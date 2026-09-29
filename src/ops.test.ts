@@ -1,0 +1,450 @@
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import { FORBIDDEN_FLAGS } from "./argv.ts";
+import { queuePath, readDesk } from "./desk.ts";
+import {
+  agentClose,
+  agentLaunch,
+  deskPost,
+  laneClose,
+  laneOpen,
+  packetLand,
+  packetReport,
+  packetVerify,
+  projectOpen,
+  projectReview,
+  projectStatus,
+  projectUpdate,
+  proposeReview,
+} from "./ops.ts";
+import { CAPTURE_REFRESH_MARK } from "./silence.ts";
+import { parsePorcelainZ } from "./packet.ts";
+import { load } from "./store.ts";
+import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
+import type { Harness } from "./test-support.ts";
+
+const open = (h: Harness, dir: string) =>
+  runWith(
+    h,
+    projectOpen({
+      dir,
+      slug: "probe",
+      outcome: "prove muster end to end",
+      reviewTrigger: "weekly",
+      nextAction: "launch the probe",
+      criticalPath: ["probe lane"],
+      space: "w1",
+      sidebar: true,
+      ephemeral: true,
+      cadenceMinutes: 15,
+      musterExtension: "/muster",
+      deskExtension: null,
+    }),
+  );
+
+async function launchedWorker(h: Harness) {
+  const dir = makeRepo(join(h.root, "repo"));
+  await open(h, dir);
+  await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+  const brief = join(dir, "brief.md");
+  writeFileSync(brief, "do it\n");
+  const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", clone: true, brief }));
+  return { dir, launched, clone: launched.row.cwd };
+}
+
+function commitInClone(clone: string, file = "work.txt") {
+  writeFileSync(join(clone, file), "packet\n");
+  sh(clone, "add", file);
+  sh(clone, "commit", "-q", "-m", "work");
+  return sh(clone, "rev-parse", "HEAD").trim();
+}
+
+describe("project_open", () => {
+  it("refuses temp-dir state unless the project says it is throwaway", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    const error = await failWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n" }));
+    expect(error._tag).toBe("GuardFailed");
+    expect(error.message).toContain("dies on reboot");
+  });
+
+  it("creates the project, activates on a space, and returns the pi-until cadence call", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    const result = await open(h, dir);
+    expect(result.project.state).toBe("active");
+    expect(result.cadence?.tool).toBe("until");
+    expect(result.cadence?.args.intervalSeconds).toBe(900);
+    expect(existsSync(join(dir, ".brain", "data", "muster", "project.json"))).toBe(true);
+    expect(readFileSync(join(dir, ".brain", "projects", "muster", "probe.svx"), "utf8")).toContain("generated_by: pi-muster");
+    expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 no lanes");
+    const adopted = await open(h, dir);
+    expect(adopted.adopted).toBe(true);
+    const quiet = await runWith(h, projectOpen({ dir, sidebar: false }));
+    expect(quiet.project.sidebar).toBe("off");
+    h.herdr.tokens.clear();
+    await runWith(h, deskPost(dir, { kind: "fyi", title: "x" }));
+    expect(h.herdr.tokens.size).toBe(0);
+    const bad = await failWith(h, projectOpen({ dir, cadenceMinutes: 90 }));
+    expect(bad.message).toContain("cache TTL");
+  });
+});
+
+describe("a lane from launch to close", () => {
+  it("launches with the full profile, reads the real session, and proves delivery", async () => {
+    const h = harness();
+    const { launched, clone } = await launchedWorker(h);
+    expect(launched.row.state).toBe("running");
+    expect(launched.row.delivery).toBe("proven");
+    expect(launched.row.clone?.branch).toBe("worker/probe-w");
+    expect(launched.row.sessionFile).toMatch(/_probe_w-20260929T060000\.jsonl$/);
+    expect(launched.row.pane?.openedByMuster).toBe(true);
+    expect(launched.argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg))).toEqual([]);
+    expect(launched.argv).toEqual(expect.arrayContaining(["-ns", "--compact-at", "300000", "--approve", "-e", "/muster"]));
+    const prelude = h.herdr.calls.find((call) => call.method === "pane.send_input");
+    expect(String(prelude?.params.text)).toContain(`cd '${clone}'`);
+    expect(String(prelude?.params.text)).toContain("export MUSTER_AGENT='probe_w'");
+    expect(String(prelude?.params.text)).toContain("export MUSTER_OWNER='owner-session'");
+    const methods = h.herdr.calls.map((call) => call.method);
+    expect(methods.indexOf("agent.start")).toBeLessThan(methods.indexOf("pane.rename"));
+    expect(methods.indexOf("pane.rename")).toBeLessThan(methods.indexOf("agent.prompt"));
+    const split = h.herdr.calls.find((call) => call.method === "pane.split");
+    expect(split?.params.direction).toBe("right");
+  });
+
+  it("marks delivery unproven when Herdr never sees working, after exactly one extra Enter", async () => {
+    const h = harness();
+    h.herdr.promptWorking = false;
+    const { launched } = await launchedWorker(h);
+    expect(launched.row.delivery).toBe("unproven");
+    expect(h.herdr.calls.filter((call) => call.method === "agent.prompt")).toHaveLength(1);
+    expect(h.herdr.calls.filter((call) => call.method === "pane.send_keys")).toHaveLength(1);
+  });
+
+  it("fails a launch whose Pi never starts a session, then relaunches in the same pane and clone", async () => {
+    const h = harness();
+    h.herdr.startSessions = false;
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    const launch = agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", clone: true, prompt: "go" });
+    const error = await failWith(h, launch);
+    expect(error._tag).toBe("GuardFailed");
+    expect(error.message).toContain("no Pi session appeared");
+    const failed = (await runWith(h, load(dir))).agents[0];
+    expect(failed?.state).toBe("failed");
+    const panesBefore = h.herdr.panes.size;
+    h.herdr.startSessions = true;
+    h.herdr.promptFails = true;
+    const relaunched = await runWith(h, launch);
+    expect(relaunched.row.state).toBe("running");
+    expect(relaunched.row.pane?.paneId).toBe(failed?.pane?.paneId);
+    expect(relaunched.row.cwd).toBe(failed?.cwd);
+    expect(h.herdr.panes.size).toBe(panesBefore);
+    expect(relaunched.row.delivery).toBe("unproven");
+  });
+
+  it("reports, verifies, lands --no-ff as the bot, closes the agent, and closes the lane", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    const reported = await runWith(
+      h,
+      packetReport({ dir, agent: "probe_w", owner: "owner-session", cwd: clone, commit: "HEAD", summary: "adds work.txt", checks: [{ name: "unit", outcome: "pass" }] }),
+    );
+    expect(reported.packet.id).toBe(commit);
+    expect(reported.delivery.status).toBe("sent");
+    expect(h.sent[0]?.to).toBe("owner-session");
+    expect(h.sent[0]?.message).toContain(commit.slice(0, 12));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("reported");
+
+    const early = await failWith(h, packetLand(dir, { id: commit, outcome: "committed" }));
+    expect(early.message).toContain("packet_verify");
+
+    const verified = await runWith(h, packetVerify(dir, commit.slice(0, 8)));
+    expect(verified.packet.state).toBe("verified");
+
+    const drained = await runWith(h, laneClose(dir, "probe"));
+    expect(drained.closed).toBe(false);
+    expect(drained.lane.state).toBe("draining");
+
+    const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+    expect(landed.packet.state).toBe("committed");
+    const head = sh(dir, "log", "-1", "--format=%an|%cn|%P");
+    expect(head.split("|")[0]).toBe("shitratgit[bot]");
+    expect(head.split("|")[1]).toBe("shitratgit[bot]");
+    expect(head.trim().split("|")[2]?.split(" ")).toHaveLength(2);
+    expect(landed.packet.landedAs).toBe(sh(dir, "rev-parse", "HEAD").trim());
+
+    const closed = await runWith(h, agentClose(dir, { name: "probe_w" }));
+    expect(closed.row.state).toBe("closed");
+    expect(closed.cloneError).toBeNull();
+    expect(existsSync(clone)).toBe(false);
+    expect(closed.restore.argv.slice(0, 2)[0]).toBe("--session");
+    expect(closed.restore.env.MUSTER_AGENT).toBe("probe_w");
+
+    const done = await runWith(h, laneClose(dir, "probe"));
+    expect(done.closed).toBe(true);
+    expect(h.herdr.panes.size).toBe(0);
+    expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 1/1 lanes");
+  });
+
+  it("records an artifact packet with evidence and no merge, which lets the lane close", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const artifact = join(h.root, "ops-report.txt");
+    writeFileSync(artifact, "did remote things\n");
+    const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "remote ops", checks: [] }));
+    const id = reported.packet.id;
+    await runWith(h, packetVerify(dir, id));
+    const missing = await failWith(h, packetLand(dir, { id, outcome: "committed" }));
+    expect(missing._tag).toBe("InputError");
+    expect(missing.message).toContain("evidence");
+    const head = sh(dir, "rev-parse", "HEAD");
+    const landed = await runWith(h, packetLand(dir, { id, outcome: "committed", evidence: "ssh remote: config present at ~/x" }));
+    expect(landed.packet.state).toBe("committed");
+    expect(landed.packet.evidence).toBe("ssh remote: config present at ~/x");
+    expect(sh(dir, "rev-parse", "HEAD")).toBe(head);
+    await runWith(h, agentClose(dir, { name: "probe_w" }));
+    expect((await runWith(h, laneClose(dir, "probe"))).closed).toBe(true);
+  });
+
+  it("refuses to record an unverified artifact packet", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const artifact = join(h.root, "ops-report.txt");
+    writeFileSync(artifact, "x\n");
+    const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "s", checks: [] }));
+    const error = await failWith(h, packetLand(dir, { id: reported.packet.id, outcome: "committed", evidence: "e" }));
+    expect(error._tag).toBe("GuardFailed");
+  });
+
+  it("fails a gate by aborting the merge and leaves the source untouched", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    const before = sh(dir, "rev-parse", "HEAD");
+    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "exit 3" }));
+    expect(error.message).toContain("gate failed");
+    expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
+    expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+  });
+
+  it("refuses closing another owner's agent and force without a verified packet", async () => {
+    const h = harness();
+    const { dir } = await launchedWorker(h);
+    h.sessionId = "someone-else";
+    expect((await failWith(h, agentClose(dir, { name: "probe_w" }))).message).toContain("belongs to owner session");
+    h.sessionId = "owner-session";
+    expect((await failWith(h, agentClose(dir, { name: "probe_w", force: true }))).message).toContain("packet_verify");
+  });
+});
+
+describe("packet_verify against fixtures", () => {
+  it("fails dirty paths that differ from source but allows generated ones", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    mkdirSync(join(clone, ".brain"), { recursive: true });
+    writeFileSync(join(clone, ".brain", "note.svx"), "generated\n");
+    writeFileSync(join(clone, "stray.ts"), "not in source\n");
+    const error = await failWith(h, packetVerify(dir, commit));
+    expect(error._tag).toBe("PacketCheckFailed");
+    expect(JSON.stringify(error.failures)).toContain("stray.ts");
+    expect(JSON.stringify(error.failures)).not.toContain(".brain");
+    writeFileSync(join(dir, "stray.ts"), "not in source\n");
+    expect((await runWith(h, packetVerify(dir, commit))).packet.state).toBe("verified");
+  });
+
+  it("fails a commit that is off the lane branch, and a missing report", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    sh(clone, "reset", "-q", "--hard", "HEAD~1");
+    const project = await runWith(h, load(dir));
+    writeFileSync(project.packets[0]?.report as string, "");
+    const error = await failWith(h, packetVerify(dir, commit));
+    const text = JSON.stringify(error.failures);
+    expect(text).toContain("not an ancestor of worker/probe-w");
+    expect(text).toContain("missing or empty");
+  });
+
+  it("fails a commit from an unrelated repo", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const other = join(h.root, "other");
+    mkdirSync(other);
+    sh(other, "init", "-q", "-b", "main");
+    writeFileSync(join(other, "foreign.txt"), "another project\n");
+    sh(other, "add", "foreign.txt");
+    sh(other, "commit", "-q", "-m", "foreign root");
+    sh(clone, "fetch", "-q", other, "main:foreign");
+    sh(clone, "merge", "-q", "--allow-unrelated-histories", "-m", "mix", "foreign");
+    const foreign = sh(clone, "rev-parse", "foreign").trim();
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: foreign, summary: "s", checks: [] }));
+    const error = await failWith(h, packetVerify(dir, foreign));
+    expect(JSON.stringify(error.failures)).toContain("shares no root commit");
+  });
+
+  it("parses porcelain -z with renames", () => {
+    expect(parsePorcelainZ("?? a.txt\0R  new.txt\0old.txt\0 M b.txt\0")).toEqual(["a.txt", "new.txt", "b.txt"]);
+  });
+});
+
+describe("project_status", () => {
+  it("interrupts rows whose pane is gone and reports cache cost from usage", async () => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    const file = launched.row.sessionFile as string;
+    writeFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: 1, cacheRead: 1000, cacheWrite: 10, totalTokens: 1011 } } })}\n`);
+    h.live = [launched.row.sessionId];
+    const status = await runWith(h, projectStatus(dir));
+    const line = status.agents[0];
+    expect(line?.cost?.cost).toBeCloseTo(1 + 100 + 12.5);
+    expect(line?.cost?.contextTokens).toBe(1011);
+    expect(line?.cache).toBe("warm");
+    expect(line?.intercom).toBe("reachable");
+    expect(status.board).toContain("cacheRead×0.1");
+
+    const pane = h.herdr.panes.get(launched.row.pane?.paneId as string);
+    if (pane) delete pane.agent;
+    const exited = await runWith(h, projectStatus(dir));
+    expect(exited.agents[0]?.state).toBe("interrupted");
+    expect(exited.agents[0]?.action).toBe("agent exited to its shell: interrupted");
+    if (pane) pane.agent = "probe_w";
+    await runWith(h, agentLaunch(dir, { action: "restore", name: "probe_w" }));
+    h.herdr.panes.delete(launched.row.pane?.paneId as string);
+    const gone = await runWith(h, projectStatus(dir));
+    expect(gone.agents[0]?.state).toBe("interrupted");
+    expect(gone.agents[0]?.action).toBe("pane gone: interrupted");
+  });
+
+  it("nudges at 30 minutes and restarts with /new at 60, only for its own rows", async () => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    const file = launched.row.sessionFile as string;
+    const age = (minutes: number) => {
+      const when = new Date(h.now.getTime() - minutes * 60_000);
+      utimesSync(file, when, when);
+    };
+    age(31);
+    h.sessionId = "not-the-owner";
+    const observed = await runWith(h, projectStatus(dir));
+    expect(observed.agents[0]?.action).toContain("nudge due");
+    expect(observed.agents[0]?.state).toBe("running");
+
+    h.sessionId = "owner-session";
+    const nudged = await runWith(h, projectStatus(dir));
+    expect(nudged.agents[0]?.state).toBe("nudged");
+    const keys = h.herdr.calls.filter((call) => call.method === "pane.send_keys");
+    expect(keys.at(-1)?.params.keys).toEqual(["Escape"]);
+
+    age(61);
+    const restarted = await runWith(h, projectStatus(dir));
+    expect(restarted.agents[0]?.state).toBe("restarted");
+    expect(restarted.agents[0]?.action).toContain("/new");
+    const row = (await runWith(h, load(dir))).agents[0];
+    expect(row?.restarts).toBe(1);
+    expect(row?.sessionId).toMatch(/^fresh-/);
+    expect(h.herdr.calls.some((call) => call.method === "pane.send_input" && call.params.text === "/new")).toBe(true);
+  });
+});
+
+describe("bridge capture and the sidebar", () => {
+  const failed = JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }, stopReason: "error", errorMessage: "prompt-capture: this wake carries an older prompt" } });
+
+  it("types one refresh into its own stuck bridge lane and flags anyone else's", async () => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    const file = launched.row.sessionFile as string;
+    writeFileSync(file, `${failed}\n`);
+
+    h.sessionId = "not-the-owner";
+    const observed = await runWith(h, projectStatus(dir));
+    expect(observed.agents[0]?.action).toContain("stuck on bridge prompt capture");
+    expect(h.herdr.tokens.get("w1")?.agents).toContain("⚠️ 1 stuck");
+
+    h.sessionId = "owner-session";
+    const prompts = () => h.herdr.calls.filter((call) => call.method === "agent.prompt").length;
+    const before = prompts();
+    const refreshed = await runWith(h, projectStatus(dir));
+    expect(refreshed.agents[0]?.action).toContain("refreshed bridge prompt capture");
+    expect(prompts()).toBe(before + 1);
+    expect(String(h.herdr.calls.at(-1)?.method)).not.toBe("pane.send_keys");
+
+    const user = JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: `${CAPTURE_REFRESH_MARK} ...` }] } });
+    writeFileSync(file, `${failed}\n${user}\n${failed}\n`);
+    const again = await runWith(h, projectStatus(dir));
+    expect(again.agents[0]?.action).toContain("failed again after a refresh");
+    expect(prompts()).toBe(before + 1);
+  });
+
+  it("keeps the space label a name and takes headline and policy through project_update", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    expect((await runWith(h, load(dir))).label).toBe("fake");
+
+    const space = h.herdr.workspaces.get("w1");
+    if (space) space.label = "[probe] cutover live · Joel: merge";
+    const status = await runWith(h, projectStatus(dir));
+    expect(status.notes.join("\n")).toContain("put back");
+    expect(h.herdr.workspaces.get("w1")?.label).toBe("fake");
+
+    const updated = await runWith(
+      h,
+      projectUpdate(dir, { headline: "cutover live", label: "Probe", policy: { restartAfterMin: null, roles: { worker: { model: "openai-codex/gpt-6-luna" } } } }),
+    );
+    expect(h.herdr.tokens.get("w1")?.now).toBe("cutover live");
+    expect(h.herdr.workspaces.get("w1")?.label).toBe("Probe");
+    expect(updated.policy.restartAfterMin).toBeNull();
+    expect(updated.policy.roles.worker).toMatchObject({ model: "openai-codex/gpt-6-luna", thinking: "medium", compactAt: 300000 });
+    await runWith(h, projectUpdate(dir, { policy: { roles: { worker: { compactAt: 200000 } } } }));
+    const merged = await runWith(h, projectUpdate(dir, { headline: null }));
+    expect(merged.policy.roles.worker).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 200000 });
+    expect(h.herdr.tokens.get("w1")?.now).toBe("launch the probe");
+
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "g" }));
+    const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "tuned", role: "worker", lane: "probe", label: "🔨 t", cwd: dir }));
+    expect(launched.row.profile).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 200000 });
+    expect((await failWith(h, projectUpdate(dir, { policy: { nudgeAfterMin: -5 } }))).message).toBeTruthy();
+  });
+});
+
+describe("desk and review", () => {
+  it("posts to the dark-wizard queue and drives needs", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    const posted = await runWith(h, deskPost(dir, { kind: "decision", title: "Ship the probe?" }));
+    expect(posted.open).toBe(1);
+    expect(h.herdr.tokens.get("w1")?.needs).toBe("🙋 Ship the probe?");
+    const items = readDesk(queuePath("probe", h.home));
+    expect(items[0]).toMatchObject({ kind: "decision", title: "Ship the probe?", from: "🐑 probe owner" });
+    await runWith(h, deskPost(dir, { kind: "done", title: "Shipped", resolves: posted.record.id }));
+    expect(h.herdr.tokens.get("w1")?.needs).toBeNull();
+    expect((await failWith(h, deskPost(dir, { kind: "done", title: "x", resolves: "nope" }))).message).toContain("no desk item");
+  });
+
+  it("reviews, archives closed lanes, and archives the project only on request", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "a", label: "🅰️ a", goal: "g" }));
+    await runWith(h, laneClose(dir, "a"));
+    expect(proposeReview(await runWith(h, load(dir)))).toBe("archive");
+    const kept = await runWith(h, projectReview(dir, { note: "still going", nextAction: "next" }));
+    expect(kept.project.state).toBe("active");
+    expect(kept.archivedLanes).toEqual(["a"]);
+    const archived = await runWith(h, projectReview(dir, { note: "done", decision: "archive" }));
+    expect(archived.project.state).toBe("archived");
+    expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 archived");
+  });
+});

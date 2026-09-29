@@ -1,0 +1,33 @@
+# Gotchas Muster cannot enforce
+
+Traps from the first pilot projects (2026-09) that stay judgment. Anything that became code is gone from this list: cwd checks, launch order, session ids from Herdr, proof of delivery, the silence check, tool allowlists, pane ownership, temp-dir state, the heavy-job lock, and landing as the bot.
+
+## Bridge lanes (`pi-claude-bridge`)
+
+- Prompt capture fails closed on wakes. An intercom, pi-until, or `sendMessage` wake skips `before_agent_start`, so the bridge must match Pi's live prompt to one it recorded on a user turn. After a `/reload` or restart that changed tools, rules, skills, or custom sections, nothing matches, and every wake ends with `stopReason: error` and 0 tokens until an ordinary user message refreshes the capture. A lane woken only by timers never gets that message. `project_status` types that message into its own stuck lanes and shows others' as `⚠️ stuck`; `agent_launch action=restore` sends it with the work prompt.
+- A spent quota ends every bridge lane's turn and nothing resumes them. After the reset, re-prompt each lane. Switch accounts near a limit; if every account is past 80% of its 7-day window, stop opening Opus lanes.
+- Mid-turn compaction continues on a fresh Claude Code process and loses the prompt cache about 58% of the time. The cold first turn after compaction often runs without tools until the bridge's listing gate covers every fresh query. Do not lower compaction thresholds on live lanes before that fix lands: every lane above the new line compacts on its next turn at once.
+- Opus lanes near 975k fail one request with "Prompt is too long". Per-role `--compact-at` keeps them far below.
+- The bridge cannot run inside pi-subagents children.
+- Bridge workers' own `until` wakes often fail to resume them. Workers run suites and deploy rungs in the foreground with a long bash timeout.
+
+## Talking to lanes
+
+- Intercom delivers when the recipient's turn ends. To steer a running turn in a pane you own, type into it.
+- Address sessions by the exact id in the catalog, never by cwd.
+- Chatty intercom drowns owners: in one pilot, 34 of about 985 messages were results. Acks and progress go to pane tokens and lane notes.
+- Never tell a worker to `/quit`. In a tiny pane it arrived as the chat message "quit". Close the pane after sign-off with `agent_close`.
+
+## Workers and the fence
+
+- A worker merges the target branch into its clone and reruns the full gate before reporting. A packet that does not land clean costs a round trip.
+- Workers stage by path. A rift clone carries untracked files from its source, and `git add -A` sweeps them in.
+- Never edit a script while a pane runs it; bash reads the file as it goes.
+- `shitrat push` can exit 0 on failure. It pushed only when its JSON says `ok:true`. Gate pushes with `if <gate>; then push; fi`, never `gate | grep && push`.
+- CI budgets in absolute milliseconds flake on runner variance. Compare against the parent build in the same run.
+
+## Restore
+
+- `agent_close` removes a worker's clone. Its restore command still names that cwd, so restore into a fresh clone (`cwd`) or fork from the row.
+- A pane that comes back after `/new` may be on the pane's default model. Restore from the catalog when the context is worth keeping.
+- A desk restored with a plain `pi --session` loses its queue digest. Its row carries `HERDR_DESK_PROJECT` and the desk extension.

@@ -1,0 +1,84 @@
+{
+  "name": "@joelhooks/pi-muster",
+  "version": "0.1.0",
+  "description": "Muster 🐑 — the project manager for Herdr project spaces: projects, lanes, packets, agents, and the desk, on top of Bellwether.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "herdr",
+    "muster",
+    "bellwether",
+    "effect",
+    "xstate"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joelhooks/pi-muster.git"
+  },
+  "homepage": "https://github.com/joelhooks/pi-muster#readme",
+  "private": true,
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "bin": {
+    "muster-heavy": "./bin/muster-heavy.ts"
+  },
+  "files": [
+    "AGENTS.md",
+    "LICENSE",
+    "bin/muster-heavy.ts",
+    "extensions/pi-muster.ts",
+    "README.md",
+    "skills/muster/references/gotchas.md",
+    "skills/muster/SKILL.md",
+    "src/argv.ts",
+    "src/compact.ts",
+    "src/desk.ts",
+    "src/domain.ts",
+    "src/errors.ts",
+    "src/heavy-lock.ts",
+    "src/herdr.ts",
+    "src/intercom.ts",
+    "src/machines.ts",
+    "src/ops.ts",
+    "src/packet.ts",
+    "src/runtime.ts",
+    "src/session-file.ts",
+    "src/silence.ts",
+    "src/store.ts",
+    "src/tokens.ts"
+  ],
+  "scripts": {
+    "check": "tsc --project tsconfig.json",
+    "test": "vitest run src",
+    "smoke": "bash scripts/smoke.sh",
+    "pack:check": "node scripts/check-package.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.79.10",
+    "@earendil-works/pi-coding-agent": "0.79.10",
+    "@earendil-works/pi-tui": "0.84.3",
+    "@types/node": "24.13.3",
+    "typebox": "1.3.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  },
+  "dependencies": {
+    "@joelhooks/pi-bellwether": "github:joelhooks/pi-bellwether#b98cbed0a22450cc3ffbe5ff4f9178f65cb2e242",
+    "effect": "4.0.0-beta.99",
+    "xstate": "5.32.5"
+  }
+}
