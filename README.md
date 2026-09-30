@@ -45,7 +45,7 @@ Role models are data. Muster reads `~/.config/muster/roster.json` (or `MUSTER_RO
 
 ## Tools
 
-Owner side: `project_open`, `project_update`, `lane_open`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`.
+Owner side: `project_open`, `project_update`, `lane_open`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`, `desk_report`, `desk_rulings`.
 
 `project_update` sets the sidebar headline and the project's policy: silence limits and per-role model, thinking, compaction, and skills, merged over Muster's defaults.
 
@@ -60,6 +60,10 @@ One inbox over every project's desk queue. It reads and routes; project desks st
 - The widget holds three rows at most: open asks by kind and age plus the Muster fleet (projects, lanes, running agents, packets to land), then the two most urgent desks with a 24-hour heat strip of queue traffic.
 - `alt+s` or `/switchboard` browses everything: `j`/`k` move, `space` folds, `enter` puts an `[project#id]` reference in the editor, `a` answers, `d` marks done.
 - `desk_inbox` lists open items ranked blocked, approval, decision, oldest first. `desk_answer` appends a resolving line to the item's own queue and nudges that project's desk.
+
+## Desk report
+
+When a desk holds several decisions, it publishes one static feedback page instead of a chat digest. `desk_report` builds it from report items: one card per decision, radio sets per decision axis, and a copy-feedback button. The page is noindex and holds no links or addresses. `desk_rulings` turns the pasted feedback into one resolving line per desk item, plus one message for the owner. The contract is in [skills/muster/references/desk-report.md](skills/muster/references/desk-report.md). The page inlines ratstack's `app.css` when it is on the machine (`MUSTER_DESK_REPORT_CSS` overrides the path).
 
 ## State
 

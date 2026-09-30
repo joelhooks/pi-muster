@@ -28,6 +28,7 @@ import {
   projectUpdate,
 } from "../src/ops.ts";
 import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "../src/runtime.ts";
+import { registerDeskReport } from "../src/desk-report-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -127,6 +128,7 @@ export default function muster(pi: ExtensionAPI) {
   if (worker) return;
 
   registerSwitchboard(pi, { env, layer, run });
+  registerDeskReport(pi, { run });
 
   pi.registerTool({
     name: "project_open",

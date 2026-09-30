@@ -37,6 +37,7 @@
     "extensions/pi-muster.ts",
     "README.md",
     "skills/muster/references/gotchas.md",
+    "skills/muster/references/desk-report.md",
     "skills/muster/SKILL.md",
     "src/argv.ts",
     "src/compact.ts",
@@ -58,6 +59,9 @@
     "src/switchboard-ops.ts",
     "src/switchboard-view.ts",
     "src/switchboard.ts",
+    "src/desk-report.ts",
+    "src/desk-report-ops.ts",
+    "src/desk-report-ext.ts",
     "src/tokens.ts"
   ],
   "scripts": {

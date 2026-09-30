@@ -34,6 +34,8 @@ afterEach(() => {
 const OWNER_TOOLS = [
   "desk_inbox",
   "desk_answer",
+  "desk_report",
+  "desk_rulings",
   "project_open",
   "lane_open",
   "lane_close",

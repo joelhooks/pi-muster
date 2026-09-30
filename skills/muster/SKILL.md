@@ -48,6 +48,7 @@ Defaults fit most work. Role models come from the fleet roster (`~/.config/muste
 
 - Reports go up one level: worker to boss, boss to hawk. Workers have no path to Joel.
 - A boss answers from source first. Hawk answers or posts one `desk_post` item with the question, evidence, and a recommendation. Nothing is pushed into the desk pane.
+- A desk holding several decisions for Joel publishes one [desk report](references/desk-report.md) page, not a chat digest. His pasted feedback goes through `desk_rulings`: each item is resolved, then the owner gets one message.
 - Never act on GitHub as Joel. Use the ShitRat bot or ask. "Rerun until green" is not a gate.
 
 ## Clocks and cost
