@@ -26,7 +26,7 @@ Layers: herdr (terminals) → Bellwether (panes, agents, watches, wakes) → Mus
 
 ## Shape it to the job
 
-Defaults fit most work: Opus for desk, hawk, and bosses; Sonnet workers; a Fable judge; 30 minutes of quiet before a nudge and 60 before a restart; per-role compaction. When the job disagrees, change the project with `project_update` rather than working around it. Long builds want longer silence limits or no auto-restart; a cheap scout lane wants a smaller model; a lane that must keep context wants a higher compact-at. An explicit model from Joel wins. `project_update` returns the policy in force.
+Defaults fit most work: Opus for desk, hawk, and bosses; Sonnet workers; a Fable judge; 30 minutes of quiet before a nudge and 60 before a restart; per-role compaction. When the job disagrees, change the project with `project_update` rather than working around it. Long builds want longer silence limits or no auto-restart; a cheap scout lane wants a smaller model; a lane that must keep context wants a higher compact-at. Bosses and the hawk may run `openai-codex/gpt-6.1-sol` (high) instead of Opus; its window is 272K, so give that role a compact-at near 200k. An explicit model from Joel wins. `project_update` returns the policy in force.
 
 ## The sidebar
 
