@@ -39,6 +39,9 @@ describe("desk feed", () => {
     expect(feed.flush()).toBe(1);
     expect(sent[0]).toMatchObject({ customType: NOTE, display: true, details: { project: "space", inbox: { open: 1, approval: 1 } } });
     expect(sent[0]?.content).toContain("not said by Joel");
+    expect(sent[0]?.content).toContain("not the desk's own words");
+    expect(sent[0]?.content).toContain("No reply is needed.");
+    expect(sent[0]?.content).toContain("Desk-queue notice from 🦅 hawk: [approval] mint a key?");
     expect(sent[0]?.content).toContain("Desk inbox now: 1 open · ✅1 · oldest 1h.");
 
     feed.turnStarted();
@@ -54,6 +57,38 @@ describe("desk feed", () => {
     const resumed = deskFeed({ project: "space", path, sendMessage: () => expect.fail("no replay"), appendEntry: () => {} });
     resumed.restore(entries);
     expect(resumed.flush()).toBe(0);
+  });
+
+  it("flushes at agent_end without triggering a turn while Pi still counts as streaming", () => {
+    const dir = home();
+    const path = queuePath("space", dir);
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    const sent: Array<{ message: NoteMessage; options: unknown; streaming: boolean }> = [];
+    let streaming = false;
+    const pi = {
+      on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler),
+      registerMessageRenderer: () => {},
+      sendMessage: (message: NoteMessage, options: unknown) => sent.push({ message, options, streaming }),
+      appendEntry: () => {},
+    };
+    registerDeskFeed(pi as never, { HOME: dir, HERDR_DESK_PROJECT: "space" });
+    const ctx = { sessionManager: { getSessionId: () => "s", getBranch: () => [] } };
+    handlers.get("session_start")?.({}, ctx);
+    try {
+      streaming = true;
+      handlers.get("agent_start")?.({}, ctx);
+      post(path, { from: "owner", kind: "done", title: "finished the packet" });
+      expect(sent).toEqual([]);
+      handlers.get("agent_end")?.({}, ctx);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ streaming: true, options: { triggerTurn: false } });
+      expect(sent[0]?.message.content).toContain("Desk-queue notice from owner: [done] finished the packet");
+      expect(sent[0]?.message.content).toContain("No reply is needed.");
+      streaming = false;
+      expect(handlers.get("before_agent_start")?.({}, ctx)).toBeUndefined();
+    } finally {
+      handlers.get("session_shutdown")?.({}, ctx);
+    }
   });
 
   it("summarises the inbox by kind", () => {

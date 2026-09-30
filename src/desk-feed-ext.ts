@@ -85,7 +85,8 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
     feed = deskFeed({
       project,
       path,
-      sendMessage: (message: NoteMessage) => pi.sendMessage(message),
+      // agent_end still counts as streaming in Pi; never steer a card into another turn.
+      sendMessage: (message: NoteMessage) => pi.sendMessage(message, { triggerTurn: false }),
       appendEntry: (type, data) => pi.appendEntry(type, data),
     });
     feed.restore(ctx.sessionManager.getBranch() as ReadonlyArray<{ type?: string; customType?: string; data?: unknown }>);

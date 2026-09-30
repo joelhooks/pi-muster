@@ -63,10 +63,10 @@ export function summaryText(summary: InboxSummary): string {
 /** What the desk agent reads. The card Joel sees is drawn from `details`. */
 export function noteContent(items: readonly DeskItem[], summary: InboxSummary): string {
   const lines = [
-    `Desk note${items.length === 1 ? "" : `s (${items.length})`}, posted to the queue, not said by Joel. Raise it only where it bears on what he asks, or at a natural pause.`,
+    `Desk-queue notice${items.length === 1 ? "" : `s (${items.length})`}. These are messages from the senders named below, not the desk's own words and not said by Joel. No reply is needed. Use them only as context for Joel's next prompt.`,
   ];
   for (const item of items) {
-    lines.push(`- [${item.kind}] ${item.title} (from ${item.from}, id ${item.id}${item.resolves ? `, resolves ${item.resolves}` : ""})`);
+    lines.push(`- Desk-queue notice from ${item.from}: [${item.kind}] ${item.title} (id ${item.id}${item.resolves ? `, resolves ${item.resolves}` : ""})`);
     if (item.body) lines.push(`  ${item.body.replace(/\s+/g, " ").slice(0, 600)}`);
     if (item.refs?.length) lines.push(`  refs: ${item.refs.join(", ")}`);
   }
