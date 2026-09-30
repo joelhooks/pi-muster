@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Call one Muster tool outside a Pi turn, through its registered execute():
 //
-//   MUSTER_CALL_SESSION=<owner session id> node scripts/call-tool.ts project_status '{"project":"/abs/dir"}'
+//   MUSTER_CALL_SESSION=<owner session id> npx tsx scripts/call-tool.ts project_status '{"project":"/abs/dir"}'
 //
 // The owner is the named session; its pane-ownership rules apply as usual.
 // Used for dogfood receipts and for operators without an owner Pi session.
@@ -12,7 +12,7 @@ type Tool = { name: string; execute: (id: string, params: unknown, signal: undef
 const [name, raw = "{}"] = process.argv.slice(2);
 const session = process.env.MUSTER_CALL_SESSION;
 if (!name || !session) {
-  console.error("usage: MUSTER_CALL_SESSION=<session id> node scripts/call-tool.ts <tool> '<json params>'");
+  console.error("usage: MUSTER_CALL_SESSION=<session id> npx tsx scripts/call-tool.ts <tool> '<json params>'");
   process.exit(2);
 }
 
