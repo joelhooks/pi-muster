@@ -208,7 +208,7 @@ export default function muster(pi: ExtensionAPI) {
     name: "agent_launch",
     label: "Muster agent launch",
     description:
-      "Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the project policy (see project_update). Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column.",
+      "Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column.",
     promptSnippet: "agent_launch: launch, fork, or restore a lane agent with its full profile",
     parameters: Type.Object({
       project: ProjectParam,

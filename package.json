@@ -49,6 +49,7 @@
     "src/machines.ts",
     "src/ops.ts",
     "src/packet.ts",
+    "src/roster.ts",
     "src/runtime.ts",
     "src/session-file.ts",
     "src/silence.ts",

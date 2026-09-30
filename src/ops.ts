@@ -44,6 +44,7 @@ import { Intercom, MusterEnv, Proc, botGit, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
+import { loadRoster } from "./roster.ts";
 import { closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
 import type { LiveCounts } from "./tokens.ts";
@@ -689,7 +690,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
-      }, roleDefaults(project.policy, role));
+      }, roleDefaults((yield* loadRoster).roster, project.policy, role, params.model));
       const now = iso(env);
       row = {
         name,
@@ -1384,5 +1385,7 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     if (label) notes.push((yield* keepSpaceLabel(project, true)) ?? `space label is "${project.label}"`);
     notes.push(yield* publishTokens(project));
     notes.push(`brain: ${yield* writeBrain(project)}`);
-    return { project, policy: effectivePolicy(project.policy), notes };
+    const { roster, path } = yield* loadRoster;
+    notes.push(`roster: ${path ?? "built-in defaults"}`);
+    return { project, policy: effectivePolicy(roster, project.policy), notes };
   });

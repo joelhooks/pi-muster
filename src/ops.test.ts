@@ -418,6 +418,41 @@ describe("bridge capture and the sidebar", () => {
   });
 });
 
+describe("roster", () => {
+  const roster = {
+    version: 1,
+    roles: {
+      boss: {
+        model: "claude-bridge/claude-opus-5-5",
+        alternates: [{ model: "openai-codex/gpt-6.1-sol", thinking: "high", compactAt: 200000, useFor: ["root-causing bugs"], avoidFor: ["front-end taste"] }],
+      },
+      worker: { model: "openai-codex/gpt-6-luna" },
+    },
+  };
+
+  it("launches from the fleet roster, and an alternate brings its settings", async () => {
+    const h = harness();
+    mkdirSync(join(h.home, ".config", "muster"), { recursive: true });
+    writeFileSync(join(h.home, ".config", "muster", "roster.json"), JSON.stringify(roster));
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "g" }));
+    const boss = await runWith(h, agentLaunch(dir, { action: "launch", name: "boss", role: "boss", lane: "probe", label: "🧭 boss", cwd: dir }));
+    expect(boss.row.profile).toMatchObject({ model: "claude-bridge/claude-opus-5-5", compactAt: 400000 });
+    const auditor = await runWith(h, agentLaunch(dir, { action: "launch", name: "auditor", role: "boss", lane: "probe", label: "🔎 audit", cwd: dir, slot: "split", model: "openai-codex/gpt-6.1-sol" }));
+    expect(auditor.row.profile).toMatchObject({ model: "openai-codex/gpt-6.1-sol", thinking: "high", compactAt: 200000 });
+    const worker = await runWith(h, agentLaunch(dir, { action: "launch", name: "w", role: "worker", lane: "probe", label: "🔨 w", cwd: dir }));
+    expect(worker.row.profile).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 300000, noSkills: true });
+
+    const update = await runWith(h, projectUpdate(dir, {}));
+    expect(update.policy.roles.boss).toMatchObject({ model: "claude-bridge/claude-opus-5-5", alternates: [{ model: "openai-codex/gpt-6.1-sol", useFor: ["root-causing bugs"] }] });
+    expect(update.notes.join("\n")).toContain("roster.json");
+
+    writeFileSync(join(h.home, ".config", "muster", "roster.json"), JSON.stringify({ version: 1, roles: { boss: { alternates: [{ model: "x" }] } } }));
+    expect((await failWith(h, agentLaunch(dir, { action: "launch", name: "bad", role: "boss", lane: "probe", label: "b", cwd: dir }))).message).toContain("roster");
+  });
+});
+
 describe("desk and review", () => {
   it("posts to the dark-wizard queue and drives needs", async () => {
     const h = harness();

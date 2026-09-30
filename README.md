@@ -19,6 +19,30 @@ Muster expects [Herdr](https://herdr.dev), pi-intercom, and pi-until in the same
 - `MUSTER_WORKER_WORKTREE`: the script that allocates, harvests, and removes worker clones.
 - `MUSTER_DESK_EXTENSION`: the Pi extension a desk agent loads to read its queue.
 
+## Roster
+
+Role models are data. Muster reads `~/.config/muster/roster.json` (or `MUSTER_ROSTER`) on every call, so one edited and synced file changes what every machine launches next. Without it, built-in defaults apply. Precedence: built-in, roster role, the alternate matching the chosen model, project policy, explicit `agent_launch` arguments.
+
+```json
+{
+  "version": 1,
+  "roles": {
+    "boss": {
+      "model": "claude-bridge/claude-opus-5-5",
+      "alternates": [
+        {
+          "model": "openai-codex/gpt-6.1-sol",
+          "thinking": "high",
+          "compactAt": 200000,
+          "useFor": ["investigation", "root-causing bugs", "reviewing a builder's output"],
+          "avoidFor": ["front-end design", "long unattended builds"]
+        }
+      ]
+    }
+  }
+}
+```
+
 ## Tools
 
 Owner side: `project_open`, `project_update`, `lane_open`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`.

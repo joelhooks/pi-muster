@@ -281,6 +281,39 @@ export const ROLE_DEFAULTS: Readonly<Record<Role, RoleDefaults>> = {
   judge: { model: "claude-bridge/claude-fable-5-1", thinking: "high", compactAt: 350_000, noSkills: false },
 };
 
+/** A model a role may run instead of its default, with the jobs it suits. */
+export const Alternate = Schema.Struct({
+  model: Schema.String,
+  thinking: Schema.optionalKey(Thinking),
+  compactAt: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt()))),
+  noSkills: Schema.optionalKey(Schema.Boolean),
+  useFor: Schema.Array(Schema.String),
+  avoidFor: Schema.optionalKey(Schema.Array(Schema.String)),
+  source: Schema.optionalKey(Schema.String),
+});
+export type Alternate = typeof Alternate.Type;
+
+export const RosterRole = Schema.Struct({ ...RolePolicy.fields, alternates: Schema.optionalKey(Schema.Array(Alternate)) });
+export type RosterRole = typeof RosterRole.Type;
+
+/**
+ * The fleet's role-to-model table (`~/.config/muster/roster.json`, or
+ * `MUSTER_ROSTER`). Data, not code: change it once and every machine that
+ * reads it launches differently on the next call.
+ */
+export const Roster = Schema.Struct({
+  version: Schema.Literal(1),
+  roles: Schema.Struct({
+    desk: Schema.optionalKey(RosterRole),
+    hawk: Schema.optionalKey(RosterRole),
+    boss: Schema.optionalKey(RosterRole),
+    worker: Schema.optionalKey(RosterRole),
+    judge: Schema.optionalKey(RosterRole),
+  }),
+});
+export type Roster = typeof Roster.Type;
+export const decodeRoster = Schema.decodeUnknownSync(Roster);
+
 export const DEFAULT_NUDGE_AFTER_MIN = 30;
 export const DEFAULT_RESTART_AFTER_MIN = 60;
 
@@ -296,8 +329,18 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
   return { nudgeMs: nudge * 60_000, restartMs: restart === null ? null : Math.max(restart, nudge) * 60_000 };
 }
 
-export function roleDefaults(policy: Policy | undefined, role: Role): RoleDefaults {
-  return { ...ROLE_DEFAULTS[role], ...(policy?.roles?.[role] ?? {}) } as RoleDefaults;
+/**
+ * Built-in defaults, then the roster's role, then the alternate matching the
+ * chosen model, then the project's policy. `model` is an explicit launch
+ * choice; picking an alternate brings its settings (a smaller window's
+ * compact-at, say) with it.
+ */
+export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string): RoleDefaults {
+  const { alternates = [], ...fleet } = roster?.roles?.[role] ?? {};
+  const project = policy?.roles?.[role] ?? {};
+  const chosen = model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model;
+  const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => candidate.model === chosen) ?? { useFor: [] };
+  return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen } as RoleDefaults;
 }
 
 /** Shallow per-role merge: a later patch overrides only the keys it names. */
@@ -313,9 +356,14 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
 }
 
 /** The policy in force, every default spelled out, so an owner sees what it is tuning. */
-export function effectivePolicy(policy: Policy | undefined) {
+export function effectivePolicy(roster: Roster | undefined, policy: Policy | undefined) {
   const limits = silenceLimits(policy);
-  const roles = Object.fromEntries(Role.literals.map((role) => [role, roleDefaults(policy, role)]));
+  const roles = Object.fromEntries(
+    Role.literals.map((role) => {
+      const alternates = (roster?.roles?.[role]?.alternates ?? []).map(({ model, useFor, avoidFor }) => ({ model, useFor, ...(avoidFor ? { avoidFor } : {}) }));
+      return [role, { ...roleDefaults(roster, policy, role), ...(alternates.length ? { alternates } : {}) }];
+    }),
+  );
   return { nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 

@@ -57,7 +57,7 @@ describe("helpers", () => {
     const off = profileFor("judge", { label: "j", compactAt: null });
     const argv = buildArgv({ kind: "launch", sessionId: "a", sessionFile: null, parentSessionFile: null, profile: off, musterExtension: null });
     expect(argv[argv.indexOf("--compact-at") + 1]).toBe("off");
-    const tuned = profileFor("worker", { label: "w" }, roleDefaults({ roles: { worker: { model: "openai-codex/gpt-6-luna", compactAt: 200_000 } } }, "worker"));
+    const tuned = profileFor("worker", { label: "w" }, roleDefaults(undefined, { roles: { worker: { model: "openai-codex/gpt-6-luna", compactAt: 200_000 } } }, "worker"));
     expect(tuned).toMatchObject({ model: "openai-codex/gpt-6-luna", thinking: "medium", compactAt: 200_000, noSkills: true });
   });
 
