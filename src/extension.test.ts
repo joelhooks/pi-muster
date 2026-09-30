@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import muster from "../extensions/pi-muster.ts";
 
@@ -38,6 +38,9 @@ function fakePi() {
 }
 
 const saved = { ...process.env };
+beforeEach(() => {
+  for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_PROJECT", "MUSTER_OWNER"]) delete process.env[key];
+});
 afterEach(() => {
   for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_PROJECT", "MUSTER_OWNER"]) delete process.env[key];
   Object.assign(process.env, saved);
@@ -67,6 +70,7 @@ describe("extension modes", () => {
     const fake = fakePi();
     muster(fake.pi as never);
     expect(fake.tools).toEqual(OWNER_TOOLS);
+    expect(fake.defs.get("project_status")).toMatchObject({ parameters: { properties: { takeover: { type: "boolean" } } } });
     expect(fake.flags).toEqual(["compact-at", "switchboard"]);
     expect(fake.commands).toEqual(["compact-at", "switchboard"]);
     expect(fake.shortcuts).toEqual(["alt+s"]);

@@ -38,6 +38,13 @@ describe("agent machine", () => {
     expect(walk("verified", [{ type: "REWORK" }])).toBe("running");
   });
 
+  it("lets live landed and reported workers report their next packet", () => {
+    expect(walk("landed", [{ type: "REPORT", paneLive: true }])).toBe("reported");
+    expect(walk("reported", [{ type: "REPORT", paneLive: true }])).toBe("reported");
+    illegal(stepAgent("w1", "landed", { type: "REPORT", paneLive: false }));
+    illegal(stepAgent("w1", "reported", { type: "REPORT" }));
+  });
+
   it("rejects illegal transitions as typed errors", () => {
     const text = illegal(stepAgent("w1", "planned", { type: "REPORT" }));
     expect(text).toContain("IllegalTransition");

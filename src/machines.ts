@@ -19,7 +19,7 @@ export type AgentEvent =
   | { type: "NUDGE" }
   | { type: "RESTART" }
   | { type: "ACTIVE" }
-  | { type: "REPORT" }
+  | { type: "REPORT"; readonly paneLive?: boolean }
   | { type: "VERIFY" }
   | { type: "REWORK" }
   | { type: "LAND" }
@@ -39,7 +39,10 @@ const WORKING = {
   CLOSE: "closed",
 } as const;
 
-export const agentMachine = setup({ types: { events: {} as AgentEvent } }).createMachine({
+export const agentMachine = setup({
+  types: { events: {} as AgentEvent },
+  guards: { paneLive: ({ event }) => event.type === "REPORT" && event.paneLive === true },
+}).createMachine({
   id: "agent",
   initial: "planned",
   states: {
@@ -49,9 +52,9 @@ export const agentMachine = setup({ types: { events: {} as AgentEvent } }).creat
     silent: { on: { NUDGE: "nudged", ACTIVE: "running", ...WORKING } },
     nudged: { on: { RESTART: "restarted", ACTIVE: "running", ...WORKING } },
     restarted: { on: { ACTIVE: "running", SILENT: "silent", ...WORKING } },
-    reported: { on: { VERIFY: "verified", REWORK: "running", LAND: "landed", PANE_GONE: "interrupted", ...CLOSABLE } },
+    reported: { on: { REPORT: { target: "reported", guard: "paneLive" }, VERIFY: "verified", REWORK: "running", LAND: "landed", PANE_GONE: "interrupted", ...CLOSABLE } },
     verified: { on: { LAND: "landed", REWORK: "running", ...CLOSABLE } },
-    landed: { on: { REWORK: "running", ...CLOSABLE } },
+    landed: { on: { REPORT: { target: "reported", guard: "paneLive" }, PANE_GONE: "interrupted", REWORK: "running", ...CLOSABLE } },
     interrupted: { on: { LAUNCH: "launching", RESTORE: "restoring", ...CLOSABLE } },
     restoring: { on: { STARTED: "running", LAUNCH_FAILED: "failed", PANE_GONE: "interrupted" } },
     failed: { on: { LAUNCH: "launching", RESTORE: "restoring", ...CLOSABLE } },

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { Effect } from "effect";
@@ -39,8 +39,8 @@ import {
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepLane, stepProject } from "./machines.ts";
-import { failures, sha256File, sourceOf, verifyPacket } from "./packet.ts";
-import { Intercom, MusterEnv, Proc, botGit, git, must } from "./runtime.ts";
+import { failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from "./packet.ts";
+import { BOT_EMAIL, BOT_NAME, Intercom, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
@@ -746,7 +746,17 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const launched = yield* Effect.gen(function* () {
       yield* paneRun(binding.paneId, shellPrelude(row.cwd, agentEnvironment));
       yield* waitForCwd(binding.paneId, row.cwd);
-      const agent = yield* agentStart(row.name, binding.paneId, argv);
+      // Cwd can be right while zsh's prompt hooks still own the foreground job.
+      // Retry only the rejected start, not the prelude that caused the race.
+      const start = (attempt: number): ReturnType<typeof agentStart> =>
+        agentStart(row.name, binding.paneId, argv).pipe(
+          Effect.catch((error) =>
+            error.code === "agent_pane_busy" && attempt < 20
+              ? env.sleep(250).pipe(Effect.flatMap(() => start(attempt + 1)))
+              : Effect.fail(error),
+          ),
+        );
+      const agent = yield* start(0);
       const sessionFile = (yield* waitForSession(binding.paneId, null)) ?? findSessionFile(row.cwd, row.sessionId, env.home);
       if (!sessionFile) {
         const tail = yield* paneRead(binding.paneId, 12).pipe(Effect.catch(() => Effect.succeed("(pane unreadable)")));
@@ -923,9 +933,6 @@ export const packetReport = (params: PacketReportInput) =>
     const report = join(reportsDir(params.dir), row.lane, `${row.name}-${id.slice(0, 12)}.md`);
     const now = iso(env);
     const draft = { id, kind: params.commit ? ("commit" as const) : ("artifact" as const), artifact, checks: [...params.checks] };
-    mkdirSync(dirname(report), { recursive: true });
-    writeFileSync(report, reportMarkdown(row, draft, params.summary, params.body));
-
     const saved = yield* mutate(params.dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findRow(current, params.agent);
@@ -944,14 +951,19 @@ export const packetReport = (params: PacketReportInput) =>
           reportedAt: prior?.reportedAt ?? now,
           updatedAt: now,
         };
-        const state = latest.state === "reported" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "REPORT" });
+        const livePane = latest.state === "reported" || latest.state === "landed"
+          ? latest.pane ? yield* locatePane(latest.pane) : null
+          : null;
+        const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!livePane?.agent });
         const next: AgentRow = { ...latest, state, updatedAt: now };
-        return [withPacket(withRow(current, next), packet), packet] as const;
+        mkdirSync(dirname(report), { recursive: true });
+        writeFileSync(report, reportMarkdown(latest, draft, params.summary, params.body));
+        return [withPacket(withRow(current, next), packet), { packet, owner: latest.owner }] as const;
       }),
     );
     const message = `🐑 packet ${id.slice(0, 12)} from ${row.name} (${row.lane}): ${(params.summary.trim().split("\n")[0] ?? "").slice(0, 200).replace(/[.\s]+$/, "")}. Report: ${report}`;
-    const delivery = yield* intercom.send(params.owner, message);
-    return { packet: saved, delivery };
+    const delivery = yield* intercom.send(saved.owner, message);
+    return { packet: saved.packet, delivery };
   });
 
 export const packetVerify = (dir: string, id: string) =>
@@ -1014,31 +1026,55 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
     const proc = yield* Proc;
     if (!row.clone) return yield* input(`${row.name} has no clone branch; rift-merge lands only clone work`);
     const source = sourceOf(project, lane, row);
-    const dirty = (yield* git(source, "status", "--porcelain", "--untracked-files=no")).trim();
-    if (dirty) return yield* new GuardFailed({ guard: "clean-source", message: `source ${source} has uncommitted tracked changes; land into a clean checkout:\n${dirty}` });
+    const gitDir = (yield* git(source, "rev-parse", "--absolute-git-dir")).trim();
+    if (existsSync(join(gitDir, "MERGE_HEAD"))) return yield* new GuardFailed({ guard: "merge", message: `source ${source} already has a merge in progress; leave it to its owner` });
+    const dirtyOutput = yield* git(source, "status", "--porcelain=v1", "-z", "--untracked-files=no");
+    // Both ends of a rename are dirty: a merge must not overwrite either.
+    const dirtyFields = dirtyOutput.split("\0");
+    const dirty = parsePorcelainZ(dirtyOutput);
+    for (let i = 0; i < dirtyFields.length; i++) {
+      if (/^[RC]|^.[RC]/.test(dirtyFields[i] ?? "")) dirty.push(dirtyFields[++i] ?? "");
+    }
     const branch = row.clone.branch;
     if (existsSync(row.cwd)) yield* git(source, "fetch", "-q", row.cwd, `${branch}:${branch}`);
     const onBranch = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, branch], { cwd: source })).code === 0;
     if (!onBranch) return yield* new GuardFailed({ guard: "harvest", message: `${packet.id.slice(0, 12)} is not on ${branch} in ${source}` });
     const merged = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, "HEAD"], { cwd: source })).code === 0;
     if (merged) return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), note: "already on HEAD; nothing merged" };
-    const merge = yield* proc.run("git", ["-c", "user.name=shitratgit[bot]", "-c", "user.email=286405550+shitratgit[bot]@users.noreply.github.com", "merge", "--no-ff", "--no-commit", branch], { cwd: source });
-    if (merge.code !== 0) {
-      yield* proc.run("git", ["merge", "--abort"], { cwd: source });
-      return yield* new GuardFailed({ guard: "merge", message: `merge of ${branch} failed and was aborted: ${(merge.stderr || merge.stdout).trim().slice(-800)}` });
-    }
-    if (params.gate) {
-      const gate = yield* runGate(source, params.gate).pipe(
-        Effect.tapError(() => proc.run("git", ["merge", "--abort"], { cwd: source })),
-      );
-      if (gate.code !== 0) {
-        yield* proc.run("git", ["merge", "--abort"], { cwd: source });
-        return yield* new GuardFailed({ guard: "gate", message: `gate failed (exit ${gate.code}); merge aborted:\n${(gate.stdout + gate.stderr).trim().slice(-1500)}` });
+    const base = (yield* git(source, "merge-base", "HEAD", branch)).trim();
+    const incoming = (yield* git(source, "diff", "--name-only", "--no-renames", "-z", base, branch)).split("\0").filter(Boolean);
+    const overlaps = dirty.filter((path) => !path.startsWith(".brain/data/muster/") && incoming.some((changed) =>
+      path === changed || path.startsWith(`${changed}/`) || changed.startsWith(`${path}/`)));
+    if (overlaps.length) return yield* new GuardFailed({ guard: "clean-source", message: `dirty tracked paths overlap the merge: ${overlaps.join(", ")}` });
+
+    // A private index starts at HEAD, so unrelated user staging cannot enter
+    // the merge commit. The real index is updated only for paths we brought in.
+    const scratch = mkdtempSync(join(gitDir, "muster-land-"));
+    const indexEnv = { GIT_INDEX_FILE: join(scratch, "index") };
+    const isolatedGit = (...args: string[]) => must("git", args, { cwd: source, env: indexEnv });
+    const abort = () => proc.run("git", ["merge", "--abort"], { cwd: source, env: indexEnv });
+    return yield* Effect.gen(function* () {
+      yield* isolatedGit("read-tree", "HEAD");
+      const merge = yield* proc.run("git", ["-c", "user.name=shitratgit[bot]", "-c", "user.email=286405550+shitratgit[bot]@users.noreply.github.com", "merge", "--no-ff", "--no-commit", branch], { cwd: source, env: indexEnv });
+      if (merge.code !== 0) {
+        yield* abort();
+        return yield* new GuardFailed({ guard: "merge", message: `merge of ${branch} failed and was aborted: ${(merge.stderr || merge.stdout).trim().slice(-800)}` });
       }
-    }
-    const message = params.message ?? `muster: land ${row.lane}/${row.name} ${packet.id.slice(0, 12)}`;
-    yield* botGit(source, "commit", "--no-edit", "-m", message);
-    return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), note: `merged ${branch} --no-ff as shitratgit[bot]; not pushed` };
+      if (params.gate) {
+        const gate = yield* runGate(source, params.gate).pipe(Effect.tapError(abort));
+        if (gate.code !== 0) {
+          yield* abort();
+          return yield* new GuardFailed({ guard: "gate", message: `gate failed (exit ${gate.code}); merge aborted:\n${(gate.stdout + gate.stderr).trim().slice(-1500)}` });
+        }
+      }
+      const message = params.message ?? `muster: land ${row.lane}/${row.name} ${packet.id.slice(0, 12)}`;
+      yield* must("git", ["commit", "--no-edit", "-m", message], {
+        cwd: source,
+        env: { ...indexEnv, GIT_COMMITTER_NAME: BOT_NAME, GIT_COMMITTER_EMAIL: BOT_EMAIL, GIT_AUTHOR_NAME: BOT_NAME, GIT_AUTHOR_EMAIL: BOT_EMAIL },
+      }).pipe(Effect.tapError(abort));
+      if (incoming.length) yield* git(source, "--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--", ...incoming);
+      return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), note: `merged ${branch} --no-ff as shitratgit[bot]; not pushed` };
+    }).pipe(Effect.ensuring(Effect.sync(() => rmSync(scratch, { recursive: true }))));
   });
 
 export const packetLand = (dir: string, params: PacketLandInput) =>
@@ -1150,6 +1186,8 @@ export interface AgentLine {
 
 export interface StatusInput {
   readonly act?: boolean | undefined;
+  /** Explicit handover: adopt all non-closed rows without restarting their panes. */
+  readonly takeover?: boolean | undefined;
 }
 
 export const projectStatus = (dir: string, params: StatusInput = {}) =>
@@ -1157,7 +1195,13 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const env = yield* MusterEnv;
     const intercom = yield* Intercom;
     const act = params.act !== false;
-    const project = yield* load(dir);
+    const project = params.takeover
+      ? yield* mutate(dir, (current) => {
+          const next = { ...current, agents: current.agents.map((row) =>
+            row.state === "closed" ? row : { ...row, owner: env.sessionId, updatedAt: iso(env) }) };
+          return Effect.succeed([next, next] as const);
+        })
+      : yield* load(dir);
     const panes = yield* paneList();
     const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
     const byTerminal = new Map(panes.map((pane) => [pane.terminal_id, pane]));

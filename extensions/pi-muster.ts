@@ -359,9 +359,13 @@ export default function muster(pi: ExtensionAPI) {
     description:
       "One owner pass: reconcile catalog rows against Herdr panes (a gone pane interrupts its row; a moved pane is rebound by terminal id), type one refresh into a bridge lane stuck on prompt capture, run the silence check on session-file age at the project's policy limits (only on rows this session owns), put back a drifted space label, report each agent's cache cost, refresh the tokens and Brain board, and return a compact board. act: false observes only.",
     promptSnippet: "project_status: reconcile, silence check, cache cost, and the board",
-    parameters: Type.Object({ project: ProjectParam, act: Type.Optional(Type.Boolean()) }),
+    parameters: Type.Object({
+      project: ProjectParam,
+      act: Type.Optional(Type.Boolean()),
+      takeover: Type.Optional(Type.Boolean({ description: "Adopt all non-closed catalog rows into this owner session without restarting or closing their panes. Explicit handover; works with act: false." })),
+    }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      return run(ctx, signal, projectStatus(projectDir(ctx, params.project), { act: params.act }), (result) => [result.board, ...result.notes].join("\n"));
+      return run(ctx, signal, projectStatus(projectDir(ctx, params.project), { act: params.act, takeover: params.takeover }), (result) => [result.board, ...result.notes].join("\n"));
     },
   });
 
