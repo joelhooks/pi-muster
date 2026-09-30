@@ -12,7 +12,7 @@ import { paneGet, reportTokens } from "./herdr.ts";
 import { deskAnswer, inboxText, loadInbox, loadSystem } from "./switchboard-ops.ts";
 import { OPEN_HINT, SwitchboardOverlay, SwitchboardState, renderWidget } from "./switchboard-view.ts";
 import type { Intent } from "./switchboard-view.ts";
-import { itemRef, queueDir, switchboardNeeds } from "./switchboard.ts";
+import { itemRef, queueDir, switchboardTokens } from "./switchboard.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS } from "./tokens.ts";
 
 const WIDGET = "muster-switchboard";
@@ -44,7 +44,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   let watcher: FSWatcher | undefined;
   let tick: ReturnType<typeof setInterval> | undefined;
   let pending: ReturnType<typeof setTimeout> | undefined;
-  let lastNeeds: string | null | undefined;
+  let lastTokens = "";
   let lastPublish = 0;
   let current: ExtensionContext | undefined;
 
@@ -54,10 +54,11 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   const publish = async (ctx: ExtensionContext) => {
     const paneId = deps.env.HERDR_PANE_ID;
     if (!paneId) return;
-    const needs = switchboardNeeds(state.groups);
     const now = Date.now();
-    if (needs === lastNeeds && now - lastPublish < TOKEN_REFRESH_MS) return;
-    lastNeeds = needs;
+    const tokens = switchboardTokens({ groups: state.groups, fleet: state.fleet, latest: state.latest, now });
+    const key = JSON.stringify(tokens);
+    if (key === lastTokens && now - lastPublish < TOKEN_REFRESH_MS) return;
+    lastTokens = key;
     lastPublish = now;
     // `progress` marks the space as managed, so Bellwether leaves `needs` to us.
     await provide(
@@ -65,7 +66,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       Effect.gen(function* () {
         const pane = yield* paneGet(paneId);
         if (!pane) return;
-        yield* reportTokens(pane.workspace_id, TOKEN_SOURCE, { progress: "☎️ switchboard", now: null, agents: null, needs }, now, TOKEN_TTL_MS);
+        yield* reportTokens(pane.workspace_id, TOKEN_SOURCE, tokens, now, TOKEN_TTL_MS);
       }),
     ).catch(() => undefined);
   };

@@ -1,57 +1,17 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-
 import { Effect } from "effect";
 
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
-import type { Project } from "./domain.ts";
 import { InputError, NotFound } from "./errors.ts";
 import { PROCESS_STATES } from "./machines.ts";
+import { readRegistry } from "./registry.ts";
 import { Intercom, MusterEnv } from "./runtime.ts";
 import { load } from "./store.ts";
-import { KIND_GLYPH, answerPost, fleetStats, formatAge, inbox, itemRef, openCount, queueDir, readQueues, recentPosts } from "./switchboard.ts";
+import { KIND_GLYPH, answerPost, fleetStats, formatAge, inbox, itemRef, latestPost, openCount, queueDir, readQueues, recentPosts } from "./switchboard.ts";
 import type { InboxGroup, SystemView } from "./switchboard.ts";
 import { openDeskItems } from "./tokens.ts";
 
-/**
- * The project list: one line per `project_open`, newest wins per slug. Muster
- * projects live inside their own repos, so without it nothing can name them all.
- */
-export const registryPath = (home: string) => join(home, ".local", "state", "muster", "projects.jsonl");
-
-export interface RegistryEntry {
-  readonly slug: string;
-  readonly dir: string;
-  readonly spaceId: string | null;
-  readonly ts: string;
-}
-
-export function readRegistry(home: string): Map<string, RegistryEntry> {
-  const path = registryPath(home);
-  const entries = new Map<string, RegistryEntry>();
-  if (!existsSync(path)) return entries;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
-    try {
-      const entry = JSON.parse(line) as RegistryEntry;
-      if (typeof entry?.slug === "string" && typeof entry.dir === "string") entries.set(entry.slug, entry);
-    } catch {
-      // Torn or blank line.
-    }
-  }
-  return entries;
-}
-
-/** Appends only when the slug is new or moved, so repeated opens do not grow the file. */
-export const registerProject = (project: Pick<Project, "slug" | "dir" | "spaceId" | "ephemeral">) =>
-  Effect.gen(function* () {
-    const env = yield* MusterEnv;
-    if (project.ephemeral) return;
-    const known = readRegistry(env.home).get(project.slug);
-    if (known && known.dir === project.dir && known.spaceId === project.spaceId) return;
-    const path = registryPath(env.home);
-    mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, `${JSON.stringify({ slug: project.slug, dir: project.dir, spaceId: project.spaceId, ts: env.now().toISOString() })}\n`);
-  });
+export { readRegistry, registerProject, registryPath } from "./registry.ts";
+export type { RegistryEntry } from "./registry.ts";
 
 export const loadInbox = Effect.gen(function* () {
   const env = yield* MusterEnv;
@@ -70,6 +30,7 @@ export const loadSystem = Effect.gen(function* () {
     groups: inbox(queues, now),
     posts: recentPosts(queues, now),
     fleet: entries.length > 0 ? fleetStats(live) : null,
+    latest: latestPost(queues),
     now,
   };
   return view;

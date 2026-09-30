@@ -9,7 +9,7 @@ import type { DeskItem, Project } from "./domain.ts";
 import { agentLaunch, projectOpen } from "./ops.ts";
 import { deskAnswer, inboxText, loadInbox, loadSystem, registryPath } from "./switchboard-ops.ts";
 import { SwitchboardState, handleKey, heatStrip, renderOverlay, renderWidget } from "./switchboard-view.ts";
-import { activity, answerPost, fleetStats, formatAge, inbox, recentPosts, switchboardNeeds } from "./switchboard.ts";
+import { activity, answerPost, fleetStats, formatAge, inbox, latestPost, recentPosts, switchboardNeeds, switchboardTokens } from "./switchboard.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 
 const NOW = Date.parse("2026-09-29T12:00:00Z");
@@ -48,7 +48,7 @@ describe("inbox", () => {
 describe("switchboard view", () => {
   const state = () => {
     const s = new SwitchboardState();
-    s.setSystem({ groups: inbox(queues, NOW), posts: recentPosts(queues, NOW), fleet: null, now: NOW });
+    s.setSystem({ groups: inbox(queues, NOW), posts: recentPosts(queues, NOW), fleet: null, latest: latestPost(queues), now: NOW });
     return s;
   };
 
@@ -126,6 +126,16 @@ describe("switchboard view", () => {
     expect(counts.reduce((a, b) => a + b, 0)).toBe(4);
     expect(heatStrip([0, 1, 2, 4], 4, plain)).toBe("·░▒█");
     expect(recentPosts(queues, NOW).support).toHaveLength(1);
+  });
+
+  it("puts the newest desk line and the fleet in the sidebar, and they move with time", () => {
+    const view = { groups: inbox(queues, NOW), fleet: { projects: 3, lanes: 15, lanesClosed: 14, running: 5, toLand: 1 }, latest: latestPost(queues), now: NOW };
+    expect(view.latest).toMatchObject({ project: "drovr", kind: "done" });
+    const tokens = switchboardTokens(view);
+    expect(tokens).toEqual({ progress: "☎️ switchboard", now: "🏁 now drovr: title d5", agents: "🐑 3p · 5 run · 1 to land", needs: "🙋 4 · 2 projects" });
+    expect(switchboardTokens({ ...view, now: NOW + 3 * 3_600_000 }).now).toBe("🏁 3h drovr: title d5");
+    expect([...(switchboardTokens({ ...view, latest: { ...view.latest!, title: "x".repeat(80) } }).now ?? "")].length).toBe(32);
+    expect(switchboardTokens({ groups: [], fleet: null, latest: null, now: NOW })).toEqual({ progress: "☎️ switchboard", now: null, agents: null, needs: null });
   });
 
   it("sums the fleet from live projects only", () => {

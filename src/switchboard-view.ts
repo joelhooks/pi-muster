@@ -2,7 +2,7 @@ import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@ea
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 
 import { KIND_GLYPH, activity, formatAge, itemRef, openCount } from "./switchboard.ts";
-import type { FleetStats, InboxGroup, InboxItem, SystemView } from "./switchboard.ts";
+import type { FleetStats, InboxGroup, InboxItem, LatestPost, SystemView } from "./switchboard.ts";
 
 /** The slice of Pi's theme the view uses, so tests can pass a plain stub. */
 export interface ViewTheme {
@@ -29,6 +29,7 @@ export class SwitchboardState {
   groups: readonly InboxGroup[] = [];
   posts: Readonly<Record<string, readonly number[]>> = {};
   fleet: FleetStats | null = null;
+  latest: LatestPost | null = null;
   now = Date.now();
   readonly expanded = new Set<string>();
   cursor = 0;
@@ -51,6 +52,7 @@ export class SwitchboardState {
   setSystem(view: SystemView): void {
     this.posts = view.posts;
     this.fleet = view.fleet;
+    this.latest = view.latest;
     this.now = view.now;
     this.setGroups(view.groups);
   }

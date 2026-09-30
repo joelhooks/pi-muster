@@ -59,6 +59,7 @@
     "src/switchboard-ext.ts",
     "src/switchboard-ops.ts",
     "src/switchboard-view.ts",
+    "src/registry.ts",
     "src/switchboard.ts",
     "src/desk-report.ts",
     "src/desk-report-ops.ts",

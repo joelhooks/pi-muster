@@ -168,10 +168,65 @@ export function fleetStats(projects: readonly Project[]): FleetStats {
   };
 }
 
-/** Everything the widget draws, read in one pass. */
+export interface LatestPost {
+  readonly project: string;
+  readonly kind: DeskKind;
+  readonly title: string;
+  readonly ts: number;
+}
+
+/** The newest line in any queue: what the system did last. */
+export function latestPost(queues: Readonly<Record<string, readonly DeskItem[]>>): LatestPost | null {
+  let latest: LatestPost | null = null;
+  for (const [project, items] of Object.entries(queues)) {
+    for (const item of items) {
+      const ts = Date.parse(item.ts);
+      if (!Number.isNaN(ts) && (!latest || ts > latest.ts)) latest = { project, kind: item.kind, title: item.title, ts };
+    }
+  }
+  return latest;
+}
+
+/** Everything the widget and the sidebar draw, read in one pass. */
 export interface SystemView {
   readonly groups: readonly InboxGroup[];
   readonly posts: Readonly<Record<string, readonly number[]>>;
   readonly fleet: FleetStats | null;
+  readonly latest: LatestPost | null;
   readonly now: number;
+}
+
+const POST_GLYPH: Readonly<Record<DeskKind, string>> = { ...KIND_GLYPH, done: "🏁", fyi: "📎" };
+const TOKEN_CHARS = 32;
+const clip = (text: string) => {
+  const chars = [...text];
+  return chars.length <= TOKEN_CHARS ? text : `${chars.slice(0, TOKEN_CHARS - 1).join("")}…`;
+};
+/** Whole parts in priority order; a part that does not fit drops, never half-shown. */
+const fit = (parts: readonly string[]) => {
+  let out = "";
+  for (const part of parts) {
+    const next = out ? `${out} · ${part}` : part;
+    if ([...next].length > TOKEN_CHARS) break;
+    out = next;
+  }
+  return out || null;
+};
+
+/**
+ * The Switchboard space's sidebar. `now` is the newest desk line and its age,
+ * so the row moves as the system does; `agents` is the Muster fleet.
+ */
+export function switchboardTokens(view: Pick<SystemView, "groups" | "fleet" | "latest" | "now">) {
+  const latest = view.latest;
+  const fleet = view.fleet;
+  const fleetParts = fleet
+    ? [`🐑 ${fleet.projects}p`, fleet.running > 0 ? `${fleet.running} run` : "", fleet.toLand > 0 ? `${fleet.toLand} to land` : "", fleet.lanes > 0 ? `${fleet.lanesClosed}/${fleet.lanes} lanes` : ""].filter(Boolean)
+    : [];
+  return {
+    progress: "☎️ switchboard",
+    now: latest ? clip(`${POST_GLYPH[latest.kind]} ${formatAge(Math.max(0, view.now - latest.ts))} ${latest.project}: ${latest.title}`) : null,
+    agents: fit(fleetParts),
+    needs: switchboardNeeds(view.groups),
+  };
 }

@@ -5,6 +5,7 @@ import { Effect, Schema } from "effect";
 
 import { Project } from "./domain.ts";
 import { NotFound, StoreError } from "./errors.ts";
+import { registerProject } from "./registry.ts";
 import { MusterEnv } from "./runtime.ts";
 
 /**
@@ -104,7 +105,11 @@ export const mutate = <A, E, R>(dir: string, patch: (project: Project) => Effect
         Effect.gen(function* () {
           const current = yield* load(dir);
           const [next, result] = yield* patch(current);
-          if (next !== current) yield* writeAtomic(path, { ...next, updatedAt: env.now().toISOString() });
+          if (next !== current) {
+            yield* writeAtomic(path, { ...next, updatedAt: env.now().toISOString() });
+            // Any write registers the project, so the Switchboard finds projects opened before the registry existed.
+            yield* registerProject(next);
+          }
           return result;
         }),
       (lock) => Effect.sync(() => rmSync(lock, { recursive: true, force: true })),
