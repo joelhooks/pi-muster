@@ -4,13 +4,23 @@ import muster from "../extensions/pi-muster.ts";
 
 function fakePi() {
   const tools: string[] = [];
+  const defs = new Map<string, { execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }>();
+  let thinking = "high";
   const flags: string[] = [];
   const commands: string[] = [];
   const shortcuts: string[] = [];
   const handlers: string[] = [];
   const emitted: string[] = [];
   const pi = {
-    registerTool: (tool: { name: string }) => tools.push(tool.name),
+    registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }) => {
+      tools.push(tool.name);
+      defs.set(tool.name, tool);
+    },
+    getThinkingLevel: () => thinking,
+    // Like a model that has no xhigh: it clamps to high.
+    setThinkingLevel: (level: string) => {
+      thinking = level === "xhigh" ? "high" : level;
+    },
     registerFlag: (name: string) => flags.push(name),
     registerCommand: (name: string) => commands.push(name),
     registerShortcut: (key: string) => shortcuts.push(key),
@@ -22,7 +32,7 @@ function fakePi() {
       on: () => () => {},
     },
   };
-  return { pi, tools, flags, commands, shortcuts, handlers, emitted };
+  return { pi, tools, defs, flags, commands, shortcuts, handlers, emitted };
 }
 
 const saved = { ...process.env };
@@ -32,6 +42,7 @@ afterEach(() => {
 });
 
 const OWNER_TOOLS = [
+  "thinking_set",
   "desk_inbox",
   "desk_answer",
   "desk_report",
@@ -72,5 +83,15 @@ describe("extension modes", () => {
     const fake = fakePi();
     muster(fake.pi as never);
     expect(fake.tools).toEqual(["packet_report", ...OWNER_TOOLS]);
+  });
+});
+
+describe("thinking_set", () => {
+  it("changes the session's own thinking level and says when the model clamps it", async () => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const tool = fake.defs.get("thinking_set");
+    expect((await tool?.execute("id", { level: "low" }))?.content[0]?.text).toBe("Thinking high → low, from the next model call.");
+    expect((await tool?.execute("id", { level: "xhigh" }))?.content[0]?.text).toContain("this model clamps xhigh to high");
   });
 });

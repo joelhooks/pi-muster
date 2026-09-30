@@ -127,6 +127,23 @@ export default function muster(pi: ExtensionAPI) {
 
   if (worker) return;
 
+  pi.registerTool({
+    name: "thinking_set",
+    label: "Muster thinking level",
+    description:
+      "Set this session's own thinking level from its next model call. A standing Hawk drops to low when the line stops and sets it back at resume; any owner can lower it for quiet watch duty. The model may clamp the level.",
+    parameters: Type.Object({ level: StringEnum(["off", "minimal", "low", "medium", "high", "xhigh"] as const) }),
+    async execute(_id, params) {
+      const before = pi.getThinkingLevel();
+      pi.setThinkingLevel(params.level);
+      const after = pi.getThinkingLevel();
+      return text(
+        `Thinking ${before} → ${after}${after === params.level ? "" : ` (this model clamps ${params.level} to ${after})`}, from the next model call.`,
+        { before, after },
+      );
+    },
+  });
+
   registerSwitchboard(pi, { env, layer, run });
   registerDeskReport(pi, { run });
 

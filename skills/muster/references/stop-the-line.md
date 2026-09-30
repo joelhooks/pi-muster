@@ -2,13 +2,14 @@
 
 Joel may say "stop the line", "freeze", or "only essentials and monitoring for 24h". That means stop all project work for a set window, for safety and token cost. Production and monitoring keep running.
 
-The desk runs the stop, Hawk carries it out, and only Joel ends it.
+The desk runs the stop, Hawk carries it out, and only Joel ends it. Hawk never stops standing. There is always one Hawk on duty with the page watch and the resume timer armed.
 
 ## 1. Relay the terms, within minutes
 
 - **Send one stop order to Hawk**, and copy the owner. It gives:
   - the window in UTC, both ends;
   - the purpose;
+  - that Hawk stays on duty at low thinking (§6);
   - a **STOP** list, a **KEEP** list, and the resume rule (§2);
   - a request that, before stopping, Hawk post one desk item with the freeze state (§3).
 - **Give the owner a heads-up.** The full terms went to Hawk, and the owner waits for Hawk's instructions. Until they arrive, it starts no new packets, merges or measurements.
@@ -25,7 +26,7 @@ The desk runs the stop, Hawk carries it out, and only Joel ends it.
 - **Merges and deploys.** A deploy already in flight either finishes through its post-check or rolls back, then stops. The deploy gate gives no GO.
 - **New work.** No new packets, lanes, load tests, stage waves or measurement runs.
 - **Clocks that wake an agent.** Every `until repeat` or tick that wakes an LLM on a schedule stops.
-- **Agents.** Workers stop at a clean checkpoint and write a handoff. Bosses, reviewers and the owner go idle.
+- **Agents.** Workers stop at a clean checkpoint and write a handoff. Bosses, reviewers and the owner go idle. Hawk stays up (§6).
 
 **KEEP**
 
@@ -47,7 +48,7 @@ Post one `fyi` desk item that Joel can read in a minute. It has four parts:
 
 ## 4. Close and catalogue
 
-Joel may also ask to close the sessions and panes.
+Joel may also ask to close the sessions and panes. That covers everyone except Hawk and the desk: those two stay open.
 
 1. **Write the roster first,** as a Brain note. For each agent it records:
    - the role;
@@ -66,18 +67,25 @@ Joel may also ask to close the sessions and panes.
 
 ## 5. Watches die with their session
 
-Pi-until watches and Herdr watches belong to their session. Closing the session that holds the page watch or the resume timer kills them.
+Pi-until watches and Herdr watches belong to their session. Closing the session that holds the page watch or the resume timer kills them. That is why Hawk stands.
 
-Before that session closes, arm both in a session that stays open, usually the desk. The stopgap copies are cancelled once the freeze keeper posts that it is armed.
+If watches must move anyway, arm them in the new session first, wait for its `fyi` saying both are armed, and only then close the old one. Never leave a gap.
 
-## 6. The freeze keeper
+## 6. The standing Hawk
 
-Monitoring sometimes needs judgment ("the hawk shouldn't sleep"). Then run one fresh keeper:
+Hawk stays on duty through the freeze on a quiet brief. There are two ways to do it:
 
-- **Setup:** Hawk role, low thinking, compact-at 200000, and a short SOP brief.
-- **Read first:** only the brief, the roster, the freeze-state item, and the last lines of the Hawk handoff.
-- **Old context:** the old Hawk's session and handoff are lore. The keeper searches them when a question needs it and never loads them whole.
-- **On start:** arm the page watch (shell condition, no LLM turns while quiet) and the resume timer. Then post one `fyi` saying both are armed.
+- **The same Hawk (default).** Hawk calls `thinking_set low` and takes the freeze brief below as its standing orders. Its watches, its context and its judgment carry straight through.
+- **A fresh third-shift Hawk.** Use this when the day Hawk's context is heavy or Joel wants a clean start.
+  1. Launch it on the Hawk role with low thinking, compact-at 200000 and the freeze brief.
+  2. It arms its own watches and posts an `fyi` saying both are armed.
+  3. Only then close the day Hawk, which goes on the roster for restore.
+
+  The third shift reads only the brief, the roster, the freeze-state item and the last lines of the Hawk handoff. The day Hawk's session and handoff are lore: it searches them when a question needs it and never loads them whole.
+
+The freeze brief:
+
+- **Watches:** a page watch on a shell condition (no LLM turns while quiet), plus the resume timer.
 - **Authority:** one named incident class, such as email delivery, and a fixed list of actions:
   - read-only diagnosis;
   - retries through the existing operator paths;
@@ -88,7 +96,7 @@ Monitoring sometimes needs judgment ("the hawk shouldn't sleep"). Then run one f
   Every deploy keeps its gate and its post-check.
 - **Off limits:** everything else, and any new class of risk: new audiences, DNS, deleting data. Those go to Joel through the desk queue.
 - **Reporting:** the desk queue only, one item per incident. When Joel is needed urgently: a `blocked` item plus one `needs_joel` ping.
-- **No recurring ticks.** The keeper wakes only on a watch.
+- **No recurring ticks.** The Hawk on duty wakes only on a watch.
 
 ## 7. Work inside the freeze
 
@@ -100,9 +108,9 @@ A paused project's local main goes stale. Fetch origin before cutting clones, an
 
 When Joel says go:
 
-1. Restore Hawk first, then the owner, then the deploy gate.
-2. Hawk decides which lanes come back. Items with a deadline go first.
-3. Put the policy back (the silence limits), along with the headline and the owner loop.
-4. Re-plan anything the freeze voided.
-5. Close the keeper, or fold it into the restored Hawk.
+1. Hawk returns to full duty. The same Hawk calls `thinking_set` back to its role's level. A third shift either keeps the watch with its thinking raised, or restores the day Hawk and hands over, watches first.
+2. Restore the owner, then the deploy gate.
+3. Hawk decides which lanes come back. Items with a deadline go first.
+4. Put the policy back (the silence limits), along with the headline and the owner loop.
+5. Re-plan anything the freeze voided.
 6. Mark the roster note done.
