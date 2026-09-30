@@ -8,6 +8,7 @@ import { parseThreshold, roleThreshold } from "./compact.ts";
 import { silenceLimits } from "./domain.ts";
 import type { DeskItem, Project } from "./domain.ts";
 import { readHolder, tryAcquire } from "./heavy-lock.ts";
+import { workPrompt } from "./ops.ts";
 import { costFromLines, readSessionCost, turnCost } from "./session-file.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, silenceDecision } from "./silence.ts";
 
@@ -174,5 +175,16 @@ describe("heavy-job lock", () => {
     const taken = tryAcquire(lock, "live gate");
     expect(taken.ok).toBe(true);
     if (taken.ok) taken.release();
+  });
+});
+
+describe("workPrompt", () => {
+  const row = (role: string) => ({ role, brief: "/b.md" }) as unknown as Parameters<typeof workPrompt>[0];
+  it("fits the role: only workers and bosses report a packet", () => {
+    expect(workPrompt(row("worker"), undefined)).toContain("packet_report");
+    expect(workPrompt(row("boss"), undefined)).toContain("packet_report");
+    expect(workPrompt(row("desk"), undefined)).toBe("Read your brief at /b.md. You are this project's desk: Joel talks to you here. Say hello in one line, then wait for him.");
+    expect(workPrompt(row("hawk"), undefined)).not.toContain("packet_report");
+    expect(workPrompt(row("desk"), "explicit")).toBe("explicit");
   });
 });

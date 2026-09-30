@@ -624,11 +624,20 @@ const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaun
     return { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true } satisfies PaneBinding;
   });
 
-export const workPrompt = (row: AgentRow, prompt: string | undefined) =>
-  prompt ??
-  (row.brief
-    ? `Read your brief at ${row.brief} and do the work it describes. When your result is committed, call packet_report once with the commit and your checks.`
-    : undefined);
+/** The default first prompt fits the role: only workers and bosses have a packet to report. */
+export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
+  if (prompt !== undefined) return prompt;
+  if (!row.brief) return undefined;
+  switch (row.role) {
+    case "desk":
+      return `Read your brief at ${row.brief}. You are this project's desk: Joel talks to you here. Say hello in one line, then wait for him.`;
+    case "hawk":
+    case "judge":
+      return `Read your brief at ${row.brief} and take up the role it describes. Report only through the channels it names.`;
+    default:
+      return `Read your brief at ${row.brief} and do the work it describes. When your result is committed, call packet_report once with the commit and your checks.`;
+  }
+};
 
 export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
   Effect.gen(function* () {
