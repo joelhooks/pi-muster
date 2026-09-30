@@ -54,6 +54,10 @@
     "src/session-file.ts",
     "src/silence.ts",
     "src/store.ts",
+    "src/switchboard-ext.ts",
+    "src/switchboard-ops.ts",
+    "src/switchboard-view.ts",
+    "src/switchboard.ts",
     "src/tokens.ts"
   ],
   "scripts": {

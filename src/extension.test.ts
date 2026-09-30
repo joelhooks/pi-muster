@@ -6,12 +6,14 @@ function fakePi() {
   const tools: string[] = [];
   const flags: string[] = [];
   const commands: string[] = [];
+  const shortcuts: string[] = [];
   const handlers: string[] = [];
   const emitted: string[] = [];
   const pi = {
     registerTool: (tool: { name: string }) => tools.push(tool.name),
     registerFlag: (name: string) => flags.push(name),
     registerCommand: (name: string) => commands.push(name),
+    registerShortcut: (key: string) => shortcuts.push(key),
     on: (event: string) => handlers.push(event),
     getFlag: () => undefined,
     appendEntry: () => {},
@@ -20,7 +22,7 @@ function fakePi() {
       on: () => () => {},
     },
   };
-  return { pi, tools, flags, commands, handlers, emitted };
+  return { pi, tools, flags, commands, shortcuts, handlers, emitted };
 }
 
 const saved = { ...process.env };
@@ -30,6 +32,8 @@ afterEach(() => {
 });
 
 const OWNER_TOOLS = [
+  "desk_inbox",
+  "desk_answer",
   "project_open",
   "lane_open",
   "lane_close",
@@ -48,8 +52,9 @@ describe("extension modes", () => {
     const fake = fakePi();
     muster(fake.pi as never);
     expect(fake.tools).toEqual(OWNER_TOOLS);
-    expect(fake.flags).toEqual(["compact-at"]);
-    expect(fake.commands).toEqual(["compact-at"]);
+    expect(fake.flags).toEqual(["compact-at", "switchboard"]);
+    expect(fake.commands).toEqual(["compact-at", "switchboard"]);
+    expect(fake.shortcuts).toEqual(["alt+s"]);
     expect(fake.emitted).toEqual([]);
   });
 

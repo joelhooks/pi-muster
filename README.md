@@ -45,13 +45,21 @@ Role models are data. Muster reads `~/.config/muster/roster.json` (or `MUSTER_RO
 
 ## Tools
 
-Owner side: `project_open`, `project_update`, `lane_open`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`.
+Owner side: `project_open`, `project_update`, `lane_open`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`.
 
 `project_update` sets the sidebar headline and the project's policy: silence limits and per-role model, thinking, compaction, and skills, merged over Muster's defaults.
 
 Worker side, when `MUSTER_AGENT` is set: `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets no owner tools and no path to the operator.
 
 `muster-heavy -- <command>` runs a command under the machine-wide heavy-job lock that `packet_land` gates also take.
+
+## Switchboard
+
+One inbox over every project's desk queue. It reads and routes; project desks stay the authority for their own work. Start a session as the Switchboard with `pi --switchboard` (or `MUSTER_SWITCHBOARD=1`, or `/switchboard on`). Nothing starts on its own otherwise.
+
+- The widget holds three rows at most: open asks by kind and age plus the Muster fleet (projects, lanes, running agents, packets to land), then the two most urgent desks with a 24-hour heat strip of queue traffic.
+- `alt+s` or `/switchboard` browses everything: `j`/`k` move, `space` folds, `enter` puts an `[project#id]` reference in the editor, `a` answers, `d` marks done.
+- `desk_inbox` lists open items ranked blocked, approval, decision, oldest first. `desk_answer` appends a resolving line to the item's own queue and nudges that project's desk.
 
 ## State
 
@@ -60,6 +68,7 @@ Worker side, when `MUSTER_AGENT` is set: `packet_report` and per-role compaction
 - `<project>/.brain/projects/muster/<slug>.svx`: a generated Brain board.
 - `~/.local/state/herdr-desk/<slug>.jsonl`: the desk queue, one JSON line per item.
 - `~/.local/state/muster/heavy-job.lock`: the heavy-job lock.
+- `~/.local/state/muster/projects.jsonl`: every project `project_open` has seen, so the Switchboard can find them all.
 
 Muster refuses project state, briefs, and agent cwds under a temp dir unless the project was opened with `ephemeral: true`.
 

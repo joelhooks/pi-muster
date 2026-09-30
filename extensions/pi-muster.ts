@@ -28,6 +28,7 @@ import {
   projectUpdate,
 } from "../src/ops.ts";
 import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "../src/runtime.ts";
+import { registerSwitchboard } from "../src/switchboard-ext.ts";
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_WORKER_WORKTREE = join(homedir(), "Code", "joelhooks", "dark-wizard", "scripts", "worker-worktree.sh");
@@ -124,6 +125,8 @@ export default function muster(pi: ExtensionAPI) {
   }
 
   if (worker) return;
+
+  registerSwitchboard(pi, { env, layer, run });
 
   pi.registerTool({
     name: "project_open",

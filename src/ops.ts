@@ -45,6 +45,7 @@ import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts
 import type { SessionCost } from "./session-file.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
+import { registerProject } from "./switchboard-ops.ts";
 import { closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
 import type { LiveCounts } from "./tokens.ts";
@@ -366,6 +367,7 @@ export const projectOpen = (params: ProjectOpenInput) =>
       if (createdRoot) yield* paneClose(createdRoot).pipe(Effect.catch(() => Effect.void));
     }
     const final = yield* load(dir);
+    yield* registerProject(final);
     notes.push(yield* publishTokens(final));
     notes.push(`brain: ${yield* writeBrain(final)}`);
     return { project: final, adopted, cadence: cadenceCall(final), notes };
