@@ -30,6 +30,7 @@ export class FakeHerdr {
   tokens = new Map<string, Record<string, string | null>>();
   promptWorking = true;
   startSessions = true;
+  startErrors: string[] = [];
   promptFails = false;
   private seq = 0;
 
@@ -138,6 +139,8 @@ export class FakeHerdr {
         return { type: "ok" };
       }
       case "agent.start": {
+        const code = this.startErrors.shift();
+        if (code) throw new HerdrApiError({ operation: method, code, message: "start rejected" });
         const pane = this.pane(method, params.pane_id);
         pane.agent = String(params.name);
         const args = params.args as string[];

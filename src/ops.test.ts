@@ -93,6 +93,118 @@ describe("project_open", () => {
   });
 });
 
+describe("field-use regressions", () => {
+  it("retries a busy shell without re-running the prelude", async () => {
+    const h = harness();
+    h.herdr.startErrors = ["agent_pane_busy"];
+    const { launched } = await launchedWorker(h);
+    expect(launched.row.state).toBe("running");
+    expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(2);
+    expect(h.herdr.calls.filter((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("cd "))).toHaveLength(1);
+  });
+
+  it("bounds busy retries and does not retry other start errors", async () => {
+    for (const code of ["agent_pane_busy", "agent_not_found"]) {
+      const h = harness();
+      h.herdr.startErrors = Array(30).fill(code);
+      await expect(launchedWorker(h)).rejects.toThrow("start rejected");
+      expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(code === "agent_pane_busy" ? 21 : 1);
+      const project = await runWith(h, load(join(h.root, "repo")));
+      expect(project.agents[0]?.state).toBe("failed");
+    }
+  });
+
+  it("lands without committing unrelated staged or unstaged source edits", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    mkdirSync(join(dir, ".brain", "data", "muster"), { recursive: true });
+    sh(dir, "add", ".brain/data/muster/project.json");
+    sh(dir, "commit", "-q", "-m", "track catalog");
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    writeFileSync(join(dir, "README.md"), "staged user edit\n");
+    sh(dir, "add", "README.md");
+    writeFileSync(join(dir, "README.md"), "unstaged user edit\n");
+    sh(dir, "add", ".brain/data/muster/project.json");
+    const staged = sh(dir, "show", ":README.md");
+    const catalog = sh(dir, "show", ":.brain/data/muster/project.json");
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed" }));
+    expect(result.packet.state).toBe("committed");
+    expect(sh(dir, "show", "HEAD:README.md")).toBe("hello\n");
+    expect(sh(dir, "show", ":README.md")).toBe(staged);
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toBe("unstaged user edit\n");
+    expect(sh(dir, "show", ":.brain/data/muster/project.json")).toBe(catalog);
+    expect(sh(dir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD^1", "HEAD").trim()).toBe("work.txt");
+  });
+
+  it("refuses dirty source paths that overlap the merge", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone, "README.md");
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    writeFileSync(join(dir, "README.md"), "user edit\n");
+    const before = sh(dir, "rev-parse", "HEAD");
+    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed" }));
+    expect(error.message).toContain("overlap");
+    expect(error.message).toContain("README.md");
+    expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toBe("user edit\n");
+  });
+
+  it("leaves an existing source merge to its owner", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    const mergeHead = join(dir, ".git", "MERGE_HEAD");
+    const previous = sh(dir, "rev-parse", "HEAD");
+    writeFileSync(mergeHead, previous);
+    expect((await failWith(h, packetLand(dir, { id: commit, outcome: "committed" }))).message).toContain("already has a merge");
+    expect(readFileSync(mergeHead, "utf8")).toBe(previous);
+  });
+
+  it("reports to the adopted catalog owner rather than the launch owner", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    h.sessionId = "new-owner";
+    await runWith(h, projectStatus(dir, { takeover: true, act: false }));
+    expect((await runWith(h, load(dir))).agents[0]?.owner).toBe("new-owner");
+    expect(h.herdr.calls.some((call) => call.method === "pane.close")).toBe(false);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "owner-session", cwd: clone, commit, summary: "s", checks: [] }));
+    expect(h.sent.at(-1)?.to).toBe("new-owner");
+  });
+
+  it("does not report new work from a landed row whose agent exited", async () => {
+    const h = harness();
+    const { dir, clone, launched } = await launchedWorker(h);
+    const first = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: first, summary: "s", checks: [] }));
+    await runWith(h, packetLand(dir, { id: first, outcome: "no_changes" }));
+    delete h.herdr.panes.get(launched.row.pane!.paneId)!.agent;
+    const second = commitInClone(clone, "next.txt");
+    expect((await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] })))._tag).toBe("IllegalTransition");
+  });
+
+  it("allows another packet after no_changes but keeps terminal outcomes final", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const first = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: first, summary: "s", checks: [] }));
+    await runWith(h, packetLand(dir, { id: first, outcome: "no_changes" }));
+    const second = commitInClone(clone, "next.txt");
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] }));
+    expect((await runWith(h, load(dir))).packets.map((packet) => packet.state)).toEqual(["no_changes", "reported"]);
+    const firstPacket = (await runWith(h, load(dir))).packets[0]!;
+    const reportBefore = readFileSync(firstPacket.report, "utf8");
+    expect((await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: first, summary: "overwrite", checks: [] }))).message).toContain("already no_changes");
+    expect(readFileSync(firstPacket.report, "utf8")).toBe(reportBefore);
+  });
+});
+
 describe("a lane from launch to close", () => {
   it("launches with the full profile, reads the real session, and proves delivery", async () => {
     const h = harness();
