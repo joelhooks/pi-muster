@@ -61,6 +61,8 @@
     "src/switchboard-view.ts",
     "src/registry.ts",
     "src/switchboard.ts",
+    "src/desk-feed.ts",
+    "src/desk-feed-ext.ts",
     "src/desk-report.ts",
     "src/desk-report-ops.ts",
     "src/desk-report-ext.ts",

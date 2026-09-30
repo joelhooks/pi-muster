@@ -26,6 +26,8 @@ function fakePi() {
     registerShortcut: (key: string) => shortcuts.push(key),
     on: (event: string) => handlers.push(event),
     getFlag: () => undefined,
+    registerMessageRenderer: () => {},
+    sendMessage: () => {},
     appendEntry: () => {},
     events: {
       emit: (event: string) => emitted.push(event),

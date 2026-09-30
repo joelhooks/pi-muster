@@ -28,6 +28,7 @@ import {
   projectUpdate,
 } from "../src/ops.ts";
 import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "../src/runtime.ts";
+import { registerDeskFeed } from "../src/desk-feed-ext.ts";
 import { registerDeskReport } from "../src/desk-report-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
 
@@ -144,6 +145,7 @@ export default function muster(pi: ExtensionAPI) {
     },
   });
 
+  registerDeskFeed(pi, env);
   registerSwitchboard(pi, { env, layer, run });
   registerDeskReport(pi, { run });
 
