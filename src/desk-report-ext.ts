@@ -10,7 +10,7 @@ export function registerDeskReport(pi: ExtensionAPI, deps: Pick<SwitchboardDeps,
     name: "desk_report",
     label: "Desk report page",
     description:
-      "Build the desk report page (ratstack look, one card per decision, copy-feedback JSON) from items JSON in the muster-desk-report.items.v1 shape. Refuses a page that holds links or email addresses, and runs the project's own redaction scan when given (PAGE is set to the page path). Writes <out>/index.html; publishing, noindex and expiry stay with the desk.",
+      "Build the desk report page (ratstack look, one card per decision, copy-feedback JSON) from items JSON in the muster-desk-report.items.v1 shape. Refuses a page that holds links or email addresses, and runs the project's own redaction scan when given (PAGE is the page without Muster's icons; PAGE_HTML is the page as written). Writes <out>/index.html; publishing, noindex and expiry stay with the desk.",
     promptSnippet: "desk_report: build Joel's desk feedback page from report items",
     parameters: Type.Object({
       report: Type.String({ description: "Items JSON path" }),

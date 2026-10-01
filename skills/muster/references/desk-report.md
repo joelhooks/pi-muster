@@ -5,7 +5,7 @@ When a desk holds several decisions for Joel, it publishes one feedback page in 
 ## Build and apply
 
 1. Write the items JSON in the `muster-desk-report.items.v1` shape (see below). Each card is written for its own decision; no card is a copy of another.
-2. Run `desk_report {report, out, scan}`. It renders `<out>/index.html` in the ratstack look. It refuses a page that holds links or email addresses, and it runs the project's own redaction scan, with `PAGE` set to the page path.
+2. Run `desk_report {report, out, scan}`. It renders `<out>/index.html` in the ratstack look. It refuses a page that holds links or email addresses, and it runs the project's own redaction scan. `PAGE` is a copy of the page without Muster's icons, whose path numbers read as phone numbers; `PAGE_HTML` is the page as written.
 3. Publish the page noindex with a 48-hour expiry (`wzrrd publish --expires-in 48h`). Check for HTTP 200 and an `x-robots-tag` noindex. Look at the rendered page before sharing the link.
 4. Joel pastes the feedback. Run `desk_rulings {project, report, feedback}`, using `dryRun` first when unsure. Each answered card resolves every desk item it covers. Send the returned owner message once.
 5. Keep a manifest next to the items: the slug, URL, expiry, desk item IDs, and publish receipts.

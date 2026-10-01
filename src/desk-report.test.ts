@@ -229,6 +229,10 @@ describe("desk report tools", () => {
     const built = await runWith(h, deskReport({ report: items, out: join(h.root, "page"), scan: 'grep -q "probe desk" "$PAGE"', cwd: h.root }));
     expect(built).toMatchObject({ cards: 3, ids: 4, css: "built-in fallback", scanned: true });
     expect(readFileSync(built.page, "utf8")).toContain("max-width: 80ch");
+    // PAGE drops Muster's icons, whose path coordinates read as phone numbers; PAGE_HTML is the page as written.
+    expect(readFileSync(built.page, "utf8")).toContain('class="desk-icon"');
+    const phone = 'grep -Eq "[0-9]{3}[.-][0-9]{3}[.-]?[0-9]{2,}|[0-9]\\.[0-9]{5,}"';
+    await runWith(h, deskReport({ report: items, out: join(h.root, "page-icons"), scan: `! ${phone} "$PAGE" && ! grep -q "<svg" "$PAGE" && grep -q "<svg" "$PAGE_HTML"`, cwd: h.root }));
 
     const failed = await failWith(h, deskReport({ report: items, out: join(h.root, "page2"), scan: "exit 3", cwd: h.root }));
     expect(failed).toMatchObject({ _tag: "GuardFailed", guard: "redaction" });

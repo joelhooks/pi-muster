@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import { Effect } from "effect";
@@ -21,6 +22,9 @@ body { box-sizing: border-box; margin: 0 auto; max-width: 80ch; padding: 1rem; }
 
 const SCAN_TIMEOUT_MS = 60_000;
 
+/** Muster's fixed icon set carries path coordinates that look like phone numbers to project scans, and never item text. */
+export const withoutDeskIcons = (html: string) => html.replace(/<svg class="desk-icon"[^>]*>[\s\S]*?<\/svg>/g, "");
+
 const input = (message: string) => new InputError({ message });
 
 const readReport = (path: string) =>
@@ -35,7 +39,10 @@ export interface DeskReportInput {
   /** Output folder; the page is written as index.html. */
   readonly out: string;
   readonly css?: string | undefined;
-  /** The project's own redaction scan, run with PAGE set to the written page. A nonzero exit fails the build. */
+  /**
+   * The project's own redaction scan. PAGE is a copy of the page without Muster's icons;
+   * PAGE_HTML is the page as written. A nonzero exit fails the build.
+   */
   readonly scan?: string | undefined;
   readonly cwd?: string | undefined;
 }
@@ -62,7 +69,11 @@ export const deskReport = (params: DeskReportInput) =>
     mkdirSync(dirname(page), { recursive: true });
     writeFileSync(page, html, "utf8");
     if (params.scan) {
-      const result = yield* proc.run("sh", ["-c", params.scan], { cwd, timeoutMs: SCAN_TIMEOUT_MS, env: { ...process.env, PAGE: page } as Record<string, string> });
+      const scanDir = mkdtempSync(join(tmpdir(), "muster-desk-scan-"));
+      const scanPage = join(scanDir, "index.html");
+      writeFileSync(scanPage, withoutDeskIcons(html), "utf8");
+      const result = yield* proc.run("sh", ["-c", params.scan], { cwd, timeoutMs: SCAN_TIMEOUT_MS, env: { ...process.env, PAGE: scanPage, PAGE_HTML: page } as Record<string, string> })
+        .pipe(Effect.ensuring(Effect.sync(() => rmSync(scanDir, { recursive: true, force: true }))));
       if (result.code !== 0) {
         return yield* new GuardFailed({ guard: "redaction", message: `scan failed (exit ${result.code}); the page at ${page} must not be shared:\n${`${result.stdout}\n${result.stderr}`.trim().slice(0, 800)}` });
       }
