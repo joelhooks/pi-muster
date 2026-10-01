@@ -400,7 +400,12 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
     const wantOpen = params.open !== false;
-    if (existing?.state === "open") return { lane: existing, created: false };
+    if (existing?.state === "open" && existing.root) {
+      const live = yield* locatePane(existing.root);
+      if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
+        return { lane: existing, created: false, note: null };
+      }
+    }
     if (wantOpen && !project.spaceId) return yield* input("the project has no space; run project_open with space or createSpace first");
 
     const base: Lane = existing ?? {
@@ -422,20 +427,25 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       const lane = yield* mutate(dir, (current) => Effect.succeed([withLane(current, base), base] as const));
       return { lane, created: !existing };
     }
-    const event = base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
-    yield* stepLane(slug, base.state, event);
+    const event = base.state === "open" ? null : base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
+    if (event) yield* stepLane(slug, base.state, event);
     let tabId = base.tabId;
     let root = base.root;
-    const liveRoot = root ? yield* paneGet(root.paneId) : null;
-    if (!liveRoot || liveRoot.terminal_id !== root?.terminalId) {
+    const liveRoot = root ? yield* locatePane(root) : null;
+    let note: string | null = null;
+    if (!liveRoot) {
       const tab = yield* tabCreate(project.spaceId as string, base.repo ?? project.dir, base.label);
       tabId = tab.tab.tab_id;
       root = { paneId: tab.root_pane.pane_id, terminalId: tab.root_pane.terminal_id, tabId, openedByMuster: true };
+      if (base.root) note = `root pane was gone; opened tab ${tabId} pane ${root.paneId}`;
+    } else if (root) {
+      tabId = liveRoot.tab_id;
+      root = { ...root, paneId: liveRoot.pane_id, tabId };
     }
     const lane = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
-        const state = yield* stepLane(slug, latest.state, event);
+        const state = event ? yield* stepLane(slug, latest.state, event) : latest.state;
         const next: Lane = {
           ...latest,
           label: params.label || latest.label,
@@ -452,7 +462,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       }),
     );
     yield* publishTokens(yield* load(dir));
-    return { lane, created: !existing };
+    return { lane, created: !existing, note };
   });
 
 const laneCounts = (project: Project, slug: string) => ({
@@ -597,12 +607,25 @@ const findSessionFile = (cwd: string, sessionId: string, home: string) => {
   return hit ? join(dir, hit) : null;
 };
 
+/** Pane ids can change; either identity is enough to protect another row's binding. */
+const sharesPane = (binding: PaneBinding, other: PaneBinding | null) =>
+  other !== null && (other.paneId === binding.paneId || other.terminalId === binding.terminalId);
+
+const blocksPane = (row: AgentRow) => !["failed", "interrupted", "closed"].includes(row.state);
+
+const guardPaneBinding = (project: Project, row: AgentRow, binding: PaneBinding) => {
+  const holder = project.agents.find((other) => other.name !== row.name && blocksPane(other) && sharesPane(binding, other.pane));
+  return holder ? input(`pane ${binding.paneId} already bound to ${holder.name} (${holder.state}); choose another pane`) : Effect.void;
+};
+
 const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaunchInput) =>
   Effect.gen(function* () {
     if (params.pane) {
       const pane = yield* paneGet(params.pane);
       if (!pane) return yield* input(`no pane ${params.pane}`);
-      return { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: false } satisfies PaneBinding;
+      const binding = { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: false } satisfies PaneBinding;
+      yield* guardPaneBinding(project, row, binding);
+      return binding;
     }
     if (row.pane) {
       const kept = yield* locatePane(row.pane);
@@ -612,7 +635,7 @@ const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaun
     const root = yield* locatePane(lane.root);
     if (!root) return yield* input(`lane ${lane.slug}'s root pane is gone; lane_open it again`);
     const slot = params.slot ?? (row.role === "worker" ? "split" : "root");
-    const rootInUse = project.agents.some((agent) => agent.lane === lane.slug && agent.name !== row.name && agent.state !== "closed" && agent.pane?.terminalId === root.terminal_id);
+    const rootInUse = project.agents.some((agent) => agent.name !== row.name && blocksPane(agent) && agent.pane && (agent.pane.paneId === root.pane_id || agent.pane.terminalId === root.terminal_id));
     if (slot === "root") {
       if (rootInUse) return yield* input(`lane ${lane.slug}'s root pane already runs an agent; use slot split`);
       return { paneId: root.pane_id, terminalId: root.terminal_id, tabId: root.tab_id, openedByMuster: true } satisfies PaneBinding;
@@ -746,8 +769,17 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
 
     const lane = yield* findLane(project, row.lane);
     const failLaunch = () => patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void));
-    const binding = yield* pickPane(project, lane, row, params).pipe(Effect.tapError(failLaunch));
-    yield* patchRow(dir, row.name, row.state, [], { pane: binding });
+    const picked = yield* pickPane(project, lane, row, params).pipe(Effect.tapError(failLaunch));
+    // Claim and release stale bindings together, before sending anything to the shell.
+    const binding = yield* mutate(dir, (current) => Effect.gen(function* () {
+      yield* guardPaneBinding(current, row, picked);
+      const stale = current.agents.filter((other) => other.name !== row.name && sharesPane(picked, other.pane));
+      const binding = { ...picked, openedByMuster: picked.openedByMuster || current.agents.some((other) => sharesPane(picked, other.pane) && other.pane?.openedByMuster) };
+      const agents = current.agents.map((other) => other.name === row.name
+        ? { ...other, pane: binding, updatedAt: iso(env) }
+        : stale.includes(other) ? { ...other, pane: null, updatedAt: iso(env) } : other);
+      return [{ ...current, agents }, binding] as const;
+    })).pipe(Effect.tapError(failLaunch));
     const launched = yield* Effect.gen(function* () {
       yield* paneRun(binding.paneId, shellPrelude(row.cwd, agentEnvironment));
       yield* waitForCwd(binding.paneId, row.cwd);
@@ -851,8 +883,12 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     if (row.state !== "closed") {
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       if (row.pane) {
-        const located = yield* locatePane(row.pane);
-        if (located) {
+        const binding = row.pane;
+        const holder = project.agents.find((other) => other.name !== row.name && other.state !== "closed" && sharesPane(binding, other.pane));
+        const located = holder ? null : yield* locatePane(row.pane);
+        if (holder) {
+          notes.push(`pane ${row.pane.paneId} kept: ${holder.name} is bound to it`);
+        } else if (located) {
           const tail = yield* paneRead(located.pane_id, CLOSE_READ_LINES).pipe(Effect.catch(() => Effect.succeed("")));
           const saved = join(closedDir(dir), `${row.name}-${env.now().getTime()}.txt`);
           mkdirSync(dirname(saved), { recursive: true });
