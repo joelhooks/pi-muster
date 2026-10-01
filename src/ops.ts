@@ -1015,9 +1015,14 @@ export const packetReport = (params: PacketReportInput) =>
           reportedAt: prior?.reportedAt ?? now,
           updatedAt: now,
         };
-        const livePane = latest.state === "reported" || latest.state === "verified" || latest.state === "landed"
-          ? latest.pane ? yield* locatePane(latest.pane) : null
-          : null;
+        const reportingAgain = latest.state === "reported" || latest.state === "verified" || latest.state === "landed";
+        const livePane = reportingAgain && latest.pane ? yield* locatePane(latest.pane) : null;
+        if (reportingAgain && !livePane?.agent) {
+          return yield* new GuardFailed({
+            guard: "pane-live",
+            message: `${latest.name} is ${latest.state}; reporting again needs its bound pane ${latest.pane?.paneId ?? "(none)"} to host a live agent, and Herdr reports none. Run project_status to rebind a moved pane, or restore the agent.`,
+          });
+        }
         const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!livePane?.agent });
         const next: AgentRow = { ...latest, state, updatedAt: now };
         mkdirSync(dirname(report), { recursive: true });

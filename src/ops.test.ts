@@ -345,7 +345,7 @@ describe("field-use regressions", () => {
     await runWith(h, packetLand(dir, { id: first, outcome: "no_changes" }));
     delete h.herdr.panes.get(launched.row.pane!.paneId)!.agent;
     const second = commitInClone(clone, "next.txt");
-    expect((await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] })))._tag).toBe("IllegalTransition");
+    expect((await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] }))).message).toMatch(/needs its bound pane .* to host a live agent/);
   });
 
   it("allows another packet after no_changes but keeps terminal outcomes final", async () => {
@@ -419,7 +419,7 @@ describe("follow-up packets", () => {
     const { h, dir, clone, launched, first } = await verifiedWorker();
     delete h.herdr.panes.get(launched.row.pane!.paneId)!.agent;
     const second = commitInClone(clone, "safety.txt");
-    expect((await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] })))._tag).toBe("IllegalTransition");
+    expect((await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] }))).message).toMatch(/needs its bound pane .* to host a live agent/);
     const project = await runWith(h, load(dir));
     expect(project.packets.map((packet) => packet.id)).toEqual([first]);
     expect(project.agents[0]?.state).toBe("verified");
