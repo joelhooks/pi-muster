@@ -23,7 +23,9 @@ No project, no Muster. Before any lane, launch, or `desk_post`, call `project_st
 
 ## How to cut a lane
 
-- Cut by write scope and by one packet that fits the time available. A lane whose packet you cannot name yet is `open: false` (proposed).
+- A lane is a feature. Its boss owns the feature end to end: it plans the packets, lands them, and closes the lane when the feature ships. A lane whose outcome you cannot name yet is `open: false` (proposed).
+- Inside a lane, cut packets by write scope and by what fits the time available.
+- A one-packet fix can run without a boss. Its worker reports to whoever opened the lane.
 - An unready dependency gets a placeholder packet, not a blocked lane.
 - A release that spans code and live config splits at the start: code, config, and early review as disjoint lanes, one writer per checkout, one combined release packet. The final integrated gate still runs. drovr split at hour five; it could have split at hour zero.
 - The judge reviews the SOP on a slow clock and never sets priorities.
@@ -57,6 +59,15 @@ Defaults fit most work. Role models come from the fleet roster (`~/.config/muste
 - When Joel stops the line (a freeze with only essentials and monitoring), the desk runs [stop the line](references/stop-the-line.md). Hawk stays standing: it drops to low thinking, or a fresh third-shift Hawk takes over. Only Joel resumes.
 - A desk holding several decisions for Joel publishes one [desk report](references/desk-report.md) page, not a chat digest. His pasted feedback goes through `desk_rulings`: each item is resolved, then the owner gets one message.
 - Never act on GitHub as Joel. Use the ShitRat bot or ask. "Rerun until green" is not a gate.
+
+## Talking across lanes and desks
+
+- Bosses talk to each other directly over intercom about interfaces, shared files, and ordering. A boss never writes in another lane's scope.
+- A decision two lanes share gets one line in the project's Brain, so neither boss holds it alone. Bosses who disagree take it to the hawk, not to Joel.
+- A desk asks another project's desk for anything that project owns, such as a Muster bug or a tool gap. Open the message with sender and receiver (`💬 drovr desk → 💬 muster desk`). Include one concrete ask, the receipt paths, and what you already ruled out.
+- The receiving desk acks, lanes the work or says no with the reason, and messages back when it ships with the steps the asker needs. Nobody hand-edits another project's catalog.
+- Touch another project's pane only when the session in it asks, and only for what it asked, such as a `/reload` it can't run mid-turn.
+- Questions for Joel go through your own project's `desk_post`, never through another desk.
 
 ## Clocks and cost
 
