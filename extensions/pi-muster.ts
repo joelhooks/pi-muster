@@ -209,7 +209,7 @@ export default function muster(pi: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;
       return run(ctx, signal, laneOpen(projectDir(ctx, project), rest), (result) =>
-        `Lane ${result.lane.slug} is ${result.lane.state}${result.lane.tabId ? ` in tab ${result.lane.tabId}, root pane ${result.lane.root?.paneId}` : ""}.`,
+        `Lane ${result.lane.slug} is ${result.lane.state}${result.lane.tabId ? ` in tab ${result.lane.tabId}, root pane ${result.lane.root?.paneId}` : ""}.${result.note ? ` ${result.note}.` : ""}`,
       );
     },
   });
