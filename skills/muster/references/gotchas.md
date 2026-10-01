@@ -31,6 +31,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 - `shitrat push` can exit 0 on failure. It pushed only when its JSON says `ok:true`. Gate pushes with `if <gate>; then push; fi`, never `gate | grep && push`.
 - CI budgets in absolute milliseconds flake on runner variance. Compare against the parent build in the same run.
 
+- `packet_report` runs in the worker's own Pi, so the worker's loaded Muster decides what it may do. After a Muster fix to reporting, `/reload` the worker. Reloading the owner changes nothing for the worker.
+
 ## Restore
 
 - `agent_close` removes a worker's clone. Its restore command still names that cwd, so restore into a fresh clone (`cwd`) or fork from the row.
