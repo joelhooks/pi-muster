@@ -516,6 +516,129 @@ describe("a lane from launch to close", () => {
   });
 });
 
+describe("packet_land external squash landings", () => {
+  async function verifiedWorker() {
+    const h = harness();
+    const worker = await launchedWorker(h);
+    await runWith(h, projectOpen({ dir: worker.dir, mode: "pr-merge" }));
+    const commit = commitInClone(worker.clone);
+    await runWith(h, packetReport({ dir: worker.dir, agent: "probe_w", owner: "o", cwd: worker.clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(worker.dir, commit));
+    sh(worker.dir, "fetch", "-q", worker.clone, commit);
+    return { h, ...worker, commit };
+  }
+
+  function squash(dir: string, commit: string) {
+    sh(dir, "merge", "--squash", commit);
+    sh(dir, "commit", "-q", "-m", "squash landing");
+    return sh(dir, "rev-parse", "HEAD").trim();
+  }
+
+  it("still records an ancestor landing", async () => {
+    const { h, dir, commit } = await verifiedWorker();
+    sh(dir, "merge", "--no-ff", "-m", "external merge", commit);
+    const landedAs = sh(dir, "rev-parse", "HEAD").trim();
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(result.note).toBe("recorded an external landing");
+    expect(result.packet.state).toBe("committed");
+    expect(result.packet.landedAs).toBe(landedAs);
+  });
+
+  it("records an identical squash patch and stores the rule with caller evidence", async () => {
+    const { h, dir, commit } = await verifiedWorker();
+    const landedAs = squash(dir, commit);
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
+    expect(result.note).toBe("recorded a squash landing (patch-id match)");
+    expect(result.packet.landedAs).toBe(landedAs);
+    expect(result.packet.evidence).toBe(`reviewed PR\n${result.note}`);
+    expect((await runWith(h, load(dir))).packets[0]?.evidence).toBe(result.packet.evidence);
+  });
+
+  it("records a squash with other PR changes when packet paths match", async () => {
+    const { h, dir, clone, commit } = await verifiedWorker();
+    commitInClone(clone, "extra.txt");
+    sh(dir, "fetch", "-q", clone, "HEAD");
+    const landedAs = squash(dir, sh(clone, "rev-parse", "HEAD").trim());
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(result.note).toBe("recorded a squash landing (paths identical at landedAs)");
+    expect(result.packet.evidence).toBe(result.note);
+    expect(result.packet.state).toBe("committed");
+  });
+
+  it("compares deleted and renamed paths literally in the path fallback", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
+    const filename = "literal[1].txt";
+    writeFileSync(join(clone, filename), "rename me\n");
+    sh(clone, "add", filename);
+    sh(clone, "commit", "-q", "-m", "base file");
+    const base = sh(clone, "rev-parse", "HEAD").trim();
+    sh(dir, "fetch", "-q", clone, base);
+    sh(dir, "merge", "--ff-only", base);
+    sh(clone, "mv", filename, "renamed.txt");
+    sh(clone, "commit", "-q", "-m", "rename");
+    const commit = sh(clone, "rev-parse", "HEAD").trim();
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "rename", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    const extra = commitInClone(clone, "extra.txt");
+    sh(dir, "fetch", "-q", clone, extra);
+    const landedAs = squash(dir, extra);
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(result.note).toBe("recorded a squash landing (paths identical at landedAs)");
+  });
+
+  it("harvests the packet object from its clone when missing from the source", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    writeFileSync(join(dir, "work.txt"), "packet\n");
+    sh(dir, "add", "work.txt");
+    sh(dir, "commit", "-q", "-m", "squash without packet object");
+    const landedAs = sh(dir, "rev-parse", "HEAD").trim();
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(result.note).toBe("recorded a squash landing (patch-id match)");
+  });
+
+  it("refuses a different change on a packet path and names the path", async () => {
+    const { h, dir, commit } = await verifiedWorker();
+    sh(dir, "merge", "--squash", commit);
+    writeFileSync(join(dir, "work.txt"), "wrong change\n");
+    sh(dir, "add", "work.txt");
+    sh(dir, "commit", "-q", "-m", "different squash");
+    const landedAs = sh(dir, "rev-parse", "HEAD").trim();
+    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(error._tag).toBe("GuardFailed");
+    expect(error.message).toContain('differing paths: "work.txt"');
+    expect((await runWith(h, load(dir))).packets[0]?.state).toBe("verified");
+  });
+
+  it("refuses an unknown landedAs commit", async () => {
+    const { h, dir, commit } = await verifiedWorker();
+    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs: "f".repeat(40) }));
+    expect(error._tag).toBe("GuardFailed");
+    expect(error.message).toContain("unknown landedAs commit");
+    expect((await runWith(h, load(dir))).packets[0]?.state).toBe("verified");
+  });
+
+  it("fetches a missing squash commit from origin before comparing it", async () => {
+    const { h, dir, clone, commit } = await verifiedWorker();
+    const remote = join(h.root, "remote");
+    sh(h.root, "clone", "-q", dir, remote);
+    sh(remote, "config", "user.name", "Test");
+    sh(remote, "config", "user.email", "test@example.test");
+    sh(remote, "fetch", "-q", clone, commit);
+    const landedAs = squash(remote, commit);
+    sh(dir, "remote", "add", "origin", remote);
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(result.note).toBe("recorded a squash landing (patch-id match)");
+    expect(result.packet.landedAs).toBe(landedAs);
+  });
+});
+
 describe("packet_verify against fixtures", () => {
   it("fails dirty paths that differ from source but allows generated ones", async () => {
     const h = harness();

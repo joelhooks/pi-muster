@@ -1138,7 +1138,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     let landedAs: string | null = null;
     let note = "";
     const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
-    const evidence = params.evidence?.trim();
+    let evidence = params.evidence?.trim();
     if (recording && !evidence) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
     if (params.outcome === "committed") {
       if (packet.state !== "verified") return yield* new GuardFailed({ guard: "verified", message: `run packet_verify on ${packet.id.slice(0, 12)} before landing it` });
@@ -1149,10 +1149,42 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       } else {
         if (!params.landedAs) return yield* input(`mode ${project.mode} lands outside Muster; pass landedAs with the merge commit`);
         const source = sourceOf(project, lane, row);
-        const contains = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, params.landedAs], { cwd: source })).code === 0;
-        if (!contains) return yield* new GuardFailed({ guard: "landed-as", message: `${params.landedAs} does not contain ${packet.id.slice(0, 12)} in ${source}` });
-        landedAs = params.landedAs;
-        note = "recorded an external landing";
+        let contains = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, params.landedAs], { cwd: source })).code === 0;
+        if (!contains) {
+          const resolve = () => proc.run("git", ["rev-parse", "--verify", "--end-of-options", `${params.landedAs}^{commit}`], { cwd: source });
+          let target = yield* resolve();
+          if (target.code !== 0) {
+            yield* proc.run("git", ["fetch", "-q", "--", "origin", params.landedAs], { cwd: source });
+            target = yield* resolve();
+          }
+          if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from origin did not resolve it)` });
+          landedAs = target.stdout.trim();
+          if ((yield* proc.run("git", ["cat-file", "-e", `${packet.id}^{commit}`], { cwd: source })).code !== 0 && row.clone && existsSync(row.cwd)) {
+            yield* git(source, "fetch", "-q", "--", row.cwd, packet.id);
+          }
+          contains = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, landedAs], { cwd: source })).code === 0;
+          if (!contains) {
+            const parent = yield* proc.run("git", ["rev-parse", "--verify", `${landedAs}^`], { cwd: source });
+            if (parent.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} has no parent for squash comparison` });
+            const base = yield* proc.run("git", ["merge-base", packet.id, parent.stdout.trim()], { cwd: source });
+            if (base.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} shares no merge base with packet ${packet.id.slice(0, 12)} in ${source}` });
+            const patchId = (from: string, to: string) => must("bash", ["-c", 'set -o pipefail; git diff --no-ext-diff --no-textconv --binary "$1" "$2" -- | git patch-id --stable', "muster-squash", from, to], { cwd: source });
+            const packetPatch = (yield* patchId(base.stdout.trim(), packet.id)).trim().split(/\s+/)[0];
+            const landingPatch = (yield* patchId(parent.stdout.trim(), landedAs)).trim().split(/\s+/)[0];
+            if (packetPatch && packetPatch === landingPatch) {
+              note = "recorded a squash landing (patch-id match)";
+            } else {
+              const paths = (yield* git(source, "diff", "--name-only", "--no-renames", "-z", base.stdout.trim(), packet.id, "--")).split("\0").filter(Boolean);
+              // Literal pathspecs include both ends of renames and missing blobs (deletions).
+              const differing = paths.length ? (yield* git(source, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--name-only", "--no-renames", "-z", packet.id, landedAs, "--", ...paths)).split("\0").filter(Boolean) : [];
+              if (differing.length) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} does not match packet ${packet.id.slice(0, 12)}; differing paths: ${differing.slice(0, 20).map((path) => JSON.stringify(path)).join(", ")}${differing.length > 20 ? ` (and ${differing.length - 20} more)` : ""}` });
+              note = "recorded a squash landing (paths identical at landedAs)";
+            }
+          }
+        }
+        landedAs ??= params.landedAs;
+        if (contains) note = "recorded an external landing";
+        else evidence = [evidence, note].filter(Boolean).join("\n");
       }
     }
     const event: AgentEvent | null = params.outcome === "rejected" ? { type: "REWORK" } : { type: "LAND" };
