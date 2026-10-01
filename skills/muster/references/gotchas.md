@@ -20,6 +20,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Workers and the fence
 
+- If the repo's Brain check rejects the board's frontmatter type, set `boardType` through `project_open` or `project_update` to a type its rules allow.
+
 - A worker merges the target branch into its clone and reruns the full gate before reporting. A packet that does not land clean costs a round trip.
 - Workers stage by path. A rift clone carries untracked files from its source, and `git add -A` sweeps them in.
 - Never edit a script while a pane runs it; bash reads the file as it goes.
