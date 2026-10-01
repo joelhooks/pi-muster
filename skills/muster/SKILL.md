@@ -9,6 +9,10 @@ One project per Herdr space. Tabs are lanes. Muster's tools own the mechanics: l
 
 Layers: herdr (terminals) → Bellwether (panes, agents, watches, wakes) → Muster (projects, lanes, packets, agents, desk). Use `herdr_layout overview` for topology; use Muster tools for anything with a lifecycle.
 
+## Start here
+
+No project, no Muster. Before any lane, launch, or `desk_post`, call `project_status`. If it finds no project, call `project_open`: adopt the current space with `space` (or `createSpace: true` for new work), give a kebab-case `slug`, the outcome, and the next action. That registers the project, so the desk queue and the Switchboard can see it. A space with lanes but no project is invisible to Joel. Arm the cadence call `project_open` returns.
+
 ## When to fan out
 
 - Fan out only when the critical path needs a second writer now. Every extra lane costs owner attention and a cold prefix.
