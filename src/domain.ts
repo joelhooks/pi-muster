@@ -139,6 +139,8 @@ export const Packet = Schema.Struct({
   state: PacketState,
   verification: Schema.NullOr(Schema.Struct({ at: Iso, checks: Schema.Array(CheckOutcome) })),
   landedAs: Schema.NullOr(Schema.String),
+  /** Earlier packet whose commit this follow-up includes. */
+  supersedes: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
   /** What the owner checked and where, when the packet was recorded without a merge. */
   evidence: Schema.optionalKey(Schema.String),
   reportedAt: Iso,
