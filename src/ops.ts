@@ -43,6 +43,7 @@ import { failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from ".
 import { BOT_EMAIL, BOT_NAME, Intercom, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
+import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { registerProject } from "./switchboard-ops.ts";
@@ -1146,6 +1147,7 @@ export const deskPost = (dir: string, params: DeskPostInput) =>
       return yield* input(`no desk item ${record.resolves} to resolve`);
     }
     appendDesk(path, record);
+    yield* nudgeSwitchboards(project.slug, record);
     const open = openDeskItems(readDesk(path));
     const tokens = yield* publishTokens(project);
     return { record, open: open.length, path, notes: [tokens] };

@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, watch } from "node:fs";
+import { mkdirSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
+import { dirname } from "node:path";
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -9,14 +10,14 @@ import type { Layer } from "effect";
 import { Type } from "typebox";
 
 import { paneGet, reportTokens } from "./herdr.ts";
-import { deskAnswer, inboxText, loadInbox, loadSystem } from "./switchboard-ops.ts";
+import { deskAnswer, focusDesk, inboxText, loadSystem, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
 import { OPEN_HINT, SwitchboardOverlay, SwitchboardState, renderWidget } from "./switchboard-view.ts";
 import type { Intent } from "./switchboard-view.ts";
 import { itemRef, queueDir, switchboardTokens } from "./switchboard.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS } from "./tokens.ts";
 
 const WIDGET = "muster-switchboard";
-const TICK_MS = 60_000;
+const TICK_MS = 1_000;
 const DEBOUNCE_MS = 200;
 /** Republish before the token lease lapses even when nothing changed. */
 const TOKEN_REFRESH_MS = 10 * 60_000;
@@ -34,15 +35,34 @@ export interface SwitchboardDeps {
 /**
  * Switchboard ☎️: the inbox over every project desk. Nothing starts until a
  * session opts in with `--switchboard`, `MUSTER_SWITCHBOARD=1`, `/switchboard`,
- * or the shortcut, so every other session keeps a side-effect-free startup.
+ * the shortcut, or `desk_inbox`, so every other session keeps a side-effect-free startup.
  */
+/** Watch directories, not files: atomic replacements and brand-new queues both count. */
+export function watchSwitchboard(home: string, changed: () => void): () => void {
+  const watchers: FSWatcher[] = [];
+  for (const dir of [queueDir(home), dirname(registryPath(home))]) {
+    mkdirSync(dir, { recursive: true });
+    try {
+      const watcher = watch(dir, changed);
+      watcher.on("error", () => watcher.close());
+      watchers.push(watcher);
+    } catch { /* The one-second poll is the floor if watching isn't supported. */ }
+  }
+  // On macOS fs.watch can miss the first create in a freshly watched directory.
+  // Poll independently of events, including registry/topology-only changes.
+  const poll = setInterval(changed, TICK_MS);
+  return () => { clearInterval(poll); watchers.forEach((watcher) => watcher.close()); };
+}
+
 export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   const state = new SwitchboardState();
   let active = false;
   // Only requestRender is needed; a structural type avoids pi-tui version skew with the host.
   let tui: { requestRender(): void } | undefined;
-  let watcher: FSWatcher | undefined;
-  let tick: ReturnType<typeof setInterval> | undefined;
+  let stopWatch: (() => void) | undefined;
+  let unregister: (() => void) | undefined;
+  let overlayTui: { requestRender(): void } | undefined;
+  let refreshing: Promise<void> | undefined;
   let pending: ReturnType<typeof setTimeout> | undefined;
   let lastTokens = "";
   let lastPublish = 0;
@@ -71,12 +91,17 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     ).catch(() => undefined);
   };
 
-  const refresh = async (ctx: ExtensionContext) => {
-    const view = await provide(ctx, loadSystem).catch(() => null);
-    if (!view) return;
-    state.setSystem(view);
-    tui?.requestRender();
-    await publish(ctx);
+  const refresh = (ctx: ExtensionContext): Promise<void> => {
+    if (refreshing) return refreshing;
+    refreshing = (async () => {
+      const view = await provide(ctx, loadSystem).catch(() => null);
+      if (!view || !active) return;
+      state.setSystem(view);
+      tui?.requestRender();
+      overlayTui?.requestRender();
+      await publish(ctx);
+    })().finally(() => { refreshing = undefined; });
+    return refreshing;
   };
 
   const schedule = () => {
@@ -91,10 +116,9 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     current = ctx;
     if (active) return;
     active = true;
-    const dir = queueDir(homedir());
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    watcher = watch(dir, () => schedule());
-    tick = setInterval(() => schedule(), TICK_MS);
+    const home = deps.env.HOME ?? homedir();
+    stopWatch = watchSwitchboard(home, schedule);
+    unregister = registerSwitchboardSession(home, ctx.sessionManager.getSessionId());
     ctx.ui.setWidget(WIDGET, (widgetTui, theme) => {
       tui = widgetTui;
       return { render: (width: number) => renderWidget(state, width, theme), invalidate: () => {} };
@@ -104,11 +128,11 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
 
   const deactivate = (ctx?: ExtensionContext) => {
     active = false;
-    watcher?.close();
-    watcher = undefined;
-    if (tick) clearInterval(tick);
+    stopWatch?.();
+    stopWatch = undefined;
+    unregister?.();
+    unregister = undefined;
     if (pending) clearTimeout(pending);
-    tick = undefined;
     pending = undefined;
     ctx?.ui.setWidget(WIDGET, undefined);
     tui = undefined;
@@ -130,11 +154,24 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     await activate(ctx);
     for (;;) {
       const intent = await ctx.ui.custom<Intent>(
-        (overlayTui, theme, _keys, done) =>
-          new SwitchboardOverlay(state, theme, () => Math.max(12, Math.floor((process.stdout.rows ?? 30) * 0.8)), done, () => overlayTui.requestRender()),
+        (screen, theme, _keys, done) => {
+          overlayTui = screen;
+          return new SwitchboardOverlay(state, theme, () => Math.max(12, Math.floor((process.stdout.rows ?? 30) * 0.8)), done, () => screen.requestRender());
+        },
         { overlay: true, overlayOptions: { anchor: "center", width: "80%", minWidth: 60, maxHeight: "80%" } },
       );
+      overlayTui = undefined;
       if (!intent || intent.type === "close") return;
+      if (intent.type === "desk") {
+        try {
+          const result = await provide(ctx, focusDesk(intent.project, intent.item ? itemRef(intent.item) : undefined));
+          if (!result.live) ctx.ui.notify("no live desk; a answers from here", "info");
+          else return;
+        } catch (error) {
+          ctx.ui.notify(`☎️ desk focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        continue;
+      }
       if (intent.type === "discuss") {
         const draft = ctx.ui.getEditorText().trim();
         ctx.ui.setEditorText(`${draft ? `${draft} ` : ""}${itemRef(intent.item)} `);
@@ -153,9 +190,14 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   pi.registerFlag("switchboard", { description: "Run this session as the Switchboard: a live inbox over every project desk.", type: "boolean" });
 
   pi.on("session_start", async (_event, ctx) => {
-    if (pi.getFlag("switchboard") === true || deps.env.MUSTER_SWITCHBOARD === "1") await activate(ctx);
+    const wasActive = active;
+    deactivate();
+    if (wasActive || pi.getFlag("switchboard") === true || deps.env.MUSTER_SWITCHBOARD === "1") await activate(ctx);
   });
   pi.on("session_shutdown", () => deactivate());
+  pi.on("before_agent_start", async (_event, ctx) => {
+    if (active) await refresh(ctx);
+  });
   pi.on("agent_end", (_event, ctx) => {
     if (active) void refresh(ctx);
   });
@@ -181,12 +223,15 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     name: "desk_inbox",
     label: "Switchboard inbox",
     description:
-      "Every open item waiting on Joel across all project desk queues, blocked first, then approvals, then decisions, oldest first. Each item has a [project#id] reference for desk_answer.",
+      "The live fleet: open desk items ranked blocked, approvals, decisions; quiet registered projects; and unregistered Herdr spaces. Reading opts this session into live updates. Each item has a [project#id] reference for desk_answer.",
     promptSnippet: "desk_inbox: every project's open items for Joel, ranked",
     parameters: Type.Object({ project: Type.Optional(Type.String({ description: "Only this project's queue" })) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      return deps.run(ctx, signal, loadInbox, (groups) =>
-        inboxText(params.project ? groups.filter((group: { project: string }) => group.project === params.project) : groups),
+      // Reading the Switchboard is itself an opt-in. Otherwise a session using
+      // only desk_inbox had a static snapshot, no watcher and no nudge address.
+      await activate(ctx);
+      return deps.run(ctx, signal, loadSystem, (view) =>
+        inboxText(params.project ? view.groups.filter((group: { project: string }) => group.project === params.project) : view.groups, params.project ? [] : view.unregistered),
       );
     },
   });

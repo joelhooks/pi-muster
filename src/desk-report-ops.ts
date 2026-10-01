@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { Effect } from "effect";
+import { nudgeSwitchboards } from "./switchboard-ops.ts";
 
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { decodeReport, redactionHits, renderReport, rulingText, rulings } from "./desk-report.ts";
@@ -114,7 +115,10 @@ export const deskRulings = (params: DeskRulingsInput) =>
           env.createId().slice(0, 8),
           env.now(),
         );
-        if (!params.dryRun) appendDesk(path, record);
+        if (!params.dryRun) {
+          appendDesk(path, record);
+          yield* nudgeSwitchboards(params.project, record);
+        }
         applied.push(id);
       }
     }
