@@ -25,6 +25,7 @@ No project, no Muster. Before any lane, launch, or `desk_post`, call `project_st
 
 - Cut by write scope and by one packet that fits the time available. A lane whose packet you cannot name yet is `open: false` (proposed).
 - An unready dependency gets a placeholder packet, not a blocked lane.
+- A release that spans code and live config splits at the start: code, config, and early review as disjoint lanes, one writer per checkout, one combined release packet. The final integrated gate still runs. drovr split at hour five; it could have split at hour zero.
 - The judge reviews the SOP on a slow clock and never sets priorities.
 - Briefs live in the project's Brain, never `/tmp`. A brief states the outcome, write scope, checks, and the report rule: commit once, then `packet_report`.
 
@@ -52,6 +53,7 @@ Defaults fit most work. Role models come from the fleet roster (`~/.config/muste
 
 - Reports go up one level: worker to boss, boss to hawk. Workers have no path to Joel.
 - A boss answers from source first. Hawk answers or posts one `desk_post` item with the question, evidence, and a recommendation. Nothing is pushed into the desk pane.
+- When Joel delegates an operation ("take charge"), record the scope in the handoff. Within it, the desk rules on execution choices from source and sends one ruling to the owning lane, never the same question back to Joel. A new class of risk goes to Joel: customer sends beyond the approval, broader production code, durability changes, deletion. A delegated desk never turns a failed gate into a pass.
 - When Joel stops the line (a freeze with only essentials and monitoring), the desk runs [stop the line](references/stop-the-line.md). Hawk stays standing: it drops to low thinking, or a fresh third-shift Hawk takes over. Only Joel resumes.
 - A desk holding several decisions for Joel publishes one [desk report](references/desk-report.md) page, not a chat digest. His pasted feedback goes through `desk_rulings`: each item is resolved, then the owner gets one message.
 - Never act on GitHub as Joel. Use the ShitRat bot or ask. "Rerun until green" is not a gate.

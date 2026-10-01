@@ -23,7 +23,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 - If the repo's Brain check rejects the board's frontmatter type, set `boardType` through `project_open` or `project_update` to a type its rules allow.
 
 - A worker merges the target branch into its clone and reruns the full gate before reporting. A packet that does not land clean costs a round trip.
-- Workers stage by path. A rift clone carries untracked files from its source, and `git add -A` sweeps them in.
+- Workers stage by path. A clone keeps its source's ignored files, such as `.env*` and `node_modules`, and `git add -A` with a loose ignore file sweeps them in.
+- A watch that waits on results re-fires on items already handled unless it keeps a seen set. Append handled ids to a file, and arm the next watch in a later tool call, never in the same batch as the write. A Muster desk needs no watch for its own queue: the desk feed keeps the cursor.
 - Never edit a script while a pane runs it; bash reads the file as it goes.
 - `shitrat push` can exit 0 on failure. It pushed only when its JSON says `ok:true`. Gate pushes with `if <gate>; then push; fi`, never `gate | grep && push`.
 - CI budgets in absolute milliseconds flake on runner variance. Compare against the parent build in the same run.
