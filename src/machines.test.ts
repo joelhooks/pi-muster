@@ -34,6 +34,14 @@ describe("agent machine", () => {
     expect(walk("closed", [{ type: "RESTORE" }, { type: "LAUNCH_FAILED" }])).toBe("failed");
   });
 
+  it("adopts only failed and launching agents", () => {
+    expect(walk("failed", [{ type: "ADOPT" }, { type: "REPORT" }])).toBe("reported");
+    expect(walk("launching", [{ type: "ADOPT" }])).toBe("running");
+    for (const state of ["planned", "running", "silent", "nudged", "restarted", "reported", "verified", "landed", "interrupted", "restoring", "closed"] as const) {
+      illegal(stepAgent("w1", state, { type: "ADOPT" }));
+    }
+  });
+
   it("sends rejected work back to running", () => {
     expect(walk("verified", [{ type: "REWORK" }])).toBe("running");
   });

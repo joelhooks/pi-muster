@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { FORBIDDEN_FLAGS } from "./argv.ts";
@@ -22,7 +23,7 @@ import {
 } from "./ops.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { parsePorcelainZ } from "./packet.ts";
-import { load } from "./store.ts";
+import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
 import type { Harness } from "./test-support.ts";
 
@@ -407,6 +408,109 @@ describe("packet_verify against fixtures", () => {
 
   it("parses porcelain -z with renames", () => {
     expect(parsePorcelainZ("?? a.txt\0R  new.txt\0old.txt\0 M b.txt\0")).toEqual(["a.txt", "new.txt", "b.txt"]);
+  });
+});
+
+describe("project_status live adoption", () => {
+  async function candidate(state: "failed" | "launching" = "failed", byId = false) {
+    const h = harness();
+    const { dir, launched, clone } = await launchedWorker(h);
+    const pane = h.herdr.panes.get(launched.row.pane?.paneId as string)!;
+    pane.agent = "pi";
+    await runWith(h, mutate(dir, (project) => {
+      const row = { ...project.agents[0]!, state, sessionFile: byId ? null : launched.row.sessionFile, restore: null };
+      return Effect.succeed([{ ...project, agents: [row] }, row] as const);
+    }));
+    const before = (await runWith(h, load(dir))).agents[0]!;
+    h.herdr.calls = [];
+    return { h, dir, pane, before, clone, file: launched.row.sessionFile! };
+  }
+
+  function noPaneInput(h: Harness) {
+    expect(h.herdr.calls.filter((call) => /^(agent\.(start|prompt|wait)|pane\.(send_input|send_text|send_keys|close))$/.test(call.method))).toEqual([]);
+  }
+
+  it.each(["failed", "launching"] as const)("adopts %s by session file and lets the worker report", async (state) => {
+    const { h, dir, pane, file, clone } = await candidate(state);
+    const stale = new Date(h.now.getTime() - 120 * 60_000);
+    utimesSync(file, stale, stale);
+    const status = await runWith(h, projectStatus(dir, { act: true }));
+    const row = status.project.agents[0]!;
+    expect(row.state).toBe("running");
+    expect(row.sessionFile).toBe(file);
+    expect(row.restore?.cwd).toBe(clone);
+    expect(row.restore?.argv).toEqual(expect.arrayContaining(["--session", file]));
+    expect(row.restore?.env).toMatchObject({ MUSTER_AGENT: row.name });
+    expect(status.board).toContain("adopted (live pi session matches)");
+    expect(h.herdr.calls.some((call) => call.method === "pane.get" && call.params.pane_id === pane.pane_id)).toBe(true);
+    noPaneInput(h);
+    const commit = commitInClone(clone);
+    const report = await runWith(h, packetReport({ dir, cwd: clone, agent: row.name, owner: row.owner, commit, summary: "live worker", checks: [] }));
+    expect(report.packet.state).toBe("reported");
+  });
+
+  it("adopts by session id and records the session path", async () => {
+    const { h, dir, file, before } = await candidate("failed", true);
+    const status = await runWith(h, projectStatus(dir));
+    expect(status.project.agents[0]).toMatchObject({ state: "running", sessionFile: file, sessionId: before.sessionId });
+    noPaneInput(h);
+  });
+
+  it("rebinds a moved pane by terminal id before adopting", async () => {
+    const { h, dir, pane } = await candidate();
+    h.herdr.panes.delete(pane.pane_id);
+    pane.pane_id = "moved";
+    pane.tab_id = "moved-tab";
+    h.herdr.panes.set(pane.pane_id, pane);
+    const status = await runWith(h, projectStatus(dir));
+    expect(status.project.agents[0]).toMatchObject({ state: "running", pane: { paneId: "moved", tabId: "moved-tab" } });
+    noPaneInput(h);
+  });
+
+  it("refuses a terminal-id mismatch", async () => {
+    const { h, dir, pane, before } = await candidate();
+    pane.terminal_id = "another-terminal";
+    const status = await runWith(h, projectStatus(dir));
+    expect(status.project.agents[0]).toEqual(before);
+    noPaneInput(h);
+  });
+
+  it.each([false, true])("refuses a different session without learning it (by id: %s)", async (byId) => {
+    const { h, dir, pane, before } = await candidate("failed", byId);
+    pane.agent_session!.value = "/sessions/timestamp_other-session.jsonl";
+    for (let pass = 0; pass < 2; pass += 1) {
+      const status = await runWith(h, projectStatus(dir));
+      expect(status.project.agents[0]).toEqual(before);
+    }
+    noPaneInput(h);
+  });
+
+  it.each(["claude", undefined])("refuses a non-Pi pane (%s)", async (agent) => {
+    const { h, dir, pane, before } = await candidate();
+    if (agent) pane.agent = agent;
+    else delete pane.agent;
+    const status = await runWith(h, projectStatus(dir));
+    expect(status.project.agents[0]).toEqual(before);
+    noPaneInput(h);
+  });
+
+  it("refuses a row owned by another session", async () => {
+    const { h, dir, before } = await candidate();
+    h.sessionId = "other-owner";
+    const status = await runWith(h, projectStatus(dir));
+    expect(status.project.agents[0]).toEqual(before);
+    noPaneInput(h);
+  });
+
+  it("reports adoptable with act: false and changes no row", async () => {
+    const { h, dir, pane, before } = await candidate("launching", true);
+    h.herdr.panes.delete(pane.pane_id);
+    pane.pane_id = "moved";
+    h.herdr.panes.set(pane.pane_id, pane);
+    const status = await runWith(h, projectStatus(dir, { act: false }));
+    expect(status.project.agents[0]).toEqual(before);
+    expect(status.board).toContain("adoptable (live pi session matches; act: false)");
+    noPaneInput(h);
   });
 });
 

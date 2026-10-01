@@ -1220,14 +1220,45 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       }
       let action: string | null = null;
       let current = row;
-      if (row.pane && !pane) {
+      const adoptionCandidate = row.state === "failed" || row.state === "launching";
+      if (adoptionCandidate) {
+        // Never learn identity from an unrelated session: that would make it
+        // match on the next pass. Read the bound terminal before adopting it.
+        const mine = row.owner === env.sessionId;
+        if (row.pane && mine) {
+          pane = (yield* locatePane(row.pane)) ?? undefined;
+          const sessionFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
+          const matches = sessionFile !== null && (row.sessionFile !== null
+            ? sessionFile === row.sessionFile
+            : sessionFile.endsWith(`_${row.sessionId}.jsonl`));
+          if (pane?.agent === "pi" && matches && sessionFile) {
+            if (act) {
+              const sessionId = sessionIdFromFile(sessionFile) ?? row.sessionId;
+              const restore = {
+                cwd: row.cwd,
+                argv: buildArgv({ kind: "restore", sessionId, sessionFile, parentSessionFile: null, profile: extensionsFor(project, row), musterExtension: project.musterExtension }),
+                env: agentEnv(project, row),
+              };
+              current = yield* patchRow(dir, row.name, row.state, [{ type: "ADOPT" }], {
+                pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id },
+                sessionFile,
+                sessionId,
+                restore,
+              });
+              action = "adopted (live pi session matches)";
+            } else {
+              action = "adoptable (live pi session matches; act: false)";
+            }
+          }
+        }
+      } else if (row.pane && !pane) {
         if (PROCESS_STATES.includes(row.state)) {
           current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: null }).pipe(Effect.catch(() => Effect.succeed(row)));
           action = "pane gone: interrupted";
         } else {
           current = yield* patchRow(dir, row.name, row.state, [], { pane: null }).pipe(Effect.catch(() => Effect.succeed(row)));
         }
-      } else if (pane && !pane.agent && PROCESS_STATES.includes(row.state) && row.state !== "launching" && row.state !== "restoring") {
+      } else if (pane && !pane.agent && PROCESS_STATES.includes(row.state) && row.state !== "restoring") {
         current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: { ...(row.pane as PaneBinding), paneId: pane.pane_id } }).pipe(
           Effect.catch(() => Effect.succeed(row)),
         );
@@ -1239,7 +1270,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         action = `rebound moved pane to ${pane.pane_id}`;
       }
       const herdrFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
-      if (herdrFile && herdrFile !== current.sessionFile) {
+      if (!adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
         current = yield* patchRow(dir, row.name, current.state, [], {
           sessionFile: herdrFile,
           sessionId: sessionIdFromFile(herdrFile) ?? current.sessionId,
@@ -1249,7 +1280,9 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       const mtime = file ? sessionMtimeMs(file) : null;
       const silentFor = mtime === null ? null : now - mtime;
       let cost = file && existsSync(file) ? yield* Effect.promise(() => readSessionCost(file, CAPTURE_REFRESH_MARK)) : null;
-      const working = ["running", "silent", "nudged", "restarted"].includes(current.state);
+      // Adoption only records evidence; do not nudge, restart, or refresh the
+      // live agent in the same pass, even if its session file looks stale.
+      const working = !adoptionCandidate && ["running", "silent", "nudged", "restarted"].includes(current.state);
 
       // A bridge lane whose wake failed prompt capture stays dead until someone
       // types to it: timer and intercom wakes skip the hook that records a prompt.
