@@ -62,7 +62,7 @@ export const verifyPacket = (project: Project, lane: Lane | undefined, row: Agen
     if (row.clone) {
       const base = row.clone.base;
       if (!base) {
-        checks.push(fail("clone base", `lane ${row.lane} has no recorded clone base (old catalog)`));
+        checks.push(skip("clone base", `lane ${row.lane} has no recorded clone base (launched before bases were recorded)`));
       } else {
         // Work advances HEAD; the starting commit must remain in the packet's history.
         const ref = packet.kind === "commit" ? packet.id : "HEAD";

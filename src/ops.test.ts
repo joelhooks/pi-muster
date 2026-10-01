@@ -136,9 +136,9 @@ describe("lane clone base", () => {
       ...project,
       agents: project.agents.map((row) => ({ ...row, clone: row.clone ? { ...row.clone, base: null } : null })),
     }, undefined] as const)));
-    expect((await failWith(h, packetVerify(dir, commit))).failures).toEqual([
-      "clone base: lane probe has no recorded clone base (old catalog)",
-    ]);
+    const legacy = await runWith(h, packetVerify(dir, commit));
+    expect(legacy.packet.verification?.checks.find((check) => check.name === "clone base"))
+      .toMatchObject({ outcome: "skip", detail: "lane probe has no recorded clone base (launched before bases were recorded)" });
   });
 
   it("fails clone base verification for a packet outside the recorded base history", async () => {
