@@ -72,6 +72,7 @@ const lane = (slug: string, state: "open" | "closed", kind: "work" | "role" = "w
   goal: "g",
   writeScope: [],
   repo: null,
+  base: null,
   generated: [],
   tabId: null,
   root: null,

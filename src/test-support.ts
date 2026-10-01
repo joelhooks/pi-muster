@@ -220,9 +220,17 @@ case "$1" in
   create)
     target="${root}/clones/$3"
     git clone -q "$2" "$target"
-    git -C "$target" checkout -q -b "worker/$3"
+    base="default branch"
+    if [ "\${4:-}" = "--base" ]; then
+      base="$5"
+      sha=$(git -C "$2" rev-parse "$base^{commit}")
+    else
+      sha=$(git -C "$target" rev-parse HEAD)
+    fi
+    git -C "$target" checkout -q -b "worker/$3" "$sha"
     echo "worktree: $target"
     echo "branch:   worker/$3"
+    echo "base: $base $sha"
     ;;
   remove)
     if [ "$2" = "--force" ]; then rm -rf "$3"; echo "trashed: $3"; exit 0; fi
