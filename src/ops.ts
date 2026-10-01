@@ -388,6 +388,7 @@ export interface LaneOpenInput {
   readonly kind?: "work" | "role" | undefined;
   readonly writeScope?: readonly string[] | undefined;
   readonly repo?: string | undefined;
+  readonly base?: string | undefined;
   readonly generated?: readonly string[] | undefined;
   /** False records the lane as proposed without a tab. */
   readonly open?: boolean | undefined;
@@ -404,7 +405,13 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
     if (existing?.state === "open" && existing.root) {
       const live = yield* locatePane(existing.root);
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
-        return { lane: existing, created: false, note: null };
+        const requestedBase = params.base;
+        const lane = requestedBase === undefined ? existing : yield* mutate(dir, (current) => {
+          const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
+          const next = { ...latest, base: requestedBase, updatedAt: iso(env) };
+          return Effect.succeed([withLane(current, next), next] as const);
+        });
+        return { lane, created: false, note: null };
       }
     }
     if (wantOpen && !project.spaceId) return yield* input("the project has no space; run project_open with space or createSpace first");
@@ -416,6 +423,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       goal: params.goal,
       writeScope: [...(params.writeScope ?? [])],
       repo: params.repo ?? null,
+      base: params.base ?? null,
       generated: [...(params.generated ?? [])],
       tabId: null,
       root: null,
@@ -425,7 +433,16 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       updatedAt: iso(env),
     };
     if (!wantOpen) {
-      const lane = yield* mutate(dir, (current) => Effect.succeed([withLane(current, base), base] as const));
+      const lane = yield* mutate(dir, (current) => {
+        const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
+        const next = {
+          ...latest,
+          base: params.base ?? latest.base,
+          goal: latest.state === "proposed" ? params.goal : latest.goal,
+          updatedAt: iso(env),
+        };
+        return Effect.succeed([withLane(current, next), next] as const);
+      });
       return { lane, created: !existing };
     }
     const event = base.state === "open" ? null : base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
@@ -454,6 +471,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
           writeScope: params.writeScope ? [...params.writeScope] : latest.writeScope,
           generated: params.generated ? [...params.generated] : latest.generated,
           repo: params.repo ?? latest.repo,
+          base: params.base ?? latest.base,
           tabId,
           root,
           state,
@@ -561,15 +579,23 @@ export interface AgentLaunchInput {
   readonly slot?: "root" | "split" | undefined;
 }
 
-const cloneFor = (source: string, name: string) =>
+const cloneFor = (source: string, name: string, lane: Lane) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const slug = name.replace(/_/g, "-");
-    const out = yield* must(env.workerWorktree, ["create", source, slug], { cwd: source, timeoutMs: 300_000 });
+    const out = yield* must(env.workerWorktree, ["create", source, slug, ...(lane.base !== null ? ["--base", lane.base] : [])], { cwd: source, timeoutMs: 300_000 });
     const path = /^worktree:\s+(.+)$/m.exec(out)?.[1]?.trim();
     const branch = /^branch:\s+(.+)$/m.exec(out)?.[1]?.trim();
     if (!path || !branch) return yield* input(`worker-worktree.sh create printed no worktree/branch:\n${out}`);
-    return { path, branch };
+    const reported = /^base:[ \t]+(.+)[ \t]+([0-9a-f]{40}|[0-9a-f]{64})[ \t]*$/m.exec(out);
+    if (!reported) return yield* input(`${env.workerWorktree} create printed no valid base: line; cannot prove clone base for lane ${lane.slug}. Update the script.`);
+    const base = { ref: (reported[1] as string).trim(), sha: reported[2] as string };
+    const head = (yield* git(path, "rev-parse", "HEAD")).trim();
+    if (head !== base.sha) return yield* new GuardFailed({
+      guard: "clone-base",
+      message: `lane ${lane.slug} clone HEAD ${head} differs from base ${base.ref} ${base.sha}`,
+    });
+    return { path, branch, base };
   });
 
 const waitForCwd = (paneId: string, cwd: string) =>
@@ -705,9 +731,9 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         cwd = existing?.cwd ?? cwd;
       } else if (params.clone) {
         const source = lane.repo ?? project.dir;
-        const allocated = yield* cloneFor(source, name);
+        const allocated = yield* cloneFor(source, name, lane);
         cwd = allocated.path;
-        clone = { source, branch: allocated.branch };
+        clone = { source, branch: allocated.branch, base: allocated.base };
       }
       if (!cwd) return yield* input("a new agent needs cwd or clone: true");
       if (!existsSync(cwd)) return yield* input(`cwd ${cwd} does not exist`);

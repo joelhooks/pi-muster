@@ -20,6 +20,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Workers and the fence
 
+- Set `base` on `lane_open` when a lane builds on anything other than the repo's default branch.
+
 - If the repo's Brain check rejects the board's frontmatter type, set `boardType` through `project_open` or `project_update` to a type its rules allow.
 
 - A live worker can report an ancestor follow-up before its verified packet lands; committing the follow-up lands both, while rejecting it leaves the earlier packet open.

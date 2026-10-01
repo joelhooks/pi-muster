@@ -103,7 +103,13 @@ export const AgentRow = Schema.Struct({
   lane: Slug,
   cwd: Path,
   /** Set when Muster allocated `cwd` as a rift clone; close removes it through worker-worktree.sh. */
-  clone: Schema.NullOr(Schema.Struct({ source: Path, branch: Schema.String })),
+  clone: Schema.NullOr(Schema.Struct({
+    source: Path,
+    branch: Schema.String,
+    /** Proven starting commit; null only for rows from older catalogs. */
+    base: Schema.NullOr(Schema.Struct({ ref: Schema.String, sha: Schema.String }))
+      .pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
+  })),
   profile: LaunchProfile,
   sessionId: SessionId,
   sessionFile: Schema.NullOr(Path),
@@ -156,6 +162,8 @@ export const Lane = Schema.Struct({
   writeScope: Schema.Array(Schema.String),
   /** Source repo for this lane's clones and landings. Null means the project dir. */
   repo: Schema.NullOr(Path),
+  /** Ref or sha worker clones start from; null uses the script's default branch. */
+  base: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
   /** Path prefixes a clone may leave dirty without matching the source. */
   generated: Schema.Array(Schema.String),
   tabId: Schema.NullOr(Schema.String),

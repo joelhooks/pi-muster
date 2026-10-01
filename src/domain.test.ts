@@ -53,6 +53,20 @@ describe("schemas", () => {
     expect(decodeProject(project).agents[0]?.state).toBe("running");
   });
 
+  it("decodes old lanes and clone rows with no base as null", () => {
+    const lane = {
+      slug: "probe", kind: "work", label: "probe", goal: "g", writeScope: [],
+      repo: null, generated: [], tabId: null, root: null, state: "proposed",
+      archived: false, createdAt: "t", updatedAt: "t",
+    };
+    const old = { ...project, lanes: [lane], agents: [{ ...project.agents[0], clone: { source: "/p", branch: "worker/w1" } }] };
+    const decoded = decodeProject(old);
+    expect(decoded.lanes[0]?.base).toBeNull();
+    expect(decoded.agents[0]?.clone?.base).toBeNull();
+    expect(decodeProject({ ...old, lanes: [{ ...lane, base: "release" }] }).lanes[0]?.base).toBe("release");
+    expect(() => decodeProject({ ...old, lanes: [{ ...lane, base: 42 }] })).toThrow();
+  });
+
   it("defaults an old project file's board type and decodes a custom type", () => {
     expect(decodeProject(project).boardType).toBe("project");
     expect(decodeProject({ ...project, boardType: "report" }).boardType).toBe("report");

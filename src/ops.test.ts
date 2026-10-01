@@ -63,6 +63,103 @@ function commitInClone(clone: string, file = "work.txt") {
   return sh(clone, "rev-parse", "HEAD").trim();
 }
 
+describe("lane clone base", () => {
+  const prepare = async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    const initial = sh(dir, "rev-parse", "HEAD").trim();
+    sh(dir, "branch", "release", initial);
+    commitInClone(dir, "default-only.txt");
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "g", base: "release" }));
+    return { h, dir, initial };
+  };
+  const launch = (h: Harness, dir: string) => runWith(h, agentLaunch(dir, {
+    action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", clone: true,
+  }));
+
+  it("updates a proposed lane's goal and base, and updates a live lane's base without a new tab", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "old", open: false }));
+    const updated = await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "new", base: "release", open: false }));
+    expect(updated.lane).toMatchObject({ goal: "new", base: "release", state: "proposed", tabId: null });
+    const opened = await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "new" }));
+    const live = await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "new", base: "abc123" }));
+    expect(live.lane.base).toBe("abc123");
+    expect(live.lane.tabId).toBe(opened.lane.tabId);
+    expect((await runWith(h, load(dir))).lanes.find((lane) => lane.slug === "probe")?.base).toBe("abc123");
+  });
+
+  it.each(["release", "sha"])("passes %s through --base and records the resolved base", async (ref) => {
+    const { h, dir, initial } = await prepare();
+    const base = ref === "sha" ? initial : ref;
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "g", base }));
+    const result = await launch(h, dir);
+    expect(result.row.clone?.base).toEqual({ ref: base, sha: initial });
+    expect(sh(result.row.cwd, "rev-parse", "HEAD").trim()).toBe(initial);
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.base).toEqual({ ref: base, sha: initial });
+  });
+
+  it("refuses a clone HEAD mismatch before starting an agent", async () => {
+    const { h, dir, initial } = await prepare();
+    const wrong = sh(dir, "rev-parse", "HEAD").trim();
+    const script = readFileSync(h.workerWorktree, "utf8");
+    writeFileSync(h.workerWorktree, script.replace('echo "base: $base $sha"', `echo "base: $base ${wrong}"`));
+    const error = await failWith(h, agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", clone: true }));
+    expect(error.message).toContain(`lane probe clone HEAD ${initial}`);
+    expect(error.message).toContain(wrong);
+    expect(h.herdr.calls.some((call) => call.method === "agent.start")).toBe(false);
+    expect((await runWith(h, load(dir))).agents).toHaveLength(0);
+  });
+
+  it("refuses an old script with no base line and names the script", async () => {
+    const { h, dir } = await prepare();
+    const script = readFileSync(h.workerWorktree, "utf8");
+    writeFileSync(h.workerWorktree, script.replace('echo "base: $base $sha"', ""));
+    const error = await failWith(h, agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", clone: true }));
+    expect(error.message).toContain(h.workerWorktree);
+    expect(error.message).toContain("cannot prove clone base for lane probe");
+    expect(h.herdr.calls.some((call) => call.method === "agent.start")).toBe(false);
+  });
+
+  it("verifies a packet descends from its recorded clone base, not that HEAD still equals it", async () => {
+    const h = harness();
+    const { dir, clone, launched } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    const verified = await runWith(h, packetVerify(dir, commit));
+    expect(verified.packet.verification?.checks.find((check) => check.name === "clone base"))
+      .toMatchObject({ outcome: "pass", detail: `default branch ${launched.row.clone?.base?.sha}` });
+    await runWith(h, mutate(dir, (project) => Effect.succeed([{
+      ...project,
+      agents: project.agents.map((row) => ({ ...row, clone: row.clone ? { ...row.clone, base: null } : null })),
+    }, undefined] as const)));
+    expect((await failWith(h, packetVerify(dir, commit))).failures).toEqual([
+      "clone base: lane probe has no recorded clone base (old catalog)",
+    ]);
+  });
+
+  it("fails clone base verification for a packet outside the recorded base history", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    // The later source commit exists in the clone but is not in the packet's history.
+    const other = commitInClone(dir, "later.txt");
+    sh(clone, "fetch", "-q", dir, other);
+    await runWith(h, mutate(dir, (project) => Effect.succeed([{
+      ...project,
+      agents: project.agents.map((row) => ({ ...row, clone: row.clone ? { ...row.clone, base: { ref: "later", sha: other } } : null })),
+    }, undefined] as const)));
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    const error = await failWith(h, packetVerify(dir, commit));
+    expect(error.failures).toEqual([
+      `clone base: lane probe: ${commit} does not descend from later ${other}`,
+    ]);
+  });
+});
+
 describe("project_open", () => {
   it("refuses temp-dir state unless the project says it is throwaway", async () => {
     const h = harness();

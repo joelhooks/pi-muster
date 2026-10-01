@@ -59,6 +59,20 @@ export const verifyPacket = (project: Project, lane: Lane | undefined, row: Agen
     const reportOk = existsSync(packet.report) && statSync(packet.report).size > 0;
     checks.push(reportOk ? pass("report exists", packet.report) : fail("report exists", `missing or empty: ${packet.report}`));
 
+    if (row.clone) {
+      const base = row.clone.base;
+      if (!base) {
+        checks.push(fail("clone base", `lane ${row.lane} has no recorded clone base (old catalog)`));
+      } else {
+        // Work advances HEAD; the starting commit must remain in the packet's history.
+        const ref = packet.kind === "commit" ? packet.id : "HEAD";
+        const contains = (yield* exitOf(row.cwd, ["merge-base", "--is-ancestor", base.sha, ref])) === 0;
+        checks.push(contains
+          ? pass("clone base", `${base.ref} ${base.sha}`)
+          : fail("clone base", `lane ${row.lane}: ${ref} does not descend from ${base.ref} ${base.sha}`));
+      }
+    }
+
     if (packet.kind === "artifact") {
       if (!packet.artifact || !existsSync(packet.artifact)) {
         checks.push(fail("artifact hash", `missing artifact ${packet.artifact ?? "(none)"}`));
