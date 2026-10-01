@@ -137,6 +137,112 @@ describe("Brain board type", () => {
   });
 });
 
+describe("pane binding safety", () => {
+  async function rootWorker() {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    const launched = await runWith(h, agentLaunch(dir, {
+      action: "launch", name: "first", role: "worker", lane: "probe", label: "🔨 first", cwd: dir, slot: "root",
+    }));
+    return { h, dir, row: launched.row };
+  }
+
+  it.each(["pane", "terminal"])("keeps a shared %s binding until the last row closes", async (identity) => {
+    const { h, dir, row } = await rootWorker();
+    const binding = row.pane!;
+    await runWith(h, mutate(dir, (project) => Effect.succeed([{
+      ...project,
+      agents: [{ ...row, state: "failed" as const }, {
+        ...row, name: "second", pane: { ...binding, ...(identity === "terminal" ? { paneId: "old-id" } : { terminalId: "old-terminal" }) },
+      }],
+    }, null] as const)));
+    const result = await runWith(h, agentClose(dir, { name: "first" }));
+    expect(result.row.state).toBe("closed");
+    expect(result.row.pane).toBeNull();
+    expect(result.notes).toContain(`pane ${binding.paneId} kept: second is bound to it`);
+    expect(h.herdr.calls.filter((call) => call.method === "pane.close")).toHaveLength(0);
+    expect(h.herdr.panes.has(binding.paneId)).toBe(true);
+    // Bring the survivor's binding up to date, as project_status does.
+    await runWith(h, mutate(dir, (project) => Effect.succeed([{
+      ...project, agents: project.agents.map((agent) => agent.name === "second" ? { ...agent, pane: binding } : agent),
+    }, null] as const)));
+    await runWith(h, agentClose(dir, { name: "second" }));
+    expect(h.herdr.calls.filter((call) => call.method === "pane.close")).toHaveLength(1);
+    expect(h.herdr.panes.has(binding.paneId)).toBe(false);
+  });
+
+  it.each(["explicit", "root", "retained"])("refuses a %s pane held by a running row before sending shell input", async (selection) => {
+    const { h, dir, row } = await rootWorker();
+    if (selection === "retained") {
+      await runWith(h, mutate(dir, (project) => Effect.succeed([{
+        ...project, agents: [...project.agents, { ...row, name: "second", state: "failed" as const }],
+      }, null] as const)));
+    }
+    h.herdr.calls.length = 0;
+    const error = await failWith(h, agentLaunch(dir, {
+      action: "launch", name: "second", role: "worker", lane: "probe", label: "🔨 second", cwd: dir,
+      ...(selection === "explicit" ? { pane: row.pane!.paneId } : { slot: "root" as const }),
+    }));
+    expect(error.message).toMatch(/already (bound|runs)/);
+    expect(h.herdr.calls.some((call) => ["pane.send_input", "agent.start"].includes(call.method))).toBe(false);
+    expect((await runWith(h, load(dir))).agents.find((agent) => agent.name === "first")?.pane).toEqual(row.pane);
+  });
+
+  it.each(["failed", "interrupted", "closed"] as const)("moves a %s row's explicit binding and Muster ownership to its replacement", async (state) => {
+    const { h, dir, row } = await rootWorker();
+    await runWith(h, mutate(dir, (project) => Effect.succeed([{
+      ...project, agents: [{ ...row, state }],
+    }, null] as const)));
+    const result = await runWith(h, agentLaunch(dir, {
+      action: "launch", name: "second", role: "worker", lane: "probe", label: "🔨 second", cwd: dir, pane: row.pane!.paneId,
+    }));
+    expect(result.row.pane).toEqual(row.pane);
+    expect((await runWith(h, load(dir))).agents.find((agent) => agent.name === "first")?.pane).toBeNull();
+    await runWith(h, agentClose(dir, { name: "first" }));
+    expect(h.herdr.panes.has(row.pane!.paneId)).toBe(true);
+    await runWith(h, agentClose(dir, { name: "second" }));
+    expect(h.herdr.panes.has(row.pane!.paneId)).toBe(false);
+  });
+
+  it.each([
+    ["missing", "open"], ["reused", "open"], ["missing", "draining"], ["reused", "draining"],
+  ])("replaces a %s root in a %s lane and restores onto the new pane", async (kind, laneState) => {
+    const { h, dir, row } = await rootWorker();
+    const binding = row.pane!;
+    if (kind === "missing") h.herdr.panes.delete(binding.paneId);
+    else h.herdr.panes.get(binding.paneId)!.terminal_id = "unrelated-terminal";
+    await runWith(h, projectStatus(dir));
+    if (laneState === "draining") expect((await runWith(h, laneClose(dir, "probe"))).lane.state).toBe("draining");
+    h.herdr.calls.length = 0;
+    const opened = await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    expect(opened.lane.state).toBe("open");
+    expect(opened.lane.root?.paneId).not.toBe(binding.paneId);
+    expect(opened.lane.root?.openedByMuster).toBe(true);
+    expect(opened.note).toBe(`root pane was gone; opened tab ${opened.lane.tabId} pane ${opened.lane.root?.paneId}`);
+    expect(h.herdr.calls.filter((call) => call.method === "tab.create")).toHaveLength(1);
+    const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "first", slot: "root" }));
+    expect(restored.row.state).toBe("running");
+    expect(restored.row.pane).toEqual(opened.lane.root);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    expect(h.herdr.calls.filter((call) => call.method === "tab.create")).toHaveLength(1);
+  });
+
+  it("finds a moved terminal without opening another tab", async () => {
+    const { h, dir, row } = await rootWorker();
+    const pane = h.herdr.panes.get(row.pane!.paneId)!;
+    h.herdr.panes.delete(pane.pane_id);
+    pane.pane_id = "moved-pane";
+    h.herdr.panes.set(pane.pane_id, pane);
+    h.herdr.calls.length = 0;
+    const result = await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    expect(result.lane.root?.paneId).toBe("moved-pane");
+    expect(result.lane.root?.terminalId).toBe(pane.terminal_id);
+    expect(h.herdr.calls.some((call) => call.method === "tab.create")).toBe(false);
+  });
+});
+
 describe("field-use regressions", () => {
   it("retries a busy shell without re-running the prelude", async () => {
     const h = harness();
