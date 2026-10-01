@@ -1,5 +1,7 @@
 import { Schema } from "effect";
 
+import { kindIcon, reportIcon } from "./desk-report-icons.ts";
+
 /**
  * The desk report: when a desk holds several decisions for Joel, it publishes
  * one static feedback page instead of a chat digest. Each card asks one plain
@@ -102,7 +104,7 @@ function renderCard(card: ReportCard, n: number, refsNote: string): string {
   const id = card.id;
   const out = [`<section class="item" id="i-${e(id)}" data-id="${e(id)}">`];
   out.push(`<h3>${pad2(n)}. ${e(card.title)}</h3>`);
-  out.push(`<p><em>${e(card.kind)} · ${e(deskIds(card).join(" + "))} · ${e(card.age)} old</em></p>`);
+  out.push(`<p><em>${kindIcon(card.kind)}${e(card.kind)} · ${e(deskIds(card).join(" + "))} · ${e(card.age)} old</em></p>`);
   out.push(`<p>${e(card.why)}</p>`);
   out.push(`<p><strong>So far.</strong> ${e(card.timeline)}</p>`);
   out.push(`<p><strong>Shows</strong></p><ul>${card.shows.map((s) => `<li>${e(s)}</li>`).join("")}</ul>`);
@@ -147,7 +149,7 @@ export function renderReport(report: DeskReport, css: string): string {
   const toc: string[] = [];
   const refsNote = report.refsNote ?? DEFAULTS.refsNote;
   for (const group of report.groups) {
-    body.push(`<h2 id="g-${e(group.key)}">${e(capitalize(group.name))}</h2><p><em>${e(group.desc)}</em></p>`);
+    body.push(`<h2 id="g-${e(group.key)}">${reportIcon("group")}${e(capitalize(group.name))}</h2><p><em>${e(group.desc)}</em></p>`);
     for (const card of report.items.filter((item) => item.group === group.key)) {
       n += 1;
       toc.push(`<li><a href="#i-${e(card.id)}">${pad2(n)}. ${e(card.title)}</a></li>`);
@@ -165,12 +167,13 @@ export function renderReport(report: DeskReport, css: string): string {
     SEED: e(report.seed),
     COUNT: String(count),
     INTRO: `<p>${e(report.intro ?? DEFAULTS.intro)}</p>`,
-    BEFORE: `<pre><code>${(report.before ?? DEFAULTS.before).map(e).join("\n")}</code></pre>`,
-    DOFIRST: report.doFirst ? `<p><strong>Do first:</strong> ${e(report.doFirst)}</p>\n` : "",
+    BEFORE: `<pre><code>${reportIcon("before")}${(report.before ?? DEFAULTS.before).map(e).join("\n")}</code></pre>`,
+    DOFIRST: report.doFirst ? `<p><strong>${reportIcon("doFirst")}Do first:</strong> ${e(report.doFirst)}</p>\n` : "",
     PRIVACY: e(report.privacyNote ?? DEFAULTS.privacyNote),
     EXPIRES: e(report.expires ?? DEFAULTS.expires),
     FOOTER: e(report.footer ?? DEFAULTS.footer),
     SCHEMA: e(report.feedbackSchema ?? FEEDBACK_SCHEMA),
+    COPYICON: reportIcon("copy"),
     TOC: toc.join("\n"),
     BODY: body.join("\n"),
   };
@@ -248,6 +251,7 @@ const TEMPLATE = `<!doctype html>
 /* joel/ratstack-mdsvx app.css, verbatim */
 %%CSS%%
 /* desk controls, kept to browser defaults */
+.desk-icon { display: inline-block; vertical-align: -0.15em; margin-right: 0.3em; }
 .item { margin-bottom: 2rem; }
 fieldset { margin: 1rem 0; }
 .opt { display: block; padding: 0.4rem 0; }
@@ -286,7 +290,7 @@ button { font: inherit; }
 </main>
 <div class="bar"><div>
 <span id="count">loading</span><br>
-<button id="copy" type="button">copy feedback</button>
+<button id="copy" type="button">%%COPYICON%%<span>copy feedback</span></button>
 <button id="show" type="button">show payload</button>
 <button id="reset" type="button">reset</button>
 </div></div>
@@ -341,7 +345,7 @@ button { font: inherit; }
     save();
   };
   document.getElementById('copy').onclick = function(){
-    var txt = JSON.stringify(payload()), b = this;
+    var txt = JSON.stringify(payload()), b = this.querySelector('span');
     function done(){ b.textContent = 'copied ✓'; setTimeout(function(){ b.textContent = 'copy feedback'; }, 1600); }
     function fallback(){ var p = document.getElementById('payload'); p.hidden = false; p.textContent = txt; var r = document.createRange(); r.selectNodeContents(p); var sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); try { document.execCommand('copy'); done(); } catch(e) { b.textContent = 'select + copy below'; } }
     if (navigator.clipboard) navigator.clipboard.writeText(txt).then(done, fallback); else fallback();

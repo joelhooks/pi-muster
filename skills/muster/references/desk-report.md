@@ -12,7 +12,7 @@ When a desk holds several decisions for Joel, it publishes one feedback page in 
 
 ## Look
 
-The look is ratstack.sh, from the wzrrd template `joel/ratstack-mdsvx` `app.css`, inlined verbatim. That means system monospace, an 80-character column, and default colors. Controls are browser defaults. Nothing is themed. Every page title starts with `🐀`.
+The look is ratstack.sh, from the wzrrd template `joel/ratstack-mdsvx` `app.css`, inlined verbatim. That means system monospace, an 80-character column, and default colors. Controls are browser defaults. Nothing is themed. Every page title starts with `🐀`. Decorative inline Hugeicons (free stroke-rounded set) sit beside group, kind, priority, caution, and copy labels; words and feedback stay unchanged.
 
 ## Page
 
