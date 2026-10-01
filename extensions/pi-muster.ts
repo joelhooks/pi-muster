@@ -161,6 +161,7 @@ export default function muster(pi: ExtensionAPI) {
     parameters: Type.Object({
       project: ProjectParam,
       slug: Type.Optional(Type.String({ description: "kebab-case project id; required for a new project" })),
+      boardType: Type.Optional(Type.String({ description: "Brain board frontmatter type; defaults to project. Set it to a type allowed by this repo." })),
       label: Type.Optional(Type.String({ description: "Space label in plain words" })),
       outcome: Type.Optional(Type.String()),
       reviewTrigger: Type.Optional(Type.String()),
@@ -387,6 +388,7 @@ export default function muster(pi: ExtensionAPI) {
     parameters: Type.Object({
       project: ProjectParam,
       headline: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      boardType: Type.Optional(Type.String({ description: "Brain board frontmatter type allowed by this repo; rewrites the board." })),
       nextAction: Type.Optional(Type.String()),
       label: Type.Optional(Type.String()),
       policy: Type.Optional(

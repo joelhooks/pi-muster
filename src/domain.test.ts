@@ -53,6 +53,12 @@ describe("schemas", () => {
     expect(decodeProject(project).agents[0]?.state).toBe("running");
   });
 
+  it("defaults an old project file's board type and decodes a custom type", () => {
+    expect(decodeProject(project).boardType).toBe("project");
+    expect(decodeProject({ ...project, boardType: "report" }).boardType).toBe("report");
+    expect(() => decodeProject({ ...project, boardType: 42 })).toThrow();
+  });
+
   it("rejects bad names, states, and roles at the boundary", () => {
     expect(() => decodeAgentName("Bad Name")).toThrow(/agent name/);
     expect(() => decodeProject({ ...project, agents: [{ ...project.agents[0], state: "idle" }] })).toThrow();

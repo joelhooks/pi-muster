@@ -94,6 +94,49 @@ describe("project_open", () => {
   });
 });
 
+describe("Brain board type", () => {
+  it("stores a custom type on open and preserves it through adoption and refresh", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    const adopted = await runWith(h, projectOpen({ dir, boardType: "report" }));
+    expect(adopted.project.boardType).toBe("report");
+    expect((await runWith(h, load(dir))).boardType).toBe("report");
+    const board = join(dir, ".brain", "projects", "muster", "probe.svx");
+    expect(readFileSync(board, "utf8")).toContain('type: "report"');
+    await open(h, dir);
+    await runWith(h, projectStatus(dir));
+    expect(readFileSync(board, "utf8")).toContain('type: "report"');
+  });
+
+  it("sets a custom type when creating a project", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    const result = await runWith(h, projectOpen({
+      dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n",
+      ephemeral: true, boardType: "resource",
+    }));
+    expect(result.project.boardType).toBe("resource");
+    expect((await runWith(h, load(dir))).boardType).toBe("resource");
+    expect(readFileSync(join(dir, ".brain", "projects", "muster", "probe.svx"), "utf8")).toContain('type: "resource"');
+  });
+
+  it("updates the stored type and rewrites it on the next refresh", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    const board = join(dir, ".brain", "projects", "muster", "probe.svx");
+    expect(readFileSync(board, "utf8")).toContain('type: "project"');
+    const updated = await runWith(h, projectUpdate(dir, { boardType: "report" }));
+    expect(updated.project.boardType).toBe("report");
+    expect((await runWith(h, load(dir))).boardType).toBe("report");
+    expect(readFileSync(board, "utf8")).toContain('type: "report"');
+    writeFileSync(board, readFileSync(board, "utf8").replace('type: "report"', 'type: "project"'));
+    await runWith(h, projectStatus(dir));
+    expect(readFileSync(board, "utf8")).toContain('type: "report"');
+  });
+});
+
 describe("field-use regressions", () => {
   it("retries a busy shell without re-running the prelude", async () => {
     const h = harness();

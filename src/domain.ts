@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 /**
  * Muster's domain values. Every file Muster reads or writes decodes through
@@ -211,6 +211,8 @@ export const Project = Schema.Struct({
   dir: Path,
   outcome: Schema.String,
   reviewTrigger: Schema.String,
+  /** Board frontmatter type chosen to match the repo's Brain rules. */
+  boardType: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("project"))),
   criticalPath: Schema.Array(Schema.String),
   nextAction: Schema.String,
   /** What the space is doing now, for the sidebar. Falls back to `nextAction`. */

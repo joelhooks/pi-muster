@@ -172,7 +172,7 @@ export function brainSummary(project: Project): string {
   const lines = [
     "---",
     `title: ${JSON.stringify(`${project.label}: Muster board`)}`,
-    'type: "project"',
+    `type: ${JSON.stringify(project.boardType)}`,
     `status: ${JSON.stringify(project.state === "archived" ? "archived" : "active")}`,
     `created_at: ${JSON.stringify(project.createdAt.slice(0, 10))}`,
     `privacy: ${JSON.stringify("private")}`,
@@ -232,6 +232,7 @@ export const writeBrain = (project: Project) =>
 // ---------- project_open ----------
 
 export interface ProjectOpenInput {
+  readonly boardType?: string | undefined;
   readonly dir: string;
   readonly slug?: string | undefined;
   readonly label?: string | undefined;
@@ -297,6 +298,7 @@ export const projectOpen = (params: ProjectOpenInput) =>
         dir,
         outcome: params.outcome as string,
         reviewTrigger: params.reviewTrigger as string,
+        boardType: params.boardType ?? "project",
         criticalPath: [...(params.criticalPath ?? [])],
         nextAction: params.nextAction as string,
         mode: params.mode ?? "rift-merge",
@@ -345,6 +347,7 @@ export const projectOpen = (params: ProjectOpenInput) =>
           ...current,
           // An adopted space already has a name; the slug is only a fallback.
           label: params.label?.trim() || (adoptedLabel && current.label === current.slug ? adoptedLabel : current.label),
+          boardType: params.boardType ?? current.boardType,
           outcome: params.outcome?.trim() || current.outcome,
           reviewTrigger: params.reviewTrigger?.trim() || current.reviewTrigger,
           criticalPath: params.criticalPath ? [...params.criticalPath] : current.criticalPath,
@@ -1451,6 +1454,8 @@ export const projectReview = (dir: string, params: ReviewInput) =>
 // ---------- project_update ----------
 
 export interface UpdateInput {
+  /** Board frontmatter type chosen to match the repo's Brain rules. */
+  readonly boardType?: string | undefined;
   /** One line: what the space is doing now. null clears it back to the next action. */
   readonly headline?: string | null | undefined;
   readonly nextAction?: string | undefined;
@@ -1470,6 +1475,7 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
         const next: Project = {
           ...current,
           ...(label ? { label } : {}),
+          ...(params.boardType !== undefined ? { boardType: params.boardType } : {}),
           ...(params.nextAction?.trim() ? { nextAction: params.nextAction.trim() } : {}),
           ...(headline !== undefined ? { headline } : {}),
           ...(patch ? { policy: mergePolicy(current.policy, patch) } : {}),

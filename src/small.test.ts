@@ -46,6 +46,7 @@ const base: Project = {
   dir: "/p",
   outcome: "o",
   reviewTrigger: "r",
+  boardType: "project",
   criticalPath: [],
   nextAction: "n",
   mode: "rift-merge",
