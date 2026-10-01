@@ -17,7 +17,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
 import { MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
-import { GuardFailed, HeavyJobBusy, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError } from "./errors.ts";
+import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError } from "./errors.ts";
 import { describeHolder, heavyLockPath, tryAcquire } from "./heavy-lock.ts";
 import {
   agentStart,
@@ -53,6 +53,8 @@ import type { LiveCounts } from "./tokens.ts";
 const MAX_WORKERS_PER_TAB = 4;
 const GATE_TIMEOUT_MS = 45 * 60_000;
 const CLOSE_READ_LINES = 40;
+const SHELL_RETRY_STEP_MS = 250;
+const SHELL_RETRY_BUDGET_MS = 15_000;
 
 // ---------- small pure helpers ----------
 
@@ -750,11 +752,17 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       // Retry only the rejected start, not the prelude that caused the race.
       const start = (attempt: number): ReturnType<typeof agentStart> =>
         agentStart(row.name, binding.paneId, argv).pipe(
-          Effect.catch((error) =>
-            error.code === "agent_pane_busy" && attempt < 20
-              ? env.sleep(250).pipe(Effect.flatMap(() => start(attempt + 1)))
-              : Effect.fail(error),
-          ),
+          Effect.catch((error) => {
+            if (error.code !== "agent_pane_busy") return Effect.fail(error);
+            if (attempt < SHELL_RETRY_BUDGET_MS / SHELL_RETRY_STEP_MS) {
+              return env.sleep(SHELL_RETRY_STEP_MS).pipe(Effect.flatMap(() => start(attempt + 1)));
+            }
+            return Effect.fail(new HerdrFailure({
+              operation: error.operation,
+              code: error.code,
+              message: `agent-start available-shell wait exhausted after ${SHELL_RETRY_BUDGET_MS} ms of retries for pane ${binding.paneId}: ${error.message}`,
+            }));
+          }),
         );
       const agent = yield* start(0);
       const sessionFile = (yield* waitForSession(binding.paneId, null)) ?? findSessionFile(row.cwd, row.sessionId, env.home);
