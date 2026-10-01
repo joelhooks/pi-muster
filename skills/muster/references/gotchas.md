@@ -22,6 +22,7 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 - If the repo's Brain check rejects the board's frontmatter type, set `boardType` through `project_open` or `project_update` to a type its rules allow.
 
+- A live worker can report an ancestor follow-up before its verified packet lands; committing the follow-up lands both, while rejecting it leaves the earlier packet open.
 - Squash-only repos land through `landedAs <squash sha>`; Muster checks the squash by patch-id or by the packet's touched paths.
 - A worker merges the target branch into its clone and reruns the full gate before reporting. A packet that does not land clean costs a round trip.
 - Workers stage by path. A clone keeps its source's ignored files, such as `.env*` and `node_modules`, and `git add -A` with a loose ignore file sweeps them in.

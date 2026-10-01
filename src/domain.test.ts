@@ -59,6 +59,17 @@ describe("schemas", () => {
     expect(() => decodeProject({ ...project, boardType: 42 })).toThrow();
   });
 
+  it("defaults supersedes in old catalogs and decodes a follow-up link", () => {
+    const packet = {
+      id: "abc", kind: "commit", lane: "probe", agent: "w1", artifact: null,
+      report: "/report.md", checks: [], state: "verified", verification: null,
+      landedAs: null, reportedAt: "t", updatedAt: "t",
+    };
+    expect(decodeProject({ ...project, packets: [packet] }).packets[0]?.supersedes).toBeNull();
+    expect(decodeProject({ ...project, packets: [{ ...packet, supersedes: "earlier" }] }).packets[0]?.supersedes).toBe("earlier");
+    expect(() => decodeProject({ ...project, packets: [{ ...packet, supersedes: 42 }] })).toThrow();
+  });
+
   it("rejects bad names, states, and roles at the boundary", () => {
     expect(() => decodeAgentName("Bad Name")).toThrow(/agent name/);
     expect(() => decodeProject({ ...project, agents: [{ ...project.agents[0], state: "idle" }] })).toThrow();

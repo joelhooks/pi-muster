@@ -966,6 +966,7 @@ export const packetReport = (params: PacketReportInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const intercom = yield* Intercom;
+    const proc = yield* Proc;
     if (!params.commit === !params.artifact) return yield* input("packet_report needs exactly one of commit or artifact");
     const project = yield* load(params.dir);
     const row = yield* findRow(project, params.agent);
@@ -978,6 +979,13 @@ export const packetReport = (params: PacketReportInput) =>
       if (!existsSync(artifact)) return yield* input(`artifact ${artifact} does not exist`);
       id = sha256File(artifact);
     }
+    const earlier = [...project.packets].reverse().find((candidate) =>
+      candidate.agent === row.name && !TERMINAL_PACKET_STATES.includes(candidate.state));
+    if (!project.packets.some((packet) => packet.id === id) && earlier) {
+      const ancestor = !!params.commit && earlier.kind === "commit" &&
+        (yield* proc.run("git", ["merge-base", "--is-ancestor", earlier.id, id], { cwd: params.cwd })).code === 0;
+      if (!ancestor) return yield* input(`earlier packet ${earlier.id.slice(0, 12)} needs an outcome first; land or reject it before reporting a non-ancestor follow-up`);
+    }
     const report = join(reportsDir(params.dir), row.lane, `${row.name}-${id.slice(0, 12)}.md`);
     const now = iso(env);
     const draft = { id, kind: params.commit ? ("commit" as const) : ("artifact" as const), artifact, checks: [...params.checks] };
@@ -988,8 +996,16 @@ export const packetReport = (params: PacketReportInput) =>
         if (prior && TERMINAL_PACKET_STATES.includes(prior.state)) {
           return yield* input(`packet ${id.slice(0, 12)} is already ${prior.state}; commit a new change for rework`);
         }
+        let supersedes = prior?.supersedes ?? null;
+        if (!prior) {
+          const pending = [...current.packets].reverse().find((candidate) =>
+            candidate.agent === latest.name && !TERMINAL_PACKET_STATES.includes(candidate.state));
+          if (pending?.id !== earlier?.id) return yield* input("earlier packet changed during reporting; retry packet_report");
+          supersedes = pending?.id ?? null;
+        }
         const packet: Packet = {
           ...draft,
+          supersedes,
           lane: latest.lane,
           agent: latest.name,
           report,
@@ -999,7 +1015,7 @@ export const packetReport = (params: PacketReportInput) =>
           reportedAt: prior?.reportedAt ?? now,
           updatedAt: now,
         };
-        const livePane = latest.state === "reported" || latest.state === "landed"
+        const livePane = latest.state === "reported" || latest.state === "verified" || latest.state === "landed"
           ? latest.pane ? yield* locatePane(latest.pane) : null
           : null;
         const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!livePane?.agent });
@@ -1125,6 +1141,14 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
     }).pipe(Effect.ensuring(Effect.sync(() => rmSync(scratch, { recursive: true }))));
   });
 
+/** One terminal outcome per packet, including packets landed with a follow-up. */
+const recordPacketOutcome = (project: Project, packet: Packet, outcome: LandOutcome, landedAs: string | null, evidence: string | undefined, now: string) =>
+  Effect.gen(function* () {
+    if (TERMINAL_PACKET_STATES.includes(packet.state)) return yield* input(`packet ${packet.id.slice(0, 12)} is already ${packet.state}`);
+    const next: Packet = { ...packet, state: outcome, landedAs, ...(evidence ? { evidence } : {}), updatedAt: now };
+    return { project: withPacket(project, next), packet: next };
+  });
+
 export const packetLand = (dir: string, params: PacketLandInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -1191,11 +1215,24 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     const saved = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
-        const next: Packet = { ...latest, state: params.outcome, landedAs, ...(evidence ? { evidence } : {}), updatedAt: iso(env) };
+        const recorded = yield* recordPacketOutcome(current, latest, params.outcome, landedAs, evidence, iso(env));
         const agent = yield* findRow(current, packet.agent);
         const moves = agent.state === "reported" || agent.state === "verified" || (agent.state === "landed" && event.type === "REWORK");
-        const updated = moves ? withRow(current, { ...agent, state: yield* stepAgent(agent.name, agent.state, event), updatedAt: iso(env) }) : current;
-        return [withPacket(updated, next), next] as const;
+        let updated = moves ? withRow(recorded.project, { ...agent, state: yield* stepAgent(agent.name, agent.state, event), updatedAt: iso(env) }) : recorded.project;
+        if (params.outcome === "committed") {
+          let supersedes = latest.supersedes;
+          const seen = new Set([latest.id]);
+          while (supersedes) {
+            if (seen.has(supersedes)) return yield* input("packet supersedes chain contains a cycle");
+            seen.add(supersedes);
+            const earlier = yield* findPacket(updated, supersedes);
+            if (!TERMINAL_PACKET_STATES.includes(earlier.state)) {
+              updated = (yield* recordPacketOutcome(updated, earlier, "committed", landedAs, `landed with ${latest.id}`, iso(env))).project;
+            }
+            supersedes = earlier.supersedes;
+          }
+        }
+        return [updated, recorded.packet] as const;
       }),
     );
     const tokens = yield* publishTokens(yield* load(dir));

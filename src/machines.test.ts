@@ -46,7 +46,10 @@ describe("agent machine", () => {
     expect(walk("verified", [{ type: "REWORK" }])).toBe("running");
   });
 
-  it("lets live landed and reported workers report their next packet", () => {
+  it("lets live verified, landed and reported workers report their next packet", () => {
+    expect(walk("verified", [{ type: "REPORT", paneLive: true }])).toBe("reported");
+    illegal(stepAgent("w1", "verified", { type: "REPORT", paneLive: false }));
+    illegal(stepAgent("w1", "verified", { type: "REPORT" }));
     expect(walk("landed", [{ type: "REPORT", paneLive: true }])).toBe("reported");
     expect(walk("reported", [{ type: "REPORT", paneLive: true }])).toBe("reported");
     illegal(stepAgent("w1", "landed", { type: "REPORT", paneLive: false }));

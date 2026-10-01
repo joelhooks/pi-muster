@@ -54,7 +54,7 @@ export const agentMachine = setup({
     nudged: { on: { RESTART: "restarted", ACTIVE: "running", ...WORKING } },
     restarted: { on: { ACTIVE: "running", SILENT: "silent", ...WORKING } },
     reported: { on: { REPORT: { target: "reported", guard: "paneLive" }, VERIFY: "verified", REWORK: "running", LAND: "landed", PANE_GONE: "interrupted", ...CLOSABLE } },
-    verified: { on: { LAND: "landed", REWORK: "running", ...CLOSABLE } },
+    verified: { on: { REPORT: { target: "reported", guard: "paneLive" }, LAND: "landed", REWORK: "running", ...CLOSABLE } },
     landed: { on: { REPORT: { target: "reported", guard: "paneLive" }, PANE_GONE: "interrupted", REWORK: "running", ...CLOSABLE } },
     interrupted: { on: { LAUNCH: "launching", RESTORE: "restoring", ...CLOSABLE } },
     restoring: { on: { STARTED: "running", LAUNCH_FAILED: "failed", PANE_GONE: "interrupted" } },

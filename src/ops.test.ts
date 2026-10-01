@@ -364,6 +364,82 @@ describe("field-use regressions", () => {
   });
 });
 
+describe("follow-up packets", () => {
+  async function verifiedWorker() {
+    const h = harness();
+    const worker = await launchedWorker(h);
+    const first = commitInClone(worker.clone);
+    const report = (commit: string) => runWith(h, packetReport({
+      dir: worker.dir, agent: "probe_w", owner: "o", cwd: worker.clone,
+      commit, summary: "follow-up", checks: [],
+    }));
+    await report(first);
+    await runWith(h, packetVerify(worker.dir, first));
+    return { h, ...worker, first, report };
+  }
+
+  it("reports from verified and lands both packets with one landing id", async () => {
+    const { h, dir, clone, first, report } = await verifiedWorker();
+    const second = commitInClone(clone, "safety.txt");
+    expect((await report(second)).packet.supersedes).toBe(first);
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("reported");
+    expect((await runWith(h, packetVerify(dir, second))).packet.supersedes).toBe(first);
+    const landed = await runWith(h, packetLand(dir, { id: second, outcome: "committed" }));
+    const packets = (await runWith(h, load(dir))).packets;
+    expect(packets.map((packet) => packet.state)).toEqual(["committed", "committed"]);
+    expect(packets.map((packet) => packet.landedAs)).toEqual([landed.packet.landedAs, landed.packet.landedAs]);
+    expect(packets[0]?.evidence).toBe(`landed with ${second}`);
+    expect((await failWith(h, packetLand(dir, { id: first, outcome: "rejected" }))).message).toContain("already committed");
+  });
+
+  it("refuses a non-ancestor without changing the earlier packet or row", async () => {
+    const { h, dir, clone, first } = await verifiedWorker();
+    sh(clone, "checkout", "-q", "-b", "unrelated", `${first}^`);
+    const second = commitInClone(clone, "different.txt");
+    const error = await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] }));
+    expect(error.message).toContain("needs an outcome first; land or reject it");
+    const project = await runWith(h, load(dir));
+    expect(project.packets.map((packet) => packet.state)).toEqual(["verified"]);
+    expect(project.agents[0]?.state).toBe("verified");
+    expect(h.sent).toHaveLength(1);
+  });
+
+  it.each(["rejected", "no_changes"] as const)("leaves the earlier verified packet landable after %s", async (outcome) => {
+    const { h, dir, clone, first, report } = await verifiedWorker();
+    const second = commitInClone(clone, "safety.txt");
+    await report(second);
+    await runWith(h, packetVerify(dir, second));
+    await runWith(h, packetLand(dir, { id: second, outcome }));
+    expect((await runWith(h, load(dir))).packets.map((packet) => packet.state)).toEqual(["verified", outcome]);
+    await runWith(h, packetLand(dir, { id: first, outcome: "committed" }));
+    expect((await runWith(h, load(dir))).packets.map((packet) => packet.state)).toEqual(["committed", outcome]);
+  });
+
+  it("requires the verified worker's pane to still hold a live agent", async () => {
+    const { h, dir, clone, launched, first } = await verifiedWorker();
+    delete h.herdr.panes.get(launched.row.pane!.paneId)!.agent;
+    const second = commitInClone(clone, "safety.txt");
+    expect((await failWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: second, summary: "s", checks: [] })))._tag).toBe("IllegalTransition");
+    const project = await runWith(h, load(dir));
+    expect(project.packets.map((packet) => packet.id)).toEqual([first]);
+    expect(project.agents[0]?.state).toBe("verified");
+  });
+
+  it("preserves the link on re-report and lands a chain of follow-ups", async () => {
+    const { h, dir, clone, first, report } = await verifiedWorker();
+    const second = commitInClone(clone, "safety.txt");
+    await report(second);
+    expect((await report(second)).packet.supersedes).toBe(first);
+    const third = commitInClone(clone, "more.txt");
+    expect((await report(third)).packet.supersedes).toBe(second);
+    await runWith(h, packetVerify(dir, third));
+    const landed = await runWith(h, packetLand(dir, { id: third, outcome: "committed" }));
+    const packets = (await runWith(h, load(dir))).packets;
+    expect(packets.map((packet) => packet.state)).toEqual(["committed", "committed", "committed"]);
+    expect(packets.every((packet) => packet.landedAs === landed.packet.landedAs)).toBe(true);
+  });
+});
+
 describe("a lane from launch to close", () => {
   it("launches with the full profile, reads the real session, and proves delivery", async () => {
     const h = harness();
