@@ -64,6 +64,7 @@
     "src/desk-feed.ts",
     "src/desk-feed-ext.ts",
     "src/desk-report.ts",
+    "src/desk-report-icons.ts",
     "src/desk-report-ops.ts",
     "src/desk-report-ext.ts",
     "src/tokens.ts"
