@@ -2,7 +2,7 @@ import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@ea
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 
 import { KIND_GLYPH, activity, formatAge, itemRef, openCount } from "./switchboard.ts";
-import type { FleetStats, InboxGroup, InboxItem, LatestPost, SystemView } from "./switchboard.ts";
+import type { FleetStats, InboxGroup, InboxItem, LatestPost, SystemView, UnregisteredSpace } from "./switchboard.ts";
 
 /** The slice of Pi's theme the view uses, so tests can pass a plain stub. */
 export interface ViewTheme {
@@ -10,9 +10,10 @@ export interface ViewTheme {
   bold(text: string): string;
 }
 
-export type Row = { readonly type: "group"; readonly group: InboxGroup } | { readonly type: "item"; readonly item: InboxItem };
+export type Row = { readonly type: "group"; readonly group: InboxGroup } | { readonly type: "item"; readonly item: InboxItem } | { readonly type: "unregistered"; readonly space: UnregisteredSpace };
 
 export type Intent =
+  | { readonly type: "desk"; readonly project: string; readonly item?: InboxItem }
   | { readonly type: "discuss"; readonly item: InboxItem }
   | { readonly type: "answer"; readonly item: InboxItem }
   | { readonly type: "done"; readonly item: InboxItem }
@@ -27,6 +28,7 @@ export const OPEN_HINT = "alt+s";
  */
 export class SwitchboardState {
   groups: readonly InboxGroup[] = [];
+  unregistered: readonly UnregisteredSpace[] = [];
   posts: Readonly<Record<string, readonly number[]>> = {};
   fleet: FleetStats | null = null;
   latest: LatestPost | null = null;
@@ -35,9 +37,7 @@ export class SwitchboardState {
   cursor = 0;
   private seen = new Set<string>();
 
-  setGroups(groups: readonly InboxGroup[]): void {
-    const before = this.current();
-    const key = before ? rowKey(before) : null;
+  setGroups(groups: readonly InboxGroup[], key: string | null = this.current() ? rowKey(this.current()!) : null): void {
     this.groups = groups;
     // A project that shows up for the first time opens, so a new ask is visible without a keypress.
     for (const group of groups) {
@@ -50,11 +50,14 @@ export class SwitchboardState {
   }
 
   setSystem(view: SystemView): void {
+    const before = this.current();
+    const key = before ? rowKey(before) : null;
+    this.unregistered = view.unregistered ?? [];
     this.posts = view.posts;
     this.fleet = view.fleet;
     this.latest = view.latest;
     this.now = view.now;
-    this.setGroups(view.groups);
+    this.setGroups(view.groups, key);
   }
 
   rows(): Row[] {
@@ -63,6 +66,7 @@ export class SwitchboardState {
       rows.push({ type: "group", group });
       if (this.expanded.has(group.project)) for (const item of group.items) rows.push({ type: "item", item });
     }
+    for (const space of this.unregistered) rows.push({ type: "unregistered", space });
     return rows;
   }
 
@@ -78,7 +82,7 @@ export class SwitchboardState {
   /** Fold or unfold the project under the cursor; on an item, fold its project and land on the header. */
   toggle(open?: boolean): void {
     const row = this.current();
-    if (!row) return;
+    if (!row || row.type === "unregistered") return;
     const project = row.type === "group" ? row.group.project : row.item.project;
     const next = open ?? !this.expanded.has(project);
     if (next) this.expanded.add(project);
@@ -97,7 +101,7 @@ export class SwitchboardState {
   }
 }
 
-const rowKey = (row: Row) => (row.type === "group" ? `g:${row.group.project}` : `i:${row.item.project}#${row.item.id}`);
+const rowKey = (row: Row) => row.type === "unregistered" ? `s:${row.space.spaceId}` : (row.type === "group" ? `g:${row.group.project}` : `i:${row.item.project}#${row.item.id}`);
 
 /** Left text and right text on one line, the right edge flush with `width`. */
 function spread(left: string, right: string, width: number): string {
@@ -120,7 +124,9 @@ function groupLine(group: InboxGroup, open: boolean, width: number, theme: ViewT
   const marker = open ? "▾" : "▸";
   const name = selected ? theme.fg("accent", theme.bold(group.project)) : theme.bold(group.project);
   const cursor = gutter ? (selected ? theme.fg("accent", "▶ ") : "  ") : "";
-  const left = `${cursor}${theme.fg(selected ? "accent" : "dim", marker)} ${name} ${theme.fg("accent", String(group.items.length))}  ${counts(group, theme)}`;
+  const outside = group.outsideSpace ? theme.fg("warning", " ↗") : "";
+  if (group.items.length === 0) return truncateToWidth(`${cursor}${theme.fg("dim", `${marker} ${group.project} 0 · quiet`)}${outside}`, width);
+  const left = `${cursor}${theme.fg(selected ? "accent" : "dim", marker)} ${name} ${theme.fg("accent", String(group.items.length))}  ${counts(group, theme)}${outside}`;
   return spread(left, theme.fg("dim", formatAge(group.oldestMs)), width);
 }
 
@@ -219,7 +225,7 @@ export function renderWidget(state: SwitchboardState, width: number, theme: View
     const group = state.groups.find((candidate) => candidate.project === project);
     const name = truncateToWidth(project, nameWidth, "…");
     const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
-    const asks = group ? `${counts(group, theme)} ${theme.fg("dim", formatAge(group.oldestMs))}` : theme.fg("dim", "quiet");
+    const asks = group?.items.length ? `${counts(group, theme)} ${theme.fg("dim", formatAge(group.oldestMs))}` : theme.fg("dim", "0 · quiet");
     return `  ${theme.bold(name)}${pad}  ${asks}`;
   });
   // The asks win the width; the strip takes what is left, the same size on every row so the hours line up.
@@ -234,7 +240,7 @@ export function renderWidget(state: SwitchboardState, width: number, theme: View
   return lines.map((line) => truncateToWidth(line, width));
 }
 
-const HELP = "↑↓ move · space fold · c fold all · enter discuss · a answer · d done · esc close";
+const HELP = "↑↓ · space/c fold · enter desk · e discuss here · a answer · d done · esc";
 
 /** The overlay body: the same rows with a cursor, then the selected item's detail. */
 export function renderOverlay(state: SwitchboardState, width: number, height: number, theme: ViewTheme): string[] {
@@ -247,11 +253,14 @@ export function renderOverlay(state: SwitchboardState, width: number, height: nu
 
   const rows = state.rows();
   const current = state.current();
+  const group = current?.type === "group" ? current.group : current?.type === "item" ? state.groups.find((group) => group.project === current.item.project) : undefined;
   const detail = current?.type === "item" ? detailLines(current.item, inner, theme) : [];
+  if (group?.outsideSpace) detail.push(theme.fg("warning", "↗ owner/desk outside space"));
   const listRoom = Math.max(3, height - 4 - (detail.length ? detail.length + 1 : 0));
   const start = Math.max(0, Math.min(state.cursor - Math.floor(listRoom / 2), rows.length - listRoom));
   const list = rows.slice(start, start + listRoom).map((row, offset) => {
     const selected = start + offset === state.cursor;
+    if (row.type === "unregistered") return truncateToWidth(`${selected ? "▶ " : "  "}${theme.fg("dim", `${row.space.label} · unregistered · project_open adopts it`)}`, inner);
     return row.type === "group"
       ? groupLine(row.group, state.expanded.has(row.group.project), inner, theme, selected, true)
       : itemLine(row.item, inner, theme, selected);
@@ -283,10 +292,10 @@ export function handleKey(state: SwitchboardState, data: string): Intent | null 
   else {
     const row = state.current();
     if (!row) return null;
-    if (matchesKey(data, "enter")) {
-      if (row.type === "group") state.toggle();
-      else return { type: "discuss", item: row.item };
-    } else if (row.type === "item" && data === "a") return { type: "answer", item: row.item };
+    if (matchesKey(data, "enter") && row.type !== "unregistered") {
+      return row.type === "group" ? { type: "desk", project: row.group.project } : { type: "desk", project: row.item.project, item: row.item };
+    } else if (row.type === "item" && data === "e") return { type: "discuss", item: row.item };
+    else if (row.type === "item" && data === "a") return { type: "answer", item: row.item };
     else if (row.type === "item" && data === "d") return { type: "done", item: row.item };
   }
   return null;

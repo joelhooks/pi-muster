@@ -54,7 +54,7 @@ describe("switchboard view", () => {
 
   it("opens new projects, folds and unfolds, and keeps the cursor on its item across refreshes", () => {
     const s = state();
-    expect(s.rows().map((row) => (row.type === "group" ? row.group.project : row.item.id))).toEqual(["drovr", "d2", "d1", "support", "s1", "s2"]);
+    expect(s.rows().map((row) => (row.type === "group" ? row.group.project : row.type === "item" ? row.item.id : row.space.spaceId))).toEqual(["drovr", "d2", "d1", "support", "s1", "s2"]);
     s.move(2);
     expect(s.current()).toMatchObject({ type: "item", item: { id: "d1" } });
     s.setGroups(inbox({ ...queues, drovr: [...queues.drovr, item("d6", "blocked", 9)] }, NOW));
@@ -72,7 +72,8 @@ describe("switchboard view", () => {
     const s = state();
     expect(handleKey(s, "\x1b[B")).toBeNull();
     expect(s.cursor).toBe(1);
-    expect(handleKey(s, "\r")).toMatchObject({ type: "discuss", item: { id: "d2" } });
+    expect(handleKey(s, "\r")).toMatchObject({ type: "desk", project: "drovr", item: { id: "d2" } });
+    expect(handleKey(s, "e")).toMatchObject({ type: "discuss", item: { id: "d2" } });
     expect(handleKey(s, "a")).toMatchObject({ type: "answer", item: { id: "d2" } });
     expect(handleKey(s, "d")).toMatchObject({ type: "done", item: { id: "d2" } });
     expect(handleKey(s, " ")).toBeNull();
@@ -171,7 +172,7 @@ describe("desk_answer", () => {
     expect(answered.nudged).toHaveLength(1);
     expect(h.sent.at(-1)?.message).toContain("go with option B");
     expect(readDesk(queuePath("probe", h.home)).at(-1)).toMatchObject({ kind: "done", resolves: "p1", from: "☎️ switchboard" });
-    expect(await runWith(h, loadInbox)).toEqual([]);
+    expect(await runWith(h, loadInbox)).toMatchObject([{ project: "probe", items: [] }]);
     expect((await failWith(h, deskAnswer({ project: "probe", id: "p1", answer: "again" })))._tag).toBe("NotFound");
   });
 });

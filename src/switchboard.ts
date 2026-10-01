@@ -34,6 +34,8 @@ export interface InboxGroup {
   readonly items: readonly InboxItem[];
   readonly counts: Readonly<Record<OpenKind, number>>;
   readonly oldestMs: number;
+  /** A live owner or desk is bound to a different Herdr space. */
+  readonly outsideSpace?: boolean;
 }
 
 export const queueDir = (home: string) => join(home, ".local", "state", "herdr-desk");
@@ -187,9 +189,26 @@ export function latestPost(queues: Readonly<Record<string, readonly DeskItem[]>>
   return latest;
 }
 
+export interface UnregisteredSpace {
+  readonly spaceId: string;
+  readonly label: string;
+}
+
+/** Keep quiet registered projects visible, without changing ask ranking. */
+export function fleetGroups(groups: readonly InboxGroup[], slugs: readonly string[], outside: ReadonlySet<string> = new Set()): InboxGroup[] {
+  const known = new Set(groups.map((group) => group.project));
+  return [
+    ...groups.map((group) => ({ ...group, outsideSpace: outside.has(group.project) })),
+    ...[...new Set(slugs)].filter((slug) => !known.has(slug)).sort().map((project) => ({
+      project, items: [], counts: { blocked: 0, approval: 0, decision: 0 }, oldestMs: 0, outsideSpace: outside.has(project),
+    })),
+  ];
+}
+
 /** Everything the widget and the sidebar draw, read in one pass. */
 export interface SystemView {
   readonly groups: readonly InboxGroup[];
+  readonly unregistered?: readonly UnregisteredSpace[];
   readonly posts: Readonly<Record<string, readonly number[]>>;
   readonly fleet: FleetStats | null;
   readonly latest: LatestPost | null;

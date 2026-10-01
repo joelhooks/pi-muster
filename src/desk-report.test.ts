@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { queuePath, readDesk } from "./desk.ts";
 import { deskReport, deskRulings } from "./desk-report-ops.ts";
+import { registerSwitchboardSession } from "./switchboard-ops.ts";
 import { FEEDBACK_SCHEMA, decodeReport, redactionHits, renderReport, rulingText, rulings } from "./desk-report.ts";
 import { reportIcon } from "./desk-report-icons.ts";
 import type { DeskItem } from "./domain.ts";
@@ -239,13 +240,18 @@ describe("desk report tools", () => {
   it("desk_rulings resolves each open item a ruling covers, skips the rest, and drafts one owner message", async () => {
     const { h, items } = setup();
     const feedback = JSON.stringify({ schema: FEEDBACK_SCHEMA, page: report.slug, items: { p1: { stack: "yes" }, o1: { void: ["a"] } } });
+    registerSwitchboardSession(h.home, "switchboard-session");
+    h.live = ["switchboard-session"];
 
     const preview = await runWith(h, deskRulings({ project: "probe", report: items, feedback, dryRun: true, cwd: h.root }));
     expect(preview.applied).toEqual(["p1", "o1"]);
+    expect(h.sent).toEqual([]);
     expect(openDeskItems(readDesk(queuePath("probe", h.home))).map((item) => item.id)).toEqual(["p1", "o1", "o2"]);
 
     const done = await runWith(h, deskRulings({ project: "probe", report: items, feedback, cwd: h.root }));
     expect(done.skipped).toEqual(["p2 (not open in probe's queue)"]);
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent.every((sent) => sent.to === "switchboard-session" && sent.message.includes("resolved"))).toBe(true);
     expect(done.unanswered).toEqual(["o2"]);
     expect(done.owner).toContain("[p1, p2] Does the credit stack with team tiers?\n  - Stacking: Stacks (suggested)");
     expect(done.owner).toContain("re-run stale checks");
