@@ -104,12 +104,21 @@ describe("field-use regressions", () => {
     expect(h.herdr.calls.filter((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("cd "))).toHaveLength(1);
   });
 
+  it("starts when the shell stays busy past the old five-second retry budget", async () => {
+    const h = harness();
+    h.herdr.startErrors = Array(30).fill("agent_pane_busy");
+    const { launched } = await launchedWorker(h);
+    expect(launched.row.state).toBe("running");
+    expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(31);
+    expect(h.herdr.calls.filter((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("cd "))).toHaveLength(1);
+  });
+
   it("bounds busy retries and does not retry other start errors", async () => {
     for (const code of ["agent_pane_busy", "agent_not_found"]) {
       const h = harness();
-      h.herdr.startErrors = Array(30).fill(code);
-      await expect(launchedWorker(h)).rejects.toThrow("start rejected");
-      expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(code === "agent_pane_busy" ? 21 : 1);
+      h.herdr.startErrors = Array(70).fill(code);
+      await expect(launchedWorker(h)).rejects.toThrow(code === "agent_pane_busy" ? "agent-start available-shell wait exhausted after 15000 ms" : "start rejected");
+      expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(code === "agent_pane_busy" ? 61 : 1);
       const project = await runWith(h, load(join(h.root, "repo")));
       expect(project.agents[0]?.state).toBe("failed");
     }
