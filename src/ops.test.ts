@@ -600,6 +600,51 @@ describe("a lane from launch to close", () => {
     expect(launched.row.delivery).toBe("proven");
   });
 
+  it.each(["svx", "md"])("verifies and lands a %s report with literal worker text", async (extension) => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    const text = '{"a":1} <script> `inline`\n```svelte\n{value}\n```\n~~~\n<script>\n~~~ & &#123;';
+    const reported = await runWith(h, packetReport({
+      dir, agent: "probe_w", owner: "owner-session", cwd: clone, commit,
+      summary: text, body: text,
+      checks: [{ name: '`check` | <script>\n{"a":1}', outcome: "pass", detail: text + " | detail" }],
+    }));
+    expect(reported.packet.report).toBe(join(dir, ".brain/data/muster/reports/probe", `probe_w-${commit.slice(0, 12)}.svx`));
+    expect(h.sent[0]?.message).toContain(reported.packet.report);
+    const report = readFileSync(reported.packet.report, "utf8");
+    expect(report).toContain(`title: "Packet ${commit.slice(0, 12)} from probe_w"`);
+    expect(report).toContain(`packet: "${commit}"`);
+    expect(report).toContain('lane: "probe"');
+    const content = report.split("---\n")[2];
+    expect(content).toBeDefined();
+    // Portable safety assertion; compilation can also use pi-notes' MDsveX.
+    const outsideCode = content?.replace(/^(`{3,})\n[\s\S]*?^\1$/gm, "").replace(/(`{3,})[^\n]*?\1/g, "");
+    expect(outsideCode).not.toMatch(/[{}<]/);
+    expect(content).toContain(`## Summary\n\n\`\`\`\`\n${text}\n\`\`\`\``);
+    expect(content).toContain(`## Notes\n\n\`\`\`\`\n${text}\n\`\`\`\``);
+    expect(content).toContain("| Check | Outcome | Detail |");
+    expect(content).toContain('| ``` `check` &#124; <script> {"a":1} ``` | pass |');
+    expect(content).toContain("&#124; detail ```` |");
+
+    let reportPath = reported.packet.report;
+    if (extension === "md") {
+      // Simulate a packet saved by the old writer; never migrate its stored path.
+      reportPath = reportPath.replace(/\.svx$/, ".md");
+      writeFileSync(reportPath, "# Legacy packet\n\nWorker report from the old writer.\n");
+      const legacyReport = reportPath;
+      await runWith(h, mutate(dir, (project) => Effect.succeed([
+        { ...project, packets: project.packets.map((packet) => packet.id === commit ? { ...packet, report: legacyReport } : packet) },
+        undefined,
+      ] as const)));
+    }
+    expect((await runWith(h, packetVerify(dir, commit))).packet.report).toBe(reportPath);
+    const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed" }));
+    expect(landed.packet.state).toBe("committed");
+    expect(landed.packet.report).toBe(reportPath);
+    expect(existsSync(reportPath)).toBe(true);
+  });
+
   it("reports, verifies, lands --no-ff as the bot, closes the agent, and closes the lane", async () => {
     const h = harness();
     const { dir, clone } = await launchedWorker(h);

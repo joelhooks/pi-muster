@@ -968,25 +968,41 @@ export interface PacketReportInput {
   readonly body?: string | undefined;
 }
 
+// A longer delimiter prevents worker-written backticks from closing our code.
+const reportFence = (text: string): string => "`".repeat(Math.max(2, ...[...text.matchAll(/`+/g)].map(([run]) => run.length)) + 1);
+const reportText = (text: string): string => `${reportFence(text)}\n${text}\n${reportFence(text)}`;
+const reportCell = (text: string): string => {
+  const cell = text.replace(/\r\n|[\r\n]/g, " ").replace(/&/g, "&amp;").replace(/\|/g, "&#124;");
+  const fence = reportFence(cell);
+  return `${fence} ${cell} ${fence}`;
+};
+
 export function reportMarkdown(row: AgentRow, packet: Pick<Packet, "id" | "kind" | "artifact" | "checks">, summary: string, body: string | undefined): string {
+  const title = `Packet ${packet.id.slice(0, 12)} from ${row.name}`;
   return [
-    `# Packet ${packet.id.slice(0, 12)} from ${row.name}`,
+    "---",
+    `title: ${JSON.stringify(title)}`,
+    `packet: ${JSON.stringify(packet.id)}`,
+    `lane: ${JSON.stringify(row.lane)}`,
+    "---",
     "",
-    `- Lane: ${row.lane}`,
+    `# Packet ${packet.id.slice(0, 12)} from ${reportCell(row.name)}`,
+    "",
+    `- Lane: ${reportCell(row.lane)}`,
     `- Kind: ${packet.kind}`,
-    `- Id: \`${packet.id}\`${packet.kind === "artifact" ? ` (sha256 of \`${packet.artifact}\`)` : ` (commit on ${row.clone?.branch ?? "the clone's branch"} in \`${row.cwd}\`)`}`,
+    `- Id: ${reportCell(packet.id)}${packet.kind === "artifact" ? ` (sha256 of ${reportCell(packet.artifact ?? "")})` : ` (commit on ${reportCell(row.clone?.branch ?? "the clone's branch")} in ${reportCell(row.cwd)})`}`,
     "",
     "## Summary",
     "",
-    summary.trim(),
+    reportText(summary.trim()),
     "",
     "## Checks",
     "",
     "| Check | Outcome | Detail |",
     "| --- | --- | --- |",
-    ...packet.checks.map((check) => `| ${check.name} | ${check.outcome} | ${(check.detail ?? "").replace(/\|/g, "\\|")} |`),
+    ...packet.checks.map((check) => `| ${reportCell(check.name)} | ${check.outcome} | ${reportCell(check.detail ?? "")} |`),
     "",
-    ...(body?.trim() ? ["## Notes", "", body.trim(), ""] : []),
+    ...(body?.trim() ? ["## Notes", "", reportText(body.trim()), ""] : []),
   ].join("\n");
 }
 
@@ -1014,7 +1030,7 @@ export const packetReport = (params: PacketReportInput) =>
         (yield* proc.run("git", ["merge-base", "--is-ancestor", earlier.id, id], { cwd: params.cwd })).code === 0;
       if (!ancestor) return yield* input(`earlier packet ${earlier.id.slice(0, 12)} needs an outcome first; land or reject it before reporting a non-ancestor follow-up`);
     }
-    const report = join(reportsDir(params.dir), row.lane, `${row.name}-${id.slice(0, 12)}.md`);
+    const report = join(reportsDir(params.dir), row.lane, `${row.name}-${id.slice(0, 12)}.svx`);
     const now = iso(env);
     const draft = { id, kind: params.commit ? ("commit" as const) : ("artifact" as const), artifact, checks: [...params.checks] };
     const saved = yield* mutate(params.dir, (current) =>
