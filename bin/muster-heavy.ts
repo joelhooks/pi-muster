@@ -2,14 +2,14 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 
-import { exclusiveRequest, heavyStatus, tryAcquireHeavy } from "../src/heavy-lock.ts";
+import { exclusiveRequest, heavySnapshot, heavyStatus, tryAcquireHeavy } from "../src/heavy-lock.ts";
 
-const usage = "usage: muster-heavy status | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
+const usage = "usage: muster-heavy status [--json] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
 const args = process.argv.slice(2);
 const options = { home: homedir() };
-if (args.length === 1 && args[0] === "status") {
+if (args[0] === "status" && (args.length === 1 || (args.length === 2 && args[1] === "--json"))) {
   try {
-    console.log(heavyStatus(options));
+    console.log(args[1] === "--json" ? JSON.stringify(heavySnapshot(options)) : heavyStatus(options));
     process.exit(0);
   } catch (error) {
     console.error(`muster-heavy: ${error instanceof Error ? error.message : String(error)}`);

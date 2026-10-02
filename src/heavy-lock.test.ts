@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  admissionReason, exclusivePendingPath, exclusiveRequest, heavyLockPath, heavySlotCount, heavyStatus,
+  admissionReason, exclusivePendingPath, exclusiveRequest, heavyLockPath, heavySlotCount, heavySnapshot, heavyStatus,
   parseMemInfo, parseVmStat, readHolder, slotPath, tryAcquire, tryAcquireHeavy,
 } from "./heavy-lock.ts";
 import type { HeavyAdapter, HeavyOptions } from "./heavy-lock.ts";
@@ -167,6 +167,13 @@ describe("heavy gate slots", () => {
     const empty = setup();
     expect(cli(empty, ["status"]).stdout).toContain("slot-1: free");
     expect(existsSync(join(empty.home, ".local"))).toBe(false);
+    const snap = heavySnapshot(options, Date.now() + 2000);
+    expect(snap).toMatchObject({ slots: 2, load: 20, availableGB: 64 });
+    expect(snap.holders[0]).toMatchObject({ name: "slot-0", held: false, holder: null });
+    expect(snap.holders[1]).toMatchObject({ name: "slot-1", held: true, stale: true, ageSeconds: 2, holder: { command: "dead gate", mode: "slot" } });
+    expect(snap.exclusivePending).toMatchObject({ held: true, holder: { command: "dead hold" } });
+    expect(JSON.parse(cli(empty, ["status", "--json"]).stdout)).toMatchObject({ holders: [{ held: false }, { held: false }], exclusivePending: { held: false } });
+    expect(readFileSync(join(slotPath(lock, 1), "holder.json"), "utf8")).toBe(before);
   });
 });
 

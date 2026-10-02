@@ -315,20 +315,52 @@ export function exclusiveRequest(options: HeavyOptions, command: string) {
   return { attempt, release };
 }
 
-export function heavyStatus(options: HeavyOptions, now = Date.now()): string {
+export interface HeavySlotView {
+  readonly name: string;
+  readonly holder: Holder | null;
+  readonly held: boolean;
+  readonly ageSeconds: number | null;
+  readonly stale: boolean;
+}
+
+export interface HeavySnapshot {
+  readonly slots: number;
+  readonly load: number;
+  readonly loadLimit: number;
+  readonly availableGB: number;
+  readonly minFreeGB: number;
+  readonly holders: readonly HeavySlotView[];
+  readonly exclusivePending: HeavySlotView;
+}
+
+/** Read-only: one sample of the machine and every slot. Never takes or clears a lock. */
+export function heavySnapshot(options: HeavyOptions, now = Date.now()): HeavySnapshot {
   const { adapter, count, minFreeGB } = settings(options);
   const lock = heavyLockPath(options.home);
   const sample = adapter.sample();
-  const lines = [`heavy slots: ${count}`, `load: ${sample.load.toFixed(1)} (limit ${sample.cores * 2.5}); available memory: ${sample.freeGB.toFixed(1)} GB (minimum ${minFreeGB} GB)`];
-  const slots = new Set([...Array.from({ length: count }, (_, n) => n), ...existingSlots(lock)]);
-  for (const [name, path] of [...Array.from(slots, (n) => [`slot-${n}`, slotPath(lock, n)] as const), ["exclusive-pending", exclusivePendingPath(options.home)] as const]) {
-    if (!path || !existsSync(path)) {
-      lines.push(`${name}: free`);
-      continue;
-    }
+  const view = (name: string, path: string): HeavySlotView => {
+    if (!existsSync(path)) return { name, holder: null, held: false, ageSeconds: null, stale: false };
     const holder = readHolder(path);
-    const age = holder ? Math.max(0, Math.floor((now - Date.parse(holder.startedAt)) / 1000)) : null;
-    lines.push(`${name}: ${describeHolder(holder)}; age ${age ?? "unknown"}s${stale(holder) ? "; stale" : ""}`);
+    const ageSeconds = holder ? Math.max(0, Math.floor((now - Date.parse(holder.startedAt)) / 1000)) : null;
+    return { name, holder, held: true, ageSeconds, stale: stale(holder) };
+  };
+  const slots = new Set([...Array.from({ length: count }, (_, n) => n), ...existingSlots(lock)]);
+  return {
+    slots: count,
+    load: sample.load,
+    loadLimit: sample.cores * 2.5,
+    availableGB: sample.freeGB,
+    minFreeGB,
+    holders: Array.from(slots, (n) => view(`slot-${n}`, slotPath(lock, n))),
+    exclusivePending: view("exclusive-pending", exclusivePendingPath(options.home)),
+  };
+}
+
+export function heavyStatus(options: HeavyOptions, now = Date.now()): string {
+  const snap = heavySnapshot(options, now);
+  const lines = [`heavy slots: ${snap.slots}`, `load: ${snap.load.toFixed(1)} (limit ${snap.loadLimit}); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
+  for (const slot of [...snap.holders, snap.exclusivePending]) {
+    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder)}; age ${slot.ageSeconds ?? "unknown"}s${slot.stale ? "; stale" : ""}` : `${slot.name}: free`);
   }
   return lines.join("\n");
 }
