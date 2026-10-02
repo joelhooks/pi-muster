@@ -223,13 +223,15 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     name: "desk_inbox",
     label: "Switchboard inbox",
     description:
-      "The live fleet: open desk items ranked blocked, approvals, decisions; quiet registered projects; and unregistered Herdr spaces. Reading opts this session into live updates. Each item has a [project#id] reference for desk_answer.",
+      "The live fleet: open desk items ranked blocked, approvals, decisions; quiet registered projects; and unregistered Herdr spaces. Read-only unless subscribe is true, which makes this session the Switchboard and pages it on every project's queue change. Project desks never subscribe. Each item has a [project#id] reference for desk_answer.",
     promptSnippet: "desk_inbox: every project's open items for Joel, ranked",
-    parameters: Type.Object({ project: Type.Optional(Type.String({ description: "Only this project's queue" })) }),
+    parameters: Type.Object({
+      project: Type.Optional(Type.String({ description: "Only this project's queue" })),
+      subscribe: Type.Optional(Type.Boolean({ description: "Run this session as the Switchboard: watch every queue and receive a nudge on each change. Default false." })),
+    }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      // Reading the Switchboard is itself an opt-in. Otherwise a session using
-      // only desk_inbox had a static snapshot, no watcher and no nudge address.
-      await activate(ctx);
+      // A read never subscribes: a project desk that peeked once was paged for every tenant's queue.
+      if (params.subscribe === true) await activate(ctx);
       return deps.run(ctx, signal, loadSystem, (view) =>
         inboxText(params.project ? view.groups.filter((group: { project: string }) => group.project === params.project) : view.groups, params.project ? [] : view.unregistered),
       );

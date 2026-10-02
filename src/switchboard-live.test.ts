@@ -113,7 +113,7 @@ describe("switchboard queue delivery", () => {
 });
 
 describe("live extension opt-in", () => {
-  it("desk_inbox starts watching and registers the session even without --switchboard", async () => {
+  it("desk_inbox reads without subscribing; subscribe: true makes the session the Switchboard", async () => {
     const { h, dir } = await setup();
     const handlers = new Map<string, Function>();
     const tools = new Map<string, { execute: Function }>();
@@ -142,7 +142,12 @@ describe("live extension opt-in", () => {
     await handlers.get("session_start")!(null, ctx);
     expect(widget).toBeUndefined();
     try {
-      const text = await tools.get("desk_inbox")!.execute("id", {}, undefined, undefined, ctx);
+      const peek = await tools.get("desk_inbox")!.execute("id", {}, undefined, undefined, ctx);
+      expect(peek).toContain("probe (0) · quiet");
+      expect(widget).toBeUndefined();
+      await runWith(h, deskPost(dir, { kind: "fyi", title: "Seen by a peek" }));
+      expect(h.sent.some((message) => message.to === "inbox-session")).toBe(false);
+      const text = await tools.get("desk_inbox")!.execute("id", { subscribe: true }, undefined, undefined, ctx);
       expect(text).toContain("probe (0) · quiet");
       expect(widget?.render(100).join("\n")).toContain("0 · quiet");
       const browsing = browse!(ctx);
