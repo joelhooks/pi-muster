@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { Effect } from "effect";
@@ -24,6 +24,8 @@ import {
   reviewDue,
 } from "./ops.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
+import { Proc, liveProc } from "./runtime.ts";
+import { ProcError } from "./errors.ts";
 import { parsePorcelainZ } from "./packet.ts";
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
@@ -71,6 +73,58 @@ function commitInClone(clone: string, file = "work.txt") {
   sh(clone, "commit", "-q", "-m", "work");
   return sh(clone, "rev-parse", "HEAD").trim();
 }
+
+describe("fleet board runner", () => {
+  it("bounds status calls at ten seconds and adds a timeout note", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    const stub = join(h.root, "fleet-compute.ts");
+    writeFileSync(stub, "// runner discovery fixture\n");
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", stub);
+    const status = await runWith(h, projectStatus(dir, { act: false }).pipe(Effect.provideService(Proc, {
+      run: (command, args, options) => {
+        if (args.includes("status")) {
+          expect(options.timeoutMs).toBe(10_000);
+          return Effect.fail(new ProcError({ command, code: null, stderr: "", message: "timed out after 10000ms" }));
+        }
+        return liveProc.run(command, args, options);
+      },
+    })));
+    expect(status.board).not.toContain("gates:");
+    expect(status.notes).toContain("fleet-compute: timed out after 10000ms");
+  });
+
+  it.each(["live", "absent", "nonzero", "JSON", "schema", "spawn"])("keeps project_status usable when runner is %s", async (mode) => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    const stub = join(h.root, "fleet-compute.ts");
+    const argsPath = join(h.root, "status-args.json");
+    if (mode !== "absent") writeFileSync(stub, `
+      const fs = require('node:fs');
+      fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
+      if (${JSON.stringify(mode)} === 'nonzero') process.exit(2);
+      console.log(${JSON.stringify(mode)} === 'JSON' ? '{' : JSON.stringify(${JSON.stringify(mode)} === 'schema' ? {} : {
+        machines: [{host: 'flagg', reading: {state: 'live', data: {slots: 4, holders: [{held: true}, {held: true}]}}}, {host: 'pennywise', reading: {state: 'unavailable'}}],
+        queue: [{id: 'a', project: 'probe', repo: 'repo', hosts: ['flagg'], enqueuedAt: '2026-09-29T05:57:00Z'}]
+      }));
+    `);
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", stub);
+    // No PATH runner; spawn mode also prevents the configured script's node from starting.
+    if (mode === "absent") symlinkSync("/bin/sh", join(h.root, "sh"));
+    if (mode === "absent" || mode === "spawn") vi.stubEnv("PATH", h.root);
+    const status = await runWith(h, projectStatus(dir, { act: false }));
+    if (mode === "live") {
+      expect(status.board).toContain("gates: flagg 2/4, pennywise off, 1 waiting (oldest 3m)");
+      expect(status.notes.some((note) => note.startsWith("fleet-compute:"))).toBe(false);
+    } else {
+      expect(status.board).not.toContain("gates:");
+      expect(status.notes.join("\n")).toContain(mode === "absent" ? "runner missing" : mode === "nonzero" ? "status exited 2" : mode === "spawn" ? "ENOENT" : "invalid JSON/schema");
+    }
+    if (mode !== "absent" && mode !== "spawn") expect(JSON.parse(readFileSync(argsPath, "utf8"))).toEqual(["status", "--json"]);
+  });
+});
 
 describe("lane clone base", () => {
   const prepare = async () => {
@@ -772,6 +826,8 @@ describe("a lane from launch to close", () => {
     { name: "gate exit 2", exit: 2, code: 2, receipt: true, guard: "gate" },
     { name: "gate exit 75", exit: 75, code: 75, receipt: true, guard: "gate" },
     { name: "busy", exit: 0, code: 75, receipt: false, guard: "busy" },
+    { name: "busy drained", exit: 0, code: 75, receipt: false, guard: "busy" },
+    { name: "busy status broken", exit: 0, code: 75, receipt: false, guard: "busy" },
     { name: "runner error", exit: 0, code: 2, receipt: false, guard: "gate-runner" },
     { name: "wrong tree", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
     { name: "lost run", exit: null, code: 2, receipt: true, guard: "gate-runner" },
@@ -799,6 +855,14 @@ describe("a lane from launch to close", () => {
       const cp = require('node:child_process');
       const path = require('node:path');
       const args = process.argv.slice(2);
+      if (args[0] === 'status') {
+        if (${JSON.stringify(scenario.name)} === 'busy status broken') { console.log('{'); process.exit(0); }
+        console.log(JSON.stringify({machines: [], queue: ${JSON.stringify(scenario.name)} === 'busy drained' ? [] : [
+          {id: 'a', project: 'other', repo: 'repo', eligibleHosts: ['flagg'], enqueuedAt: '2026-09-29T05:57:00Z'},
+          {id: 'b', project: 'probe', repo: 'repo', eligibleHosts: ['flagg'], enqueuedAt: '2026-09-29T05:58:00Z'}
+        ]}));
+        process.exit(0);
+      }
       const value = key => args[args.indexOf(key) + 1];
       const receiptPath = value('--receipt');
       fs.writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(args));
@@ -834,6 +898,9 @@ describe("a lane from launch to close", () => {
       const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
       expect(error._tag).toBe(scenario.guard === "busy" ? "HeavyJobBusy" : "GuardFailed");
       if ("guard" in error) expect(error.guard).toBe(scenario.guard);
+      if (scenario.name === "busy") expect(error.message).toContain("queue position: flagg 2; oldest waiter 3m");
+      if (scenario.name === "busy drained") expect(error.message).toContain("queue length: 0; oldest waiter 0m");
+      if (scenario.name === "busy status broken") expect(error.message).toBe("fleet-compute gate admission busy (wait 1200 expired)");
       if (scenario.name === "lost run") expect(error.message).toContain("host vanished");
       if (scenario.name === "runner error") expect(error.message).toContain("stub output tail");
       if (scenario.name === "changed commit tree") {
