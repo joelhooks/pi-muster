@@ -2,10 +2,11 @@ import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "
 import { join } from "node:path";
 
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { FORBIDDEN_FLAGS } from "./argv.ts";
 import { queuePath, readDesk } from "./desk.ts";
+import { machineAdapter, tryAcquireHeavy } from "./heavy-lock.ts";
 import {
   agentClose,
   agentLaunch,
@@ -27,6 +28,13 @@ import { parsePorcelainZ } from "./packet.ts";
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
 import type { Harness } from "./test-support.ts";
+
+// Gate tests model admission, not the load of the machine running Vitest.
+beforeEach(() => {
+  vi.spyOn(machineAdapter, "performanceCores").mockReturnValue(12);
+  vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 16, load: 20, freeGB: 64 });
+});
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 const open = (h: Harness, dir: string) =>
   runWith(
@@ -725,6 +733,33 @@ describe("a lane from launch to close", () => {
     const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "s", checks: [] }));
     const error = await failWith(h, packetLand(dir, { id: reported.packet.id, outcome: "committed", evidence: "e" }));
     expect(error._tag).toBe("GuardFailed");
+  });
+
+  it("fails fast with every slot holder, aborts the merge, then lands after a slot drains", async () => {
+    vi.stubEnv("MUSTER_HEAVY_SLOTS", "2");
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    const before = sh(dir, "rev-parse", "HEAD");
+    const a = tryAcquireHeavy({ home: h.home }, "other gate a");
+    const b = tryAcquireHeavy({ home: h.home }, "other gate b");
+    expect(a.ok && b.ok).toBe(true);
+    try {
+      const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+      expect(error._tag).toBe("HeavyJobBusy");
+      expect(error.message).toContain("other gate a");
+      expect(error.message).toContain("other gate b");
+      expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
+      expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+      if (a.ok) a.release();
+      const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+      expect(landed.packet.state).toBe("committed");
+    } finally {
+      if (a.ok) a.release();
+      if (b.ok) b.release();
+    }
   });
 
   it("fails a gate by aborting the merge and leaves the source untouched", async () => {

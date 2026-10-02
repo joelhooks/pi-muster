@@ -51,7 +51,13 @@ Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane
 
 Worker side, when `MUSTER_AGENT` is set: `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets no owner tools and no path to the operator.
 
-`muster-heavy -- <command>` runs a command under the machine-wide heavy-job lock that `packet_land` gates also take.
+`muster-heavy -- <command>` runs a command in the same machine-wide heavy slots as `packet_land` gates. `MUSTER_HEAVY_SLOTS` overrides the count; otherwise it is `max(1, floor(performanceCores / 3))` (4 on a 12-performance-core Mac). macOS reads `hw.perflevel0.physicalcpu`; the fallback uses half of `os.availableParallelism()` as performance cores.
+
+Admission waits when 1-minute load exceeds available cores × 2.5 or available memory is below `MUSTER_HEAVY_MIN_FREE_GB` (default 16). macOS counts free, inactive and speculative pages from `vm_stat`; Linux uses `MemAvailable`. `--wait <seconds>` retries every 5 seconds and prints the reason. Without a wait, the CLI exits 75 and `packet_land` returns `HeavyJobBusy`, naming occupied slots or the admission blocker.
+
+For a deploy window, use `muster-heavy --exclusive --wait 1200 -- <command>`. It reserves admission, drains all configured and existing slots, holds them all (including the legacy lock), and releases on command exit. Timeout or cancellation clears only its own reservations. `muster-heavy status` shows the count, load, available memory, every slot's holder and age, and the exclusive-pending marker without changing locks. Dead local holders are reclaimed only during acquisition; unknown or foreign-host holders fail closed.
+
+Slot 0 retains `heavy-job.lock`; other slots use `heavy-job.lock.<n>`. New slot holders carry a `mode: "slot"` marker. A live, unmarked legacy lock is treated as exclusive until it drains, never deleted. Older single-lock sessions see exclusive holds as busy. Sessions on the intermediate multi-slot hotfix do not understand exclusive-pending; reload them before relying on deploy admission fencing, and keep slot counts consistent across sessions.
 
 ## Switchboard
 
@@ -71,7 +77,8 @@ When a desk holds several decisions, it publishes one static feedback page inste
 - `<project>/.brain/data/muster/reports/`: packet reports as `.svx`, with title, packet id and lane frontmatter. Worker text is fenced as code for MDsveX; existing `.md` report paths still verify and land without migration. `closed/`: pane tails saved before a close or restart.
 - `<project>/.brain/projects/muster/<slug>.svx`: a generated Brain board.
 - `~/.local/state/herdr-desk/<slug>.jsonl`: the desk queue, one JSON line per item.
-- `~/.local/state/muster/heavy-job.lock`: the heavy-job lock.
+- `~/.local/state/muster/heavy-job.lock` (slot 0), `heavy-job.lock.<n>`: atomic mkdir heavy slots with `holder.json`.
+- `~/.local/state/muster/heavy-job.lock.exclusive-pending`: the exclusive request's holder and admission fence.
 - `~/.local/state/muster/projects.jsonl`: every project `project_open` has seen, so the Switchboard can find them all.
 
 Muster refuses project state, briefs, and agent cwds under a temp dir unless the project was opened with `ephemeral: true`.

@@ -18,6 +18,11 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 - Chatty intercom drowns owners: in one pilot, 34 of about 985 messages were results. Acks and progress go to pane tokens and lane notes.
 - Never tell a worker to `/quit`. In a tiny pane it arrived as the chat message "quit". Close the pane after sign-off with `agent_close`.
 
+## Heavy gates and deploy windows
+
+- A slot is capacity, not permission to overload the machine. `muster-heavy status` shows load, available memory and holders without reclaiming stale locks. Waiting jobs print whether slots, load, memory or an exclusive hold blocks them.
+- Deploy windows use `muster-heavy --exclusive --wait 1200 -- <cmd>`, not a manually created slot-0 lock. Keep slot counts consistent and reload sessions on the intermediate multi-slot hotfix before relying on exclusive-pending: those sessions do not see the new admission fence. An unmarked live legacy lock blocks new admission until its holder exits.
+
 ## Workers and the fence
 
 - Set `base` on `lane_open` when a lane builds on anything other than the repo's default branch.

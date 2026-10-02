@@ -2,12 +2,12 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { parseThreshold, roleThreshold } from "./compact.ts";
 import { silenceLimits } from "./domain.ts";
 import type { DeskItem, Project } from "./domain.ts";
-import { heavySlots, readHolder, slotPath, tryAcquire, tryAcquireSlot } from "./heavy-lock.ts";
+import { heavySlots, machineAdapter, readHolder, slotPath, tryAcquire, tryAcquireSlot } from "./heavy-lock.ts";
 import { workPrompt } from "./ops.ts";
 import { costFromLines, readSessionCost, turnCost } from "./session-file.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, silenceDecision } from "./silence.ts";
@@ -181,8 +181,11 @@ describe("heavy-job lock", () => {
 
   it("admits up to the slot count, keeps slot 0 on the legacy path, and reports a holder when full", () => {
     const lock = join(mkdtempSync(join(tmpdir(), "lock-")), "heavy.lock");
-    expect(heavySlots({})).toBe(4);
-    expect(heavySlots({ MUSTER_HEAVY_SLOTS: "2" })).toBe(2);
+    const cores = vi.spyOn(machineAdapter, "performanceCores").mockReturnValue(12);
+    try {
+      expect(heavySlots({})).toBe(4);
+      expect(heavySlots({ MUSTER_HEAVY_SLOTS: "2" })).toBe(2);
+    } finally { cores.mockRestore(); }
     const held = [tryAcquireSlot(lock, "a", 2), tryAcquireSlot(lock, "b", 2)];
     expect(held.every((slot) => slot.ok)).toBe(true);
     expect(readHolder(slotPath(lock, 0))?.command).toBe("a");
