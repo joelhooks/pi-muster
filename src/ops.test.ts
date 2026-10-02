@@ -591,6 +591,14 @@ describe("a lane from launch to close", () => {
     expect(relaunched.row.delivery).toBe("unproven");
   });
 
+  it("retries the work prompt while Herdr has not yet registered the agent name", async () => {
+    const h = harness();
+    h.herdr.promptNotReady = 2;
+    const { launched } = await launchedWorker(h);
+    expect(h.herdr.promptNotReady).toBe(0);
+    expect(launched.row.delivery).toBe("proven");
+  });
+
   it("reports, verifies, lands --no-ff as the bot, closes the agent, and closes the lane", async () => {
     const h = harness();
     const { dir, clone } = await launchedWorker(h);

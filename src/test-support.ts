@@ -32,6 +32,8 @@ export class FakeHerdr {
   startSessions = true;
   startErrors: string[] = [];
   promptFails = false;
+  /** Reject this many agent.prompt calls with agent_not_ready, as Herdr does before it registers a fresh agent name. */
+  promptNotReady = 0;
   private seq = 0;
 
   constructor(readonly home: string) {
@@ -152,6 +154,10 @@ export class FakeHerdr {
       }
       case "agent.prompt":
         if (this.promptFails) throw new HerdrApiError({ operation: method, code: "agent_not_found", message: "agent gone" });
+        if (this.promptNotReady > 0) {
+          this.promptNotReady -= 1;
+          throw new HerdrApiError({ operation: method, code: "agent_not_ready", message: `agent ${String(params.target)} is not an active named agent` });
+        }
         return { type: "agent_prompted", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
       case "agent.wait":
         return { type: "agent_info", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };

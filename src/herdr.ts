@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Schedule } from "effect";
 import {
   HERDR_TRANSPORT_GRACE_MS,
   type HerdrError,
@@ -17,6 +17,8 @@ import { Herdr } from "./runtime.ts";
  */
 
 export const PROOF_OF_LIFE_MS = 30_000;
+const NAME_READY_STEP_MS = 500;
+const NAME_READY_TRIES = 20;
 const START_TIMEOUT_MS = 60_000;
 
 type PaneInfo = HerdrResultFor<"pane.get">["pane"];
@@ -126,11 +128,15 @@ export const promptWithProof = (paneId: string, text: string): Effect.Effect<Pro
   Effect.gen(function* () {
     const started = Date.now();
     const remaining = () => Math.max(1_000, PROOF_OF_LIFE_MS - (Date.now() - started));
-    const submitted = yield* call({
+    const prompt = call({
       method: "agent.prompt",
       params: { target: paneId, text, wait: { until: ["working"], timeout_ms: PROOF_OF_LIFE_MS } },
       timeoutMs: PROOF_OF_LIFE_MS + HERDR_TRANSPORT_GRACE_MS,
-    }).pipe(
+    });
+    // A fresh pane can be idle before Herdr registers its agent name. agent_not_ready
+    // rejects before any text is typed, so retrying cannot deliver twice.
+    const submitted = yield* prompt.pipe(
+      Effect.retry({ while: (error) => isCode(error, "agent_not_ready"), schedule: Schedule.spaced(NAME_READY_STEP_MS), times: NAME_READY_TRIES }),
       Effect.map((result) => result.agent.agent_status === "working"),
       Effect.catchIf(
         (error) => isCode(error, "agent_prompt_stalled"),
