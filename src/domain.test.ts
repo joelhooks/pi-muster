@@ -80,6 +80,7 @@ describe("schemas", () => {
       landedAs: null, reportedAt: "t", updatedAt: "t",
     };
     expect(decodeProject({ ...project, packets: [packet] }).packets[0]?.supersedes).toBeNull();
+    expect(decodeProject({ ...project, packets: [packet] }).packets[0]?.gate).toBeNull();
     expect(decodeProject({ ...project, packets: [{ ...packet, supersedes: "earlier" }] }).packets[0]?.supersedes).toBe("earlier");
     expect(() => decodeProject({ ...project, packets: [{ ...packet, supersedes: 42 }] })).toThrow();
   });

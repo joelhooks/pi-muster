@@ -133,6 +133,24 @@ export const CheckOutcome = Schema.Struct({
 });
 export type CheckOutcome = typeof CheckOutcome.Type;
 
+const GateFields = {
+  runId: Schema.String,
+  host: Schema.String,
+  tree: Schema.String,
+  slot: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  durationMs: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
+};
+
+/** Fleet-compute's receipt boundary; extra runner fields remain in the saved file. */
+export const GateReceipt = Schema.Struct({
+  ...GateFields,
+  exit: Schema.NullOr(Schema.Number.check(Schema.isInt())),
+  lostReason: Schema.optionalKey(Schema.String),
+});
+export type GateReceipt = typeof GateReceipt.Type;
+export const PacketGate = Schema.Struct({ ...GateFields, receipt: Path });
+export type PacketGate = typeof PacketGate.Type;
+
 export const Packet = Schema.Struct({
   /** Full commit id or sha256 of the artifact. The packet's name. */
   id: Schema.String,
@@ -145,6 +163,7 @@ export const Packet = Schema.Struct({
   state: PacketState,
   verification: Schema.NullOr(Schema.Struct({ at: Iso, checks: Schema.Array(CheckOutcome) })),
   landedAs: Schema.NullOr(Schema.String),
+  gate: Schema.NullOr(PacketGate).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
   /** Earlier packet whose commit this follow-up includes. */
   supersedes: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
   /** What the owner checked and where, when the packet was recorded without a merge. */

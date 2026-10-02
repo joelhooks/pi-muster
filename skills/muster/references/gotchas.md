@@ -20,6 +20,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Heavy gates and deploy windows
 
+- Installed fleet-compute owns landing gates: its receipt decides success (including gate exits 2 or 75); a lost run (`exit: null`) fails closed, and the private index and committed tree must match the receipt.
+
 - A slot is capacity, not permission to overload the machine. `muster-heavy status` shows load, available memory and holders without reclaiming stale locks. Waiting jobs print whether slots, load, memory or an exclusive hold blocks them.
 - Deploy windows use `muster-heavy --exclusive --wait 1200 -- <cmd>`, not a manually created slot-0 lock. Keep slot counts consistent and reload sessions on the intermediate multi-slot hotfix before relying on exclusive-pending: those sessions do not see the new admission fence. A live slot-0 holder blocks new admission only when it is marked `exclusive`; an unmarked one from older code is just a busy slot.
 

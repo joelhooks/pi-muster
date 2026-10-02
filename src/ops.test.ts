@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { Effect } from "effect";
@@ -737,6 +737,8 @@ describe("a lane from launch to close", () => {
 
   it("fails fast with every slot holder, aborts the merge, then lands after a slot drains", async () => {
     vi.stubEnv("MUSTER_HEAVY_SLOTS", "2");
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "/missing/fleet-compute.ts");
+    vi.stubEnv("PATH", "/usr/bin:/bin");
     const h = harness();
     const { dir, clone } = await launchedWorker(h);
     const commit = commitInClone(clone);
@@ -756,10 +758,102 @@ describe("a lane from launch to close", () => {
       if (a.ok) a.release();
       const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
       expect(landed.packet.state).toBe("committed");
+      expect(landed.packet.gate).toBeNull();
     } finally {
       if (a.ok) a.release();
       if (b.ok) b.release();
     }
+  });
+
+  it.each([
+    { name: "pass", exit: 0, code: 2, receipt: true, guard: null },
+    { name: "PATH pass", exit: 0, code: 0, receipt: true, guard: null },
+    { name: "gate exit 1", exit: 1, code: 1, receipt: true, guard: "gate" },
+    { name: "gate exit 2", exit: 2, code: 2, receipt: true, guard: "gate" },
+    { name: "gate exit 75", exit: 75, code: 75, receipt: true, guard: "gate" },
+    { name: "busy", exit: 0, code: 75, receipt: false, guard: "busy" },
+    { name: "runner error", exit: 0, code: 2, receipt: false, guard: "gate-runner" },
+    { name: "wrong tree", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
+    { name: "lost run", exit: null, code: 2, receipt: true, guard: "gate-runner" },
+    { name: "changed private index", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
+    { name: "changed commit tree", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
+    { name: "malformed receipt", exit: 0, code: 0, receipt: true, guard: "gate-runner" },
+  ])("fleet-compute: $name", async (scenario) => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    const before = sh(dir, "rev-parse", "HEAD");
+    if (scenario.name === "changed commit tree") {
+      // A hostile post-commit hook advances HEAD to a new commit with the old
+      // tree. The assertion must report it, not reset or rewrite either commit.
+      const hook = join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "hooks", "post-commit");
+      writeFileSync(hook, `#!/bin/sh\ntree=$(git rev-parse HEAD^1^{tree})\ncommit=$(printf 'hook commit' | git commit-tree "$tree" -p HEAD)\ngit update-ref HEAD "$commit"\n`);
+      chmodSync(hook, 0o755);
+    }
+    const stub = join(h.root, "fleet-compute.ts");
+    const argvPath = join(h.root, "gate-argv.json");
+    writeFileSync(stub, `
+      const fs = require('node:fs');
+      const cp = require('node:child_process');
+      const path = require('node:path');
+      const args = process.argv.slice(2);
+      const value = key => args[args.indexOf(key) + 1];
+      const receiptPath = value('--receipt');
+      fs.writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(args));
+      const receipt = {runId: 'stub-run', host: 'stub-host', tree: value('--tree'), slot: 1, durationMs: 42, exit: ${JSON.stringify(scenario.exit)}, lostReason: 'host vanished'};
+      if (${JSON.stringify(scenario.name)} === 'wrong tree') receipt.tree = 'wrong';
+      if (${scenario.receipt}) fs.writeFileSync(receiptPath, ${JSON.stringify(scenario.name)} === 'malformed receipt' ? '{' : JSON.stringify(receipt));
+      if (${JSON.stringify(scenario.name)} === 'changed private index') cp.execFileSync('git', ['read-tree', 'HEAD'], {cwd: value('--source'), env: {...process.env, GIT_INDEX_FILE: path.join(path.dirname(receiptPath), 'index')}});
+      console.error('stub output tail');
+      process.exit(${scenario.code});
+    `);
+    if (scenario.name === "PATH pass") {
+      const launcher = join(h.root, "fleet-compute");
+      writeFileSync(launcher, `#!/bin/sh\nexec '${process.execPath}' '${stub}' "$@"\n`);
+      chmodSync(launcher, 0o755);
+      vi.stubEnv("MUSTER_FLEET_COMPUTE", "/missing/fleet-compute.ts");
+      vi.stubEnv("PATH", `${h.root}:${process.env.PATH}`);
+    } else {
+      vi.stubEnv("MUSTER_FLEET_COMPUTE", stub);
+    }
+    // Discovery happens during landing, and the runner bypasses local admission.
+    vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 1, load: 100, freeGB: 1 });
+    if (scenario.guard === null) {
+      const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+      expect(result.packet.gate).toMatchObject({ runId: "stub-run", host: "stub-host", slot: 1, durationMs: 42, tree: sh(dir, "rev-parse", "HEAD^{tree}").trim() });
+      expect(result.note).toContain(`gate ran on stub-host at tree ${result.packet.gate?.tree.slice(0, 12)} (run stub-run)`);
+      expect(result.packet.evidence).toContain(result.note);
+      const saved = result.packet.gate?.receipt;
+      expect(saved).toBe(`${result.packet.report}.gate-receipt.json`);
+      if (!saved) throw new Error("missing saved receipt");
+      expect(JSON.parse(readFileSync(saved, "utf8")).tree).toBe(result.packet.gate?.tree);
+      expect((await runWith(h, load(dir))).packets[0]?.gate).toEqual(result.packet.gate);
+    } else {
+      const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+      expect(error._tag).toBe(scenario.guard === "busy" ? "HeavyJobBusy" : "GuardFailed");
+      if ("guard" in error) expect(error.guard).toBe(scenario.guard);
+      if (scenario.name === "lost run") expect(error.message).toContain("host vanished");
+      if (scenario.name === "runner error") expect(error.message).toContain("stub output tail");
+      if (scenario.name === "changed commit tree") {
+        expect(sh(dir, "rev-parse", "HEAD")).not.toBe(before);
+        expect(sh(dir, "merge-base", "--is-ancestor", commit, "HEAD")).toBe("");
+        expect(error.message).toContain("commit left intact for owner");
+        const packet = (await runWith(h, load(dir))).packets[0];
+        expect(existsSync(`${packet?.report}.gate-receipt.json`)).toBe(true);
+      } else {
+        expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
+        expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+        expect(existsSync(join(dir, "work.txt"))).toBe(false);
+      }
+      expect((await runWith(h, load(dir))).packets[0]?.state).toBe("verified");
+    }
+    const packet = (await runWith(h, load(dir))).packets[0];
+    expect(existsSync(`${packet?.report}.gate-receipt.json`)).toBe(scenario.receipt);
+    const args = JSON.parse(readFileSync(argvPath, "utf8"));
+    expect(args).toEqual(["gate", "--project", "probe", "--repo", "repo", "--source", dir, "--tree", expect.any(String), "--head", before.trim(), "--branch", (await runWith(h, load(dir))).agents[0]?.clone?.branch, "--wait", "1200", "--receipt", expect.any(String), "--", "sh", "-c", "test -f work.txt"]);
+    expect(existsSync(join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "MERGE_HEAD"))).toBe(false);
   });
 
   it("fails a gate by aborting the merge and leaves the source untouched", async () => {

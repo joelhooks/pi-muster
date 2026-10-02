@@ -1,5 +1,5 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
 import { Effect, Schema } from "effect";
 
@@ -15,8 +15,8 @@ import {
 } from "./argv.ts";
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
-import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
+import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
+import { GateReceipt, Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { tryAcquireHeavy } from "./heavy-lock.ts";
 import {
@@ -1227,6 +1227,7 @@ export const packetReport = (params: PacketReportInput) =>
           state: "reported",
           verification: null,
           landedAs: null,
+          gate: null,
           reportedAt: prior?.reportedAt ?? now,
           updatedAt: now,
         };
@@ -1293,15 +1294,55 @@ export interface PacketLandInput {
   readonly message?: string | undefined;
 }
 
-const runGate = (source: string, gate: string) =>
+const runGate = (source: string, gate: string, context: {
+  readonly project: Project;
+  readonly tree: string;
+  readonly head: string;
+  readonly branch: string;
+  readonly receiptPath: string;
+  readonly savedReceipt: string;
+}) =>
   Effect.gen(function* () {
+    const { project, tree, head, branch, receiptPath, savedReceipt } = context;
     const env = yield* MusterEnv;
     const proc = yield* Proc;
+    // Resolve at call time: installing the runner needs no extension restart.
+    const configured = process.env.MUSTER_FLEET_COMPUTE;
+    const explicit = configured && isAbsolute(configured) && existsSync(configured) ? configured : null;
+    const onPath = explicit ? null : (yield* proc.run("sh", ["-c", "command -v fleet-compute"], { cwd: source })).stdout.trim();
+    const runner = explicit ? { command: "node", prefix: [explicit] } : onPath ? { command: onPath, prefix: [] } : null;
+    if (runner) {
+      const result = yield* proc.run(runner.command, [
+        ...runner.prefix, "gate", "--project", project.slug,
+        "--repo", basename(source), "--source", source, "--tree", tree,
+        "--head", head, "--branch", branch, "--wait", "1200", "--receipt", receiptPath,
+        "--", "sh", "-c", gate,
+      ], { cwd: source, timeoutMs: GATE_TIMEOUT_MS }).pipe(
+        Effect.mapError((error) => new GuardFailed({ guard: "gate-runner", message: error.message })),
+      );
+      if (!existsSync(receiptPath)) {
+        if (result.code === 75) return yield* new HeavyJobBusy({ holder: "fleet-compute", message: "fleet-compute gate admission busy (wait 1200 expired)" });
+        return yield* new GuardFailed({ guard: "gate-runner", message: `gate runner exited ${result.code} without a receipt:\n${(result.stdout + result.stderr).trim().slice(-1500)}` });
+      }
+      // Keep failure and lost-run receipts too, not just successful landings.
+      yield* Effect.try({
+        try: () => copyFileSync(receiptPath, savedReceipt),
+        catch: (error) => new GuardFailed({ guard: "gate-runner", message: `cannot save gate receipt: ${String(error)}` }),
+      });
+      const receipt = yield* Effect.try({
+        try: () => Schema.decodeUnknownSync(GateReceipt)(JSON.parse(readFileSync(receiptPath, "utf8"))),
+        catch: (error) => new GuardFailed({ guard: "gate-runner", message: `invalid gate receipt: ${String(error)}` }),
+      });
+      if (receipt.tree !== tree) return yield* new GuardFailed({ guard: "gate-tree", message: `gate receipt tree ${receipt.tree} differs from merged tree ${tree}` });
+      if (receipt.exit === null) return yield* new GuardFailed({ guard: "gate-runner", message: `gate run lost: ${receipt.lostReason ?? "unknown reason"}` });
+      return { ...result, code: receipt.exit, receipt };
+    }
     const held = tryAcquireHeavy({ home: env.home }, `muster gate: ${gate}`);
     if (!held.ok) {
       return yield* new HeavyJobBusy({ holder: held.reason, message: `heavy gate admission busy: ${held.reason}` });
     }
-    return yield* proc.run("sh", ["-c", gate], { cwd: source, timeoutMs: GATE_TIMEOUT_MS }).pipe(Effect.ensuring(Effect.sync(held.release)));
+    const result = yield* proc.run("sh", ["-c", gate], { cwd: source, timeoutMs: GATE_TIMEOUT_MS }).pipe(Effect.ensuring(Effect.sync(held.release)));
+    return { ...result, receipt: null };
   });
 
 const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet, params: PacketLandInput) =>
@@ -1323,7 +1364,7 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
     const onBranch = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, branch], { cwd: source })).code === 0;
     if (!onBranch) return yield* new GuardFailed({ guard: "harvest", message: `${packet.id.slice(0, 12)} is not on ${branch} in ${source}` });
     const merged = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, "HEAD"], { cwd: source })).code === 0;
-    if (merged) return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), note: "already on HEAD; nothing merged" };
+    if (merged) return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), note: "already on HEAD; nothing merged", gate: null };
     const base = (yield* git(source, "merge-base", "HEAD", branch)).trim();
     const incoming = (yield* git(source, "diff", "--name-only", "--no-renames", "-z", base, branch)).split("\0").filter(Boolean);
     const overlaps = dirty.filter((path) => !path.startsWith(".brain/data/muster/") && incoming.some((changed) =>
@@ -1343,20 +1384,43 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
         yield* abort();
         return yield* new GuardFailed({ guard: "merge", message: `merge of ${branch} failed and was aborted: ${(merge.stderr || merge.stdout).trim().slice(-800)}` });
       }
+      let receipt: GateReceipt | null = null;
+      const receiptPath = join(scratch, "gate-receipt.json");
+      const savedReceipt = `${packet.report}.gate-receipt.json`;
       if (params.gate) {
-        const gate = yield* runGate(source, params.gate).pipe(Effect.tapError(abort));
+        const tree = (yield* isolatedGit("write-tree")).trim();
+        const head = (yield* git(source, "rev-parse", "HEAD")).trim();
+        const gate = yield* runGate(source, params.gate, { project, tree, head, branch, receiptPath, savedReceipt }).pipe(Effect.tapError(abort));
+        receipt = gate.receipt;
         if (gate.code !== 0) {
           yield* abort();
           return yield* new GuardFailed({ guard: "gate", message: `gate failed (exit ${gate.code}); merge aborted:\n${(gate.stdout + gate.stderr).trim().slice(-1500)}` });
         }
       }
       const message = params.message ?? `muster: land ${row.lane}/${row.name} ${packet.id.slice(0, 12)}`;
+      let gateEvidence: PacketGate | null = null;
+      if (receipt) {
+        gateEvidence = { runId: receipt.runId, host: receipt.host, tree: receipt.tree, slot: receipt.slot, durationMs: receipt.durationMs, receipt: savedReceipt };
+        const currentTree = (yield* isolatedGit("write-tree").pipe(Effect.tapError(abort))).trim();
+        if (currentTree !== receipt.tree) {
+          // Restore the merge index so abort can remove incoming worktree paths
+          // even when the gate rewrote the private index to HEAD.
+          yield* isolatedGit("read-tree", receipt.tree).pipe(Effect.tapError(abort));
+          yield* isolatedGit("update-index", "--refresh").pipe(Effect.tapError(abort));
+          yield* abort();
+          return yield* new GuardFailed({ guard: "gate-tree", message: `private index tree ${currentTree} differs from gated tree ${receipt.tree}; merge aborted before commit` });
+        }
+      }
       yield* must("git", ["commit", "--no-edit", "-m", message], {
         cwd: source,
         env: { ...indexEnv, GIT_COMMITTER_NAME: BOT_NAME, GIT_COMMITTER_EMAIL: BOT_EMAIL, GIT_AUTHOR_NAME: BOT_NAME, GIT_AUTHOR_EMAIL: BOT_EMAIL },
       }).pipe(Effect.tapError(abort));
+      if (receipt) {
+        const committedTree = (yield* git(source, "rev-parse", "HEAD^{tree}")).trim();
+        if (committedTree !== receipt.tree) return yield* new GuardFailed({ guard: "gate-tree", message: `committed HEAD tree ${committedTree} differs from gated tree ${receipt.tree}; commit left intact for owner (receipt: ${gateEvidence?.receipt})` });
+      }
       if (incoming.length) yield* git(source, "--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--", ...incoming);
-      return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), note: `merged ${branch} --no-ff as shitratgit[bot]; not pushed` };
+      return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), gate: gateEvidence, note: `merged ${branch} --no-ff as shitratgit[bot]; not pushed${receipt ? `; gate ran on ${receipt.host} at tree ${receipt.tree.slice(0, 12)} (run ${receipt.runId})` : ""}` };
     }).pipe(Effect.ensuring(Effect.sync(() => rmSync(scratch, { recursive: true }))));
   });
 
@@ -1380,6 +1444,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
 
     let landedAs: string | null = null;
     let note = "";
+    let gate: PacketGate | null = null;
     const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
     let evidence = params.evidence?.trim();
     if (recording && !evidence) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
@@ -1388,7 +1453,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       if (recording) {
         note = "recorded without a merge";
       } else if (project.mode === "rift-merge" && !params.landedAs) {
-        ({ landedAs, note } = yield* riftMerge(project, lane, row, packet, params));
+        ({ landedAs, note, gate } = yield* riftMerge(project, lane, row, packet, params));
       } else {
         if (!params.landedAs) return yield* input(`mode ${project.mode} lands outside Muster; pass landedAs with the merge commit`);
         const source = sourceOf(project, lane, row);
@@ -1434,7 +1499,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     const saved = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
-        const recorded = yield* recordPacketOutcome(current, latest, params.outcome, landedAs, evidence, iso(env));
+        const recorded = yield* recordPacketOutcome(current, { ...latest, gate: gate ?? latest.gate }, params.outcome, landedAs, gate ? [evidence, note].filter(Boolean).join("\n") : evidence, iso(env));
         const agent = yield* findRow(current, packet.agent);
         const moves = agent.state === "reported" || agent.state === "verified" || (agent.state === "landed" && event.type === "REWORK");
         let updated = moves ? withRow(recorded.project, { ...agent, state: yield* stepAgent(agent.name, agent.state, event), updatedAt: iso(env) }) : recorded.project;
