@@ -67,14 +67,23 @@ describe("heavy gate slots", () => {
     if (held.ok) held.release();
   });
 
-  it("leaves live legacy holders untouched and treats them as exclusive", () => {
+  it("counts an unmarked legacy holder as one busy slot and leaves it untouched", () => {
     const options = setup();
-    const legacy = tryAcquire(heavyLockPath(options.home), "old deploy");
+    const legacy = tryAcquire(heavyLockPath(options.home), "old gate");
+    const held = tryAcquireHeavy(options, "new gate");
+    expect(held.ok).toBe(true);
+    expect(readHolder(heavyLockPath(options.home))?.command).toBe("old gate");
+    if (held.ok) held.release();
+    if (legacy.ok) legacy.release();
+  });
+
+  it("fences new admission only behind a slot 0 marked exclusive", () => {
+    const options = setup();
+    const hold = tryAcquire(heavyLockPath(options.home), "deploy", process.pid, "exclusive");
     const held = tryAcquireHeavy(options, "new gate");
     expect(held.ok).toBe(false);
-    if (!held.ok) expect(held.reason).toContain("old deploy");
-    expect(readHolder(heavyLockPath(options.home))?.command).toBe("old deploy");
-    if (legacy.ok) legacy.release();
+    if (!held.ok) expect(held.reason).toContain("deploy");
+    if (hold.ok) hold.release();
   });
 
   it("pending fences new jobs, drains every existing slot, holds and releases all", () => {

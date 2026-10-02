@@ -57,7 +57,7 @@ Admission waits when 1-minute load exceeds available cores × 2.5 or available m
 
 For a deploy window, use `muster-heavy --exclusive --wait 1200 -- <command>`. It reserves admission, drains all configured and existing slots, holds them all (including the legacy lock), and releases on command exit. Timeout or cancellation clears only its own reservations. `muster-heavy status` shows the count, load, available memory, every slot's holder and age, and the exclusive-pending marker without changing locks. Dead local holders are reclaimed only during acquisition; unknown or foreign-host holders fail closed.
 
-Slot 0 retains `heavy-job.lock`; other slots use `heavy-job.lock.<n>`. New slot holders carry a `mode: "slot"` marker. A live, unmarked legacy lock is treated as exclusive until it drains, never deleted. Older single-lock sessions see exclusive holds as busy. Sessions on the intermediate multi-slot hotfix do not understand exclusive-pending; reload them before relying on deploy admission fencing, and keep slot counts consistent across sessions.
+Slot 0 retains `heavy-job.lock`; other slots use `heavy-job.lock.<n>`. Slot holders carry `mode: "slot"`; an exclusive hold marks slot 0 `mode: "exclusive"`. Only that marker fences new admission. A live unmarked holder from older code counts as one busy slot and is never deleted. Older single-lock sessions see exclusive holds as busy. Sessions on the intermediate multi-slot hotfix do not understand exclusive-pending; reload them before relying on deploy admission fencing, and keep slot counts consistent across sessions.
 
 ## Switchboard
 

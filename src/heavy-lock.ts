@@ -22,7 +22,8 @@ export interface Holder {
   readonly host: string;
   readonly command: string;
   readonly startedAt: string;
-  readonly mode?: "slot";
+  /** "exclusive" marks a deploy hold on slot 0; anything else there is an ordinary busy slot. */
+  readonly mode?: "slot" | "exclusive";
 }
 
 export type Acquire = { readonly ok: true; readonly release: () => void } | { readonly ok: false; readonly holder: Holder | null };
@@ -42,7 +43,7 @@ export function readHolder(lock: string): Holder | null {
     const value: unknown = JSON.parse(readFileSync(join(lock, "holder.json"), "utf8"));
     if (typeof value !== "object" || value === null || !("pid" in value) || !("host" in value) || !("command" in value) || !("startedAt" in value)) return null;
     if (typeof value.pid !== "number" || !Number.isInteger(value.pid) || value.pid <= 0 || value.pid > 2147483647 || typeof value.host !== "string" || typeof value.command !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt))) return null;
-    return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && value.mode === "slot" ? { mode: "slot" as const } : {}) };
+    return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && (value.mode === "slot" || value.mode === "exclusive") ? { mode: value.mode } : {}) };
   } catch {
     return null;
   }
@@ -52,7 +53,7 @@ function stale(holder: Holder | null): boolean {
   return holder !== null && holder.host === hostname() && !alive(holder.pid);
 }
 
-export function tryAcquire(lock: string, command: string, pid = process.pid, mode?: "slot"): Acquire {
+export function tryAcquire(lock: string, command: string, pid = process.pid, mode?: "slot" | "exclusive"): Acquire {
   mkdirSync(join(lock, ".."), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -216,7 +217,8 @@ function blocker(lock: string, allowSlot = false): string | null {
     rmSync(lock, { recursive: true, force: true });
     return null;
   }
-  if (allowSlot && holder?.mode === "slot") return null;
+  // Only a marked exclusive hold fences the machine. Older code writes unmarked holders; they are one busy slot.
+  if (allowSlot && holder !== null && holder.mode !== "exclusive") return null;
   return `${lock.split("/").at(-1)}: ${describeHolder(holder)}`;
 }
 
@@ -280,7 +282,7 @@ export function exclusiveRequest(options: HeavyOptions, command: string) {
     }
     // Retain the legacy lock while draining: old sessions cannot see pending.
     if (actor.getSnapshot().matches("reserved")) {
-      const legacy = tryAcquire(heavyLockPath(options.home), command);
+      const legacy = tryAcquire(heavyLockPath(options.home), command, process.pid, "exclusive");
       if (!legacy.ok) return { ok: false, reason: `heavy-job.lock: ${describeHolder(legacy.holder)}` };
       releases.push(legacy.release);
       actor.send({ type: "DRAIN" });
