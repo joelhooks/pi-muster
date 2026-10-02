@@ -68,7 +68,7 @@ When a desk holds several decisions, it publishes one static feedback page inste
 ## State
 
 - `<project>/.brain/data/muster/project.json`: the project, its lanes, agent rows, and packets. Schema-decoded on every read; written with a lock and an atomic rename.
-- `<project>/.brain/data/muster/reports/`: packet reports. `closed/`: pane tails saved before a close or restart.
+- `<project>/.brain/data/muster/reports/`: packet reports as `.svx`, with title, packet id and lane frontmatter. Worker text is fenced as code for MDsveX; existing `.md` report paths still verify and land without migration. `closed/`: pane tails saved before a close or restart.
 - `<project>/.brain/projects/muster/<slug>.svx`: a generated Brain board.
 - `~/.local/state/herdr-desk/<slug>.jsonl`: the desk queue, one JSON line per item.
 - `~/.local/state/muster/heavy-job.lock`: the heavy-job lock.
