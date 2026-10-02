@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 
 import {
   agentEnv,
@@ -16,8 +16,8 @@ import {
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
-import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError } from "./errors.ts";
+import { Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
+import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { describeHolder, heavyLockPath, tryAcquire } from "./heavy-lock.ts";
 import {
   agentStart,
@@ -47,7 +47,7 @@ import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { registerProject } from "./switchboard-ops.ts";
-import { closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
+import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
 import type { LiveCounts } from "./tokens.ts";
 
@@ -367,6 +367,9 @@ export const projectOpen = (params: ProjectOpenInput) =>
     );
 
     const notes: string[] = [];
+    const visibility = yield* publicCheckout(dir);
+    if (visibility === "public") notes.push(`⚠ ${dir} is a public GitHub checkout; Muster state there is one commit from being published. Use a private dir.`);
+    if (visibility === "unknown") notes.push("GitHub checkout visibility unknown (git/gh unavailable or failed).");
     if (params.desk && !project.lanes.some((lane) => lane.slug === "desk" && lane.state !== "closed")) {
       const desk = yield* laneOpen(dir, { slug: "desk", kind: "role", label: "💬 desk", goal: "Joel's gateway: answers from evidence and turns feedback into dispatches" });
       notes.push(`desk tab ${desk.lane.tabId}${createdRoot ? " (first tab)" : " (appended; an adopted space keeps its tab order)"}`);
@@ -377,6 +380,173 @@ export const projectOpen = (params: ProjectOpenInput) =>
     notes.push(yield* publishTokens(final));
     notes.push(`brain: ${yield* writeBrain(final)}`);
     return { project: final, adopted, cadence: cadenceCall(final), notes };
+  });
+
+// ---------- project_move ----------
+
+export type CheckoutVisibility = "public" | "private" | "unknown" | "not-github";
+
+/** Pure boundary decisions; only github.com origins qualify. */
+export function githubOrigin(origin: string): string | null {
+  const match = /^(?:git@github\.com:|(?:https?|ssh):\/\/(?:git@)?github\.com\/)([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(origin.trim());
+  return match?.[1] ?? null;
+}
+
+export function checkoutVisibility(origin: string, response: unknown): CheckoutVisibility {
+  if (!githubOrigin(origin)) return "not-github";
+  if (typeof response !== "object" || response === null || !("visibility" in response)) return "unknown";
+  return response.visibility === "PUBLIC" ? "public" : response.visibility === "PRIVATE" || response.visibility === "INTERNAL" ? "private" : "unknown";
+}
+
+export const publicCheckout = (dir: string) =>
+  Effect.gen(function* () {
+    const proc = yield* Proc;
+    const repo = yield* proc.run("git", ["rev-parse", "--show-toplevel"], { cwd: dir, timeoutMs: 10_000 });
+    if (repo.code !== 0) return "unknown" as const;
+    const origin = yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: dir, timeoutMs: 10_000 });
+    if (origin.code !== 0) return "unknown" as const;
+    const name = githubOrigin(origin.stdout);
+    if (!name) return "not-github" as const;
+    const result = yield* proc.run("gh", ["repo", "view", name, "--json", "visibility"], { cwd: dir, timeoutMs: 10_000 });
+    if (result.code !== 0) return "unknown" as const;
+    return yield* Effect.try({ try: () => checkoutVisibility(origin.stdout, JSON.parse(result.stdout) as unknown), catch: () => input("invalid gh visibility response") });
+  }).pipe(Effect.catch(() => Effect.succeed("unknown" as const)));
+
+/** Check a not-yet-created target using its nearest existing parent checkout. */
+const existingParent = (path: string): string => {
+  let parent = path;
+  while (!existsSync(parent)) parent = dirname(parent);
+  return parent;
+};
+
+const guardMoveTree = (root: string, paths: readonly string[]) => {
+  for (const path of paths) {
+    let at = path;
+    while (at !== root) {
+      if (existsSync(at) && lstatSync(at).isSymbolicLink()) throw new Error(`refusing symlinked state path ${at}`);
+      at = dirname(at);
+    }
+  }
+};
+
+const moveIO = <A>(path: string, run: () => A) =>
+  Effect.try({ try: run, catch: (error) => new StoreError({ path, message: `project move failed: ${String(error)}` }) });
+
+export const projectMove = (dir: string, destination: string) =>
+  Effect.gen(function* () {
+    const toInput = yield* requireAbsolute("to", destination);
+    const old = yield* moveIO(dir, () => realpathSync(dir));
+    yield* moveIO(old, () => guardMoveTree(old, [dataDir(old)]));
+    const initial = yield* load(old);
+    yield* guardDurable(initial, "to", toInput);
+    const parent = existingParent(toInput);
+    const visibility = yield* publicCheckout(parent);
+    if (visibility === "public") return yield* input(`target ${toInput} is inside a public GitHub checkout; use a private dir`);
+    yield* moveIO(toInput, () => mkdirSync(toInput, { recursive: true }));
+    const to = yield* moveIO(toInput, () => realpathSync(toInput));
+    yield* guardDurable(initial, "to", to);
+    if (to === old || to.startsWith(`${dataDir(old)}/`) || old.startsWith(`${dataDir(to)}/`)) return yield* input("source and target Muster state overlap");
+    if (exists(to)) return yield* input(`target ${to} already holds a Muster project`);
+
+    const result = yield* mutate(old, (current) => Effect.gen(function* () {
+        yield* moveIO(to, () => {
+          guardMoveTree(to, [dataDir(to), join(to, ".brain", "projects", "muster")]);
+          guardMoveTree(old, [join(old, ".brain", "projects", "muster")]);
+          mkdirSync(dataDir(to), { recursive: true });
+        });
+        const targetLock = `${projectPath(to)}.lock`;
+        return yield* Effect.acquireUseRelease(
+          moveIO(to, () => mkdirSync(targetLock)),
+          () => Effect.gen(function* () {
+            if (exists(to)) return yield* input(`target ${to} already holds a Muster project`);
+            const oldBoard = join(old, ".brain", "projects", "muster", `${current.slug}.svx`);
+            const newBoard = join(to, ".brain", "projects", "muster", `${current.slug}.svx`);
+            if (existsSync(newBoard)) return yield* input(`target board already exists: ${newBoard}`);
+            const rewrittenPaths: Array<{ from: string; to: string }> = [];
+            const rewritePath = (value: string) => {
+              const next = value === oldBoard ? newBoard : value.startsWith(`${dataDir(old)}/`) ? `${dataDir(to)}/${value.slice(dataDir(old).length + 1)}` : value;
+              if (next !== value && !rewrittenPaths.some((entry) => entry.from === value)) rewrittenPaths.push({ from: value, to: next });
+              return next;
+            };
+            const rewrite = (value: unknown, key = ""): unknown => {
+              if (key === "cwd" || key === "repo") return value;
+              if (typeof value === "string") return rewritePath(value);
+              if (Array.isArray(value)) return value.map((entry) => rewrite(entry));
+              if (typeof value === "object" && value !== null) return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, rewrite(v, k)]));
+              return value;
+            };
+            const next = yield* decodeWith(Schema.decodeUnknownSync(ProjectSchema), rewrite(current));
+            const lanesGivenRepo = current.lanes.filter((lane) => lane.repo === null).map((lane) => lane.slug);
+            const moved: Project = {
+              ...next, dir: to,
+              lanes: next.lanes.map((lane) => ({ ...lane, repo: lane.repo ?? old })),
+              agents: next.agents.map((row) => ({ ...row, restore: row.restore ? { ...row.restore, env: { ...row.restore.env, MUSTER_PROJECT: to } } : null })),
+            };
+            const manifest = yield* moveIO(old, () => {
+              const files: Array<{ from: string; to: string; hash: string }> = [];
+              const walk = (source: string, target: string) => {
+                for (const entry of readdirSync(source, { withFileTypes: true })) {
+                  const from = join(source, entry.name);
+                  const dest = join(target, entry.name);
+                  if (from === `${projectPath(old)}.lock`) continue;
+                  if (entry.isDirectory()) walk(from, dest);
+                  else if (entry.isFile()) files.push({ from, to: dest, hash: sha256File(from) });
+                  else throw new Error(`refusing non-regular state file ${from}`);
+                }
+              };
+              walk(dataDir(old), dataDir(to));
+              if (existsSync(oldBoard)) {
+                if (!lstatSync(oldBoard).isFile()) throw new Error(`refusing non-regular board ${oldBoard}`);
+                files.push({ from: oldBoard, to: newBoard, hash: sha256File(oldBoard) });
+              }
+              // Never overwrite pre-existing target files, including a hand-written board.
+              for (const file of files) {
+                guardMoveTree(to, [file.to]);
+                if (existsSync(file.to)) throw new Error(`target file already exists: ${file.to}`);
+              }
+              for (const file of files) {
+                mkdirSync(dirname(file.to), { recursive: true });
+                copyFileSync(file.from, file.to);
+                if (sha256File(file.to) !== file.hash) throw new Error(`copy hash mismatch: ${file.to}`);
+              }
+              return files;
+            });
+            yield* moveIO(to, () => writeFileSync(projectPath(to), `${JSON.stringify(Schema.encodeSync(ProjectSchema)(moved), null, 2)}\n`));
+            const verified = yield* load(to);
+            yield* moveIO(to, () => {
+              for (const packet of verified.packets) {
+                if (rewrittenPaths.some((entry) => entry.to === packet.report) && !existsSync(packet.report)) throw new Error(`missing rewritten report ${packet.report}`);
+              }
+              // Before any removal, ensure the source hasn't changed since copying.
+              for (const file of manifest) if (sha256File(file.from) !== file.hash) throw new Error(`source changed during move: ${file.from}`);
+            });
+            yield* writeBrain(verified);
+            yield* moveIO(to, () => {
+              for (const file of manifest) {
+                // Catalog and board are the deliberate rewrites; every other copied file stays byte-identical.
+                if (file.to !== projectPath(to) && file.to !== newBoard && sha256File(file.to) !== file.hash) throw new Error(`final copy hash mismatch: ${file.to}`);
+              }
+            });
+            yield* registerProject(verified);
+            yield* moveIO(old, () => {
+              for (const file of manifest) unlinkSync(file.from);
+              const prune = (path: string) => {
+                for (const entry of readdirSync(path, { withFileTypes: true })) if (entry.isDirectory() && join(path, entry.name) !== `${projectPath(old)}.lock`) prune(join(path, entry.name));
+                if (readdirSync(path).length === 0) rmdirSync(path);
+              };
+              prune(dataDir(old));
+              const boardDir = dirname(oldBoard);
+              if (existsSync(boardDir) && readdirSync(boardDir).length === 0) rmdirSync(boardDir);
+            });
+            const agentsToRestore = moved.agents.filter((row) => row.pane !== null && row.state !== "closed").map((row) => `restore ${row.name} to pick up the new project dir`);
+            return [current, { project: verified, copiedFiles: manifest.length, rewrittenPaths, lanesGivenRepo, agentsToRestore,
+              notes: [...(visibility === "unknown" ? ["Target GitHub visibility unknown (git/gh unavailable or failed)."] : []), "A live desk's cadence still points at the old dir until it restores; replace its old cadence with the new project dir."] }] as const;
+          }),
+          () => moveIO(to, () => rmdirSync(targetLock)),
+        );
+      }));
+    yield* moveIO(old, () => { if (existsSync(dataDir(old)) && readdirSync(dataDir(old)).length === 0) rmdirSync(dataDir(old)); });
+    return result;
   });
 
 // ---------- lanes ----------

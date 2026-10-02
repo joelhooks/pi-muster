@@ -23,6 +23,7 @@ import {
   packetReport,
   packetVerify,
   projectOpen,
+  projectMove,
   projectReview,
   projectStatus,
   projectUpdate,
@@ -186,6 +187,22 @@ export default function muster(pi: ExtensionAPI) {
           result.cadence ? `Arm the owner pass now: ${result.cadence.tool} ${JSON.stringify(result.cadence.args)}` : "No cadence recorded.",
         ].join("\n"),
       );
+    },
+  });
+
+  pi.registerTool({
+    name: "project_move",
+    label: "Muster project move",
+    description: "Move Muster state and its Brain board to a private absolute dir. Preserve code repos and worktrees; do not restart agents. Restore live agents and replace the desk cadence afterwards.",
+    parameters: Type.Object({ project: ProjectParam, to: Type.String({ description: "New private absolute project dir" }) }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      return run(ctx, signal, projectMove(projectDir(ctx, params.project), params.to), (result) => [
+        `Moved ${result.project.slug} to ${result.project.dir}: ${result.copiedFiles} files copied.`,
+        ...result.rewrittenPaths.map((path) => `${path.from} → ${path.to}`),
+        `Lanes given explicit old repo: ${result.lanesGivenRepo.join(", ") || "(none)"}.`,
+        ...result.agentsToRestore,
+        ...result.notes,
+      ].join("\n"));
     },
   });
 
