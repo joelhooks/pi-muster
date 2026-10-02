@@ -1173,6 +1173,11 @@ describe("desk and review", () => {
     const kept = await runWith(h, projectReview(dir, { note: "still going", nextAction: "next" }));
     expect(kept.project.state).toBe("active");
     expect(kept.archivedLanes).toEqual(["a"]);
+    const reopened = await runWith(h, laneOpen(dir, { slug: "a", label: "🅰️ a", goal: "g" }));
+    expect(reopened.lane).toMatchObject({ state: "open", archived: false });
+    expect((await runWith(h, projectStatus(dir))).board).toContain("lanes: a=open");
+    await runWith(h, laneClose(dir, "a"));
+    await runWith(h, projectReview(dir, { note: "closed again" }));
     const archived = await runWith(h, projectReview(dir, { note: "done", decision: "archive" }));
     expect(archived.project.state).toBe("archived");
     expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 archived");

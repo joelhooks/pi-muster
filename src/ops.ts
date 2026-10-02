@@ -475,6 +475,8 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
           tabId,
           root,
           state,
+          // A reopened lane is live work again; the weekly review archived it only because it was closed.
+          archived: false,
           updatedAt: iso(env),
         };
         return [withLane(current, next), next] as const;
