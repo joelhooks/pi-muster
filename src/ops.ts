@@ -1519,6 +1519,8 @@ export interface AgentLine {
   readonly cache: "warm" | "cold" | null;
   readonly cost: SessionCost | null;
   readonly intercom: "reachable" | "unreachable" | "unknown";
+  /** The live session id; address intercom by this, never by the catalog name. */
+  readonly sessionId?: string;
   readonly action: string | null;
 }
 
@@ -1691,6 +1693,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         cache: silentFor === null ? null : silentFor < CACHE_TTL_MS ? "warm" : "cold",
         cost,
         intercom: live === undefined ? "unknown" : live.includes(current.sessionId) ? "reachable" : "unreachable",
+        sessionId: current.sessionId,
         action,
       });
     }
@@ -1729,7 +1732,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
     "agents (cost = cacheRead×0.1 + cacheWrite×1.25 + input, input-token equivalents):",
     ...agents.map(
       (agent) =>
-        `- ${agent.name} ${agent.role}/${agent.lane} ${agent.state} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.action ? ` · ${agent.action}` : ""}`,
+        `- ${agent.name} ${agent.role}/${agent.lane} ${agent.state} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}`,
     ),
   ];
   return out.join("\n");

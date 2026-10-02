@@ -592,6 +592,13 @@ describe("a lane from launch to close", () => {
     expect(relaunched.row.delivery).toBe("unproven");
   });
 
+  it("shows each agent's live session id on the board for intercom addressing", async () => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    const board = (await runWith(h, projectStatus(dir, { act: false }))).board;
+    expect(board).toMatch(new RegExp(`intercom=\\w+@${launched.row.sessionId.slice(0, 8)}`));
+  });
+
   it("retries the work prompt while Herdr has not yet registered the agent name", async () => {
     const h = harness();
     h.herdr.promptNotReady = 2;
