@@ -18,7 +18,7 @@ import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
 import { Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
-import { describeHolder, heavyLockPath, tryAcquireSlot } from "./heavy-lock.ts";
+import { tryAcquireHeavy } from "./heavy-lock.ts";
 import {
   agentStart,
   paneClose,
@@ -1297,10 +1297,9 @@ const runGate = (source: string, gate: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const proc = yield* Proc;
-    const lock = heavyLockPath(env.home);
-    const held = tryAcquireSlot(lock, `muster gate: ${gate}`);
+    const held = tryAcquireHeavy({ home: env.home }, `muster gate: ${gate}`);
     if (!held.ok) {
-      return yield* new HeavyJobBusy({ holder: describeHolder(held.holder), message: `one full gate at a time on this machine; busy: ${describeHolder(held.holder)}` });
+      return yield* new HeavyJobBusy({ holder: held.reason, message: `heavy gate admission busy: ${held.reason}` });
     }
     return yield* proc.run("sh", ["-c", gate], { cwd: source, timeoutMs: GATE_TIMEOUT_MS }).pipe(Effect.ensuring(Effect.sync(held.release)));
   });

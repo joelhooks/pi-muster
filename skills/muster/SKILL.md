@@ -48,7 +48,7 @@ Defaults fit most work. Role models come from the fleet roster (`~/.config/muste
 
 - The intercom report is a claim. `packet_verify` plus the worker's check receipts are the evidence. Screen state, `DONE`, age, or a commit alone are not.
 - Record exactly one outcome per packet: committed, rejected, or no_changes.
-- Land through `packet_land` with the repo's full gate. One full gate at a time per machine (`muster-heavy -- <cmd>` for workers).
+- Land through `packet_land` with the repo's full gate (`muster-heavy --wait 1200 -- <cmd>` for workers). For a deploy window that must drain and hold every heavy slot, use `muster-heavy --exclusive --wait 1200 -- <cmd>`.
 - An artifact packet (remote-machine ops, config, no clone branch) lands by recording: `packet_land` with `evidence`, no merge.
 - A customer-facing check counts only when loaded signed out, as the recipient sees it.
 - A deploy gate needs a captured base-versus-head surface diff. An allowed-diff list reasoned from code is not evidence.
