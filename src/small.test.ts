@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { parseThreshold, roleThreshold } from "./compact.ts";
 import { silenceLimits } from "./domain.ts";
 import type { DeskItem, Project } from "./domain.ts";
-import { readHolder, tryAcquire } from "./heavy-lock.ts";
+import { heavySlots, readHolder, slotPath, tryAcquire, tryAcquireSlot } from "./heavy-lock.ts";
 import { workPrompt } from "./ops.ts";
 import { costFromLines, readSessionCost, turnCost } from "./session-file.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, silenceDecision } from "./silence.ts";
@@ -177,6 +177,21 @@ describe("heavy-job lock", () => {
     const taken = tryAcquire(lock, "live gate");
     expect(taken.ok).toBe(true);
     if (taken.ok) taken.release();
+  });
+
+  it("admits up to the slot count, keeps slot 0 on the legacy path, and reports a holder when full", () => {
+    const lock = join(mkdtempSync(join(tmpdir(), "lock-")), "heavy.lock");
+    expect(heavySlots({})).toBe(4);
+    expect(heavySlots({ MUSTER_HEAVY_SLOTS: "2" })).toBe(2);
+    const held = [tryAcquireSlot(lock, "a", 2), tryAcquireSlot(lock, "b", 2)];
+    expect(held.every((slot) => slot.ok)).toBe(true);
+    expect(readHolder(slotPath(lock, 0))?.command).toBe("a");
+    expect(readHolder(slotPath(lock, 1))?.command).toBe("b");
+    const full = tryAcquireSlot(lock, "c", 2);
+    expect(full.ok).toBe(false);
+    if (!full.ok) expect(full.holder?.command).toBe("a");
+    for (const slot of held) if (slot.ok) slot.release();
+    expect(tryAcquireSlot(lock, "d", 2).ok).toBe(true);
   });
 });
 

@@ -18,7 +18,7 @@ import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
 import { Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
-import { describeHolder, heavyLockPath, tryAcquire } from "./heavy-lock.ts";
+import { describeHolder, heavyLockPath, tryAcquireSlot } from "./heavy-lock.ts";
 import {
   agentStart,
   paneClose,
@@ -1298,7 +1298,7 @@ const runGate = (source: string, gate: string) =>
     const env = yield* MusterEnv;
     const proc = yield* Proc;
     const lock = heavyLockPath(env.home);
-    const held = tryAcquire(lock, `muster gate: ${gate}`);
+    const held = tryAcquireSlot(lock, `muster gate: ${gate}`);
     if (!held.ok) {
       return yield* new HeavyJobBusy({ holder: describeHolder(held.holder), message: `one full gate at a time on this machine; busy: ${describeHolder(held.holder)}` });
     }

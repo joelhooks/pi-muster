@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 /**
- * One full test gate at a time on this machine. Eight parallel replay gates
- * took one machine to load 350 with swap nearly full. The lock is a
+ * A few full test gates at a time on this machine (`heavySlots`, default 4). Eight
+ * parallel replay gates once took a machine to load 350 with swap nearly full. The lock is a
  * directory (mkdir is atomic) holding the holder's pid; a dead holder is stale
  * and gets taken over.
  */
@@ -62,6 +62,28 @@ export function tryAcquire(lock: string, command: string, pid = process.pid): Ac
     };
   }
   return { ok: false, holder: readHolder(lock) };
+}
+
+/** Full gates allowed at once on this machine. One was too strict for a 16-core, 128 GB Mac Studio. */
+export function heavySlots(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const value = Number(env.MUSTER_HEAVY_SLOTS);
+  return Number.isInteger(value) && value > 0 ? value : 4;
+}
+
+/** Slot 0 keeps the original path, so sessions on older code still see it held. */
+export function slotPath(lock: string, slot: number): string {
+  return slot === 0 ? lock : `${lock}.${slot}`;
+}
+
+/** Take the first free slot; when all are held, report the first slot's holder. */
+export function tryAcquireSlot(lock: string, command: string, slots = heavySlots(), pid = process.pid): Acquire {
+  let first: Acquire | null = null;
+  for (let slot = 0; slot < slots; slot++) {
+    const result = tryAcquire(slotPath(lock, slot), command, pid);
+    if (result.ok) return result;
+    first ??= result;
+  }
+  return first ?? { ok: false, holder: null };
 }
 
 export function describeHolder(holder: Holder | null): string {

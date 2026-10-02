@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 
-import { describeHolder, heavyLockPath, tryAcquire } from "../src/heavy-lock.ts";
+import { describeHolder, heavyLockPath, tryAcquireSlot } from "../src/heavy-lock.ts";
 
 const usage = "usage: muster-heavy [--wait <seconds>] -- <command> [args...]";
 const args = process.argv.slice(2);
@@ -17,10 +17,10 @@ const command = args.slice(split + 1);
 const lock = heavyLockPath(homedir());
 const deadline = Date.now() + (Number.isFinite(waitSeconds) ? waitSeconds : 0) * 1000;
 
-let acquired = tryAcquire(lock, command.join(" "));
+let acquired = tryAcquireSlot(lock, command.join(" "));
 while (!acquired.ok && Date.now() < deadline) {
   await new Promise((resolve) => setTimeout(resolve, 5000));
-  acquired = tryAcquire(lock, command.join(" "));
+  acquired = tryAcquireSlot(lock, command.join(" "));
 }
 if (!acquired.ok) {
   console.error(`muster-heavy: busy, ${describeHolder(acquired.holder)}`);
