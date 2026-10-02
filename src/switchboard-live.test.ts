@@ -164,6 +164,28 @@ describe("live extension opt-in", () => {
     await runWith(h, nudgeSwitchboards("probe", ask));
     expect(h.sent).toEqual([]);
   });
+
+  it("never registers a Muster-launched session as the Switchboard, even with subscribe: true", async () => {
+    const { h, dir } = await setup();
+    const handlers = new Map<string, Function>();
+    const tools = new Map<string, { execute: Function }>();
+    const notes: string[] = [];
+    const pi = {
+      registerFlag: () => {}, registerShortcut: () => {}, registerCommand: () => {},
+      on: (event: string, handler: Function) => handlers.set(event, handler),
+      registerTool: (tool: { name: string; execute: Function }) => tools.set(tool.name, tool),
+      getFlag: () => false,
+    };
+    const ctx = { sessionManager: { getSessionId: () => "desk-session" }, ui: { setWidget: () => {}, notify: (text: string) => notes.push(text) } };
+    registerSwitchboard(pi as never, { env: { HOME: h.home, MUSTER_ROLE: "desk" }, layer: () => h.layer, run: async (_ctx, _signal, program, render) => render(await runWith(h, program)) });
+    await handlers.get("session_start")!(null, ctx);
+    try {
+      await tools.get("desk_inbox")!.execute("id", { subscribe: true }, undefined, undefined, ctx);
+      await runWith(h, deskPost(dir, { kind: "decision", title: "Not for the desk" }));
+      expect(h.sent.some((message) => message.to === "desk-session")).toBe(false);
+      expect(notes.join("\n")).toContain("not paged");
+    } finally { handlers.get("session_shutdown")!(); }
+  });
 });
 
 describe("desk focus", () => {

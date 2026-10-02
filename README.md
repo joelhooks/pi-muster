@@ -59,7 +59,7 @@ One inbox over every project's desk queue. It reads and routes; project desks st
 
 - The widget holds three rows at most: open asks by kind and age plus the Muster fleet (projects, lanes, running agents, packets to land), then the two most urgent desks with a 24-hour heat strip of queue traffic.
 - `alt+s` or `/switchboard` browses everything: `j`/`k` move, `space` folds, `enter` puts an `[project#id]` reference in the editor, `a` answers, `d` marks done.
-- `desk_inbox` lists open items ranked blocked, approval, decision, oldest first. It is read-only; only `subscribe: true`, `--switchboard`, or `/switchboard` makes a session the Switchboard that is paged on every queue change. `desk_answer` appends a resolving line to the item's own queue and nudges that project's desk.
+- `desk_inbox` lists open items ranked blocked, approval, decision, oldest first. It is read-only; only `subscribe: true`, `--switchboard`, or `/switchboard` makes a session the Switchboard that is paged on every queue change, and never one Muster launched (any `MUSTER_ROLE`). `desk_answer` appends a resolving line to the item's own queue and nudges that project's desk.
 
 ## Desk report
 
