@@ -11,6 +11,8 @@ Layers: herdr (terminals) → Bellwether (panes, agents, watches, wakes) → Mus
 
 ## Start here
 
+A project dir must be private, never a public repo's checkout; lanes point `repo` at public code.
+
 No project, no Muster. Before any lane, launch, or `desk_post`, call `project_status`. If it finds no project, call `project_open`: adopt the current space with `space` (or `createSpace: true` for new work), give a kebab-case `slug`, the outcome, and the next action. That registers the project, so the desk queue and the Switchboard can see it. A space with lanes but no project is invisible to Joel. Arm the cadence call `project_open` returns.
 
 ## When to fan out
