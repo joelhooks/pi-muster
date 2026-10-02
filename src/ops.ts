@@ -406,9 +406,10 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       const live = yield* locatePane(existing.root);
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
         const requestedBase = params.base;
-        const lane = requestedBase === undefined ? existing : yield* mutate(dir, (current) => {
+        // An open lane is never archived; this also repairs a lane reopened before reopening cleared the flag.
+        const lane = requestedBase === undefined && !existing.archived ? existing : yield* mutate(dir, (current) => {
           const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
-          const next = { ...latest, base: requestedBase, updatedAt: iso(env) };
+          const next = { ...latest, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
           return Effect.succeed([withLane(current, next), next] as const);
         });
         return { lane, created: false, note: null, outcome: project.outcome };

@@ -1176,6 +1176,12 @@ describe("desk and review", () => {
     const reopened = await runWith(h, laneOpen(dir, { slug: "a", label: "🅰️ a", goal: "g" }));
     expect(reopened.lane).toMatchObject({ state: "open", archived: false });
     expect((await runWith(h, projectStatus(dir))).board).toContain("lanes: a=open");
+    // A lane left open but archived by older code is repaired by an idempotent lane_open on its live root.
+    await runWith(h, mutate(dir, (project) => Effect.succeed([{ ...project, lanes: project.lanes.map((lane) => ({ ...lane, archived: true })) }, undefined] as const)));
+    expect((await runWith(h, projectStatus(dir))).board).toContain("lanes: none");
+    const repaired = await runWith(h, laneOpen(dir, { slug: "a", label: "🅰️ a", goal: "g" }));
+    expect(repaired.lane).toMatchObject({ state: "open", archived: false, tabId: reopened.lane.tabId });
+    expect((await runWith(h, projectStatus(dir))).board).toContain("lanes: a=open");
     await runWith(h, laneClose(dir, "a"));
     await runWith(h, projectReview(dir, { note: "closed again" }));
     const archived = await runWith(h, projectReview(dir, { note: "done", decision: "archive" }));
