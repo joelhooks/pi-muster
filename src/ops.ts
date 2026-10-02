@@ -19,6 +19,7 @@ import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packe
 import { GateReceipt, Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { tryAcquireHeavy } from "./heavy-lock.ts";
+import { FleetStatus, busyQueue, gatesLine } from "./fleet.ts";
 import {
   agentStart,
   paneClose,
@@ -1294,6 +1295,25 @@ export interface PacketLandInput {
   readonly message?: string | undefined;
 }
 
+/** Resolve at call time: installing the runner needs no extension restart. */
+const fleetRunner = (source: string) => Effect.gen(function* () {
+  const proc = yield* Proc;
+  const configured = process.env.MUSTER_FLEET_COMPUTE;
+  const explicit = configured && isAbsolute(configured) && existsSync(configured) ? configured : null;
+  const onPath = explicit ? null : (yield* proc.run("sh", ["-c", "command -v fleet-compute"], { cwd: source, timeoutMs: 10_000 })).stdout.trim();
+  return explicit ? { command: "node", prefix: [explicit] } : onPath ? { command: onPath, prefix: [] } : null;
+});
+
+const fleetStatus = (source: string, runner: { command: string; prefix: string[] }) => Effect.gen(function* () {
+  const proc = yield* Proc;
+  const result = yield* proc.run(runner.command, [...runner.prefix, "status", "--json"], { cwd: source, timeoutMs: 10_000 });
+  if (result.code !== 0) return yield* input(`fleet-compute status exited ${result.code}`);
+  return yield* Effect.try({
+    try: () => Schema.decodeUnknownSync(FleetStatus)(JSON.parse(result.stdout)),
+    catch: (error) => input(`fleet-compute status invalid JSON/schema: ${String(error)}`),
+  });
+});
+
 const runGate = (source: string, gate: string, context: {
   readonly project: Project;
   readonly tree: string;
@@ -1306,11 +1326,7 @@ const runGate = (source: string, gate: string, context: {
     const { project, tree, head, branch, receiptPath, savedReceipt } = context;
     const env = yield* MusterEnv;
     const proc = yield* Proc;
-    // Resolve at call time: installing the runner needs no extension restart.
-    const configured = process.env.MUSTER_FLEET_COMPUTE;
-    const explicit = configured && isAbsolute(configured) && existsSync(configured) ? configured : null;
-    const onPath = explicit ? null : (yield* proc.run("sh", ["-c", "command -v fleet-compute"], { cwd: source })).stdout.trim();
-    const runner = explicit ? { command: "node", prefix: [explicit] } : onPath ? { command: onPath, prefix: [] } : null;
+    const runner = yield* fleetRunner(source);
     if (runner) {
       const result = yield* proc.run(runner.command, [
         ...runner.prefix, "gate", "--project", project.slug,
@@ -1321,7 +1337,13 @@ const runGate = (source: string, gate: string, context: {
         Effect.mapError((error) => new GuardFailed({ guard: "gate-runner", message: error.message })),
       );
       if (!existsSync(receiptPath)) {
-        if (result.code === 75) return yield* new HeavyJobBusy({ holder: "fleet-compute", message: "fleet-compute gate admission busy (wait 1200 expired)" });
+        if (result.code === 75) {
+          const queue = yield* fleetStatus(source, runner).pipe(
+            Effect.map((status) => busyQueue(status, project.slug, basename(source), env.now().getTime())),
+            Effect.catch(() => Effect.succeed(null)),
+          );
+          return yield* new HeavyJobBusy({ holder: "fleet-compute", message: `fleet-compute gate admission busy (wait 1200 expired)${queue ? `; ${queue}` : ""}` });
+        }
         return yield* new GuardFailed({ guard: "gate-runner", message: `gate runner exited ${result.code} without a receipt:\n${(result.stdout + result.stderr).trim().slice(-1500)}` });
       }
       // Keep failure and lost-run receipts too, not just successful landings.
@@ -1767,7 +1789,13 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const tokens = yield* publishTokens(final, { stuck });
     const brain = yield* writeBrain(final);
     const desk = openDeskItems(readDesk(queuePath(final.slug, env.home)));
-    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime()), notes: [tokens, `brain: ${brain}`, ...(label ? [label] : [])] };
+    const fleet = yield* Effect.gen(function* () {
+      const runner = yield* fleetRunner(dir);
+      if (!runner) return { line: null, note: "fleet-compute: runner missing" };
+      const status = yield* fleetStatus(dir, runner);
+      return { line: gatesLine(status, env.now().getTime()), note: null };
+    }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
+    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime(), fleet.line), notes: [tokens, `brain: ${brain}`, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
@@ -1783,7 +1811,7 @@ export function reviewDue(project: Project, nowMs: number): string | null {
   return last ? `⚠ review overdue: last project_review ${days}d ago` : `⚠ review overdue: no project_review in ${days}d`;
 }
 
-export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now()): string {
+export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null): string {
   const lanes = project.lanes.filter((lane) => !lane.archived);
   const due = reviewDue(project, nowMs);
   const pending = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state));
@@ -1792,6 +1820,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
     `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state}`).join(", ") || "none"}`,
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,
+    ...(gates ? [gates] : []),
     ...(due ? [`${due}. Reconfirm the outcome; work drifting to another project's outcome goes to that project's desk.`] : []),
     "agents (cost = cacheRead×0.1 + cacheWrite×1.25 + input, input-token equivalents):",
     ...agents.map(
