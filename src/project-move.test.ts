@@ -30,7 +30,7 @@ async function fixture(root?: string) {
   const report = join(dataDir(old), "reports", "work", "report.md");
   const tail = join(dataDir(old), "closed", "tail.txt");
   for (const file of [report, tail]) { mkdirSync(join(file, ".."), { recursive: true }); writeFileSync(file, `fixture ${file}\n`); }
-  await runWith(h, mutate(old, (project) => Effect.succeed([{ ...project, packets: [{ id: "fixture", kind: "artifact", lane: "work", agent: "worker", artifact: brief, report, checks: [], state: "reported", verification: null, landedAs: null, supersedes: null, reportedAt: project.createdAt, updatedAt: project.updatedAt }] }, undefined] as const)));
+  await runWith(h, mutate(old, (project) => Effect.succeed([{ ...project, packets: [{ id: "fixture", kind: "artifact", lane: "work", agent: "worker", artifact: brief, report, checks: [], state: "reported", verification: null, landedAs: null, gate: null, supersedes: null, reportedAt: project.createdAt, updatedAt: project.updatedAt }] }, undefined] as const)));
   return { h, old, report, tail, brief, agent, to: join(root ?? h.root, "private") };
 }
 

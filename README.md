@@ -53,6 +53,8 @@ Worker side, when `MUSTER_AGENT` is set: `packet_report` and per-role compaction
 
 `muster-heavy -- <command>` runs a command in the same machine-wide heavy slots as `packet_land` gates. `MUSTER_HEAVY_SLOTS` overrides the count; otherwise it is `max(1, floor(performanceCores / 3))` (4 on a 12-performance-core Mac). macOS reads `hw.perflevel0.physicalcpu`; the fallback uses half of `os.availableParallelism()` as performance cores.
 
+When installed, `packet_land` uses `fleet-compute gate` (`MUSTER_FLEET_COMPUTE` selects an absolute script path); the receipt, not the process exit, decides the result, records the host, and proves the committed tree.
+
 Admission waits when 1-minute load exceeds available cores × 2.5 or available memory is below `MUSTER_HEAVY_MIN_FREE_GB` (default 16). macOS counts free, inactive and speculative pages from `vm_stat`; Linux uses `MemAvailable`. `--wait <seconds>` retries every 5 seconds and prints the reason. Without a wait, the CLI exits 75 and `packet_land` returns `HeavyJobBusy`, naming occupied slots or the admission blocker.
 
 For a deploy window, use `muster-heavy --exclusive --wait 1200 -- <command>`. It reserves admission, drains all configured and existing slots, holds them all (including the legacy lock), and releases on command exit. Timeout or cancellation clears only its own reservations. `muster-heavy status` (or `status --json`, the same fields for tools) shows the count, load, available memory, every slot's holder and age, and the exclusive-pending marker without changing locks. Dead local holders are reclaimed only during acquisition; unknown or foreign-host holders fail closed.
