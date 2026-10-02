@@ -20,6 +20,7 @@ import {
   projectStatus,
   projectUpdate,
   proposeReview,
+  reviewDue,
 } from "./ops.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { parsePorcelainZ } from "./packet.ts";
@@ -1144,6 +1145,22 @@ describe("desk and review", () => {
     await runWith(h, deskPost(dir, { kind: "done", title: "Shipped", resolves: posted.record.id }));
     expect(h.herdr.tokens.get("w1")?.needs).toBeNull();
     expect((await failWith(h, deskPost(dir, { kind: "done", title: "x", resolves: "nope" }))).message).toContain("no desk item");
+  });
+
+  it("flags an overdue weekly review on the board and echoes the outcome when a lane opens", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    const opened = await runWith(h, laneOpen(dir, { slug: "a", label: "🅰️ a", goal: "g" }));
+    const project = await runWith(h, load(dir));
+    expect(opened.outcome).toBe(project.outcome);
+    const start = Date.parse(project.createdAt);
+    const day = 24 * 60 * 60 * 1000;
+    expect(reviewDue(project, start + 6 * day)).toBeNull();
+    expect(reviewDue(project, start + 9 * day)).toBe("⚠ review overdue: no project_review in 9d");
+    const reviewed = { ...project, reviews: [{ at: new Date(start + 8 * day).toISOString(), note: "n", proposal: "continue" as const, decision: "continue" as const }] };
+    expect(reviewDue(reviewed, start + 9 * day)).toBeNull();
+    expect(reviewDue(reviewed, start + 16 * day)).toBe("⚠ review overdue: last project_review 8d ago");
   });
 
   it("reviews, archives closed lanes, and archives the project only on request", async () => {

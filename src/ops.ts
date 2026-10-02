@@ -411,7 +411,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
           const next = { ...latest, base: requestedBase, updatedAt: iso(env) };
           return Effect.succeed([withLane(current, next), next] as const);
         });
-        return { lane, created: false, note: null };
+        return { lane, created: false, note: null, outcome: project.outcome };
       }
     }
     if (wantOpen && !project.spaceId) return yield* input("the project has no space; run project_open with space or createSpace first");
@@ -443,7 +443,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
         };
         return Effect.succeed([withLane(current, next), next] as const);
       });
-      return { lane, created: !existing };
+      return { lane, created: !existing, note: null, outcome: project.outcome };
     }
     const event = base.state === "open" ? null : base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
     if (event) yield* stepLane(slug, base.state, event);
@@ -481,7 +481,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       }),
     );
     yield* publishTokens(yield* load(dir));
-    return { lane, created: !existing, note };
+    return { lane, created: !existing, note, outcome: project.outcome };
   });
 
 const laneCounts = (project: Project, slug: string) => ({
@@ -1511,19 +1511,32 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const tokens = yield* publishTokens(final, { stuck });
     const brain = yield* writeBrain(final);
     const desk = openDeskItems(readDesk(queuePath(final.slug, env.home)));
-    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length), notes: [tokens, `brain: ${brain}`, ...(label ? [label] : [])] };
+    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime()), notes: [tokens, `brain: ${brain}`, ...(label ? [label] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
 
-export function board(project: Project, agents: readonly AgentLine[], openDesk: number): string {
+const REVIEW_DUE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The weekly review is overdue when the last one, or the project's start, is over a week old. Pure. */
+export function reviewDue(project: Project, nowMs: number): string | null {
+  const last = project.reviews.at(-1)?.at ?? null;
+  const since = Date.parse(last ?? project.createdAt);
+  if (!Number.isFinite(since) || nowMs - since <= REVIEW_DUE_MS) return null;
+  const days = Math.floor((nowMs - since) / (24 * 60 * 60 * 1000));
+  return last ? `⚠ review overdue: last project_review ${days}d ago` : `⚠ review overdue: no project_review in ${days}d`;
+}
+
+export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now()): string {
   const lanes = project.lanes.filter((lane) => !lane.archived);
+  const due = reviewDue(project, nowMs);
   const pending = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state));
   const out = [
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
     `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state}`).join(", ") || "none"}`,
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,
+    ...(due ? [`${due}. Reconfirm the outcome; work drifting to another project's outcome goes to that project's desk.`] : []),
     "agents (cost = cacheRead×0.1 + cacheWrite×1.25 + input, input-token equivalents):",
     ...agents.map(
       (agent) =>
