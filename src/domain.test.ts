@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeAgentName, decodeDeskItem, decodeProject, isTempPath } from "./domain.ts";
+import { Schema } from "effect";
+import { GateReceipt, decodeAgentName, decodeDeskItem, decodeProject, isTempPath } from "./domain.ts";
 
 const project = {
   version: 1,
@@ -104,5 +105,16 @@ describe("schemas", () => {
     expect(isTempPath("/private/var/folders/ab/T/x")).toBe(true);
     expect(isTempPath("/Users/me/Code/x")).toBe(false);
     expect(isTempPath("/tmpfoo")).toBe(false);
+  });
+});
+
+describe("GateReceipt", () => {
+  it("accepts fleet-compute's superset receipt with a null slot and keeps only the known fields", () => {
+    const decoded = Schema.decodeUnknownSync(GateReceipt)({
+      runId: "r1", host: "flagg", tree: "t", exit: 0, slot: null, durationMs: 5,
+      repo: "pi-muster", head: "h", branch: "b", startedAt: "2026-10-02T16:00:00.000Z", lease: null,
+      queuedMs: 1, slotHeld: true, peakLoad1: 30.5, minAvailableGB: 40,
+    });
+    expect(decoded).toEqual({ runId: "r1", host: "flagg", tree: "t", exit: 0, slot: null, durationMs: 5 });
   });
 });

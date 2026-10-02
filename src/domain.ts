@@ -137,7 +137,8 @@ const GateFields = {
   runId: Schema.String,
   host: Schema.String,
   tree: Schema.String,
-  slot: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+  // Null when the host doesn't say which slot it took (Flagg wraps muster-heavy).
+  slot: Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   durationMs: Schema.Number.check(Schema.isGreaterThanOrEqualTo(0)),
 };
 
