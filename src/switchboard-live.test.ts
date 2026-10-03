@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { queuePath, readDesk } from "./desk.ts";
 import { deskPost, projectOpen, agentLaunch } from "./ops.ts";
 import { Herdr, Intercom } from "./runtime.ts";
+import { load } from "./store.ts";
 import { focusDesk, deskAnswer, loadSystem, nudgeSwitchboards, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
 import { watchSwitchboard, registerSwitchboard } from "./switchboard-ext.ts";
 import { SwitchboardState, handleKey, renderOverlay } from "./switchboard-view.ts";
@@ -83,6 +84,21 @@ describe("switchboard queue delivery", () => {
     h.sent.length = 0;
     await runWith(h, nudgeSwitchboards("probe", ask));
     expect(h.sent).toEqual([]);
+  });
+
+  it("nudges the desk by session id and says when no live session will read it", async () => {
+    const { h, dir } = await setup();
+    await runWith(h, agentLaunch(dir, { action: "launch", name: "desk", role: "desk", lane: "desk", label: "desk", cwd: dir }));
+    const sessionId = (await runWith(h, load(dir))).agents.find((agent) => agent.name === "desk")!.sessionId;
+    h.live = [];
+    const first = await runWith(h, deskPost(dir, { kind: "decision", title: "Ship?" }));
+    const quiet = await runWith(h, deskAnswer({ project: "probe", id: first.record.id, answer: "yes" }));
+    expect(h.sent.at(-1)?.to).toBe(sessionId);
+    expect(quiet.nudged).toEqual([`desk (${sessionId}): queued, no live session`]);
+    h.live = [sessionId];
+    const second = await runWith(h, deskPost(dir, { kind: "decision", title: "Again?" }));
+    const heard = await runWith(h, deskAnswer({ project: "probe", id: second.record.id, answer: "no" }));
+    expect(heard.nudged).toEqual([`desk (${sessionId}): sent`]);
   });
 
   it("doesn't turn an intercom failure into a failed write", async () => {

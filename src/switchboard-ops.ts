@@ -146,11 +146,15 @@ export const deskAnswer = (params: DeskAnswerInput) =>
     const known = readRegistry(env.home).get(params.project);
     const project = known ? yield* load(known.dir).pipe(Effect.catch(() => Effect.succeed(null))) : null;
     const desks = project?.agents.filter((agent) => agent.role === "desk" && PROCESS_STATES.includes(agent.state)) ?? [];
+    // pi-intercom queues a send to a session that isn't connected and still
+    // reports "sent", so liveness comes from the session list, not the result.
+    const live = desks.length ? yield* intercom.sessions().pipe(Effect.catchCause(() => Effect.succeed(undefined))) : undefined;
     const nudged: string[] = [];
     for (const desk of desks) {
       const message = `☎️ Joel answered ${itemRef({ project: params.project, id: item.id })} "${item.title}": ${params.answer.trim()}`;
       const result = yield* intercom.send(desk.sessionId, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
-      nudged.push(`${desk.name}: ${result.status}`);
+      const status = result.status === "sent" && live && !live.includes(desk.sessionId) ? "queued, no live session" : result.status;
+      nudged.push(`${desk.name} (${desk.sessionId}): ${status}`);
     }
     return { record, item, remaining: open.length - 1, nudged };
   });
