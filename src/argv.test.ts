@@ -15,13 +15,13 @@ describe("buildArgv", () => {
     expect(buildArgv({ kind: "launch", sessionId: "w1-1", sessionFile: null, parentSessionFile: null, profile, musterExtension: "/muster" })).toEqual([
       "--session-id", "w1-1",
       "--name", "🔨 store",
-      "--model", "claude-bridge/claude-sonnet-5-5:medium",
+      "--model", "openai-codex/gpt-6.1-sol:medium",
       "--append-system-prompt", "/b/brief.md",
       "-ns",
       "--skill", "/s/tdd",
       "-e", "/muster",
       "-e", "/e/extra.ts",
-      "--compact-at", "300000",
+      "--compact-at", "200000",
       "--approve",
     ]);
   });

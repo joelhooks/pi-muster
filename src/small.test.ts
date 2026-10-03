@@ -157,7 +157,7 @@ describe("compaction thresholds", () => {
     expect(parseThreshold("300_000")).toBe(300000);
     expect(parseThreshold("off")).toBeNull();
     expect(parseThreshold("nope")).toBeUndefined();
-    expect(roleThreshold("worker")).toBe(300000);
+    expect(roleThreshold("worker")).toBe(200000);
     expect(roleThreshold("king")).toBeUndefined();
   });
 });

@@ -610,7 +610,7 @@ describe("a lane from launch to close", () => {
     expect(launched.row.sessionFile).toMatch(/_probe_w-20260929T060000\.jsonl$/);
     expect(launched.row.pane?.openedByMuster).toBe(true);
     expect(launched.argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg))).toEqual([]);
-    expect(launched.argv).toEqual(expect.arrayContaining(["-ns", "--compact-at", "300000", "--approve", "-e", "/muster"]));
+    expect(launched.argv).toEqual(expect.arrayContaining(["-ns", "--compact-at", "200000", "--approve", "-e", "/muster"]));
     const prelude = h.herdr.calls.find((call) => call.method === "pane.send_input");
     expect(String(prelude?.params.text)).toContain(`cd '${clone}'`);
     expect(String(prelude?.params.text)).toContain("export MUSTER_AGENT='probe_w'");
@@ -1332,15 +1332,15 @@ describe("bridge capture and the sidebar", () => {
     expect(h.herdr.tokens.get("w1")?.now).toBe("cutover live");
     expect(h.herdr.workspaces.get("w1")?.label).toBe("Probe");
     expect(updated.policy.restartAfterMin).toBeNull();
-    expect(updated.policy.roles.worker).toMatchObject({ model: "openai-codex/gpt-6-luna", thinking: "medium", compactAt: 300000 });
-    await runWith(h, projectUpdate(dir, { policy: { roles: { worker: { compactAt: 200000 } } } }));
+    expect(updated.policy.roles.worker).toMatchObject({ model: "openai-codex/gpt-6-luna", thinking: "medium", compactAt: 200000 });
+    await runWith(h, projectUpdate(dir, { policy: { roles: { worker: { compactAt: 250000 } } } }));
     const merged = await runWith(h, projectUpdate(dir, { headline: null }));
-    expect(merged.policy.roles.worker).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 200000 });
+    expect(merged.policy.roles.worker).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 250000 });
     expect(h.herdr.tokens.get("w1")?.now).toBe("launch the probe");
 
     await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "g" }));
     const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "tuned", role: "worker", lane: "probe", label: "🔨 t", cwd: dir }));
-    expect(launched.row.profile).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 200000 });
+    expect(launched.row.profile).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 250000 });
     expect((await failWith(h, projectUpdate(dir, { policy: { nudgeAfterMin: -5 } }))).message).toBeTruthy();
   });
 });
@@ -1369,7 +1369,7 @@ describe("roster", () => {
     const auditor = await runWith(h, agentLaunch(dir, { action: "launch", name: "auditor", role: "boss", lane: "probe", label: "🔎 audit", cwd: dir, slot: "split", model: "openai-codex/gpt-6.1-sol" }));
     expect(auditor.row.profile).toMatchObject({ model: "openai-codex/gpt-6.1-sol", thinking: "high", compactAt: 200000 });
     const worker = await runWith(h, agentLaunch(dir, { action: "launch", name: "w", role: "worker", lane: "probe", label: "🔨 w", cwd: dir }));
-    expect(worker.row.profile).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 300000, noSkills: true });
+    expect(worker.row.profile).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 200000, noSkills: true });
 
     const update = await runWith(h, projectUpdate(dir, {}));
     expect(update.policy.roles.boss).toMatchObject({ model: "claude-bridge/claude-opus-5-5", alternates: [{ model: "openai-codex/gpt-6.1-sol", useFor: ["root-causing bugs"] }] });

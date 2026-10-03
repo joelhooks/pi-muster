@@ -309,7 +309,7 @@ export const ROLE_DEFAULTS: Readonly<Record<Role, RoleDefaults>> = {
   desk: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 450_000, noSkills: false },
   hawk: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 450_000, noSkills: false },
   boss: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 400_000, noSkills: false },
-  worker: { model: "claude-bridge/claude-sonnet-5-5", thinking: "medium", compactAt: 300_000, noSkills: true },
+  worker: { model: "openai-codex/gpt-6.1-sol", thinking: "medium", compactAt: 200_000, noSkills: true },
   judge: { model: "claude-bridge/claude-fable-5-1", thinking: "high", compactAt: 350_000, noSkills: false },
 };
 
