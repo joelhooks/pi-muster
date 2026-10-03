@@ -55,7 +55,7 @@ Worker side, when `MUSTER_AGENT` is set: `packet_report` and per-role compaction
 
 When fleet-compute is installed, `project_status` shows gate slots and queue age; busy gate admission reports per-host queue positions. Status failures omit the line and add a note.
 
-When installed, `packet_land` uses `fleet-compute gate` (`MUSTER_FLEET_COMPUTE` selects an absolute script path); the receipt, not the process exit, decides the result, records the host, and proves the committed tree.
+When installed, `packet_land` uses `fleet-compute gate` (`MUSTER_FLEET_COMPUTE` selects an absolute script path; `MUSTER_FLEET_COMPUTE=off` falls back to local admission); the receipt, not the process exit, decides the result, records the host, and proves the committed tree.
 
 Admission waits when 1-minute load exceeds available cores × 2.5 or available memory is below `MUSTER_HEAVY_MIN_FREE_GB` (default 16). macOS counts free, inactive and speculative pages from `vm_stat`; Linux uses `MemAvailable`. `--wait <seconds>` retries every 5 seconds and prints the reason. Without a wait, the CLI exits 75 and `packet_land` returns `HeavyJobBusy`, naming occupied slots or the admission blocker.
 

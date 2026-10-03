@@ -1295,10 +1295,11 @@ export interface PacketLandInput {
   readonly message?: string | undefined;
 }
 
-/** Resolve at call time: installing the runner needs no extension restart. */
+/** Resolve at call time: installing the runner needs no extension restart. `MUSTER_FLEET_COMPUTE=off` turns it off. */
 const fleetRunner = (source: string) => Effect.gen(function* () {
   const proc = yield* Proc;
   const configured = process.env.MUSTER_FLEET_COMPUTE;
+  if (configured === "off") return null;
   const explicit = configured && isAbsolute(configured) && existsSync(configured) ? configured : null;
   const onPath = explicit ? null : (yield* proc.run("sh", ["-c", "command -v fleet-compute"], { cwd: source, timeoutMs: 10_000 })).stdout.trim();
   return explicit ? { command: "node", prefix: [explicit] } : onPath ? { command: onPath, prefix: [] } : null;

@@ -31,8 +31,10 @@ import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
 import type { Harness } from "./test-support.ts";
 
-// Gate tests model admission, not the load of the machine running Vitest.
+// Gate tests model admission, not the load of the machine running Vitest,
+// and never reach a real fleet-compute runner from the environment or PATH.
 beforeEach(() => {
+  vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
   vi.spyOn(machineAdapter, "performanceCores").mockReturnValue(12);
   vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 16, load: 20, freeGB: 64 });
 });
@@ -123,6 +125,20 @@ describe("fleet board runner", () => {
       expect(status.notes.join("\n")).toContain(mode === "absent" ? "runner missing" : mode === "nonzero" ? "status exited 2" : mode === "spawn" ? "ENOENT" : "invalid JSON/schema");
     }
     if (mode !== "absent" && mode !== "spawn") expect(JSON.parse(readFileSync(argsPath, "utf8"))).toEqual(["status", "--json"]);
+  });
+
+  it("MUSTER_FLEET_COMPUTE=off skips a runner on PATH", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    const ran = join(h.root, "ran");
+    const launcher = join(h.root, "fleet-compute");
+    writeFileSync(launcher, `#!/bin/sh\ntouch '${ran}'\nexit 99\n`);
+    chmodSync(launcher, 0o755);
+    vi.stubEnv("PATH", `${h.root}:${process.env.PATH}`);
+    const status = await runWith(h, projectStatus(dir, { act: false }));
+    expect(status.board).not.toContain("gates:");
+    expect(existsSync(ran)).toBe(false);
   });
 });
 
