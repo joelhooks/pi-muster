@@ -36,17 +36,48 @@ export function skillIndex({ cwd, agentDir = process.env.PI_CODING_AGENT_DIR ?? 
   });
 }
 
-const tokens = (text: string) => new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+const STOPWORDS = new Set(["a", "an", "the", "for", "to", "of", "and", "with", "use", "when"]);
 
-/** Weighted token overlap, with an exact-name bonus and stable lexical ties. */
+function stem(word: string): string {
+  const stripped = word.replace(/(ing|ed|s)$/, "");
+  const base = stripped.length >= 3 ? stripped : word;
+  // Share the silent-e form: writing / write both become writ.
+  return base.endsWith("e") && base.length > 3 ? base.slice(0, -1) : base;
+}
+
+function tokens(text: string): string[] {
+  return (text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter((word) => !STOPWORDS.has(word)).map(stem);
+}
+
+/** BM25 with corpus IDF, length normalization, weighted names and stable ties. */
 export function findSkills({ skills, query, limit = 5 }: { skills: readonly Skill[]; query: string; limit?: number }) {
-  const words = tokens(query);
+  const words = new Set(tokens(query));
   const count = Number.isFinite(limit) ? Math.max(1, Math.min(10, Math.floor(limit))) : 5;
-  return skills.filter((skill) => !skill.disableModelInvocation).map((skill) => {
+  const documents = skills.filter((skill) => !skill.disableModelInvocation).map((skill) => {
     const name = tokens(skill.name);
     const description = tokens(skill.description);
+    const frequencies = new Map<string, number>();
+    for (const word of name) frequencies.set(word, (frequencies.get(word) ?? 0) + 5);
+    for (const word of description) frequencies.set(word, (frequencies.get(word) ?? 0) + 1);
+    return { skill, frequencies, length: name.length + description.length };
+  });
+  const documentFrequency = new Map<string, number>();
+  for (const doc of documents) {
+    for (const word of doc.frequencies.keys()) documentFrequency.set(word, (documentFrequency.get(word) ?? 0) + 1);
+  }
+  const averageLength = documents.reduce((sum, doc) => sum + doc.length, 0) / (documents.length || 1) || 1;
+  const k1 = 1.2;
+  const b = 0.75;
+  return documents.map(({ skill, frequencies, length }) => {
     let score = skill.name.toLowerCase() === query.trim().toLowerCase() ? 100 : 0;
-    for (const word of words) score += (name.has(word) ? 5 : 0) + (description.has(word) ? 1 : 0);
+    for (const word of words) {
+      const tf = frequencies.get(word) ?? 0;
+      if (!tf) continue;
+      const df = documentFrequency.get(word) ?? 0;
+      const idf = Math.log(1 + (documents.length - df + 0.5) / (df + 0.5));
+      score += idf * tf * (k1 + 1) / (tf + k1 * (1 - b + b * length / averageLength));
+    }
     return { skill, score };
   }).filter(({ score }) => score > 0).sort((a, b) =>
     b.score - a.score || (a.skill.name < b.skill.name ? -1 : a.skill.name > b.skill.name ? 1 : 0),

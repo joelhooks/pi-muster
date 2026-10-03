@@ -40,6 +40,43 @@ describe("skill discovery", () => {
     expect(matches.every((s) => s.description.length <= 200)).toBe(true);
   });
 
+  it.each([
+    ["write tests first red green", "tdd"],
+    ["write a brief for an agent", "writing-for-agents"],
+  ])("ranks task terms above common name words: %s", (query, expected) => {
+    const f = fixture();
+    const base = join(f.agentDir, "skills");
+    f.skill(base, "brain-first-workflow", "Use when agents write plans and tests");
+    f.skill(base, "write-a-skill", "Use when an agent needs to write a skill");
+    f.skill(base, "agent-browser", "Use an agent to browse");
+    f.skill(base, "tdd", "Test-first development with red-green-refactor");
+    f.skill(base, "writing-for-agents", "Create briefs consumed by agents");
+    for (let i = 0; i < 20; i++) f.skill(base, `common-${i}`, "Use when agents write plans and tests for work");
+    const skills = skillIndex(f);
+    // Frozen old scorer proves these fixtures reproduce the desk's regressions.
+    const words = new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+    const old = skills.map((skill) => {
+      const name = new Set(skill.name.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+      const description = new Set(skill.description.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
+      let score = skill.name === query ? 100 : 0;
+      for (const word of words) score += (name.has(word) ? 5 : 0) + (description.has(word) ? 1 : 0);
+      return { name: skill.name, score };
+    }).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+    expect(old[0]?.name).not.toBe(expected);
+    expect(findSkills({ skills, query })[0]?.name).toBe(expected);
+  });
+
+  it("normalizes light suffixes, ignores stopwords and keeps stable ties", () => {
+    const f = fixture();
+    const base = join(f.agentDir, "skills");
+    f.skill(base, "alpha", "write test");
+    f.skill(base, "beta", "writing tested");
+    const skills = skillIndex(f);
+    expect(findSkills({ skills, query: "tested writing" }).slice(0, 2).map((s) => s.name)).toEqual(["alpha", "beta"]);
+    expect(findSkills({ skills, query: "writing tests" }).slice(0, 2).map((s) => s.name)).toEqual(["alpha", "beta"]);
+    expect(findSkills({ skills, query: "a an the for to of and with use when" })).toEqual([]);
+  });
+
   it("reads both settings paths relative to their settings dirs and follows agentDir env", () => {
     const f = fixture();
     f.skill(join(f.agentDir, "custom"), "global-extra", "global");
