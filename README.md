@@ -43,6 +43,8 @@ Role models are data. Muster reads `~/.config/muster/roster.json` (or `MUSTER_RO
 }
 ```
 
+Role and alternate `skills` name standing skills (names or absolute paths); launch skills append after project policy skills, de-duplicated. Workers keep `-ns` and search the installed catalog with `skill_find`, then read a matching `SKILL.md`.
+
 ## Tools
 
 Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`, `desk_report`, `desk_rulings`, `thinking_set` (a session lowers or raises its own thinking level, as a standing Hawk does when the line stops).
