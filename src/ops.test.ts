@@ -22,6 +22,7 @@ import {
   projectUpdate,
   proposeReview,
   reviewDue,
+  workPrompt,
 } from "./ops.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { Proc, liveProc } from "./runtime.ts";
@@ -1342,6 +1343,34 @@ describe("bridge capture and the sidebar", () => {
     const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "tuned", role: "worker", lane: "probe", label: "🔨 t", cwd: dir }));
     expect(launched.row.profile).toMatchObject({ model: "openai-codex/gpt-6-luna", compactAt: 250000 });
     expect((await failWith(h, projectUpdate(dir, { policy: { nudgeAfterMin: -5 } }))).message).toBeTruthy();
+  });
+});
+
+describe("worker skill launch", () => {
+  it("launches roster skills through the harness and notes unknown names", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    const skill = join(dir, ".pi", "skills", "fixture", "SKILL.md");
+    mkdirSync(join(skill, ".."), { recursive: true });
+    writeFileSync(skill, "---\nname: fixture\ndescription: Test launch\n---\n# Fixture");
+    mkdirSync(join(h.home, ".config", "muster"), { recursive: true });
+    writeFileSync(join(h.home, ".config", "muster", "roster.json"), JSON.stringify({
+      version: 1, roles: { worker: { skills: ["fixture", "missing"] } },
+    }));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "probe", goal: "g" }));
+    const result = await runWith(h, agentLaunch(dir, {
+      action: "launch", name: "w", role: "worker", lane: "probe", label: "worker", cwd: dir,
+    }));
+    expect(result.argv.slice(result.argv.indexOf("-ns"), result.argv.indexOf("-ns") + 3)).toEqual(["-ns", "--skill", skill]);
+    expect(result.notes).toContain('skill "missing" not found; skipped');
+    expect((await runWith(h, projectUpdate(dir, {}))).policy.roles.worker?.skills).toEqual(["fixture", "missing"]);
+    const row = { ...result.row, brief: "/brief.md" };
+    expect(workPrompt(row, undefined)).toContain("Skills aren't preloaded: call skill_find");
+    for (const role of ["desk", "hawk", "judge"] as const) {
+      expect(workPrompt({ ...row, role }, undefined)).not.toContain("skill_find");
+    }
+    expect(workPrompt(row, "Custom prompt")).toBe("Custom prompt");
   });
 });
 

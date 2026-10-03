@@ -210,6 +210,7 @@ export const RolePolicy = Schema.Struct({
   thinking: Schema.optionalKey(Thinking),
   compactAt: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt()))),
   noSkills: Schema.optionalKey(Schema.Boolean),
+  skills: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type RolePolicy = typeof RolePolicy.Type;
 
@@ -303,6 +304,7 @@ export interface RoleDefaults {
    */
   readonly compactAt: number | null;
   readonly noSkills: boolean;
+  readonly skills?: readonly string[];
 }
 
 export const ROLE_DEFAULTS: Readonly<Record<Role, RoleDefaults>> = {
@@ -319,6 +321,7 @@ export const Alternate = Schema.Struct({
   thinking: Schema.optionalKey(Thinking),
   compactAt: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt()))),
   noSkills: Schema.optionalKey(Schema.Boolean),
+  skills: Schema.optionalKey(Schema.Array(Schema.String)),
   useFor: Schema.Array(Schema.String),
   avoidFor: Schema.optionalKey(Schema.Array(Schema.String)),
   source: Schema.optionalKey(Schema.String),
@@ -346,6 +349,10 @@ export const Roster = Schema.Struct({
 export type Roster = typeof Roster.Type;
 export const decodeRoster = Schema.decodeUnknownSync(Roster);
 
+/** Only the settings field used by skill discovery; other Pi settings stay Pi's. */
+export const SkillSettings = Schema.Struct({ skills: Schema.optionalKey(Schema.Array(Schema.String)) });
+export const decodeSkillSettings = Schema.decodeUnknownSync(SkillSettings);
+
 export const DEFAULT_NUDGE_AFTER_MIN = 30;
 export const DEFAULT_RESTART_AFTER_MIN = 60;
 
@@ -372,7 +379,9 @@ export function roleDefaults(roster: Roster | undefined, policy: Policy | undefi
   const project = policy?.roles?.[role] ?? {};
   const chosen = model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model;
   const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => candidate.model === chosen) ?? { useFor: [] };
-  return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen } as RoleDefaults;
+  return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen,
+    skills: [...new Set([...(fleet.skills ?? []), ...("skills" in alternate ? alternate.skills ?? [] : []), ...(project.skills ?? [])])],
+  };
 }
 
 /** Shallow per-role merge: a later patch overrides only the keys it names. */
@@ -392,7 +401,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
   const limits = silenceLimits(policy);
   const roles = Object.fromEntries(
     Role.literals.map((role) => {
-      const alternates = (roster?.roles?.[role]?.alternates ?? []).map(({ model, useFor, avoidFor }) => ({ model, useFor, ...(avoidFor ? { avoidFor } : {}) }));
+      const alternates = (roster?.roles?.[role]?.alternates ?? []).map(({ model, useFor, avoidFor, skills }) => ({ model, useFor, ...(avoidFor ? { avoidFor } : {}), ...(skills ? { skills } : {}) }));
       return [role, { ...roleDefaults(roster, policy, role), ...(alternates.length ? { alternates } : {}) }];
     }),
   );

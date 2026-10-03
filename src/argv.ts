@@ -72,7 +72,7 @@ export function profileFor(role: Role, input: ProfileInput, d: RoleDefaults = RO
     thinking: input.thinking === undefined ? d.thinking : input.thinking,
     appendSystemPrompt: [...(input.appendSystemPrompt ?? [])],
     noSkills: input.noSkills ?? d.noSkills,
-    skills: [...(input.skills ?? [])],
+    skills: [...new Set([...(d.skills ?? []), ...(input.skills ?? [])])],
     extensions: [...(input.extensions ?? [])],
     env: { ...(input.env ?? {}) },
     compactAt: input.compactAt === undefined ? d.compactAt : input.compactAt,

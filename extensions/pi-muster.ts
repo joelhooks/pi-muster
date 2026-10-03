@@ -32,6 +32,7 @@ import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "../src/runtime.ts";
 import { registerDeskFeed } from "../src/desk-feed-ext.ts";
 import { registerDeskReport } from "../src/desk-report-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
+import { findSkills, skillIndex } from "../src/skills.ts";
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_WORKER_WORKTREE = join(homedir(), "Code", "joelhooks", "dark-wizard", "scripts", "worker-worktree.sh");
@@ -126,6 +127,20 @@ export default function muster(pi: ExtensionAPI) {
       },
     });
   }
+
+  pi.registerTool({
+    name: "skill_find",
+    label: "Find skills",
+    description: "Search every installed skill by task words; read the SKILL.md of any match before using it.",
+    parameters: Type.Object({
+      query: Type.String(),
+      limit: Type.Optional(Type.Integer({ default: 5, minimum: 1, maximum: 10 })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const matches = findSkills({ skills: skillIndex({ cwd: ctx.cwd }), ...params });
+      return text(matches.length ? matches.map((skill) => `${skill.name}: ${skill.description}\n${skill.path}`).join("\n\n") : "No matching skills.", { matches });
+    },
+  });
 
   if (worker) return;
 
@@ -395,6 +410,7 @@ export default function muster(pi: ExtensionAPI) {
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       compactAt: Type.Optional(Type.Union([Type.Integer(), Type.Null()], { description: "null turns compaction off" })),
       noSkills: Type.Optional(Type.Boolean()),
+      skills: Type.Optional(Type.Array(Type.String({ description: "Skill name or absolute path" }))),
     }),
   );
 
@@ -402,7 +418,7 @@ export default function muster(pi: ExtensionAPI) {
     name: "project_update",
     label: "Muster project update",
     description:
-      "Shape the project to the job. headline is the sidebar's one line on what the space is doing (null falls back to the next action); change it when the story changes, not every pass. label renames the project and its owned space. policy merges over the defaults: silence limits in minutes (restartAfterMin null never restarts) and per-role model, thinking, compactAt, noSkills for later launches. Returns the policy in force.",
+      "Shape the project to the job. headline is the sidebar's one line on what the space is doing (null falls back to the next action); change it when the story changes, not every pass. label renames the project and its owned space. policy merges over the defaults: silence limits in minutes (restartAfterMin null never restarts) and per-role model, thinking, compactAt, noSkills, skills for later launches. Returns the policy in force.",
     promptSnippet: "project_update: sidebar headline, next action, and the project's timeouts and role defaults",
     parameters: Type.Object({
       project: ProjectParam,

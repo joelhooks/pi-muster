@@ -70,7 +70,7 @@ describe("extension modes", () => {
   it("gives a plain session the owner tools and no worker tool, and starts nothing", () => {
     const fake = fakePi();
     muster(fake.pi as never);
-    expect(fake.tools).toEqual(OWNER_TOOLS);
+    expect(fake.tools).toEqual(["skill_find", ...OWNER_TOOLS]);
     expect(fake.defs.get("project_status")).toMatchObject({ parameters: { properties: { takeover: { type: "boolean" } } } });
     expect(fake.flags).toEqual(["compact-at", "switchboard"]);
     expect(fake.commands).toEqual(["compact-at", "switchboard"]);
@@ -78,18 +78,18 @@ describe("extension modes", () => {
     expect(fake.emitted).toEqual([]);
   });
 
-  it("gives a worker only packet_report: no desk, no path to Joel", () => {
+  it("gives a worker packet_report and skill_find: no desk, no path to Joel", () => {
     Object.assign(process.env, { MUSTER_ROLE: "worker", MUSTER_AGENT: "w1", MUSTER_PROJECT: "/p", MUSTER_OWNER: "boss" });
     const fake = fakePi();
     muster(fake.pi as never);
-    expect(fake.tools).toEqual(["packet_report"]);
+    expect(fake.tools).toEqual(["packet_report", "skill_find"]);
   });
 
   it("gives a boss both sides: it reports up and owns its workers", () => {
     Object.assign(process.env, { MUSTER_ROLE: "boss", MUSTER_AGENT: "b1", MUSTER_PROJECT: "/p", MUSTER_OWNER: "hawk" });
     const fake = fakePi();
     muster(fake.pi as never);
-    expect(fake.tools).toEqual(["packet_report", ...OWNER_TOOLS]);
+    expect(fake.tools).toEqual(["packet_report", "skill_find", ...OWNER_TOOLS]);
   });
 });
 

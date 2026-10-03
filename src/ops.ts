@@ -47,6 +47,7 @@ import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
+import { resolveSkills, skillIndex } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
@@ -864,7 +865,7 @@ export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
     case "judge":
       return `Read your brief at ${row.brief} and take up the role it describes. Report only through the channels it names.`;
     default:
-      return `Read your brief at ${row.brief} and do the work it describes. When your result is committed, call packet_report once with the commit and your checks.`;
+      return `Read your brief at ${row.brief} and do the work it describes. Skills aren't preloaded: call skill_find with your task's key words and read any skill that matches before you start. When your result is committed, call packet_report once with the commit and your checks.`;
   }
 };
 
@@ -875,6 +876,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const project = yield* load(dir);
     const existing = project.agents.find((agent) => agent.name === name);
 
+    const skillNotes: string[] = [];
     let row: AgentRow;
     if (params.action === "restore") {
       if (!existing) return yield* new NotFound({ kind: "agent", id: name, message: `no row ${name} to restore` });
@@ -920,7 +922,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       const inherited: ProfileInput = parent
         ? { ...parent.profile, label }
         : { label };
-      const profile: LaunchProfile = profileFor(role, {
+      const requestedProfile: LaunchProfile = profileFor(role, {
         ...inherited,
         ...(params.model !== undefined ? { model: params.model } : {}),
         ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
@@ -931,6 +933,14 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
       }, roleDefaults((yield* loadRoster).roster, project.policy, role, params.model));
+      const resolved = requestedProfile.skills.length > 0
+        ? yield* Effect.try({
+          try: () => resolveSkills({ skills: requestedProfile.skills, index: skillIndex({ cwd }) }),
+          catch: (cause) => new InputError({ message: `skill discovery: ${String(cause)}` }),
+        })
+        : { paths: [], notes: [] };
+      const profile: LaunchProfile = { ...requestedProfile, skills: resolved.paths };
+      skillNotes.push(...resolved.notes);
       const now = iso(env);
       row = {
         name,
@@ -1050,7 +1060,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       readiness: launched.agent.interactive_ready === true ? "proven" : "unknown",
       proof,
       sessionIdMatched: actualId === null ? null : actualId === row.sessionId,
-      notes: [tokens],
+      notes: [...skillNotes, tokens],
     };
   });
 

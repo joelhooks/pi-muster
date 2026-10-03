@@ -56,6 +56,7 @@
     "src/runtime.ts",
     "src/session-file.ts",
     "src/silence.ts",
+    "src/skills.ts",
     "src/store.ts",
     "src/switchboard-ext.ts",
     "src/switchboard-ops.ts",
