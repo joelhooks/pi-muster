@@ -70,6 +70,8 @@ Roster skills are a role's standing set; name extras at launch; workers pull the
 
 ## Talking across lanes and desks
 
+Messages must be plain sentences with spaces between words; put code, paths and ids in backticks.
+
 - Workers and bosses post FYI, progress and done with `owner_note`; these accumulate without waking their owner. A blocking question uses `owner_note kind=question`. `packet_report` remains the one finish report.
 - Answer a queued question with `owner_reply`, naming its URI. Replies thread back to the author and mention them, so their feed wakes when idle. Owners pull `owner_inbox` for records and use `ack` only for items they have handled.
 - Intercom ask/reply is for live back-and-forth, not progress pings. Older or unavailable queue readers still receive an intercom fallback for mentions.

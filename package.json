@@ -68,6 +68,7 @@
     "src/switchboard-flame.ts",
     "src/switchboard-ops.ts",
     "src/switchboard-view.ts",
+    "src/readable.ts",
     "src/registry.ts",
     "src/relay-events.ts",
     "src/owner-lexicon.ts",
