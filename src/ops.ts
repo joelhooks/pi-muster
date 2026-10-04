@@ -253,45 +253,65 @@ const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
 export const ingestRemotePackets = (dir: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const project = yield* load(dir);
+  const notes: string[] = [];
+  const failedMachines = new Set<string>();
   for (const row of project.agents.filter(row => row.machine !== "local" && row.state !== "closed")) {
-    const machine = yield* machineConfig(row.machine);
-    const output = yield* remoteNode(row.machine, machine, `import {existsSync,readdirSync,readFileSync} from 'node:fs'; const root=process.argv[1]; const files=existsSync(root)?readdirSync(root).filter(n=>/^[a-f0-9]{40,64}$/.test(n)).slice(0,100):[]; console.log(JSON.stringify(files.flatMap(n=>{const p=root+'/'+n+'/packet.json';return existsSync(p)?[JSON.parse(readFileSync(p,'utf8'))]:[]})));`, [join(row.cwd, ".pi/muster/packets")]);
-    const values = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Unknown)), output);
-    for (const value of values) {
-      const sidecar = yield* decodeWith(decodeRemotePacket, value);
-      const packet = sidecar.packet;
-      if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
-      const report = join(reportsDir(dir), row.lane, `${row.name}-${packet.id.slice(0,12)}.svx`);
-      yield* mutate(dir, current => Effect.gen(function* () {
-        if (current.packets.some(prior => prior.id === packet.id)) return [current, false] as const;
-        const latest = yield* findRow(current, row.name);
-        const earlier = [...current.packets].reverse().find(prior => prior.agent === latest.name && !TERMINAL_PACKET_STATES.includes(prior.state));
-        if (earlier) {
-          if (packet.kind !== "commit" || earlier.kind !== "commit") return yield* input(`machine ${row.machine}: earlier packet needs an outcome first`);
-          const runner = yield* Proc;
-          const ancestry = yield* sshProc(row.machine, machine, runner, env.home).run("git", ["merge-base", "--is-ancestor", earlier.id, packet.id], { cwd: row.cwd, timeoutMs: 15_000 });
-          if (ancestry.code !== 0) return yield* input(`machine ${row.machine}: non-ancestor follow-up requires an outcome first`);
-        }
-        const reportingAgain = ["reported", "verified", "landed"].includes(latest.state);
-        const live = reportingAgain && latest.pane ? yield* onRemote(row.machine, machine, locatePane(latest.pane)) : null;
-        const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!live?.agent });
-        mkdirSync(dirname(report), { recursive: true }); writeFileSync(report, sidecar.reportText);
-        const ingested: Packet = { ...packet, report, verification: null, gate: null, landedAs: null, supersedes: earlier?.id ?? null };
-        return [withPacket(withRow(current, { ...latest, state, updatedAt: iso(env) }), ingested), true] as const;
-      }));
+    const skipped = (reason: string) => notes.push(`machine ${row.machine}: ingest skipped for ${row.name}: ${reason}`);
+    if (failedMachines.has(row.machine)) { skipped("machine unavailable earlier in this pass"); continue; }
+    const fetched = yield* Effect.gen(function* () {
+      const machine = yield* machineConfig(row.machine);
+      const output = yield* remoteNode(row.machine, machine, `import {existsSync,readdirSync,readFileSync} from 'node:fs'; const root=process.argv[1]; const files=existsSync(root)?readdirSync(root).filter(n=>/^[a-f0-9]{40,64}$/.test(n)).slice(0,100):[]; console.log(JSON.stringify(files.flatMap(id=>{const p=root+'/'+id+'/packet.json';if(!existsSync(p))return [];try{return [{id,value:JSON.parse(readFileSync(p,'utf8')),error:null}]}catch(error){return [{id,value:null,error:String(error)}]}})));`, [join(row.cwd, ".pi/muster/packets")]);
+      const values = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ id: Schema.String, value: Schema.Unknown, error: Schema.NullOr(Schema.String) }))), output);
+      return { machine, values };
+    }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(row.machine); skipped(error.message); return null; })));
+    if (!fetched) continue;
+    const { machine, values } = fetched;
+    for (const entry of values) {
+      if (failedMachines.has(row.machine)) break;
+      if (entry.error) { skipped(`sidecar ${entry.id}: ${entry.error}`); continue; }
+      yield* Effect.gen(function* () {
+        const sidecar = yield* decodeWith(decodeRemotePacket, entry.value);
+        const packet = sidecar.packet;
+        if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
+        const report = join(reportsDir(dir), row.lane, `${row.name}-${packet.id.slice(0,12)}.svx`);
+        yield* mutate(dir, current => Effect.gen(function* () {
+          if (current.packets.some(prior => prior.id === packet.id)) return [current, false] as const;
+          const latest = yield* findRow(current, row.name);
+          const earlier = [...current.packets].reverse().find(prior => prior.agent === latest.name && !TERMINAL_PACKET_STATES.includes(prior.state));
+          if (earlier) {
+            if (packet.kind !== "commit" || earlier.kind !== "commit") return yield* input(`machine ${row.machine}: earlier packet needs an outcome first`);
+            const runner = yield* Proc;
+            const ancestry = yield* sshProc(row.machine, machine, runner, env.home).run("git", ["merge-base", "--is-ancestor", earlier.id, packet.id], { cwd: row.cwd, timeoutMs: 15_000 });
+            if (ancestry.code !== 0) return yield* input(`machine ${row.machine}: non-ancestor follow-up requires an outcome first`);
+          }
+          const reportingAgain = ["reported", "verified", "landed"].includes(latest.state);
+          const live = reportingAgain && latest.pane ? yield* onRemote(row.machine, machine, locatePane(latest.pane)) : null;
+          const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!live?.agent });
+          yield* Effect.try({ try: () => { mkdirSync(dirname(report), { recursive: true }); writeFileSync(report, sidecar.reportText); }, catch: error => new StoreError({ path: report, message: String(error) }) });
+          const ingested: Packet = { ...packet, report, verification: null, gate: null, landedAs: null, supersedes: earlier?.id ?? null };
+          return [withPacket(withRow(current, { ...latest, state, updatedAt: iso(env) }), ingested), true] as const;
+        }));
+      }).pipe(Effect.catch(error => Effect.sync(() => {
+        skipped(`sidecar ${entry.id}: ${error.message}`);
+        if (error._tag === "ProcError" && (error.code === null || error.code === 255)) failedMachines.add(row.machine);
+      })));
     }
   }
+  return { notes, failedMachines };
 });
 
-const remoteSessionTimes = (project: Project) => Effect.gen(function* () {
+const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[]) => Effect.gen(function* () {
   const result = new Map<string, number | null>();
   const names = [...new Set(project.agents.filter(row => row.machine !== "local" && row.state !== "closed").map(row => row.machine))];
   for (const name of names) {
-    const machine = yield* machineConfig(name);
-    const files = project.agents.filter(row => row.machine === name).slice(0, 100).map(row => row.sessionFile).filter((file): file is string => file !== null);
-    const raw = yield* remoteNode(name, machine, `import {statSync} from 'node:fs';console.log(JSON.stringify(process.argv.slice(1).map(p=>{try{return [p,statSync(p).mtimeMs]}catch{return [p,null]}})));`, files);
-    const entries = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.String, Schema.NullOr(Schema.Number)]))), raw);
-    for (const [file, mtime] of entries) result.set(`${name}:${file}`, mtime);
+    if (failedMachines.has(name)) continue;
+    yield* Effect.gen(function* () {
+      const machine = yield* machineConfig(name);
+      const files = project.agents.filter(row => row.machine === name).slice(0, 100).map(row => row.sessionFile).filter((file): file is string => file !== null);
+      const raw = yield* remoteNode(name, machine, `import {statSync} from 'node:fs';console.log(JSON.stringify(process.argv.slice(1).map(p=>{try{return [p,statSync(p).mtimeMs]}catch{return [p,null]}})));`, files);
+      const entries = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.String, Schema.NullOr(Schema.Number)]))), raw);
+      for (const [file, mtime] of entries) result.set(`${name}:${file}`, mtime);
+    }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(name); notes.push(`machine ${name}: session stats skipped: ${error.message}`); })));
   }
   return result;
 });
@@ -397,7 +417,7 @@ export function findLane(project: Project, slug: string) {
   return lane ? Effect.succeed(lane) : Effect.fail(new NotFound({ kind: "lane", id: slug, message: `no lane named ${slug}` }));
 }
 
-export function findPacket(project: Project, id: string) {
+export function findPacket(project: Project, id: string): Effect.Effect<Packet, NotFound | InputError> {
   const matches = project.packets.filter((packet) => packet.id === id || (id.length >= 7 && packet.id.startsWith(id)));
   if (matches.length === 1) return Effect.succeed(matches[0] as Packet);
   return Effect.fail(
@@ -1780,9 +1800,14 @@ export const packetReport = (params: PacketReportInput) =>
 export const packetVerify = (dir: string, id: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
-    yield* ingestRemotePackets(dir);
-    const project = yield* load(dir);
-    const packet = yield* findPacket(project, id);
+    let project = yield* load(dir);
+    let ingestNotes: string[] = [];
+    if (!project.packets.some(packet => packet.id === id || (id.length >= 7 && packet.id.startsWith(id)))) {
+      ingestNotes = (yield* ingestRemotePackets(dir)).notes;
+      project = yield* load(dir);
+    }
+    const packet = yield* findPacket(project, id).pipe(Effect.mapError(error => error._tag === "NotFound" && ingestNotes.length
+      ? new NotFound({ ...error, message: `${error.message}; ${ingestNotes.join("; ")}` }) : error));
     const row = yield* findRow(project, packet.agent);
     const lane = project.lanes.find((candidate) => candidate.slug === packet.lane);
     const checks = row.machine === "local" ? yield* verifyPacket(project, lane, row, packet) : yield* verifyRemotePacket(project, lane, row, packet);
@@ -2154,7 +2179,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const env = yield* MusterEnv;
     const intercom = yield* Comms;
     const act = params.act !== false;
-    yield* ingestRemotePackets(dir);
+    const ingestion = yield* ingestRemotePackets(dir);
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.gen(function* () {
@@ -2173,11 +2198,16 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const lines: AgentLine[] = [];
     let stuck = 0;
 
-    const remoteTimes = yield* remoteSessionTimes(project);
+    const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     for (const row of project.agents) {
       if (row.state === "closed" || row.state === "planned") continue;
       if (row.machine !== "local") {
-        lines.push(yield* remoteStatusRow(dir, project, row, act, remoteTimes));
+        const unavailable: AgentLine = { name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action: `machine ${row.machine}: remote status unavailable; row unchanged` };
+        lines.push(ingestion.failedMachines.has(row.machine) ? unavailable : yield* remoteStatusRow(dir, project, row, act, remoteTimes).pipe(Effect.catch(error => Effect.sync(() => {
+          ingestion.failedMachines.add(row.machine);
+          ingestion.notes.push(`machine ${row.machine}: status skipped for ${row.name}: ${error.message}`);
+          return unavailable;
+        }))));
         continue;
       }
       let pane: PaneInfo | undefined;
@@ -2392,7 +2422,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
-    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime(), fleet.line), notes: [tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    return { project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes].join("\n"), notes: [...ingestion.notes, tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));

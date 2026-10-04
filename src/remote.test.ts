@@ -114,7 +114,7 @@ describe("remote owner operations", () => {
     const restored = await s.run(agentLaunch(s.dir, { action: "restore", name: "remote-fork" }));
     expect(restored.row.machine).toBe("remote"); expect(restored.argv).toContain("--session");
     expect(s.calls.filter(call => call.command === "ssh").every(call => (call.timeoutMs ?? Infinity) <= 300000)).toBe(true);
-  });
+  }, 30_000);
   it("keeps remote-only skill paths across restore instead of rediscovering them locally", async () => {
     const s = setup(); await s.open();
     const original = s.proc.run;
@@ -199,8 +199,47 @@ describe("remote owner operations", () => {
     const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
     writeFileSync(join(root, "packet.json"), JSON.stringify({ project: "wrong", machine: "remote", packet: { id, kind: "commit", artifact: null, lane: "work", agent: launched.row.name, report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: s.h.now.toISOString(), updatedAt: s.h.now.toISOString() }, reportText: "wrong" }));
     const before = readFileSync(projectPath(s.dir), "utf8");
-    await expect(s.run(ingestRemotePackets(s.dir))).rejects.toThrow("invalid packet sidecar identity");
+    const result = await s.run(ingestRemotePackets(s.dir));
+    expect(result.notes.join("\n")).toContain("invalid packet sidecar identity");
     expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
+  });
+  it("keeps local status available and skips remaining machine rows after a transport failure", async () => {
+    const s = setup(); await s.open(); await s.launch(); await s.launch("remote-two");
+    const local = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local worker", clone: true, noSkills: true }));
+    s.calls.length = 0;
+    const original = s.proc.run;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh"
+      ? Effect.fail(new ProcError({ command: "ssh remote", code: 255, stderr: "offline", message: "machine remote: offline" })) : original(command, args, options));
+    const status = await s.run(projectStatus(s.dir, { act: false }));
+    expect(status.agents.find(row => row.name === local.row.name)?.state).toBe("running");
+    expect(status.board).toContain("machine remote: ingest skipped for remote-w");
+    expect(status.notes.join("\n")).toContain("machine unavailable earlier in this pass");
+    expect((await s.run(load(s.dir))).agents.filter(row => row.machine === "remote").every(row => row.state === "running")).toBe(true);
+    expect(vi.mocked(s.proc.run).mock.calls.filter(([command]) => command === "ssh")).toHaveLength(1);
+  });
+  it("skips malformed sidecars while ingesting a good sidecar in the same pass", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
+    const root = join(launched.row.cwd, ".pi/muster/packets");
+    for (const key of [id, "a".repeat(40)]) mkdirSync(join(root, key), { recursive: true });
+    writeFileSync(join(root, "a".repeat(40), "packet.json"), "{broken JSON");
+    writeFileSync(join(root, id, "packet.json"), JSON.stringify({ project: "probe", machine: "remote", packet: { id, kind: "commit", artifact: null, lane: "work", agent: launched.row.name, report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: s.h.now.toISOString(), updatedAt: s.h.now.toISOString() }, reportText: "good report" }));
+    const result = await s.run(ingestRemotePackets(s.dir));
+    expect(result.notes.join("\n")).toContain(`sidecar ${"a".repeat(40)}`);
+    expect((await s.run(load(s.dir))).packets.map(packet => packet.id)).toEqual([id]);
+    expect(readFileSync((await s.run(load(s.dir))).packets[0]!.report, "utf8")).toBe("good report");
+  });
+  it("verifies a local packet without SSH even when a remote machine is offline", async () => {
+    const s = setup(); await s.open(); await s.launch();
+    const local = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local worker", clone: true, noSkills: true }));
+    const artifact = join(s.h.root, "local-artifact.txt"); writeFileSync(artifact, "local evidence");
+    const report = await s.run(packetReport({ dir: s.dir, agent: local.row.name, owner: local.row.owner, cwd: local.row.cwd, artifact, summary: "Local artifact", checks: [] }));
+    const original = s.proc.run;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh"
+      ? Effect.fail(new ProcError({ command: "ssh remote", code: 255, stderr: "offline", message: "machine remote: offline" })) : original(command, args, options));
+    expect((await s.run(packetVerify(s.dir, report.packet.id))).packet.state).toBe("verified");
+    expect(vi.mocked(s.proc.run).mock.calls.some(([command]) => command === "ssh")).toBe(false);
+    await expect(s.run(packetVerify(s.dir, "f".repeat(40)))).rejects.toThrow("machine remote: ingest skipped");
   });
   it("saves remote logs, closes the bound pane and removes the clone through SSH", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();

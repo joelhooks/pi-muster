@@ -61,4 +61,6 @@ Use the real lane slug and brief. Fork and restore reuse the source row's machin
 
 A remote `packet_report` writes its report and an atomic `packet.json` sidecar under the clone's `.pi/muster/packets/<id>/`. It does not touch a project catalog. Owner `project_status` ingests sidecars, and `packet_verify` also ingests before looking up an unknown id. Repeating ingestion does not reset a verified or landed packet. Non-ancestor follow-ups still need an outcome on the earlier packet.
 
+Ingestion failures appear as board notes instead of failing the owner pass. A bad sidecar is skipped independently. After a machine transport failure, the pass skips its remaining rows and preserves their state. Verifying a packet already in the local catalog does not run ingestion; verifying a local worker packet never contacts SSH.
+
 The owner verifies remote git and file evidence over bounded SSH calls, then fetches the worker branch over SSH for a local landing. Remote session mtimes are batched; cost is not read. Closing saves the pane tail locally and invokes the remote clone-removal script. A failed SSH read is not evidence that a pane disappeared.
