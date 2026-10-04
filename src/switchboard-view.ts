@@ -1,7 +1,8 @@
+import { stripVTControlCharacters } from "node:util";
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 
-import { FlameState, flameEnabled, flameSummary, renderFlame } from "./switchboard-flame.ts";
+import { ActivityState, activityEnabled, activitySummary, renderActivity } from "./switchboard-flame.ts";
 import { KIND_GLYPH, KIND_RANK, TICKER_WINDOW_MS, eventText, formatAge, itemRef, openCount } from "./switchboard.ts";
 import type { FleetStats, InboxGroup, InboxItem, LatestPost, QueueEvent, SystemView, UnregisteredSpace } from "./switchboard.ts";
 
@@ -28,7 +29,7 @@ export const OPEN_HINT = "alt+s";
  * still exists, so a new arrival never moves what Joel is reading.
  */
 export class SwitchboardState {
-  readonly flame = new FlameState();
+  readonly activity = new ActivityState();
   groups: readonly InboxGroup[] = [];
   unregistered: readonly UnregisteredSpace[] = [];
   posts: Readonly<Record<string, readonly number[]>> = {};
@@ -41,7 +42,6 @@ export class SwitchboardState {
   private seen = new Set<string>();
 
   setGroups(groups: readonly InboxGroup[], key: string | null = this.current() ? rowKey(this.current()!) : null): void {
-    this.flame.update(groups, this.now);
     this.groups = groups;
     // A project that shows up for the first time opens, so a new ask is visible without a keypress.
     for (const group of groups) {
@@ -202,8 +202,11 @@ export function systemLine(state: SwitchboardState, theme: ViewTheme, room = Num
 
 /** Collapsed ambient display; plain terminals get only the summary. */
 export function renderWidget(state: SwitchboardState, width: number, theme: ViewTheme, env: Readonly<Record<string, string | undefined>> = process.env, now = state.now): string[] {
-  if (!flameEnabled(width, theme, env)) return [truncateToWidth(`☎️ ${flameSummary(state.groups)} · ${OPEN_HINT}`, width)];
-  return renderFlame(state.groups, state.flame, width, theme, now);
+  if (!activityEnabled(width, theme, env)) {
+    const oldest = openCount(state.groups) ? ` · oldest ${formatAge(Math.max(0, ...state.groups.map((g) => g.oldestMs)))}` : "";
+    return [stripVTControlCharacters(truncateToWidth(`☎️ ${activitySummary(state.groups, state.activity, now)}${oldest} · ${OPEN_HINT}`, width))];
+  }
+  return renderActivity(state.groups, state.activity, width, theme, now);
 }
 
 /** Expanded header: globally ranked asks and recent queue activity. */
