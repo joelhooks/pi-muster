@@ -74,6 +74,7 @@ const OWNER_TOOLS = [
   "lane_open",
   "lane_close",
   "agent_launch",
+  "agent_rewind",
   "agent_close",
   "packet_verify",
   "packet_land",
@@ -90,7 +91,7 @@ describe("extension modes", () => {
     expect(fake.tools).toEqual(["owner_inbox", "owner_reply", "skill_find", ...OWNER_TOOLS]);
     expect(fake.defs.get("project_status")).toMatchObject({ parameters: { properties: { takeover: { type: "boolean" } } } });
     expect(fake.flags).toEqual(["compact-at", "switchboard"]);
-    expect(fake.commands).toEqual(["compact-at", "switchboard"]);
+    expect(fake.commands).toEqual(["compact-at", "muster-rewind", "switchboard"]);
     expect(fake.shortcuts).toEqual(["alt+s"]);
     expect(fake.emitted).toEqual([]);
   });
@@ -99,7 +100,7 @@ describe("extension modes", () => {
     Object.assign(process.env, { MUSTER_ROLE: "worker", MUSTER_AGENT: "w1", MUSTER_PROJECT: "/p", MUSTER_OWNER: "boss" });
     const fake = fakePi();
     muster(fake.pi as never);
-    expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "packet_report", "skill_find"]);
+    expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "packet_report", "skill_find", "context_mark"]);
   });
 
   it("gives a boss both sides: it reports up and owns its workers", () => {
