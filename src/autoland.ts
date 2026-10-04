@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { Effect, Schema } from "effect";
 import type { Packet, Project } from "./domain.ts";
 import { sourceOf } from "./packet.ts";
@@ -48,7 +49,8 @@ export const findLanding = (project: Project, packet: Packet, options: { notes?:
     if (!repo) { options.notes?.push("autoland: no GitHub origin; ancestor-only"); return null; }
     const candidates = [packet.id];
     // A later worker head is usable only when it provably contains this packet.
-    if (row.clone) {
+    // A closed worker's worktree is trashed; its head is no longer evidence.
+    if (row.clone && existsSync(row.cwd)) {
       const head = yield* run("git", ["rev-parse", "HEAD"], row.cwd);
       const sha = head.stdout.trim();
       if (SHA.test(sha) && sha !== packet.id && (yield* run("git", ["merge-base", "--is-ancestor", packet.id, sha], row.cwd)).code === 0) candidates.push(sha);
@@ -56,7 +58,9 @@ export const findLanding = (project: Project, packet: Packet, options: { notes?:
     for (const sha of candidates) {
       if (Date.now() >= deadline) break;
       const result = yield* run("gh", ["api", `repos/${repo}/commits/${sha}/pulls`, "--paginate", "--slurp"]);
-      if (result.code !== 0) { options.notes?.push("autoland: gh lookup failed; ancestor-only"); return null; }
+      // 422 "No commit found": a local worker commit GitHub never saw; try the next candidate.
+      if (result.code !== 0 && /No commit found/.test(result.stdout + result.stderr)) continue;
+      if (result.code !== 0) { options.notes?.push(`autoland: gh lookup failed for ${sha.slice(0, 8)}; ancestor-only`); continue; }
       const pulls = yield* Effect.try({ try: () => {
         const pages: unknown = JSON.parse(result.stdout);
         // --slurp wraps each page; injected runners may return a single page.

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { findLanding } from "./autoland.ts";
@@ -64,6 +64,29 @@ describe("autoland evidence", () => {
     const f = await fixture();
     github(f, reason === "no match" ? [] : [{ number: 1, merged_at: reason === "unmerged" ? null : "today", merge_commit_sha: reason === "unreachable" ? "a".repeat(40) : sh(f.origin, "rev-parse", "HEAD").trim(), base: { ref: reason === "wrong base" ? "release" : "main" } }]);
     expect(await runWith(f.h, findLanding(f.project, f.packet))).toBeNull();
+  });
+  it("a 422 for an unpushed packet commit still checks the worker head, quietly", async () => {
+    const f = await fixture();
+    writeFileSync(join(f.row.cwd, "followup"), "two"); sh(f.row.cwd, "add", "followup"); sh(f.row.cwd, "commit", "-qm", "followup");
+    const head = sh(f.row.cwd, "rev-parse", "HEAD").trim();
+    const merged = sh(f.origin, "rev-parse", "HEAD").trim();
+    const pull = { number: 7, merged_at: "2026-10-04", merge_commit_sha: merged, base: { ref: "main" }, merged_by: { login: "kodiak" } };
+    github(f, []);
+    const prev = f.h.proc;
+    f.h.proc = { run: (cmd, args, opts) => cmd !== "gh" ? prev.run(cmd, args, opts)
+      : args[1]?.includes(head) ? Effect.succeed({ code: 0, stdout: JSON.stringify([[pull]]), stderr: "" })
+      : Effect.succeed({ code: 1, stdout: "", stderr: `gh: No commit found for SHA: ${f.packet.id} (HTTP 422)` }) };
+    const notes: string[] = [];
+    expect(await runWith(f.h, findLanding(f.project, f.packet, { notes }))).toMatchObject({ sha: merged, pr: 7, how: "squash" });
+    expect(notes).toEqual([]);
+  });
+  it("a trashed worker worktree is skipped without an unavailable note", async () => {
+    const f = await fixture();
+    github(f, []);
+    rmSync(f.row.cwd, { recursive: true, force: true });
+    const notes: string[] = [];
+    expect(await runWith(f.h, findLanding(f.project, f.packet, { notes }))).toBeNull();
+    expect(notes.join(" ")).not.toContain("unavailable");
   });
   it("missing gh is nonfatal with an ancestor-only note", async () => {
     const f = await fixture(); github(f, null, true); const notes: string[] = [];
