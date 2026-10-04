@@ -58,6 +58,7 @@ const OWNER_TOOLS = [
   "desk_answer",
   "desk_report",
   "desk_rulings",
+  "project_digest",
   "project_open",
   "project_move",
   "lane_open",
