@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -20,8 +20,8 @@ function setup(): HeavyOptions {
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 // Node's preload changes only the test child's adapter, never real machine state.
-function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, load: 20, freeGB: 64 })") {
-  const source = `import { machineAdapter } from ${JSON.stringify(pathToFileURL(resolve("src/heavy-lock.ts")).href)}; let calls = 0; machineAdapter.performanceCores = () => 12; machineAdapter.sample = () => { calls++; return ${sampleCode}; };`;
+function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, load: 20, freeGB: 64 })", fakeClock = false) {
+  const source = `import { machineAdapter } from ${JSON.stringify(pathToFileURL(resolve("src/heavy-lock.ts")).href)}; let calls = 0; machineAdapter.performanceCores = () => 12; machineAdapter.sample = () => { calls++; return ${sampleCode}; }; ${fakeClock ? "let now = Date.now(); Date.now = () => now; globalThis.setTimeout = (fn, ms) => { now += ms; queueMicrotask(fn); };" : ""}`;
   return spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(source)}`, "bin/muster-heavy.ts", ...args], {
     encoding: "utf8", timeout: 10000,
     env: { ...process.env, HOME: options.home, MUSTER_HEAVY_SLOTS: "2", MUSTER_HEAVY_MIN_FREE_GB: "16" },
@@ -65,6 +65,63 @@ describe("heavy gate slots", () => {
     expect(readHolder(heavyLockPath(options.home))?.command).toBe("live gate");
     expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
     if (held.ok) held.release();
+  });
+
+  it.each(["slot", "exclusive"].flatMap((mode) => ["dead", "reused", "variant"].map((kind) => ({ mode, kind }))))("reaps $kind pending holders for $mode admission", ({ mode, kind }) => {
+    const options = setup();
+    const pending = exclusivePendingPath(options.home);
+    tryAcquire(pending, "orphan", kind === "reused" ? process.pid : 999_999_99);
+    const holder = readHolder(pending)!;
+    writeFileSync(join(pending, "holder.json"), JSON.stringify({
+      ...holder,
+      startedAt: kind === "reused" ? "2000-01-01T00:00:00.000Z" : holder.startedAt,
+      host: kind === "variant" ? `${hostname().replace(/\.(local|localdomain)$/i, "")}.LOCAL` : holder.host,
+    }));
+    const request = mode === "exclusive" ? exclusiveRequest(options, "new gate") : undefined;
+    const acquired = request ? request.attempt() : tryAcquireHeavy(options, "new gate");
+    expect(acquired.ok, kind).toBe(true);
+    if (mode === "slot") expect(existsSync(pending)).toBe(false);
+    else expect(readHolder(pending)?.command).toBe("new gate");
+    if (acquired.ok) acquired.release();
+    request?.release();
+  });
+
+  it("preserves foreign and unreadable pending holders", () => {
+    for (const foreign of [true, false]) {
+      const options = setup();
+      const pending = exclusivePendingPath(options.home);
+      tryAcquire(pending, "orphan", 999_999_99);
+      const original = readHolder(pending)!;
+      const json = JSON.stringify(foreign ? { ...original, host: `${hostname()}.foreign.example` } : {});
+      writeFileSync(join(pending, "holder.json"), json);
+      expect(heavySnapshot(options).exclusivePending).toMatchObject({ health: "unknown", stale: false });
+      expect(tryAcquireHeavy(options, "slot").ok).toBe(false);
+      const request = exclusiveRequest(options, "deploy");
+      expect(request.attempt().ok).toBe(false);
+      request.release();
+      expect(readFileSync(join(pending, "holder.json"), "utf8")).toBe(json);
+    }
+  });
+
+  it("labels alive, dead and reused holders with age without reaping", () => {
+    const options = setup();
+    const pending = exclusivePendingPath(options.home);
+    const now = Date.now();
+    tryAcquire(pending, "waiting deploy");
+    const original = readHolder(pending)!;
+    writeFileSync(join(pending, "holder.json"), JSON.stringify({ ...original, startedAt: new Date(now).toISOString() }));
+    expect(heavySnapshot(options, now + 3000).exclusivePending).toMatchObject({ health: "alive", ageSeconds: 3, stale: false });
+    const blocked = tryAcquireHeavy(options, "new gate");
+    expect(blocked.ok).toBe(false);
+    if (!blocked.ok) expect(blocked.reason).toMatch(/alive; age \d+s/);
+    writeFileSync(join(pending, "holder.json"), JSON.stringify({ ...original, startedAt: "2000-01-01T00:00:00.000Z" }));
+    expect(heavySnapshot(options, now).exclusivePending).toMatchObject({ health: "reused", stale: true });
+    expect(heavyStatus(options, now)).toContain("reused; age");
+    expect(JSON.parse(cli(options, ["status", "--json"]).stdout).exclusivePending).toMatchObject({ health: "reused", stale: true });
+    writeFileSync(join(pending, "holder.json"), JSON.stringify({ ...original, pid: 999_999_99 }));
+    expect(heavySnapshot(options, now).exclusivePending).toMatchObject({ health: "dead", stale: true });
+    expect(heavyStatus(options, now)).toContain("dead; age");
+    expect(existsSync(pending)).toBe(true);
   });
 
   it("counts an unmarked legacy holder as one busy slot and leaves it untouched", () => {
@@ -158,7 +215,7 @@ describe("heavy gate slots", () => {
     expect(status).toContain("heavy slots: 2");
     expect(status).toContain("slot-0: free");
     expect(status).toContain("slot-1: pid 99999999");
-    expect(status).toContain("age 2s; stale");
+    expect(status).toContain("dead; age 2s; stale");
     expect(status).toContain("exclusive-pending: pid 99999999");
     expect(status).toContain("load: 20.0");
     expect(status).toContain("available memory: 64.0 GB");
@@ -201,11 +258,33 @@ describe("machine pressure admission", () => {
     expect(existsSync(heavyLockPath(options.home))).toBe(false);
   });
 
+  it("does not reserve an exclusive fence under pressure; slots can run when pressure clears", () => {
+    for (const sample of [{ cores: 16, load: 41, freeGB: 64 }, { cores: 16, load: 20, freeGB: 15 }]) {
+      const options = setup();
+      let current = sample;
+      const pressured = { ...options, adapter: { ...adapter, sample: () => current } };
+      const request = exclusiveRequest(pressured, "deploy");
+      // Reaping happens even when pressure prevents reservation.
+      tryAcquire(exclusivePendingPath(options.home), "dead waiter", 999_999_99);
+      expect(request.attempt().ok).toBe(false);
+      expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
+      expect(existsSync(heavyLockPath(options.home))).toBe(false);
+      current = { cores: 16, load: 20, freeGB: 64 };
+      const slot = tryAcquireHeavy(pressured, "ordinary gate");
+      expect(slot.ok).toBe(true);
+      expect(request.attempt().ok).toBe(false);
+      expect(readHolder(exclusivePendingPath(options.home))?.command).toBe("deploy");
+      if (slot.ok) slot.release();
+      expect(request.attempt().ok).toBe(true);
+      request.release();
+    }
+  });
+
   it("CLI waits and prints why under fake high load or low memory, then starts", () => {
     for (const pressure of ["{ cores: 16, load: 41, freeGB: 64 }", "{ cores: 16, load: 20, freeGB: 15 }"]) {
       for (const flags of [[], ["--exclusive"]]) {
         const options = setup();
-        const result = cli(options, [...flags, "--wait", "0.05", "--", process.execPath, "-e", "console.log('started')"], `calls === 1 ? ${pressure} : { cores: 16, load: 20, freeGB: 64 }`);
+        const result = cli(options, [...flags, "--wait", "0.05", "--", process.execPath, "-e", "console.log('started')"], `calls === 1 ? ${pressure} : { cores: 16, load: 20, freeGB: 64 }`, true);
         expect(result.status, result.stderr).toBe(0);
         expect(result.stderr).toMatch(/waiting, (load|available memory)/);
         expect(result.stdout).toContain("started");
@@ -229,7 +308,7 @@ describe("machine pressure admission", () => {
   it("CLI cleans exclusive reservations on timeout and spawn failure", () => {
     const options = setup();
     const held = tryAcquireHeavy(options, "gate");
-    const timeout = cli(options, ["--exclusive", "--wait", "0.05", "--", "true"]);
+    const timeout = cli(options, ["--exclusive", "--wait", "0.05", "--", "true"], undefined, true);
     expect(timeout.status).toBe(75);
     expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
     expect(readHolder(heavyLockPath(options.home))?.command).toBe("gate");

@@ -49,8 +49,32 @@ export function readHolder(lock: string): Holder | null {
   }
 }
 
+export type HolderHealth = "alive" | "dead" | "reused" | "unknown";
+
+// macOS may append a network suffix to the same machine's hostname. Do not
+// collapse arbitrary domains: foreign hosts must still fail closed.
+function localHost(host: string): boolean {
+  const normalize = (name: string) => name.toLowerCase().replace(/\.(local|localdomain)\.?$/, "");
+  return normalize(host) === normalize(hostname());
+}
+
+function holderHealth(holder: Holder | null): HolderHealth {
+  if (!holder || !localHost(holder.host)) return "unknown";
+  if (!alive(holder.pid)) return "dead";
+  try {
+    // lstart has one-second resolution. A later start is positive evidence
+    // of pid reuse; missing/denied/unparseable output is not grounds to reap.
+    const started = Date.parse(execFileSync("ps", ["-o", "lstart=", "-p", String(holder.pid)], {
+      encoding: "utf8", timeout: 2000, env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"],
+    }).trim());
+    if (Number.isFinite(started) && started > Date.parse(holder.startedAt)) return "reused";
+  } catch { /* EPERM or unavailable process metadata retains the live fence. */ }
+  return "alive";
+}
+
 function stale(holder: Holder | null): boolean {
-  return holder !== null && holder.host === hostname() && !alive(holder.pid);
+  const health = holderHealth(holder);
+  return health === "dead" || health === "reused";
 }
 
 export function tryAcquire(lock: string, command: string, pid = process.pid, mode?: "slot" | "exclusive"): Acquire {
@@ -106,8 +130,8 @@ export function tryAcquireSlot(lock: string, command: string, slots = heavySlots
   return first ?? { ok: false, holder: null };
 }
 
-export function describeHolder(holder: Holder | null): string {
-  return holder ? `pid ${holder.pid} on ${holder.host} since ${holder.startedAt}: ${holder.command}` : "unknown holder";
+export function describeHolder(holder: Holder | null, now = Date.now(), health = holderHealth(holder)): string {
+  return holder ? `pid ${holder.pid} on ${holder.host} since ${holder.startedAt}: ${holder.command}; ${health}; age ${Math.max(0, Math.floor((now - Date.parse(holder.startedAt)) / 1000))}s` : "unknown holder";
 }
 
 function positive(value: string | undefined, name: string): number | undefined {
@@ -275,6 +299,12 @@ export function exclusiveRequest(options: HeavyOptions, command: string) {
     if (actor.getSnapshot().matches("closed")) return { ok: false, reason: "exclusive request closed" };
     if (actor.getSnapshot().matches("held")) return { ok: true, release };
     if (actor.getSnapshot().matches("waiting")) {
+      // Reap even under pressure, but do not fence runnable slot jobs until
+      // this request itself is eligible. Once reserved, retain drain priority.
+      const blocked = blocker(exclusivePendingPath(options.home));
+      if (blocked) return { ok: false, reason: blocked };
+      const pressure = pressureReason(adapter, minFreeGB);
+      if (pressure) return { ok: false, reason: pressure };
       const pending = tryAcquire(exclusivePendingPath(options.home), command);
       if (!pending.ok) return { ok: false, reason: `exclusive-pending: ${describeHolder(pending.holder)}` };
       releases.push(pending.release);
@@ -320,6 +350,7 @@ export interface HeavySlotView {
   readonly holder: Holder | null;
   readonly held: boolean;
   readonly ageSeconds: number | null;
+  readonly health: HolderHealth | null;
   readonly stale: boolean;
 }
 
@@ -339,10 +370,11 @@ export function heavySnapshot(options: HeavyOptions, now = Date.now()): HeavySna
   const lock = heavyLockPath(options.home);
   const sample = adapter.sample();
   const view = (name: string, path: string): HeavySlotView => {
-    if (!existsSync(path)) return { name, holder: null, held: false, ageSeconds: null, stale: false };
+    if (!existsSync(path)) return { name, holder: null, held: false, ageSeconds: null, health: null, stale: false };
     const holder = readHolder(path);
     const ageSeconds = holder ? Math.max(0, Math.floor((now - Date.parse(holder.startedAt)) / 1000)) : null;
-    return { name, holder, held: true, ageSeconds, stale: stale(holder) };
+    const health = holderHealth(holder);
+    return { name, holder, held: true, ageSeconds, health, stale: health === "dead" || health === "reused" };
   };
   const slots = new Set([...Array.from({ length: count }, (_, n) => n), ...existingSlots(lock)]);
   return {
@@ -360,7 +392,7 @@ export function heavyStatus(options: HeavyOptions, now = Date.now()): string {
   const snap = heavySnapshot(options, now);
   const lines = [`heavy slots: ${snap.slots}`, `load: ${snap.load.toFixed(1)} (limit ${snap.loadLimit}); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
   for (const slot of [...snap.holders, snap.exclusivePending]) {
-    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder)}; age ${slot.ageSeconds ?? "unknown"}s${slot.stale ? "; stale" : ""}` : `${slot.name}: free`);
+    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}` : `${slot.name}: free`);
   }
   return lines.join("\n");
 }
