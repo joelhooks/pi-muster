@@ -5,7 +5,8 @@ import { basename, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { ownerFeed } from "./owner-feed.ts";
+import { OWNER_NOTE, ownerFeed } from "./owner-feed.ts";
+import { OwnerTimelineView, ownerInboxText, ownerLine, readOwnerTimelineData } from "./owner-view.ts";
 import { ownerPath, writeReader, retireReader } from "./owner-queue.ts";
 
 /** Registration is inert. Session lifecycle owns its file watch and fallback poll. */
@@ -30,7 +31,7 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     const id = ctx.sessionManager.getSessionId();
     if (!feed || session !== id) {
       stop(); session = id;
-      feed = ownerFeed({ session: id, home: home(), sendMessage: (message, options) => pi.sendMessage(message, options), appendEntry: (type, data) => pi.appendEntry(type, data) });
+      feed = ownerFeed({ session: id, home: home(), project: env.MUSTER_PROJECT, sendMessage: (message, options) => pi.sendMessage(message, options), appendEntry: (type, data) => pi.appendEntry(type, data) });
       feed.restore(ctx.sessionManager.getBranch());
     }
     return feed;
@@ -61,13 +62,23 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
   pi.on("before_agent_start", (_event, ctx) => get(ctx).beforeTurn());
   pi.on("agent_start", () => feed?.turnStarted());
   pi.on("agent_end", () => { feed?.turnEnded(); /* next poll checks Pi's real idle state */ });
+  pi.registerMessageRenderer(OWNER_NOTE, (message, options, theme) => {
+    const data = readOwnerTimelineData(message.details);
+    return data ? new OwnerTimelineView(data, { expanded: options.expanded, noColor: env.NO_COLOR !== undefined || process.env.NO_COLOR !== undefined }, theme) : undefined;
+  });
   pi.registerTool({
     name: "owner_inbox", label: "Muster owner inbox",
     description: "Pull your own owner queue, never Joel's desk queue. Default: undelivered items. since includes recent delivered items. ack consumes only returned items from the next digest.",
+    renderCall: (args, theme) => ownerLine(`🐦 owner inbox${args.ack ? " · acknowledge" : ""}${args.since ? ` · since ${args.since}` : ""}`, theme),
+    renderResult(result, options, theme) {
+      if (options.isPartial) return ownerLine("🐦 reading owner inbox…", theme);
+      const data = readOwnerTimelineData(result.details);
+      return data ? new OwnerTimelineView(data, { expanded: options.expanded, noColor: env.NO_COLOR !== undefined || process.env.NO_COLOR !== undefined }, theme) : ownerLine(result.content.filter(c => c.type === "text").map(c => c.text).join(" "), theme);
+    },
     parameters: Type.Object({ since: Type.Optional(Type.String()), kinds: Type.Optional(Type.Array(StringEnum(["fyi", "progress", "done", "question", "blocked", "action"] as const))), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })), ack: Type.Optional(Type.Boolean()) }),
     async execute(_id, input, _signal, _onUpdate, ctx) {
       const result = get(ctx).inbox(input);
-      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+      return { content: [{ type: "text", text: ownerInboxText(result, result.cursor) }], details: result };
     },
   });
 }

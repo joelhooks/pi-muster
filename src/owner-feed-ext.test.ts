@@ -13,7 +13,7 @@ describe("owner feed lifecycle", () => {
     const entries: Array<{ type: string; customType: string; data: unknown }> = [];
     const idle = vi.fn(() => true);
     const ctx = { isIdle: idle, sessionManager: { getSessionId: () => "reader", getBranch: () => entries } };
-    const pi = { on: (name: string, fn: (...args: unknown[]) => unknown) => handlers.set(name, fn), registerTool: () => {}, appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }), sendMessage: (m: unknown, options: unknown) => sent.push({ m, options }) };
+    const pi = { on: (name: string, fn: (...args: unknown[]) => unknown) => handlers.set(name, fn), registerTool: () => {}, registerMessageRenderer: () => {}, appendEntry: (customType: string, data: unknown) => entries.push({ type: "custom", customType, data }), sendMessage: (m: unknown, options: unknown) => sent.push({ m, options }) };
     registerOwnerFeed(pi as never, { HOME: home, MUSTER_ROLE: "worker" });
     expect(readerFresh("reader", home)).toBe(false);
     vi.useFakeTimers();

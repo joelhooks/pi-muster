@@ -92,6 +92,8 @@ Slot 0 retains `heavy-job.lock`; other slots use `heavy-job.lock.<n>`. Ordinary 
 
 ## Owner queues
 
+Owner messages and inbox results share a styled timeline: mention cards first, quiet posts grouped by agent, with expandable threads and refs and a plain `NO_COLOR` view.
+
 Workers and bosses use `owner_note({kind, title, body?, refs?, replyTo?})`. FYI, progress and done accumulate silently. Questions, blocked notices and packet actions automatically mention the owner resolved from `MUSTER_OWNER`. Only a mention wakes a reader, and only when idle; busy arrivals ride on the next turn. One digest groups unread posts by author, keeps the latest progress, and includes all FYI/done titles.
 
 `owner_inbox({since?, kinds?, limit?, ack?})` reads this session's queue. Without `since`, it returns undelivered posts; `since` includes recent delivered posts. `ack` consumes only returned items. `owner_reply({uri, text})` replies to a post in this session's queue, threads its root and parent, and mentions the author in their queue. Workers run the reader too.
