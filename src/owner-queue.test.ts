@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { ownerFeed, ownerTimeline, OWNER_CURSOR } from "./owner-feed.ts";
-import { appendOwnerItem, ownerPath, deliverOwnerItem, readerFresh, writeReader, mentions, readOwnerQueue, canonicalJson } from "./owner-queue.ts";
+import { appendOwnerItem, ownerPath, deliverOwnerItem, readerFresh, writeReader, mentions, readOwnerQueue, canonicalJson, forwardOwner, resolveOwner } from "./owner-queue.ts";
+import { OwnerTimelineView, ownerInboxText, readOwnerTimelineData } from "./owner-view.ts";
 import type { OwnerItem } from "./domain.ts";
 
 const fixture = () => {
@@ -16,6 +17,52 @@ const fixture = () => {
   return { home, entries, sent, feed, post: (kind: OwnerItem["kind"], title: string = kind) => appendOwnerItem("owner", { author: "probe", lane: "lane", kind, title }, home) };
 };
 describe("owner queue", () => {
+  it("forwards old-code appends and unread history once across reload", () => {
+    const f = fixture();
+    const old = appendOwnerItem("old", { author: "probe", kind: "question", title: "history" }, f.home);
+    forwardOwner({ from: "old", to: "owner", project: "p", home: f.home });
+    // Simulate a still-running old version: bypass the forwarding-aware writer.
+    const late = appendOwnerItem("scratch", { author: "probe", kind: "question", title: "late", mention: "old" }, f.home);
+    writeFileSync(ownerPath("old", f.home), JSON.stringify(old) + "\n" + JSON.stringify(late) + "\n");
+    const inbox = f.feed.inbox();
+    expect(inbox.via).toEqual({ [old.uri]: "old", [late.uri]: "old" });
+    expect(ownerInboxText(inbox, inbox.cursor)).toContain("via old");
+    const data = readOwnerTimelineData(inbox)!;
+    const view = new OwnerTimelineView(data, { expanded: true, noColor: true }, { fg: (_color, text) => text, bold: text => text });
+    expect(view.render(120).join("\n")).toContain("via old");
+    expect(view.render(120).join("\n")).toContain("2 mentions");
+    expect(f.feed.flush()).toBe(2);
+    f.feed.restore(f.entries);
+    expect(f.feed.flush()).toBe(0);
+    expect(f.feed.beforeTurn()).toBeUndefined();
+    f.feed.restore(f.entries);
+    expect(f.feed.inbox().items).toHaveLength(0);
+  });
+  it("filters pre-forward history by the old reader heartbeat, not future appends", () => {
+    const f = fixture();
+    appendOwnerItem("old", { author: "probe", kind: "fyi", title: "consumed" }, f.home);
+    writeReader("old", f.home, Date.now() + 1000);
+    forwardOwner({ from: "old", to: "owner", project: "p", home: f.home });
+    const late = appendOwnerItem("scratch", { author: "probe", kind: "fyi", title: "late" }, f.home);
+    const path = ownerPath("old", f.home);
+    writeFileSync(path, readFileSync(path, "utf8") + JSON.stringify(late) + "\n");
+    expect(f.feed.inbox().items.map(i => i.uri)).toEqual([late.uri]);
+  });
+  it("new senders rewrite mentions and wake the final owner; cycles and depth overflow fail closed", async () => {
+    const f = fixture();
+    forwardOwner({ from: "old", to: "owner", project: "p", home: f.home });
+    const calls: string[] = [];
+    const result = await Effect.runPromise(deliverOwnerItem({ owner: "old", home: f.home, session: "probe", project: "p", item: { author: "probe", kind: "question", title: "wake", mention: "old" }, send: to => { calls.push(to); return Effect.succeed({ status: "sent" as const }); } }));
+    expect(calls).toEqual(["owner"]); expect(result.woke).toBe(true);
+    expect(mentions(readOwnerQueue("owner", f.home).items[0]!.item, "owner")).toBe(true);
+    expect(() => forwardOwner({ from: "owner", to: "old", project: "p", home: f.home })).toThrow(/cycle/);
+    for (let n = 3; n >= 0; n--) forwardOwner({ from: "a" + n, to: n === 3 ? "owner" : "a" + (n + 1), project: "p", home: f.home });
+    expect(() => forwardOwner({ from: "extra", to: "a0", project: "p", home: f.home })).toThrow(/depth/);
+  });
+  it("catalog resolution falls back visibly when unavailable", () => {
+    const f = fixture();
+    expect(resolveOwner({ owner: "old", project: "/missing", agent: "probe", home: f.home })).toMatchObject({ owner: "old", resolution: expect.stringContaining("fallback") });
+  });
   it("lexicon posts hash canonical JSON, thread root/parent, and wake on mention not kind", async () => {
     const f = fixture(); const question = f.post("question");
     expect(question.$type).toBe("dev.muster.note.post"); expect(question.uri).toMatch(/^muster:\/\/probe\/dev.muster.note.post\/[a-f0-9]+$/);

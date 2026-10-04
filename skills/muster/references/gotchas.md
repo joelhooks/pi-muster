@@ -48,7 +48,7 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Restore
 
-- Owner queues are per session, separate from Joel's desk queue. `/new` changes the address. Replies mention a post's author session, so they do not follow an agent name into a new session. Reload owners and workers to enable the feed; stale or absent readers fall back to intercom for mentions.
+- Owner queues are per session, separate from Joel's desk queue. `/new` changes the address. A takeover forwards old owner queues, including posts from workers still on old code. Reload the new owner to load forwarding-aware readers. `owner_inbox` labels forwarded records `via <old owner short id>`. History since the old reader's last heartbeat may replay because its exact consumption point is unknown. Replies still target the parent's author, not an agent name. Stale or absent readers fall back to intercom for mentions.
 
 - `agent_close` removes a worker's clone. Its restore command still names that cwd, so restore into a fresh clone (`cwd`) or fork from the row.
 - A pane that comes back after `/new` may be on the pane's default model. Restore from the catalog when the context is worth keeping.

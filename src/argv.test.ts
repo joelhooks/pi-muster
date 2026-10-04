@@ -11,6 +11,18 @@ const profile = profileFor("worker", {
 });
 
 describe("buildArgv", () => {
+  it.each(["desk", "boss", "hawk", "judge"] as const)("%s loads package muster once unless noSkills", role => {
+    const p = profileFor(role, { label: role, noSkills: false });
+    expect(p.skills.some(s => s.endsWith("/skills/muster"))).toBe(true);
+    const duplicate = profileFor(role, { label: role, noSkills: false, skills: p.skills });
+    expect(duplicate.skills).toEqual(p.skills);
+    expect(profileFor(role, { label: role, noSkills: false, skills: ["muster", ...p.skills.map(s => s + "/SKILL.md")] }).skills).toEqual(p.skills);
+    const argv = buildArgv({ kind: "launch", sessionId: role, sessionFile: null, parentSessionFile: null, musterExtension: null, profile: p });
+    expect(argv.filter(a => a === "--skill")).toHaveLength(1);
+    expect(argv).toContain(p.skills[0]);
+    expect(profileFor(role, { label: role, noSkills: true }).skills).toEqual([]);
+    expect(profileFor("worker", { label: "worker" }).skills).toEqual([]);
+  });
   it("builds the exact launch argv with role defaults", () => {
     expect(buildArgv({ kind: "launch", sessionId: "w1-1", sessionFile: null, parentSessionFile: null, profile, musterExtension: "/muster" })).toEqual([
       "--session-id", "w1-1",

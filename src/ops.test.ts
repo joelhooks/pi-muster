@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { FORBIDDEN_FLAGS } from "./argv.ts";
+import type { AgentRow } from "./domain.ts";
+import { FORBIDDEN_FLAGS, profileFor } from "./argv.ts";
 import { queuePath, readDesk } from "./desk.ts";
 import { machineAdapter, tryAcquireHeavy } from "./heavy-lock.ts";
 import {
@@ -24,7 +25,9 @@ import {
   reviewDue,
   workPrompt,
 } from "./ops.ts";
-import { readOwnerQueue, writeReader, ownerPath } from "./owner-queue.ts";
+import muster from "../extensions/pi-muster.ts";
+import { ownerFeed } from "./owner-feed.ts";
+import { readOwnerQueue, writeReader, ownerPath, appendOwnerItem, deliverOwnerItem, mentions } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { Herdr, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
 import { watchEntries } from "./relay-events.ts";
@@ -610,6 +613,44 @@ describe("field-use regressions", () => {
     writeFileSync(mergeHead, previous);
     expect((await failWith(h, packetLand(dir, { id: commit, outcome: "committed" }))).message).toContain("already has a merge");
     expect(readFileSync(mergeHead, "utf8")).toBe(previous);
+  });
+
+  it("owner_note resolves a stale launch owner after takeover, and forwarded inbox wakes once", async () => {
+    const h = harness();
+    const dir = join(h.root, "project"); mkdirSync(dir);
+    await open(h, dir);
+    const row: AgentRow = { name: "probe_w", role: "worker", lane: "probe", cwd: dir, clone: null,
+      profile: profileFor("worker", { label: "worker" }), sessionId: "probe", sessionFile: null, parentSessionFile: null,
+      pane: null, owner: "owner-session", brief: null, state: "planned", delivery: "none", restarts: 0, restore: null,
+      createdAt: h.now.toISOString(), updatedAt: h.now.toISOString() };
+    await runWith(h, mutate(dir, current => Effect.succeed([{ ...current, agents: [row] }, undefined] as const)));
+    const old = appendOwnerItem("owner-session", { author: "probe", kind: "question", title: "unread" }, h.home);
+    h.sessionId = "new-owner";
+    await runWith(h, projectStatus(dir, { takeover: true, act: false }));
+    vi.stubEnv("HOME", h.home);
+    vi.stubEnv("MUSTER_ROLE", "worker"); vi.stubEnv("MUSTER_OWNER", "owner-session");
+    vi.stubEnv("MUSTER_PROJECT", dir); vi.stubEnv("MUSTER_AGENT", "probe_w");
+    const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+    const host = { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => tools.set(t.name, t),
+      on: () => {}, registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {},
+      getFlag: () => undefined, registerMessageRenderer: () => {}, events: { emit: () => {}, on: () => () => {} } };
+    muster(host as never);
+    writeReader("new-owner", h.home);
+    writeReader("owner-session", h.home); // A is still alive; routing must choose B, not merely a live reader.
+    const ctx = { cwd: dir, sessionManager: { getSessionId: () => "probe", getBranch: () => [] } };
+    const result = await tools.get("owner_note")!.execute("note", { kind: "question", title: "new note" }, undefined, undefined, ctx);
+    expect(result).toMatchObject({ details: { owner: "new-owner", resolution: "catalog row", queued: true, woke: true, path: "queue" } });
+    expect(readOwnerQueue("new-owner", h.home).items).toHaveLength(1);
+    expect(mentions(readOwnerQueue("new-owner", h.home).items[0]!.item, "new-owner")).toBe(true);
+    const feed = ownerFeed({ session: "new-owner", home: h.home, appendEntry: () => {}, sendMessage: () => {} });
+    expect(feed.inbox().via[old.uri]).toBe("owner-session");
+    expect(feed.flush()).toBe(2); expect(feed.flush()).toBe(0);
+    feed.dispose();
+    const sent: string[] = [];
+    const delivery = await Effect.runPromise(deliverOwnerItem({ owner: "owner-session", agent: "probe_w", home: h.home, session: "probe", project: dir,
+      item: { author: "probe", kind: "blocked", title: "blocked" }, send: to => { sent.push(to); return Effect.succeed({ status: "sent" as const }); } }));
+    expect(delivery.owner).toBe("new-owner");
+    expect(sent).toEqual([]); // Fresh B reader; its feed owns the wake.
   });
 
   it("reports to the adopted catalog owner rather than the launch owner", async () => {

@@ -1,7 +1,7 @@
 import { mkdirSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname } from "node:path";
+import { dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -54,7 +54,7 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     const path = ownerPath(id, home());
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      watcher = watch(dirname(path), (_event, name) => { if (!name || String(name) === basename(path)) schedule(); });
+      watcher = watch(dirname(path), (_event, name) => { if (!name || /\.(jsonl|forward)$/.test(String(name))) schedule(); });
       poll = setInterval(tick, 30000); poll.unref?.(); tick();
     } catch { stop(); /* unavailable reader: writers retain the outbox fallback */ }
   });
