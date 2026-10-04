@@ -50,7 +50,7 @@ Roster skills are a role's standing set; name extras at launch; workers pull the
 
 ## What counts as verified
 
-- The intercom report is a claim. `packet_verify` plus the worker's check receipts are the evidence. Screen state, `DONE`, age, or a commit alone are not.
+- The owner-queue packet report is a claim. `packet_verify` plus the worker's check receipts are the evidence. Screen state, `DONE`, age, or a commit alone are not.
 - Record exactly one outcome per packet: committed, rejected, or no_changes.
 - Before `agent_close` or `lane_close`, cancel the pane's Bellwether watches with `herdr_watch action=cancel`. Muster cannot retire them through the current Bellwether API. Inspect named targets as well as pane targets; otherwise closing a pane wakes its owner with `targetGone`.
 - Land through `packet_land` with the repo's full gate (`muster-heavy --wait 1200 -- <cmd>` for workers). For a deploy window that must drain and hold every heavy slot, set a deploy window id: `MUSTER_DEPLOY_WINDOW=<deploy-id> muster-heavy --exclusive --wait 1200 -- <cmd>`. Without it `--exclusive` exits 64; holds are capped at 20 minutes. Never use it for ordinary gates.
@@ -69,6 +69,10 @@ Roster skills are a role's standing set; name extras at launch; workers pull the
 - Never act on GitHub as Joel. Use the ShitRat bot or ask. "Rerun until green" is not a gate.
 
 ## Talking across lanes and desks
+
+- Workers and bosses post FYI, progress and done with `owner_note`; these accumulate without waking their owner. A blocking question uses `owner_note kind=question`. `packet_report` remains the one finish report.
+- Answer a queued question with `owner_reply`, naming its URI. Replies thread back to the author and mention them, so their feed wakes when idle. Owners pull `owner_inbox` for records and use `ack` only for items they have handled.
+- Intercom ask/reply is for live back-and-forth, not progress pings. Older or unavailable queue readers still receive an intercom fallback for mentions.
 
 - Bosses talk to each other directly over intercom about interfaces, shared files, and ordering. A boss never writes in another lane's scope.
 - A decision two lanes share gets one line in the project's Brain, so neither boss holds it alone. Bosses who disagree take it to the hawk, not to Joel.

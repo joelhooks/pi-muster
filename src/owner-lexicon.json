@@ -1,0 +1,159 @@
+{
+  "lexicons": [
+    {
+      "lexicon": 1,
+      "id": "dev.muster.note.post",
+      "description": "Local JSONL transport only. URI uses muster://; cid is truncated SHA-256 over recursively key-sorted JSON excluding cid.",
+      "defs": {
+        "strongRef": {
+          "type": "object",
+          "required": [
+            "uri",
+            "cid"
+          ],
+          "properties": {
+            "uri": {
+              "type": "string"
+            },
+            "cid": {
+              "type": "string"
+            }
+          }
+        },
+        "main": {
+          "type": "record",
+          "key": "tid",
+          "record": {
+            "type": "object",
+            "required": [
+              "$type",
+              "uri",
+              "cid",
+              "author",
+              "createdAt",
+              "text",
+              "kind"
+            ],
+            "properties": {
+              "$type": {
+                "type": "string",
+                "const": "dev.muster.note.post"
+              },
+              "uri": {
+                "type": "string"
+              },
+              "cid": {
+                "type": "string"
+              },
+              "author": {
+                "type": "string"
+              },
+              "createdAt": {
+                "type": "string",
+                "format": "datetime"
+              },
+              "text": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "fyi",
+                  "progress",
+                  "done",
+                  "question",
+                  "blocked",
+                  "action"
+                ]
+              },
+              "lane": {
+                "type": "string"
+              },
+              "refs": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "reply": {
+                "type": "object",
+                "required": [
+                  "root",
+                  "parent"
+                ],
+                "properties": {
+                  "root": {
+                    "type": "ref",
+                    "ref": "#strongRef"
+                  },
+                  "parent": {
+                    "type": "ref",
+                    "ref": "#strongRef"
+                  }
+                }
+              },
+              "facets": {
+                "type": "array",
+                "items": {
+                  "type": "ref",
+                  "ref": "dev.muster.note.facet"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "lexicon": 1,
+      "id": "dev.muster.note.facet",
+      "defs": {
+        "main": {
+          "type": "object",
+          "required": [
+            "index",
+            "features"
+          ],
+          "properties": {
+            "index": {
+              "type": "object",
+              "required": [
+                "byteStart",
+                "byteEnd"
+              ],
+              "properties": {
+                "byteStart": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "byteEnd": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            },
+            "features": {
+              "type": "array",
+              "items": {
+                "type": "ref",
+                "ref": "#mention"
+              }
+            }
+          }
+        },
+        "mention": {
+          "type": "object",
+          "required": [
+            "did"
+          ],
+          "properties": {
+            "did": {
+              "type": "string",
+              "description": "Pi session id now; DID when moved to atproto."
+            }
+          }
+        }
+      }
+    }
+  ]
+}

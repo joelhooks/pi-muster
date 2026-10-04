@@ -68,7 +68,7 @@ Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane
 
 `project_update` sets the sidebar headline and the project's policy: silence limits and per-role model, thinking, compaction, and skills, merged over Muster's defaults.
 
-Worker side, when `MUSTER_AGENT` is set: `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets no owner tools and no path to the operator.
+Worker side, when `MUSTER_AGENT` is set: `owner_note`, `owner_reply`, `owner_inbox`, `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets its own queue tools but no project-management or operator tools.
 
 `muster-heavy -- <command>` runs a command in the same machine-wide heavy slots as `packet_land` gates. `MUSTER_HEAVY_SLOTS` overrides the count; otherwise it is `max(1, floor(performanceCores / 3))` (4 on a 12-performance-core Mac). macOS reads `hw.perflevel0.physicalcpu`; the fallback uses half of `os.availableParallelism()` as performance cores.
 
@@ -83,6 +83,16 @@ For a deploy window, use `MUSTER_DEPLOY_WINDOW=deploy-2026-10-04 muster-heavy --
 Exclusive holds have a hard 20-minute cap from acquisition, not request time. `MUSTER_EXCLUSIVE_CAP_MIN` can only lower it, clamped to 1–20 minutes. At the cap the CLI sends SIGTERM to the detached child process group, waits 15 seconds, then sends SIGKILL, releases its locks and exits 124. Requests, acquisitions, releases, refusals, caps and reaps append private JSONL audit records to `~/.local/state/muster/heavy-exclusive.jsonl`; cap and reap events also print to stderr. Admission and explicit `status --reap` reclaim exclusive holds older than their cap plus two minutes. A same-host live holder receives SIGTERM and immediate SIGKILL before its locks are removed; unknown and foreign-host holders fail closed. Plain `status` and `status --json` remain read-only. Legacy exclusive holders without an acquisition timestamp use their recorded start time for the backstop.
 
 Slot 0 retains `heavy-job.lock`; other slots use `heavy-job.lock.<n>`. Slot holders carry `mode: "slot"`; an exclusive hold marks slot 0 `mode: "exclusive"`. Only that marker fences new admission. A live unmarked holder from older code counts as one busy slot and is never deleted. Older single-lock sessions see exclusive holds as busy. Sessions on the intermediate multi-slot hotfix do not understand exclusive-pending; reload them before relying on deploy admission fencing, and keep slot counts consistent across sessions.
+
+## Owner queues
+
+Workers and bosses use `owner_note({kind, title, body?, refs?, replyTo?})`. FYI, progress and done accumulate silently. Questions, blocked notices and packet actions automatically mention the owner resolved from `MUSTER_OWNER`. Only a mention wakes a reader, and only when idle; busy arrivals ride on the next turn. One digest groups unread posts by author, keeps the latest progress, and includes all FYI/done titles.
+
+`owner_inbox({since?, kinds?, limit?, ack?})` reads this session's queue. Without `since`, it returns undelivered posts; `since` includes recent delivered posts. `ack` consumes only returned items. `owner_reply({uri, text})` replies to a post in this session's queue, threads its root and parent, and mentions the author in their queue. Workers run the reader too.
+
+Storage is private local JSONL at `~/.local/state/muster/owner-queue/<session>.jsonl`, separate from Joel's desk queue. Lines use `dev.muster.note.post` records with local `muster://` URIs, time-sortable keys, truncated canonical-JSON SHA-256 cids, session authors and UTF-8 mention facets. Titles cap at 200 characters, bodies at 4096 bytes. NSIDs and the local lexicon live in `src/owner-lexicon.ts` and `.json`. This is not a PDS: follows, a public timeline and real atproto transport are deferred.
+
+A watch plus a 30-second poll delivers mentions. Session custom entries persist the cursor and delivered URIs across reload. A reader presence heartbeat expires after two minutes; a missing, stale or dead reader, queue failure or telemetry failure uses intercom for waking posts, while retaining the queued copy when possible. Tool results identify the path. Relay counters record metadata only, never titles or bodies.
 
 ## Switchboard
 

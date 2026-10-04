@@ -31,6 +31,8 @@ import {
 } from "../src/ops.ts";
 import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "../src/runtime.ts";
 import { registerDeskFeed } from "../src/desk-feed-ext.ts";
+import { registerOwnerFeed } from "../src/owner-feed-ext.ts";
+import { capBody, deliverOwnerItem, findOwnerPost } from "../src/owner-queue.ts";
 import { registerDeskReport } from "../src/desk-report-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
 import { findSkills, skillIndex } from "../src/skills.ts";
@@ -95,6 +97,32 @@ export default function muster(host: ExtensionAPI) {
     intercom = undefined;
   });
 
+  registerOwnerFeed(pi, env);
+
+  if ((worker || role === "boss") && env.MUSTER_OWNER) {
+    pi.registerTool({
+      name: "owner_note", label: "Muster owner note",
+      description: "Post FYI, progress or done silently to your owner's queue. question and blocked mention and wake the owner. Use replyTo to thread a post. packet_report stays the single finish report.",
+      parameters: Type.Object({ kind: StringEnum(["fyi", "progress", "done", "question", "blocked"] as const), title: Type.String(), body: Type.Optional(Type.String()), refs: Type.Optional(Type.Array(Type.String())), replyTo: Type.Optional(Type.String()) }),
+      async execute(_id, params, signal, _onUpdate, ctx) {
+        const session = ctx.sessionManager.getSessionId();
+        if (params.replyTo) findOwnerPost(session, params.replyTo);
+        return run(ctx, signal, deliverOwnerItem({ owner: env.MUSTER_OWNER!, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => JSON.stringify(result));
+      },
+    });
+  }
+  pi.registerTool({
+    name: "owner_reply", label: "Muster owner reply",
+    description: "Reply to a post in your own owner queue. Threads root and parent, mentions the author and writes to their queue; wakes them when idle. No path to Joel's desk queue.",
+    parameters: Type.Object({ uri: Type.String(), text: Type.String() }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const session = ctx.sessionManager.getSessionId();
+      const parent = findOwnerPost(session, params.uri);
+      const body = capBody(params.text);
+      return run(ctx, signal, deliverOwnerItem({ owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => JSON.stringify(result));
+    },
+  });
+
   if (env.MUSTER_AGENT && env.MUSTER_PROJECT && env.MUSTER_OWNER) {
     const agent = env.MUSTER_AGENT;
     const project = env.MUSTER_PROJECT;
@@ -103,7 +131,7 @@ export default function muster(host: ExtensionAPI) {
       name: "packet_report",
       label: "Muster packet report",
       description:
-        "Report your one finished packet to your owner: a commit (or an artifact file) plus the checks you ran. Writes the report file, records the packet, and sends one intercom message to your owner. Call it once, after committing. It is your only report channel.",
+        "Report your one finished packet to your owner: a commit (or an artifact file) plus the checks you ran. Writes the report file, records the packet, and queues an action mentioning your owner (intercom fallback for old or unavailable readers). Call it once, after committing. It is your only report channel.",
       promptSnippet: "packet_report: report your committed result and checks to your owner, once",
       parameters: Type.Object({
         commit: Type.Optional(Type.String({ description: "Commit id or ref in your checkout" })),

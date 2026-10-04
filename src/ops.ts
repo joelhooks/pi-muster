@@ -45,6 +45,7 @@ import { BOT_EMAIL, BOT_NAME, Intercom, MusterEnv, Proc, git, must } from "./run
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
+import { deliverOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts";
@@ -867,7 +868,7 @@ export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
     case "judge":
       return `Read your brief at ${row.brief} and take up the role it describes. Report only through the channels it names.`;
     default:
-      return `Read your brief at ${row.brief} and do the work it describes. Skills aren't preloaded: call skill_find with your task's key words and read any skill that matches before you start. When your result is committed, call packet_report once with the commit and your checks.`;
+      return `Read your brief at ${row.brief} and do the work it describes. Skills aren't preloaded: call skill_find with your task's key words and read any skill that matches before you start. FYI, progress and done go through owner_note; a blocking question uses owner_note kind=question. Answer threaded questions with owner_reply. Intercom ask/reply is only for live back-and-forth. When your result is committed, call packet_report once with the commit and your checks.`;
   }
 };
 
@@ -1292,8 +1293,10 @@ export const packetReport = (params: PacketReportInput) =>
     );
     const message = `🐑 packet ${id.slice(0, 12)} from ${row.name} (${row.lane}): ${(params.summary.trim().split("\n")[0] ?? "").slice(0, 200).replace(/[.\s]+$/, "")}. Report: ${report}`;
     relayEvent({ ts: iso(env), session: env.sessionId, kind: "packet_report", project: project.slug, packetId: id }, env.home);
-    const delivery = yield* intercom.send(saved.owner, message);
-    return { packet: saved.packet, delivery };
+    const notice = yield* deliverOwnerItem({ owner: saved.owner, home: env.home, session: env.sessionId, project: project.slug,
+      item: { author: env.sessionId, lane: row.lane, kind: "action", title: `Packet ${id.slice(0, 12)} from ${row.name}: ${params.summary.trim().split("\n")[0] ?? ""}`, refs: [report], body: message },
+      send: intercom.send, message });
+    return { packet: saved.packet, delivery: notice.delivery, notice };
   });
 
 export const packetVerify = (dir: string, id: string) =>

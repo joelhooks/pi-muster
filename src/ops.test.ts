@@ -24,6 +24,7 @@ import {
   reviewDue,
   workPrompt,
 } from "./ops.ts";
+import { readOwnerQueue, writeReader, ownerPath } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { Proc, liveProc } from "./runtime.ts";
 import { ProcError } from "./errors.ts";
@@ -76,6 +77,20 @@ function commitInClone(clone: string, file = "work.txt") {
   sh(clone, "commit", "-q", "-m", "work");
   return sh(clone, "rev-parse", "HEAD").trim();
 }
+
+describe("packet owner queue delivery", () => {
+  it.each(["fresh", "missing", "stale", "queue-failure", "event-failure"])("queues action and preserves fallback for %s reader", async mode => {
+    const h = harness(); const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    if (mode !== "missing") writeReader("owner-session", h.home, mode === "stale" ? Date.now() - 121000 : Date.now());
+    if (mode === "queue-failure") mkdirSync(ownerPath("owner-session", h.home));
+    if (mode === "event-failure") mkdirSync(join(h.home, ".local/state/muster/relay-events.jsonl"));
+    const result = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "owner-session", cwd: clone, commit, summary: "queues result", checks: [] }));
+    expect(result.notice.path).toBe(mode === "fresh" ? "queue" : "intercom");
+    expect(h.sent).toHaveLength(mode === "fresh" ? 0 : 1);
+    if (mode !== "queue-failure") expect(readOwnerQueue("owner-session", h.home).items[0]?.item).toMatchObject({ kind: "action", refs: [result.packet.report], facets: [{ features: [{ did: "owner-session" }] }] });
+  });
+});
 
 describe("fleet board runner", () => {
   it("bounds status calls at ten seconds and adds a timeout note", async () => {

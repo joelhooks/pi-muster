@@ -87,6 +87,7 @@ export function agentEnv(project: Project, row: AgentRow): Record<string, string
     MUSTER_PROJECT: project.dir,
     MUSTER_AGENT: row.name,
     MUSTER_OWNER: row.owner,
+    MUSTER_LANE: row.lane,
     MUSTER_ROLE: row.role,
   };
 }
