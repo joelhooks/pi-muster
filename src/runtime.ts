@@ -72,15 +72,42 @@ export interface EnvShape {
 
 export class MusterEnv extends Context.Service<MusterEnv, EnvShape>()("muster/Env") {}
 
-export type OutboxStatus = "sent" | "rejected" | "blocked" | "failed" | "unavailable";
+export type OutboxStatus = "sent" | "queued" | "rejected" | "blocked" | "failed" | "unavailable";
 
-export interface IntercomShape {
+export interface IntercomTransport {
   readonly send: (to: string, message: string) => Effect.Effect<{ readonly status: OutboxStatus; readonly detail?: string }>;
   /** Live intercom session ids, or undefined when pi-intercom is absent or disconnected. */
   readonly sessions: () => Effect.Effect<readonly string[] | undefined>;
 }
 
-export class Intercom extends Context.Service<Intercom, IntercomShape>()("muster/Intercom") {}
+export type CommsAddress =
+  | { readonly kind: "alias"; readonly project: string; readonly row: string }
+  | { readonly kind: "did"; readonly did: `did:${string}` }
+  | { readonly kind: "session"; readonly id: string };
+export type CommsTarget = CommsAddress | string;
+export interface CommsLease {
+  readonly address: CommsAddress;
+  readonly session: string;
+  readonly expiresAt?: string;
+}
+export type DeliveryStatus = "accepted" | "queued" | "delivered" | "acked" | "expired" | "failed";
+export interface CommsDelivery { readonly status: DeliveryStatus; readonly detail?: string }
+export class CommsError extends Error {
+  readonly _tag: string = "CommsError";
+}
+export class Unsupported extends CommsError {
+  override readonly _tag = "Unsupported";
+  override readonly name = "Unsupported";
+}
+export interface CommsShape {
+  readonly send: (to: CommsTarget, message: string) => Effect.Effect<CommsDelivery>;
+  readonly ask: (to: CommsTarget, message: string, options: { readonly timeoutMs: number }) => Effect.Effect<CommsDelivery, CommsError>;
+  readonly reply: (id: string, message: string) => Effect.Effect<CommsDelivery, CommsError>;
+  readonly wake: (to: CommsTarget) => Effect.Effect<{ readonly woke: boolean; readonly reason?: string }, CommsError>;
+  readonly resolve: (identity: CommsTarget) => Effect.Effect<CommsLease, CommsError>;
+  readonly sessions: () => Effect.Effect<readonly string[] | undefined, CommsError>;
+}
+export class Comms extends Context.Service<Comms, CommsShape>()("muster/Comms") {}
 
 const MAX_BUFFER = 16 * 1024 * 1024;
 

@@ -10,9 +10,9 @@ import { projectPath } from "./store.ts";
 import { StoreError } from "./errors.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
 import { relayEvent } from "./relay-events.ts";
-import type { OutboxStatus } from "./runtime.ts";
+import type { CommsDelivery } from "./runtime.ts";
 
-export interface OwnerNoteInput { author: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string }
+export interface OwnerNoteInput { author: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string; signed?: unknown }
 export const mentions = (item: OwnerItem, reader: string) => item.facets?.some(f => Number.isInteger(f.index.byteStart) && Number.isInteger(f.index.byteEnd) && f.index.byteStart >= 0 && f.index.byteEnd > f.index.byteStart && f.index.byteEnd <= Buffer.byteLength(item.text) && f.features.some(feature => feature.$type === MENTION_NSID && feature.did === reader)) ?? false;
 export const wakeKind = (kind: OwnerKind) => kind === "question" || kind === "blocked" || kind === "action";
 export const ownerPath = (session: string, home = homedir()) => join(home, ".local/state/muster/owner-queue", `${decodeOwnerSession(session)}.jsonl`);
@@ -113,7 +113,7 @@ export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = hom
     ...(parent ? { reply: { root: parent.reply?.root ?? { uri: parent.uri, cid: parent.cid }, parent: { uri: parent.uri, cid: parent.cid } } } : {}),
     ...(mention ? { facets: [{ index: { byteStart: 0, byteEnd: Buffer.byteLength(prefix.trimEnd()) }, features: [{ $type: MENTION_NSID, did: mention }] }] } : {}),
   };
-  const item = decodeOwnerItem({ ...record, cid: createHash("sha256").update(canonicalJson(record)).digest("hex").slice(0, 32) });
+  const item = decodeOwnerItem({ ...record, cid: createHash("sha256").update(canonicalJson(record)).digest("hex").slice(0, 32), ...(input.signed === undefined ? {} : { signed: input.signed }) });
   const path = ownerPath(owner, home);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   appendFileSync(path, `${JSON.stringify(item)}\n`, { mode: 0o600 });
@@ -153,7 +153,7 @@ export function retireReader(owner: string, home: string, startedAt: string) {
   } catch { /* missing or replaced presence is not ours */ }
 }
 /** Queue first. Missing readers and any queue/telemetry failure keep the old outbox path. */
-export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; home: string; session: string; project: string; item: OwnerNoteInput; send: (to: string, message: string) => Effect.Effect<{ readonly status: OutboxStatus; readonly detail?: string }, never, R>; message?: string }) => Effect.gen(function* () {
+export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; home: string; session: string; project: string; item: OwnerNoteInput; send: (to: string, message: string) => Effect.Effect<CommsDelivery, never, R>; message?: string }) => Effect.gen(function* () {
   const resolved = resolveOwner(params);
   const route = yield* Effect.try({ try: () => ownerRoute(resolved.owner, params.home), catch: error => new StoreError({ path: ownerPath(resolved.owner, params.home), message: String(error) }) });
   const owner = route.owner;
@@ -166,6 +166,6 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   let path: "queue" | "intercom" = item && (!woke || readerFresh(owner, params.home)) ? "queue" : "intercom";
   const logged = relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path, ...(item ? { itemId: item.uri } : {}) }, params.home);
   if (!logged && woke) path = "intercom";
-  const delivery = path === "intercom" ? yield* params.send(owner, params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`) : { status: "sent" as const, detail: "owner queue" };
+  const delivery = path === "intercom" ? yield* params.send(owner, params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`) : { status: "queued" as const, detail: "owner queue" };
   return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke, path, delivery, owner, resolution: resolved.resolution };
 });

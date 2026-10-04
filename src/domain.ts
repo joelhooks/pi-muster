@@ -33,6 +33,12 @@ const StrongRef = Schema.Struct({ uri: Schema.String, cid: Schema.String });
 export const OwnerItem = Schema.Struct({
   $type: Schema.Literal(POST_NSID), uri: Schema.String, cid: Schema.String,
   author: SessionId, createdAt: Schema.String, text: Schema.String, kind: OwnerKind,
+  signed: Schema.optionalKey(Schema.Unknown),
+  /** Optional cached delivery metadata; older queues usually contain only the post. */
+  delivery: Schema.optionalKey(Schema.Struct({
+    status: Schema.Literals(["accepted", "queued", "delivered", "acked", "expired", "failed"]),
+    detail: Schema.optionalKey(Schema.String),
+  })),
   lane: Schema.optional(Schema.String), refs: Schema.optional(Schema.Array(Schema.String)),
   reply: Schema.optional(Schema.Struct({ root: StrongRef, parent: StrongRef })),
   facets: Schema.optional(Schema.Array(Schema.Struct({
@@ -41,7 +47,17 @@ export const OwnerItem = Schema.Struct({
   }))),
 });
 export type OwnerItem = typeof OwnerItem.Type;
-export const decodeOwnerItem = Schema.decodeUnknownSync(OwnerItem);
+const decodeOwnerRecord = Schema.decodeUnknownSync(OwnerItem);
+/** Normalize legacy receipt metadata on read; never rewrite the JSONL or its CID. */
+export function decodeOwnerItem(input: unknown): OwnerItem {
+  if (typeof input === "object" && input !== null && "delivery" in input &&
+    typeof input.delivery === "object" && input.delivery !== null && "status" in input.delivery) {
+    const old = input.delivery.status;
+    const status = old === "sent" ? "delivered" : old === "rejected" || old === "blocked" || old === "unavailable" ? "failed" : old;
+    return decodeOwnerRecord({ ...input, delivery: { ...input.delivery, status } });
+  }
+  return decodeOwnerRecord(input);
+}
 export const OwnerReader = Schema.Struct({ pid: Schema.Number, startedAt: Schema.String, heartbeatAt: Schema.String });
 export const decodeOwnerReader = Schema.decodeUnknownSync(OwnerReader);
 export const OwnerRouting = Schema.Struct({ via: Schema.Record(Schema.String, SessionId), mentioned: Schema.Array(Schema.String) });
@@ -251,6 +267,7 @@ export type RolePolicy = typeof RolePolicy.Type;
  * shapes them to the job with `project_update` instead of reading rules.
  */
 export const Policy = Schema.Struct({
+  comms: Schema.Literals(["intercom", "network"]).pipe(Schema.withDecodingDefaultKey(Effect.succeed("intercom" as const))),
   /** Quiet minutes before the owner pass sends `esc` and a note. */
   nudgeAfterMin: Schema.optionalKey(Minutes),
   /** Quiet minutes before `/new` plus a re-prompt; null never restarts on its own. */
@@ -265,7 +282,8 @@ export const Policy = Schema.Struct({
     }),
   ),
 });
-export type Policy = typeof Policy.Type;
+/** Policy patches omit comms; persisted policies decode it to intercom. */
+export type Policy = Partial<Pick<typeof Policy.Type, "comms">> & Omit<typeof Policy.Type, "comms">;
 
 export const Project = Schema.Struct({
   version: Schema.Literal(1),
@@ -419,11 +437,12 @@ export function roleDefaults(roster: Roster | undefined, policy: Policy | undefi
 }
 
 /** Shallow per-role merge: a later patch overrides only the keys it names. */
-export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
+export function mergePolicy(base: Policy | undefined, patch: Policy): typeof Policy.Type {
   const roles: Record<string, RolePolicy> = { ...(base?.roles ?? {}) };
   for (const [role, value] of Object.entries(patch.roles ?? {})) roles[role] = { ...(roles[role] ?? {}), ...value };
   return {
     ...(base ?? {}),
+    comms: patch.comms ?? base?.comms ?? "intercom",
     ...(patch.nudgeAfterMin !== undefined ? { nudgeAfterMin: patch.nudgeAfterMin } : {}),
     ...(patch.restartAfterMin !== undefined ? { restartAfterMin: patch.restartAfterMin } : {}),
     ...(Object.keys(roles).length > 0 ? { roles } : {}),
@@ -439,10 +458,10 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { comms: policy?.comms ?? "intercom", aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
-export const decodePolicy = Schema.decodeUnknownSync(Policy);
+export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(["intercom", "network"])) }));
 export const decodeProject = Schema.decodeUnknownSync(Project);
 export const decodeDeskItem = Schema.decodeUnknownSync(DeskItem);
 export const decodeAgentName = Schema.decodeUnknownSync(AgentName);

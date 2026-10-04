@@ -88,7 +88,7 @@ Messages must be plain sentences with spaces between words; put code, paths and 
 
 - Bosses talk to each other directly over intercom about interfaces, shared files, and ordering. A boss never writes in another lane's scope.
 - A decision two lanes share gets one line in the project's Brain, so neither boss holds it alone. Bosses who disagree take it to the hawk, not to Joel.
-- Address intercom by the session id `project_status` shows (`intercom=reachable@<id>`), never by a catalog or launch name. A restore or `/new` changes the id, and intercom queues mail for a dead name while still saying "Message sent".
+- Muster resolves `<project slug>/<agent row name>` through its Comms port at send time, so a restore or `/new` does not strand the alias. Raw intercom calls still need the live session id from `project_status`, never a launch name. `MUSTER_COMMS` overrides project policy `comms`; the default is intercom. Network delivery fails closed until implemented. Intercom ask/reply through the port are unsupported, and wake reports that intercom has no wake.
 - A desk asks another project's desk for anything that project owns, such as a Muster bug or a tool gap. Open the message with sender and receiver (`💬 drovr desk → 💬 muster desk`). Include one concrete ask, the receipt paths, and what you already ruled out.
 - The receiving desk acks, lanes the work or says no with the reason, and messages back when it ships with the steps the asker needs. Nobody hand-edits another project's catalog.
 - Touch another project's pane only when the session in it asks, and only for what it asked, such as a `/reload` it can't run mid-turn.

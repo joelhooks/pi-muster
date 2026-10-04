@@ -904,7 +904,7 @@ describe("field-use regressions", () => {
     feed.dispose();
     const sent: string[] = [];
     const delivery = await Effect.runPromise(deliverOwnerItem({ owner: "owner-session", agent: "probe_w", home: h.home, session: "probe", project: dir,
-      item: { author: "probe", kind: "blocked", title: "blocked" }, send: to => { sent.push(to); return Effect.succeed({ status: "sent" as const }); } }));
+      item: { author: "probe", kind: "blocked", title: "blocked" }, send: to => { sent.push(to); return Effect.succeed({ status: "delivered" as const }); } }));
     expect(delivery.owner).toBe("new-owner");
     expect(sent).toEqual([]); // Fresh B reader; its feed owns the wake.
   });
@@ -1147,7 +1147,7 @@ describe("a lane from launch to close", () => {
       packetReport({ dir, agent: "probe_w", owner: "owner-session", cwd: clone, commit: "HEAD", summary: "adds work.txt", checks: [{ name: "unit", outcome: "pass" }] }),
     );
     expect(reported.packet.id).toBe(commit);
-    expect(reported.delivery.status).toBe("sent");
+    expect(reported.delivery.status).toBe("delivered");
     expect(h.sent[0]?.to).toBe("owner-session");
     expect(h.sent[0]?.message).toContain(commit.slice(0, 12));
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("reported");

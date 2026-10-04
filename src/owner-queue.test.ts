@@ -52,7 +52,7 @@ describe("owner queue", () => {
     const f = fixture();
     forwardOwner({ from: "old", to: "owner", project: "p", home: f.home });
     const calls: string[] = [];
-    const result = await Effect.runPromise(deliverOwnerItem({ owner: "old", home: f.home, session: "probe", project: "p", item: { author: "probe", kind: "question", title: "wake", mention: "old" }, send: to => { calls.push(to); return Effect.succeed({ status: "sent" as const }); } }));
+    const result = await Effect.runPromise(deliverOwnerItem({ owner: "old", home: f.home, session: "probe", project: "p", item: { author: "probe", kind: "question", title: "wake", mention: "old" }, send: to => { calls.push(to); return Effect.succeed({ status: "delivered" as const }); } }));
     expect(calls).toEqual(["owner"]); expect(result.woke).toBe(true);
     expect(mentions(readOwnerQueue("owner", f.home).items[0]!.item, "owner")).toBe(true);
     expect(() => forwardOwner({ from: "owner", to: "old", project: "p", home: f.home })).toThrow(/cycle/);
@@ -117,7 +117,7 @@ describe("owner queue", () => {
       if (mode !== "missing") writeReader("owner", f.home, mode === "stale" ? Date.now() - 121000 : Date.now(), mode === "dead" ? 2147483647 : process.pid);
       if (mode === "queue-failure") mkdirSync(ownerPath("owner", f.home), { recursive: true });
       if (mode === "event-failure") mkdirSync(join(f.home, ".local/state/muster/relay-events.jsonl"));
-      const result = await Effect.runPromise(deliverOwnerItem({ owner: "owner", home: f.home, session: "worker", project: "p", item: { author: "probe", lane: "l", kind, title: "private title", body: "private body" }, send: (_to, message) => { calls.push(message); return Effect.succeed({ status: "sent" as const }); } }));
+      const result = await Effect.runPromise(deliverOwnerItem({ owner: "owner", home: f.home, session: "worker", project: "p", item: { author: "probe", lane: "l", kind, title: "private title", body: "private body" }, send: (_to, message) => { calls.push(message); return Effect.succeed({ status: "delivered" as const }); } }));
       expect(result.path).toBe(mode === "fresh" ? "queue" : "intercom");
       expect(calls).toHaveLength(mode === "fresh" ? 0 : 1);
       if (mode !== "queue-failure") expect(readFileSync(ownerPath("owner", f.home), "utf8")).toContain(kind);

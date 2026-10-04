@@ -13,8 +13,7 @@ import { Type } from "typebox";
 import { registerCompaction } from "../src/compact.ts";
 import { agentRewind, registerWorkerNavigation } from "../src/rewind.ts";
 import { MAX_CADENCE_MINUTES } from "../src/domain.ts";
-import { createIntercom } from "../src/intercom.ts";
-import type { LiveIntercom } from "../src/intercom.ts";
+import { createComms } from "../src/comms.ts";
 import {
   agentClose,
   agentLaunch,
@@ -30,7 +29,7 @@ import {
   projectStatus,
   projectUpdate,
 } from "../src/ops.ts";
-import { Herdr, Intercom, MusterEnv, Proc, liveProc, createEmitPaneClose } from "../src/runtime.ts";
+import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "../src/runtime.ts";
 import { registerDeskFeed } from "../src/desk-feed-ext.ts";
 import { registerOwnerFeed } from "../src/owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "../src/owner-view.ts";
@@ -45,7 +44,7 @@ import { squashed } from "../src/readable.ts";
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_WORKER_WORKTREE = join(homedir(), "Code", "joelhooks", "dark-wizard", "scripts", "worker-worktree.sh");
 
-type Services = Herdr | Proc | MusterEnv | Intercom;
+type Services = Herdr | Proc | MusterEnv | Comms;
 
 const text = (body: string, details: unknown) => ({ content: [{ type: "text" as const, text: body }], details });
 
@@ -79,7 +78,7 @@ export default function muster(host: ExtensionAPI) {
   const env = process.env;
   const role = env.MUSTER_ROLE;
   const worker = role === "worker";
-  let intercom: LiveIntercom | undefined;
+  const comms = new Map<string, ReturnType<typeof createComms>>();
 
   registerCompaction(pi, env);
 
@@ -98,7 +97,15 @@ export default function muster(host: ExtensionAPI) {
         sleep: (ms) => Effect.sleep(ms),
         emitPaneClose: createEmitPaneClose(pi.events),
       }),
-      Layer.succeed(Intercom)((intercom ??= createIntercom(pi.events, () => randomUUID()))),
+      Layer.succeed(Comms)((() => {
+        const dir = resolve(env.MUSTER_PROJECT ?? ctx.cwd);
+        let service = comms.get(dir);
+        if (!service) {
+          service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir, adapterEnv: () => env.MUSTER_COMMS });
+          comms.set(dir, service);
+        }
+        return service;
+      })()),
     );
 
   const run = async <A>(ctx: ExtensionContext, signal: AbortSignal | undefined, program: Effect.Effect<A, unknown, Services>, render: (value: A) => string) => {
@@ -118,8 +125,8 @@ export default function muster(host: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
-    intercom?.dispose();
-    intercom = undefined;
+    for (const service of comms.values()) service.dispose();
+    comms.clear();
   });
 
   registerOwnerFeed(pi, env);
@@ -139,7 +146,7 @@ export default function muster(host: ExtensionAPI) {
         if (error) return error;
         const session = ctx.sessionManager.getSessionId();
         if (params.replyTo) findOwnerPost(session, params.replyTo);
-        return run(ctx, signal, deliverOwnerItem({ owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => `${ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
+        return run(ctx, signal, deliverOwnerItem({ owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) }), result => `${ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
       },
     });
   }
@@ -158,7 +165,7 @@ export default function muster(host: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionId();
       const parent = findOwnerPost(session, params.uri);
       const body = capBody(params.text);
-      return run(ctx, signal, deliverOwnerItem({ owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${parent.author} · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
+      return run(ctx, signal, deliverOwnerItem({ owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) }), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${parent.author} · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
     },
   });
 
@@ -517,6 +524,7 @@ export default function muster(host: ExtensionAPI) {
       label: Type.Optional(Type.String()),
       policy: Type.Optional(
         Type.Object({
+          comms: Type.Optional(StringEnum(["intercom", "network"] as const)),
           nudgeAfterMin: Type.Optional(Type.Number()),
           restartAfterMin: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
           roles: Type.Optional(
