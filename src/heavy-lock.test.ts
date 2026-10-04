@@ -162,6 +162,97 @@ describe("heavy FIFO queue", () => {
   });
 });
 
+describe("reserved deploy slot", () => {
+  const path = (options: HeavyOptions) => `${heavyLockPath(options.home)}.deploy-0`;
+
+  it("admits a deploy immediately with all four normal slots held, never an ordinary gate", () => {
+    const options = { ...setup(), slots: "4" };
+    const gates = Array.from({ length: 4 }, (_, n) => tryAcquireHeavy(options, `gate ${n}`));
+    expect(gates.every((gate) => gate.ok)).toBe(true);
+    expect(tryAcquireHeavy(options, "ordinary overflow").ok).toBe(false);
+    expect(existsSync(path(options))).toBe(false);
+    const request = priorityRequest(options, "deploy");
+    expect(request.attempt()).toMatchObject({ ok: true, slot: "deploy-0" });
+    expect(readHolder(path(options))).toMatchObject({ mode: "priority", window: "test-deploy" });
+    request.release();
+    for (const gate of gates) if (gate.ok) gate.release();
+  });
+
+  it("keeps a second priority request waiting despite free normal slots, then ahead of ordinary tickets", () => {
+    const options = { ...setup(), slots: "1" };
+    const first = priorityRequest(options, "first");
+    expect(first.attempt().ok).toBe(true);
+    const ordinary = enqueueHeavy({ ...options, now: () => 1 }, "ordinary", "slot");
+    const own = enqueueHeavy({ ...options, now: () => 2 }, "second", "priority");
+    const second = priorityRequest(options, "second", () => own.name);
+    expect(second.attempt()).toMatchObject({ ok: false, reason: "priority window already held" });
+    first.release();
+    expect(second.attempt()).toMatchObject({ ok: true, slot: "deploy-0" });
+    second.release(); ordinary.release();
+  });
+
+  it("falls back to a normal slot ahead of ordinary waiters when the reserved slot is unknown", () => {
+    const options = { ...setup(), slots: "1" };
+    mkdirSync(path(options), { recursive: true });
+    const older = enqueueHeavy({ ...options, now: () => 1 }, "ordinary", "slot");
+    const request = priorityRequest(options, "fallback");
+    expect(request.attempt()).toMatchObject({ ok: true, slot: "slot-0" });
+    const audit = readFileSync(join(options.home, ".local/state/muster/heavy-exclusive.jsonl"), "utf8");
+    expect(audit).toContain('"slot":"slot-0"');
+    request.release(); older.release();
+  });
+
+  it("exclusive drains an active deploy, then holds and blocks deploy-0", () => {
+    const options = setup();
+    const deploy = priorityRequest(options, "active deploy");
+    expect(deploy.attempt().ok).toBe(true);
+    const exclusive = exclusiveRequest(options, "exclusive");
+    expect(exclusive.attempt()).toMatchObject({ ok: false, reason: expect.stringContaining("deploy-0") });
+    const next = priorityRequest(options, "next deploy");
+    expect(next.attempt().ok).toBe(false);
+    deploy.release();
+    expect(exclusive.attempt().ok).toBe(true);
+    expect(readHolder(path(options))?.command).toBe("exclusive");
+    expect(next.attempt().ok).toBe(false);
+    exclusive.release();
+    expect(existsSync(path(options))).toBe(false);
+    expect(next.attempt().ok).toBe(true);
+    next.release();
+  });
+
+  it("refuses deploy-0 under memory pressure", () => {
+    const options = { ...setup(), adapter: { ...adapter, sample: () => ({ cores: 16, load: 99, freeGB: 15 }) } };
+    const request = priorityRequest(options, "low-memory deploy");
+    expect(request.attempt()).toMatchObject({ ok: false, reason: expect.stringContaining("available memory") });
+    expect(existsSync(path(options))).toBe(false);
+    request.release();
+  });
+
+  it("explicit reaper frees a dead deploy-0 without waiting for its cap", () => {
+    const options = setup();
+    const request = priorityRequest(options, "dead deploy");
+    expect(request.attempt().ok).toBe(true);
+    writeFileSync(join(path(options), "holder.json"), JSON.stringify({ ...readHolder(path(options)), pid: 99999999 }));
+    expect(heavySnapshot(options).deploySlot).toMatchObject({ held: true, health: "dead" });
+    reapExclusive(options);
+    expect(existsSync(path(options))).toBe(false);
+    request.release();
+  });
+
+  it("reports the reserved slot and its remaining seconds in text and JSON", () => {
+    const now = Date.now();
+    const options = { ...setup(), slots: "4", now: () => now };
+    expect(heavyStatus(options)).toContain("heavy slots: 4 + 1 deploy");
+    expect(heavyStatus(options)).toContain("deploy-0: free");
+    const request = priorityRequest(options, "deploy");
+    expect(request.attempt().ok).toBe(true);
+    expect(heavyStatus(options, now + 2000)).toContain("deploy-0: ⚡ window test-deploy");
+    expect(heavyStatus(options, now + 2000)).toContain("left 298s");
+    expect(JSON.parse(cli(options, ["status", "--json"]).stdout).deploySlot).toMatchObject({ name: "deploy-0", held: true, window: "test-deploy" });
+    request.release();
+  });
+});
+
 describe("priority deploy windows", () => {
   const events = (home: string) => readFileSync(join(home, ".local/state/muster/heavy-exclusive.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
 
@@ -174,7 +265,7 @@ describe("priority deploy windows", () => {
     const deploy = priorityRequest(options, "deploy", () => own.name);
     expect(deploy.attempt().ok).toBe(true);
     expect(readHolder(heavyLockPath(options.home))?.command).toBe("running gate");
-    expect(readHolder(slotPath(heavyLockPath(options.home), 1))?.mode).toBe("priority");
+    expect(readHolder(`${heavyLockPath(options.home)}.deploy-0`)?.mode).toBe("priority");
     expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
     deploy.release();
     if (gate.ok) gate.release();
@@ -251,7 +342,7 @@ describe("priority deploy windows", () => {
     const own = enqueueHeavy(options, "waiting deploy", "priority");
     const status = heavyStatus(options, now + 2000);
     expect(status).toContain("⚡ window test-deploy");
-    expect(status).toContain("cap remaining 298s");
+    expect(status).toContain("left 298s");
     expect(status).toContain("wait 0m02s; ⚡ window test-deploy");
     request.release(); own.release();
   });
@@ -262,13 +353,13 @@ describe("priority deploy windows", () => {
     const gate = tryAcquireHeavy(options, "ordinary");
     const request = priorityRequest(options, "stale deploy");
     expect(request.attempt().ok).toBe(true);
-    const path = slotPath(heavyLockPath(options.home), 1);
+    const path = `${heavyLockPath(options.home)}.deploy-0`;
     writeFileSync(join(path, "holder.json"), JSON.stringify({ ...readHolder(path), pid: 1234567 }));
     const signals: [number, NodeJS.Signals][] = [];
     const reaper = { ...options, health: () => "alive" as const, kill: (pid: number, signal: NodeJS.Signals) => { signals.push([pid, signal]); } };
     reapExclusive({ ...reaper, now: () => now + 420000 });
     expect(existsSync(path)).toBe(true);
-    expect(heavySnapshot(options, now + 420001).holders[1]?.remainingSeconds).toBe(0);
+    expect(heavySnapshot(options, now + 420001).deploySlot.remainingSeconds).toBe(0);
     reapExclusive({ ...reaper, now: () => now + 420001 });
     expect(signals).toEqual([[1234567, "SIGTERM"], [1234567, "SIGKILL"]]);
     expect(existsSync(path)).toBe(false);
@@ -292,6 +383,8 @@ describe("priority deploy windows", () => {
     expect(alive).toBe(false);
     expect(events(options.home).map((entry) => entry.event)).toEqual(["requested", "acquired", "capped", "released"]);
     expect(events(options.home).every((entry) => entry.mode === "priority" && entry.ppid > 0)).toBe(true);
+    expect(events(options.home).find((entry) => entry.event === "acquired")).toMatchObject({ slot: "deploy-0" });
+    expect(existsSync(`${heavyLockPath(options.home)}.deploy-0`)).toBe(false);
     expect(existsSync(heavyLockPath(options.home))).toBe(false);
   });
 });
@@ -390,7 +483,7 @@ describe("exclusive deploy policy", () => {
     expect(request.attempt().ok).toBe(true);
     reapExclusive({ ...options, now: () => Date.now() + 21 * 60000, kill: (pid) => { signals.push(pid); } });
     expect(signals).toEqual([]);
-    for (const path of [exclusivePendingPath(options.home), heavyLockPath(options.home)]) {
+    for (const path of [exclusivePendingPath(options.home), heavyLockPath(options.home), `${heavyLockPath(options.home)}.deploy-0`]) {
       writeFileSync(join(path, "holder.json"), JSON.stringify({ ...readHolder(path), host: "foreign.example" }));
     }
     reapExclusive({ ...options, now: () => Date.now() + 30 * 60000, health: () => "alive", kill: (pid) => { signals.push(pid); } });
