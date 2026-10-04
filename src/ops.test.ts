@@ -83,6 +83,44 @@ function commitInClone(clone: string, file = "work.txt") {
 }
 
 describe("slow Pi startup", () => {
+  it.each(["last lines", "Error: No API key found for anthropic"])("continues the owner pass after one restart fails: %s", async tail => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    const second = await runWith(h, agentLaunch(dir, {
+      action: "launch", name: "second", role: "worker", lane: "probe", label: "🔨 second", cwd: dir, brief: launched.row.brief!,
+    }));
+    const age = (min: number) => {
+      const at = new Date(h.now.getTime() - min * 60_000);
+      for (const row of [launched.row, second.row]) utimesSync(row.sessionFile!, at, at);
+    };
+    age(31);
+    await runWith(h, projectStatus(dir));
+    age(61);
+    const failedPane = launched.row.pane!.paneId;
+    let restarting = false;
+    const handle = h.herdr.handle.bind(h.herdr);
+    vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => {
+      if (params.pane_id === failedPane) {
+        if (method === "pane.send_input" && params.text === "/new") { restarting = true; return { type: "ok" }; }
+        if (method === "pane.read" && restarting) return { type: "pane_read", read: { text: tail } };
+      }
+      return handle(method, params);
+    });
+    const result = await runWith(h, projectStatus(dir));
+    expect(result.agents[0]?.state).toBe("failed");
+    expect(result.agents[0]?.action).toContain(tail.startsWith("Error:") ? "restart failed: model error" : "restart failed: no Pi session appeared");
+    expect(result.agents[1]?.state).toBe("restarted");
+    expect(result.agents[1]?.action).toContain("re-prompt proven");
+    const rows = (await runWith(h, load(dir))).agents;
+    expect(rows[0]?.state).toBe("failed");
+    if (tail.startsWith("Error:")) expect(rows[0]?.events?.at(-1)).toMatchObject({ type: "MODEL_ERROR", detail: tail });
+    expect(rows[1]?.sessionId).toMatch(/^fresh-/);
+    expect(rows[1]?.delivery).toBe("proven");
+    expect(result.board).toContain("second");
+    expect(result.notes.join("\n")).toContain("brain:");
+    expect(h.herdr.calls.at(-1)?.method).toBe("workspace.report_metadata");
+  });
+
   async function setup(load = 0, appearAt = Infinity, tail = "creating a new session…") {
     const h = harness();
     h.startupLoad = { load, cpus: 8 };

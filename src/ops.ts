@@ -1886,30 +1886,30 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
             const wait = yield* waitForSession(paneId, current.sessionFile);
             const text = workPrompt(current, undefined);
             const issue = wait.state === "missing" ? modelOutputIssue(wait.tail) : null;
-            if (issue?.severity === "error") {
-              yield* patchRow(dir, current.name, current.state, [{ type: "FAIL" }], {
-                delivery: "unproven", events: [...(current.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: issue.line }],
-              });
-              return yield* new GuardFailed({ guard: "model-proof", message: `pane ${paneId}: delivery: unproven (model error: ${issue.line})` });
-            }
             if (wait.state === "missing") {
-              yield* patchRow(dir, current.name, current.state, [{ type: "FAIL" }], { delivery: "unproven" });
-              return yield* new GuardFailed({ guard: "launch", message: `Herdr restarted ${current.name} but no Pi session appeared in ${paneId}. Pane tail (UNTRUSTED):\n${wait.tail.trim().slice(-1500)}` });
+              current = yield* patchRow(dir, current.name, current.state, [{ type: "FAIL" }], {
+                delivery: "unproven",
+                ...(issue?.severity === "error" ? { events: [...(current.events ?? []), { type: "MODEL_ERROR" as const, at: iso(env), detail: issue.line }] } : {}),
+              }).pipe(Effect.catch(() => Effect.succeed(current)));
+              action = issue?.severity === "error"
+                ? `restart failed: model error in ${paneId}: ${issue.line}; tail saved to ${saved}`
+                : `restart failed: no Pi session appeared in ${paneId}; tail saved to ${saved}`;
+            } else {
+              const proof = text && wait.state === "ready"
+                ? yield* promptWithProof(paneId, text).pipe(
+                    Effect.catch((error) => Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: error.message })),
+                  )
+                : null;
+              const receipt = wait.state === "pending" ? pendingPromptNote(paneId, text)
+                : wait.slow ? slowStartNote(wait)
+                : "";
+              action = `restarted with /new after ${Math.floor(silentFor / 60_000)}m; ${proof ? `re-prompt ${proof.state}` : text ? "re-prompt pending" : "no brief to re-prompt"}; ${receipt}; tail saved to ${saved}`;
+              current = yield* patchRow(dir, current.name, current.state, decision.events, {
+                restarts: current.restarts + 1,
+                ...(wait.state === "ready" ? { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? current.sessionId } : {}),
+                delivery: wait.state === "pending" ? "none" : proof?.state === "proven" ? "proven" : "unproven",
+              }).pipe(Effect.catch(() => Effect.succeed(current)));
             }
-            const proof = text && wait.state === "ready"
-              ? yield* promptWithProof(paneId, text).pipe(
-                  Effect.catch((error) => Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: error.message })),
-                )
-              : null;
-            const receipt = wait.state === "pending" ? pendingPromptNote(paneId, text)
-              : wait.state === "ready" && wait.slow ? slowStartNote(wait)
-              : "";
-            action = `restarted with /new after ${Math.floor(silentFor / 60_000)}m; ${proof ? `re-prompt ${proof.state}` : text ? "re-prompt pending" : "no brief to re-prompt"}; ${receipt}; tail saved to ${saved}`;
-            current = yield* patchRow(dir, current.name, current.state, decision.events, {
-              restarts: current.restarts + 1,
-              ...(wait.state === "ready" ? { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? current.sessionId } : {}),
-              delivery: wait.state === "pending" ? "none" : proof?.state === "proven" ? "proven" : "unproven",
-            }).pipe(Effect.catch(() => Effect.succeed(current)));
           }
           if (decision.action !== "restart") {
             current = yield* patchRow(dir, current.name, current.state, decision.events).pipe(Effect.catch(() => Effect.succeed(current)));
