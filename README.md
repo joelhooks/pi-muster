@@ -72,6 +72,8 @@ Worker side, when `MUSTER_AGENT` is set: `packet_report` and per-role compaction
 
 `muster-heavy -- <command>` runs a command in the same machine-wide heavy slots as `packet_land` gates. `MUSTER_HEAVY_SLOTS` overrides the count; otherwise it is `max(1, floor(performanceCores / 3))` (4 on a 12-performance-core Mac). macOS reads `hw.perflevel0.physicalcpu`; the fallback uses half of `os.availableParallelism()` as performance cores.
 
+Local heavy waiters use FIFO tickets in `~/.local/state/muster/heavy-queue/`, created with `wx` on the first failed attempt when `--wait` is positive. Tickets record pid, host, process start, enqueue time, truncated command, cwd and mode. Arrival names sort by padded millisecond timestamp then pid. A slot caller may enter only when fewer older live tickets exist than free slots; no-ticket callers, including local `packet_land` gates, count as newest. Queue decisions and slot acquisition share a short-lived `heavy-admission.lock` to prevent simultaneous polls from stealing a place. Pressure and exclusive fences still win. An exclusive waiter may reserve its drain only at the queue head; once reserved it retains drain priority. Acquisition, timeout and signal/exit cleanup remove the owned ticket. Admission reaps dead or reused tickets; unknown, malformed and foreign-host tickets fail closed. Status lists queue position, pid, health, wait age and command in text and JSON without reaping. Waiting messages show the caller's position and age. Eligible waiters poll every second (the head also polls every second when no slots are free); others poll every five seconds. Reload older CLI sessions before relying on FIFO, since they do not read tickets.
+
 When fleet-compute is installed, `project_status` shows gate slots and queue age; busy gate admission reports per-host queue positions. Status failures omit the line and add a note.
 
 When installed, `packet_land` uses `fleet-compute gate` (`MUSTER_FLEET_COMPUTE` selects an absolute script path; `MUSTER_FLEET_COMPUTE=off` falls back to local admission); the receipt, not the process exit, decides the result, records the host, and proves the committed tree.
@@ -117,6 +119,7 @@ When a desk holds several decisions, it publishes one static feedback page inste
 - `<project>/.brain/projects/muster/<slug>.svx`: a generated Brain board.
 - `~/.local/state/herdr-desk/<slug>.jsonl`: the desk queue, one JSON line per item.
 - `~/.local/state/muster/heavy-job.lock` (slot 0), `heavy-job.lock.<n>`: atomic mkdir heavy slots with `holder.json`.
+- `~/.local/state/muster/heavy-queue/`: FIFO waiter tickets; `heavy-admission.lock` serializes local admission decisions.
 - `~/.local/state/muster/heavy-job.lock.exclusive-pending`: the exclusive request's holder and admission fence.
 - `~/.local/state/muster/projects.jsonl`: every project `project_open` has seen, so the Switchboard can find them all.
 

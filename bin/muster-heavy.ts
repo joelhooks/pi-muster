@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { ExclusiveRefused, exclusiveRequest, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy } from "../src/heavy-lock.ts";
+import { enqueueHeavy, ExclusiveRefused, exclusiveRequest, heavyQueueState, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy, waitAge } from "../src/heavy-lock.ts";
 import type { HeavyOptions } from "../src/heavy-lock.ts";
 
 const usage = "usage: muster-heavy status [--json] [--reap] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
@@ -36,8 +36,11 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
     process.exit(2);
   }
   const command = args.slice(split + 1);
-  const deadline = Date.now() + waitSeconds * 1000;
-  let cleanup = () => {};
+  const now = options.now ?? Date.now;
+  const deadline = now() + waitSeconds * 1000;
+  let ticket: ReturnType<typeof enqueueHeavy> | undefined;
+  let release = () => {};
+  const cleanup = () => { ticket?.release(); release(); };
   let child: ReturnType<typeof spawn> | undefined;
   let capTimer: ReturnType<typeof setTimeout> | undefined;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
@@ -63,20 +66,24 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
   }
   process.on("exit", () => cleanup());
   try {
-    const request = exclusive ? exclusiveRequest(options, command.join(" ")) : undefined;
-    cleanup = request?.release ?? cleanup;
-    const attempt = () => request ? request.attempt() : tryAcquireHeavy(options, command.join(" "));
+    const request = exclusive ? exclusiveRequest(options, command.join(" "), () => ticket?.name) : undefined;
+    release = request?.release ?? release;
+    const attempt = () => request ? request.attempt() : tryAcquireHeavy(options, command.join(" "), ticket?.name);
     let acquired = attempt();
-    while (!acquired.ok && Date.now() < deadline) {
-      console.error(`muster-heavy: waiting, ${acquired.reason}`);
-      await new Promise((resolve) => setTimeout(resolve, Math.min(5000, Math.max(0, deadline - Date.now()))));
+    if (!acquired.ok && waitSeconds > 0) ticket = enqueueHeavy(options, command.join(" "), exclusive ? "exclusive" : "slot");
+    while (!acquired.ok && now() < deadline) {
+      const queue = heavyQueueState(options, ticket?.name);
+      console.error(`muster-heavy: waiting: position ${queue.own?.position ?? queue.rows.length + 1} of ${queue.rows.length}, ${waitAge(queue.own?.ageSeconds ?? null)}; ${acquired.reason}`);
+      const pollMs = queue.older < Math.max(1, queue.freeSlots) ? 1000 : 5000;
+      await new Promise((resolve) => timers.setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - now()))));
       acquired = attempt();
     }
     if (!acquired.ok) {
       console.error(`muster-heavy: busy, ${acquired.reason}`);
       return finish(75);
     }
-    cleanup = acquired.release;
+    ticket?.release();
+    release = acquired.release;
     child = spawn(command[0] as string, command.slice(1), { stdio: "inherit", detached: exclusive });
     if (request) capTimer = timers.setTimeout(() => {
       capped = true;

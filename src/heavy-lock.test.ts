@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -27,6 +27,140 @@ function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, 
     env: { ...process.env, HOME: options.home, MUSTER_HEAVY_SLOTS: "2", MUSTER_HEAVY_MIN_FREE_GB: "16", MUSTER_DEPLOY_WINDOW: window ?? undefined },
   });
 }
+
+describe("heavy FIFO queue", () => {
+  function ticket(options: HeavyOptions, ms: number, pid = process.pid, extra = {}) {
+    const dir = join(options.home, ".local/state/muster/heavy-queue");
+    mkdirSync(dir, { recursive: true });
+    const name = `${String(ms).padStart(16, "0")}-${pid}.json`;
+    writeFileSync(join(dir, name), JSON.stringify({ pid, host: hostname(), startedAt: new Date().toISOString(), enqueuedAt: ms, command: `waiter-${ms}`, cwd: process.cwd(), mode: "slot", ...extra }), { flag: "wx" });
+    return name;
+  }
+
+  it("admits three waiters FIFO even when the newest polls first", () => {
+    const options = { ...setup(), slots: "1" };
+    const names = [1, 2, 3].map((ms) => ticket(options, ms));
+    for (let head = 0; head < names.length; head++) {
+      for (let newer = 2; newer > head; newer--) expect(tryAcquireHeavy(options, "newer", names[newer]).ok).toBe(false);
+      const result = tryAcquireHeavy(options, "head", names[head]);
+      expect(result.ok).toBe(true);
+      expect(existsSync(join(options.home, ".local/state/muster/heavy-queue", names[head]!))).toBe(false);
+      if (result.ok) result.release();
+    }
+  });
+
+  it("admits the two oldest with two free slots, but not a third or a no-ticket caller", () => {
+    const options = setup();
+    const names = [1, 2, 3].map((ms) => ticket(options, ms));
+    expect(tryAcquireHeavy(options, "third", names[2]).ok).toBe(false);
+    expect(tryAcquireHeavy(options, "no ticket").ok).toBe(false);
+    const second = tryAcquireHeavy(options, "second", names[1]);
+    const first = tryAcquireHeavy(options, "first", names[0]);
+    expect(second.ok).toBe(true);
+    expect(first.ok).toBe(true);
+    if (first.ok) first.release();
+    if (second.ok) second.release();
+    const third = tryAcquireHeavy(options, "third", names[2]);
+    expect(third.ok).toBe(true);
+    if (third.ok) third.release();
+    const newest = tryAcquireHeavy(options, "empty queue");
+    expect(newest.ok).toBe(true);
+    if (newest.ok) newest.release();
+  });
+
+  it("a no-ticket caller defers to a live waiter on one slot", () => {
+    const options = { ...setup(), slots: "1" };
+    const name = ticket(options, 1);
+    expect(tryAcquireHeavy(options, "packet_land gate")).toMatchObject({ ok: false, reason: expect.stringContaining("older waiters") });
+    rmSync(join(options.home, ".local/state/muster/heavy-queue", name));
+    const admitted = tryAcquireHeavy(options, "packet_land gate");
+    expect(admitted.ok).toBe(true);
+    if (admitted.ok) admitted.release();
+  });
+
+  it("exclusive drain waits behind older tickets, then fences all new admission", () => {
+    const options = setup();
+    const old = ticket(options, 1);
+    const own = ticket(options, 2, process.pid, { mode: "exclusive" });
+    const deploy = exclusiveRequest(options, "deploy", () => own);
+    expect(deploy.attempt().ok).toBe(false);
+    expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
+    const first = tryAcquireHeavy(options, "old", old);
+    expect(first.ok).toBe(true);
+    expect(deploy.attempt().ok).toBe(false);
+    expect(existsSync(exclusivePendingPath(options.home))).toBe(true);
+    expect(tryAcquireHeavy(options, "new").ok).toBe(false);
+    if (first.ok) first.release();
+    expect(deploy.attempt().ok).toBe(true);
+    expect(existsSync(join(options.home, ".local/state/muster/heavy-queue", own))).toBe(false);
+    deploy.release();
+  });
+
+  it("reaps dead and reused tickets but retains unknown foreign tickets", () => {
+    const options = { ...setup(), slots: "1" };
+    const dead = ticket(options, 1, 99999999);
+    const reused = ticket(options, 2, process.pid, { startedAt: "2000-01-01T00:00:00.000Z" });
+    const foreign = ticket(options, 3, process.pid, { host: "foreign.invalid" });
+    expect(tryAcquireHeavy(options, "gate").ok).toBe(false);
+    const dir = join(options.home, ".local/state/muster/heavy-queue");
+    expect(existsSync(join(dir, dead))).toBe(false);
+    expect(existsSync(join(dir, reused))).toBe(false);
+    expect(existsSync(join(dir, foreign))).toBe(true);
+    expect(heavyStatus(options)).toContain("unknown");
+  });
+
+  it("status lists queue position, age and command without reaping", () => {
+    const options = setup();
+    ticket(options, 1000, 99999999);
+    ticket(options, 2000);
+    expect(heavySnapshot(options, 253000)).toMatchObject({ queue: [
+      { position: 1, pid: 99999999, health: "dead", ageSeconds: 252, command: "waiter-1000" },
+      { position: 2, pid: process.pid, health: "alive", ageSeconds: 251, command: "waiter-2000" },
+    ] });
+    expect(heavyStatus(options, 253000)).toContain("position 1: pid 99999999; dead; wait 4m12s; waiter-1000");
+    expect(JSON.parse(cli(options, ["status", "--json"]).stdout).queue).toHaveLength(2);
+    expect(readdirSync(join(options.home, ".local/state/muster/heavy-queue"))).toHaveLength(2);
+  });
+
+  it("polls the head at 1s and distant waiters at 5s using injected timers", () => {
+    const preload = `import { readFileSync, readdirSync } from 'node:fs'; import { join } from 'node:path'; const timer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => { const dir = join(process.env.HOME, '.local/state/muster/heavy-queue'); const files = readdirSync(dir); const ticket = JSON.parse(readFileSync(join(dir, files.at(-1)), 'utf8')); console.error('TICKET:' + JSON.stringify(ticket)); console.error('POLL:' + ms); return timer(fn, ms); };`;
+    for (const older of [0, 2]) {
+      const options = setup();
+      for (let n = 0; n < older; n++) ticket(options, n + 1);
+      const result = cli(options, ["--wait", "6", "--", "true", "x".repeat(300)], "({ cores: 16, load: 41, freeGB: 64 })", true, "test-deploy", preload);
+      expect(result.status).toBe(75);
+      expect(result.stderr).toContain(`POLL:${older === 0 ? 1000 : 5000}`);
+      const payload = JSON.parse(result.stderr.split('\n').find((line) => line.startsWith('TICKET:'))!.slice(7));
+      expect(payload).toMatchObject({ host: hostname(), cwd: process.cwd(), mode: "slot" });
+      expect(payload.command).toHaveLength(200);
+      expect(Number.isFinite(Date.parse(payload.startedAt))).toBe(true);
+      expect(typeof payload.enqueuedAt).toBe("number");
+      expect(readdirSync(join(options.home, ".local/state/muster/heavy-queue"))).toHaveLength(older);
+    }
+  });
+
+  it("a --wait 0 refusal never creates a ticket", () => {
+    const options = setup();
+    expect(cli(options, ["--wait", "0", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })").status).toBe(75);
+    expect(existsSync(join(options.home, ".local/state/muster/heavy-queue"))).toBe(false);
+  });
+
+  it.each([false, true])("CLI tickets clean up on acquire, timeout and signal (exclusive=%s)", (exclusive) => {
+    const options = setup();
+    const flags = exclusive ? ["--exclusive"] : [];
+    const dir = join(options.home, ".local/state/muster/heavy-queue");
+    const success = cli(options, [...flags, "--wait", "2", "--", "true"], "calls === 1 ? { cores: 16, load: 41, freeGB: 64 } : { cores: 16, load: 20, freeGB: 64 }", true);
+    expect(success.status, success.stderr).toBe(0);
+    expect(success.stderr).toContain("waiting: position 1 of 1");
+    expect(readdirSync(dir)).toEqual([]);
+    const timeout = cli(options, [...flags, "--wait", "1", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })", true);
+    expect(timeout.status).toBe(75);
+    expect(readdirSync(dir)).toEqual([]);
+    const signal = cli(options, [...flags, "--wait", "10", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })", false, "test-deploy", "const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => realTimer(() => process.emit('SIGTERM'), 0);");
+    expect(signal.status).toBe(128);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+});
 
 describe("exclusive deploy policy", () => {
   const events = (home: string) => readFileSync(join(home, ".local/state/muster/heavy-exclusive.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
@@ -432,7 +566,7 @@ describe("machine pressure admission", () => {
         const options = setup();
         const result = cli(options, [...flags, "--wait", "0.05", "--", process.execPath, "-e", "console.log('started')"], `calls === 1 ? ${pressure} : { cores: 16, load: 20, freeGB: 64 }`, true);
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stderr).toMatch(/waiting, (load|available memory)/);
+        expect(result.stderr).toMatch(/waiting: position 1 of 1, .*; (load|available memory)/);
         expect(result.stdout).toContain("started");
         expect(existsSync(heavyLockPath(options.home))).toBe(false);
         expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
