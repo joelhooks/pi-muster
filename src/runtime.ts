@@ -65,6 +65,8 @@ export interface EnvShape {
   readonly workerWorktree: string;
   readonly createId: () => string;
   readonly sleep: (ms: number) => Effect.Effect<void>;
+  /** Optional test seam; absent uses the live OS sample at wait time. */
+  readonly startupLoad?: () => { readonly load: number; readonly cpus: number };
   readonly emitPaneClose: EmitPaneClose;
 }
 
