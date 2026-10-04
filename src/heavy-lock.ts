@@ -22,8 +22,8 @@ export interface Holder {
   readonly host: string;
   readonly command: string;
   readonly startedAt: string;
-  /** "exclusive" marks a deploy hold on slot 0; anything else there is an ordinary busy slot. */
-  readonly mode?: "slot" | "exclusive";
+  /** Only "exclusive" fences admission; "priority" is a capped single-slot window. */
+  readonly mode?: "slot" | "exclusive" | "priority";
   readonly window?: string;
   readonly exclusiveAcquiredAt?: string;
   readonly exclusiveCapMs?: number;
@@ -52,7 +52,7 @@ export function readHolder(lock: string): Holder | null {
 function decodeHolder(value: unknown): Holder | null {
   if (typeof value !== "object" || value === null || !("pid" in value) || !("host" in value) || !("command" in value) || !("startedAt" in value)) return null;
   if (typeof value.pid !== "number" || !Number.isInteger(value.pid) || value.pid <= 0 || value.pid > 2147483647 || typeof value.host !== "string" || typeof value.command !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt))) return null;
-  return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && (value.mode === "slot" || value.mode === "exclusive") ? { mode: value.mode } : {}),
+  return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && (value.mode === "slot" || value.mode === "exclusive" || value.mode === "priority") ? { mode: value.mode } : {}),
     ...("window" in value && typeof value.window === "string" ? { window: value.window } : {}),
     ...("exclusiveAcquiredAt" in value && typeof value.exclusiveAcquiredAt === "string" && Number.isFinite(Date.parse(value.exclusiveAcquiredAt)) ? { exclusiveAcquiredAt: value.exclusiveAcquiredAt } : {}),
     ...("exclusiveCapMs" in value && typeof value.exclusiveCapMs === "number" && value.exclusiveCapMs > 0 && Number.isFinite(value.exclusiveCapMs) ? { exclusiveCapMs: value.exclusiveCapMs } : {}),
@@ -87,7 +87,7 @@ function stale(holder: Holder | null): boolean {
   return health === "dead" || health === "reused";
 }
 
-export function tryAcquire(lock: string, command: string, pid = process.pid, mode?: "slot" | "exclusive"): Acquire {
+export function tryAcquire(lock: string, command: string, pid = process.pid, mode?: "slot" | "exclusive" | "priority"): Acquire {
   mkdirSync(join(lock, ".."), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -218,7 +218,7 @@ export interface HeavyOptions {
 }
 
 export class ExclusiveRefused extends Error {
-  constructor() { super("MUSTER_DEPLOY_WINDOW must be 1-64 characters [A-Za-z0-9._:-]; --exclusive is deploy-only"); }
+  constructor() { super("MUSTER_DEPLOY_WINDOW must be 1-64 characters [A-Za-z0-9._:-]; priority and --exclusive are deploy-only"); }
 }
 
 export function exclusiveCapMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
@@ -226,12 +226,17 @@ export function exclusiveCapMs(env: Readonly<Record<string, string | undefined>>
   return (Number.isFinite(minutes) ? Math.min(20, Math.max(1, minutes)) : 20) * 60_000;
 }
 
-function capMs(options: HeavyOptions): number {
-  return Math.min(exclusiveCapMs(), options.testOnlyCapMs ?? Infinity);
+export function deployCapMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const minutes = Number(env.MUSTER_DEPLOY_CAP_MIN ?? 5);
+  return (Number.isFinite(minutes) ? Math.min(5, Math.max(1, minutes)) : 5) * 60_000;
+}
+
+function capMs(options: HeavyOptions, mode: "exclusive" | "priority" = "exclusive"): number {
+  return Math.min(mode === "priority" ? deployCapMs() : exclusiveCapMs(), options.testOnlyCapMs ?? Infinity);
 }
 
 export type ExclusiveEvent = "requested" | "acquired" | "released" | "capped" | "reaped" | "refused";
-export function logExclusive(options: HeavyOptions, event: ExclusiveEvent, command: string, holder?: Holder): void {
+export function logExclusive(options: HeavyOptions, event: ExclusiveEvent, command: string, holder?: Holder, mode: "exclusive" | "priority" = "exclusive"): void {
   let parentCommand = "";
   try {
     parentCommand = execFileSync("ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim().slice(0, 200);
@@ -239,7 +244,7 @@ export function logExclusive(options: HeavyOptions, event: ExclusiveEvent, comma
   const dir = join(options.home, ".local/state/muster");
   mkdirSync(dir, { recursive: true });
   appendFileSync(join(dir, "heavy-exclusive.jsonl"), `${JSON.stringify({
-    ts: new Date((options.now ?? Date.now)()).toISOString(), event, window: holder?.window ?? options.window ?? null,
+    ts: new Date((options.now ?? Date.now)()).toISOString(), event, mode: holder?.mode === "priority" ? "priority" : mode, window: holder?.window ?? options.window ?? null,
     pid: holder?.pid ?? process.pid, ppid: process.ppid, parentCommand, cwd: process.cwd(), command: command.slice(0, 200),
   })}\n`, { mode: 0o600 });
 }
@@ -253,18 +258,19 @@ function sameHolder(a: Holder | null, b: Holder): boolean {
 export function reapExclusive(options: HeavyOptions): void {
   const lock = heavyLockPath(options.home);
   const pending = exclusivePendingPath(options.home);
-  const candidates = [pending, lock];
+  const candidates = [pending, lock, ...existingSlots(lock).map((n) => slotPath(lock, n))];
   for (const path of candidates) {
     const holder = readHolder(path);
-    if (!holder || (path === lock && holder.mode !== "exclusive")) continue;
+    if (!holder || (path !== pending && holder.mode !== "exclusive" && holder.mode !== "priority")) continue;
+    const mode = holder.mode === "priority" ? "priority" : "exclusive";
     // A pending request has no hold clock until every slot has drained.
     const acquiredAt = holder.exclusiveAcquiredAt ?? (path === lock && holder.window === undefined ? holder.startedAt : undefined);
-    if (!acquiredAt || (options.now ?? Date.now)() - Date.parse(acquiredAt) <= Math.min(capMs(options), holder.exclusiveCapMs ?? Infinity) + 120_000) continue;
+    if (!acquiredAt || (options.now ?? Date.now)() - Date.parse(acquiredAt) <= Math.min(capMs(options, mode), holder.exclusiveCapMs ?? Infinity) + 120_000) continue;
     // Remote and unverified holders retain their fence. Never signal reused pids.
     const health = (options.health ?? holderHealth)(holder);
     if (!localHost(holder.host) || health === "unknown") continue;
     logExclusive(options, "reaped", holder.command, holder);
-    console.error(`muster-heavy: REAPED exclusive window ${holder.window ?? "legacy"}, pid ${holder.pid}: hold exceeded cap + 2 min`);
+    console.error(`muster-heavy: REAPED ${mode} window ${holder.window ?? "legacy"}, pid ${holder.pid}: hold exceeded cap + 2 min`);
     if (health === "alive") {
       const kill = options.kill ?? process.kill;
       // Backstop escalation is immediate: unlike the cooperative holder it may
@@ -291,17 +297,17 @@ function settings(options: HeavyOptions) {
   };
 }
 
-export function admissionReason(sample: MachineSample, minFreeGB: number): string | null {
+export function admissionReason(sample: MachineSample, minFreeGB: number, bypassLoad = false): string | null {
   if (![sample.cores, sample.load, sample.freeGB].every(Number.isFinite) || sample.cores <= 0 || sample.load < 0 || sample.freeGB < 0) return "machine load/memory unavailable";
   const reasons: string[] = [];
-  if (sample.load > sample.cores * 2.5) reasons.push(`load ${sample.load.toFixed(1)} above ${sample.cores * 2.5}`);
+  if (!bypassLoad && sample.load > sample.cores * 2.5) reasons.push(`load ${sample.load.toFixed(1)} above ${sample.cores * 2.5}`);
   if (sample.freeGB < minFreeGB) reasons.push(`available memory ${sample.freeGB.toFixed(1)} GB below ${minFreeGB} GB`);
   return reasons.length ? reasons.join("; ") : null;
 }
 
-function pressureReason(adapter: HeavyAdapter, minFreeGB: number): string | null {
+function pressureReason(adapter: HeavyAdapter, minFreeGB: number, bypassLoad = false): string | null {
   try {
-    return admissionReason(adapter.sample(), minFreeGB);
+    return admissionReason(adapter.sample(), minFreeGB, bypassLoad);
   } catch (error) {
     return `machine load/memory unavailable: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -335,7 +341,7 @@ export function heavyQueuePath(home: string): string {
 export interface HeavyTicket extends Holder {
   readonly enqueuedAt: number;
   readonly cwd: string;
-  readonly mode: "slot" | "exclusive";
+  readonly mode: "slot" | "exclusive" | "priority";
 }
 
 export interface HeavyQueueView {
@@ -352,7 +358,8 @@ function readTicket(path: string): HeavyTicket | null {
   try {
     const value: unknown = JSON.parse(readFileSync(path, "utf8"));
     const holder = decodeHolder(value);
-    if (!holder || typeof value !== "object" || value === null || !("enqueuedAt" in value) || typeof value.enqueuedAt !== "number" || !Number.isSafeInteger(value.enqueuedAt) || value.enqueuedAt < 0 || !("cwd" in value) || typeof value.cwd !== "string" || (holder.mode !== "slot" && holder.mode !== "exclusive")) return null;
+    if (!holder || typeof value !== "object" || value === null || !("enqueuedAt" in value) || typeof value.enqueuedAt !== "number" || !Number.isSafeInteger(value.enqueuedAt) || value.enqueuedAt < 0 || !("cwd" in value) || typeof value.cwd !== "string" || (holder.mode !== "slot" && holder.mode !== "exclusive" && holder.mode !== "priority")) return null;
+    if (holder.mode === "priority" && (!holder.window || !/^[A-Za-z0-9._:-]{1,64}$/.test(holder.window))) return null;
     return { ...holder, mode: holder.mode, enqueuedAt: value.enqueuedAt, cwd: value.cwd };
   } catch { return null; }
 }
@@ -373,10 +380,14 @@ export function heavyQueue(options: HeavyOptions, now = (options.now ?? Date.now
     rows.push({ name, position: rows.length + 1, ticket, pid: ticket?.pid ?? null, health,
       ageSeconds: ticket ? Math.max(0, Math.floor((now - ticket.enqueuedAt) / 1000)) : null, command: ticket?.command ?? null });
   }
-  return rows;
+  // Preserve arrival-name FIFO within each class. Unknown tickets retain their
+  // ordinary place; priority is a validated, audited window, not a role flag.
+  rows.sort((a, b) => Number(b.ticket?.mode === "priority") - Number(a.ticket?.mode === "priority"));
+  return rows.map((row, index) => ({ ...row, position: index + 1 }));
 }
 
-export function enqueueHeavy(options: HeavyOptions, command: string, mode: "slot" | "exclusive") {
+export function enqueueHeavy(options: HeavyOptions, command: string, mode: "slot" | "exclusive" | "priority") {
+  if (mode === "priority") validateWindow(options, command, mode);
   const dir = heavyQueuePath(options.home);
   mkdirSync(dir, { recursive: true });
   const enqueuedAt = (options.now ?? Date.now)();
@@ -385,7 +396,7 @@ export function enqueueHeavy(options: HeavyOptions, command: string, mode: "slot
     startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", timeout: 2000, env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
     if (!Number.isFinite(Date.parse(startedAt))) startedAt = new Date().toISOString();
   } catch { /* Same conservative timestamp fallback as lock holders. */ }
-  const ticket: HeavyTicket = { pid: process.pid, host: hostname(), startedAt, enqueuedAt, command: command.slice(0, 200), cwd: process.cwd(), mode };
+  const ticket: HeavyTicket = { pid: process.pid, host: hostname(), startedAt, enqueuedAt, command: command.slice(0, 200), cwd: process.cwd(), mode, ...(mode === "priority" ? { window: options.window } : {}) };
   for (let stamp = enqueuedAt; ; stamp++) {
     const name = `${String(stamp).padStart(16, "0")}-${process.pid}.json`;
     const path = join(dir, name);
@@ -428,19 +439,27 @@ export function tryAcquireHeavy(options: HeavyOptions, command: string, ticket?:
   return withAdmission(options, command, () => acquireHeavy(options, command, ticket));
 }
 
-function acquireHeavy(options: HeavyOptions, command: string, ticket?: string): HeavyAcquire {
+function acquireHeavy(options: HeavyOptions, command: string, ticket?: string, priority = false): HeavyAcquire {
   const { adapter, count, minFreeGB } = settings(options);
   const lock = heavyLockPath(options.home);
   reapExclusive(options);
   const blocked = blocker(exclusivePendingPath(options.home)) ?? blocker(lock, true);
   if (blocked) return { ok: false, reason: blocked };
-  const pressure = pressureReason(adapter, minFreeGB);
+  const pressure = pressureReason(adapter, minFreeGB, priority);
   if (pressure) return { ok: false, reason: pressure };
   const queue = heavyQueueState(options, ticket, true);
-  if (queue.older >= queue.freeSlots && queue.older > 0) return { ok: false, reason: `heavy queue: ${queue.older} older waiters, ${queue.freeSlots} free slots` };
+  if (priority) {
+    for (const n of new Set([0, ...existingSlots(lock)])) {
+      const path = slotPath(lock, n);
+      if (blocker(path) !== null && readHolder(path)?.mode === "priority") return { ok: false, reason: "priority window already held" };
+    }
+    const olderPriority = queue.rows.filter((row) => row.ticket?.mode === "priority" && (!queue.own || row.position < queue.own.position));
+    if (olderPriority.length) return { ok: false, reason: `heavy queue: ${olderPriority.length} older priority waiters` };
+  }
+  if (!priority && queue.older >= queue.freeSlots && queue.older > 0) return { ok: false, reason: `heavy queue: ${queue.older} older waiters, ${queue.freeSlots} free slots` };
   const holders: string[] = [];
   for (let n = 0; n < count; n++) {
-    const slot = tryAcquire(slotPath(lock, n), command, process.pid, "slot");
+    const slot = tryAcquire(slotPath(lock, n), command, process.pid, priority ? "priority" : "slot");
     if (!slot.ok) {
       holders.push(`slot-${n}: ${describeHolder(slot.holder)}`);
       continue;
@@ -452,6 +471,12 @@ function acquireHeavy(options: HeavyOptions, command: string, ticket?: string): 
       return { ok: false, reason: fence };
     }
     try {
+      if (priority) {
+        const path = slotPath(lock, n);
+        const holder = readHolder(path);
+        if (!holder) throw new Error("priority holder lost before metadata write");
+        writeFileSync(join(path, "holder.json"), JSON.stringify({ ...holder, window: options.window, exclusiveAcquiredAt: new Date((options.now ?? Date.now)()).toISOString(), exclusiveCapMs: capMs(options, "priority") }));
+      }
       if (queue.own) rmSync(join(heavyQueuePath(options.home), queue.own.name), { force: true });
     } catch (error) {
       slot.release();
@@ -476,11 +501,64 @@ const exclusiveMachine = createMachine({
   },
 });
 
-export function exclusiveRequest(options: HeavyOptions, command: string, ticket: () => string | undefined = () => undefined) {
+function validateWindow(options: HeavyOptions, command: string, mode: "exclusive" | "priority"): void {
   if (!options.window || !/^[A-Za-z0-9._:-]{1,64}$/.test(options.window)) {
-    logExclusive(options, "refused", command);
+    logExclusive(options, "refused", command, undefined, mode);
     throw new ExclusiveRefused();
   }
+}
+
+// Priority never reserves a drain: waiting -> held -> capped -> closed.
+const priorityMachine = createMachine({
+  initial: "waiting",
+  states: {
+    waiting: { on: { ACQUIRE: "held", CANCEL: "closed" } },
+    held: { on: { CAP: "capped", CANCEL: "closed" } },
+    capped: { on: { CANCEL: "closed" } },
+    closed: { type: "final" },
+  },
+});
+
+export function priorityRequest(options: HeavyOptions, command: string, ticket: () => string | undefined = () => undefined) {
+  validateWindow(options, command, "priority");
+  const audit = (event: ExclusiveEvent) => logExclusive(options, event, command, undefined, "priority");
+  audit("requested");
+  const actor = createActor(priorityMachine).start();
+  let unlock = () => {};
+  let acquiredAtMs: number | undefined;
+  const release = () => {
+    if (actor.getSnapshot().matches("closed")) return;
+    unlock();
+    actor.send({ type: "CANCEL" });
+    actor.stop();
+    audit("released");
+  };
+  return {
+    attempt: (): HeavyAcquire => {
+      if (actor.getSnapshot().matches("held")) return { ok: true, release };
+      if (!actor.getSnapshot().matches("waiting")) return { ok: false, reason: "priority request closed" };
+      const result = withAdmission(options, command, () => acquireHeavy(options, command, ticket(), true));
+      if (!result.ok) return result;
+      unlock = result.release;
+      acquiredAtMs = (options.now ?? Date.now)();
+      actor.send({ type: "ACQUIRE" });
+      audit("acquired");
+      return { ok: true, release };
+    },
+    release,
+    capMs: capMs(options, "priority"),
+    get acquiredAtMs() { return acquiredAtMs; },
+    capped: () => {
+      if (!actor.getSnapshot().matches("held")) return;
+      actor.send({ type: "CAP" });
+      audit("capped");
+      console.error(`muster-heavy: CAPPED priority window ${options.window}: hold reached ${capMs(options, "priority") / 60_000} min`);
+    },
+  };
+}
+
+export function exclusiveRequest(options: HeavyOptions, command: string, ticket: () => string | undefined = () => undefined) {
+  validateWindow(options, command, "exclusive");
   logExclusive(options, "requested", command);
   const { adapter, count, minFreeGB } = settings(options);
   const lock = heavyLockPath(options.home);
@@ -607,7 +685,7 @@ export function heavySnapshot(options: HeavyOptions, now = Date.now()): HeavySna
     const exclusive = name === "exclusive-pending" || holder?.mode === "exclusive" || holder?.window !== undefined;
     const acquiredAt = holder?.exclusiveAcquiredAt ?? (holder?.mode === "exclusive" && holder.window === undefined ? holder.startedAt : undefined);
     const exclusiveAgeSeconds = exclusive && acquiredAt ? Math.max(0, Math.floor((now - Date.parse(acquiredAt)) / 1000)) : null;
-    const remainingSeconds = exclusive ? Math.max(0, Math.ceil((Math.min(capMs(options), holder?.exclusiveCapMs ?? Infinity) - (acquiredAt ? Math.max(0, now - Date.parse(acquiredAt)) : 0)) / 1000)) : null;
+    const remainingSeconds = exclusive ? Math.max(0, Math.ceil((Math.min(capMs(options, holder?.mode === "priority" ? "priority" : "exclusive"), holder?.exclusiveCapMs ?? Infinity) - (acquiredAt ? Math.max(0, now - Date.parse(acquiredAt)) : 0)) / 1000)) : null;
     return { name, holder, held: true, ageSeconds, health, stale: health === "dead" || health === "reused", window: holder?.window ?? null, exclusiveAgeSeconds, remainingSeconds };
   };
   const slots = new Set([...Array.from({ length: count }, (_, n) => n), ...existingSlots(lock)]);
@@ -627,9 +705,9 @@ export function heavyStatus(options: HeavyOptions, now = Date.now()): string {
   const snap = heavySnapshot(options, now);
   const lines = [`heavy slots: ${snap.slots}`, `load: ${snap.load.toFixed(1)} (limit ${snap.loadLimit}); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
   for (const slot of [...snap.holders, snap.exclusivePending]) {
-    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}${slot.remainingSeconds !== null ? `; window ${slot.window ?? "legacy"}; hold age ${slot.exclusiveAgeSeconds === null ? "pending" : `${slot.exclusiveAgeSeconds}s`}; cap remaining ${slot.remainingSeconds}s` : ""}` : `${slot.name}: free`);
+    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}${slot.remainingSeconds !== null ? `; ${slot.holder?.mode === "priority" ? "⚡ " : ""}window ${slot.window ?? "legacy"}; hold age ${slot.exclusiveAgeSeconds === null ? "pending" : `${slot.exclusiveAgeSeconds}s`}; cap remaining ${slot.remainingSeconds}s` : ""}` : `${slot.name}: free`);
   }
   lines.push(`heavy queue: ${snap.queue.length}`);
-  for (const row of snap.queue) lines.push(`position ${row.position}: pid ${row.pid ?? "unknown"}; ${row.health}; wait ${waitAge(row.ageSeconds)}; ${row.command ?? "unknown ticket"}`);
+  for (const row of snap.queue) lines.push(`position ${row.position}: pid ${row.pid ?? "unknown"}; ${row.health}; wait ${waitAge(row.ageSeconds)}; ${row.ticket?.mode === "priority" ? `⚡ window ${row.ticket.window}; ` : ""}${row.command ?? "unknown ticket"}`);
   return lines.join("\n");
 }

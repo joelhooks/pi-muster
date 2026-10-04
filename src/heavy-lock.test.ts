@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  admissionReason, exclusiveCapMs, reapExclusive, exclusivePendingPath, exclusiveRequest, heavyLockPath, heavySlotCount, heavySnapshot, heavyStatus,
+  admissionReason, priorityRequest, deployCapMs, enqueueHeavy, heavyQueue, exclusiveCapMs, reapExclusive, exclusivePendingPath, exclusiveRequest, heavyLockPath, heavySlotCount, heavySnapshot, heavyStatus,
   parseMemInfo, parseVmStat, readHolder, slotPath, tryAcquire, tryAcquireHeavy,
 } from "./heavy-lock.ts";
 import type { HeavyAdapter, HeavyOptions } from "./heavy-lock.ts";
@@ -20,7 +20,7 @@ function setup(): HeavyOptions {
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 // Node's preload changes only the test child's adapter, never real machine state.
-function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, load: 20, freeGB: 64 })", fakeClock = false, window: string | null = "test-deploy", extraPreload = "") {
+function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, load: 20, freeGB: 64 })", fakeClock = false, window: string | null = args.includes("--exclusive") ? "test-deploy" : null, extraPreload = "") {
   const source = `import { machineAdapter } from ${JSON.stringify(pathToFileURL(resolve("src/heavy-lock.ts")).href)}; let calls = 0; machineAdapter.performanceCores = () => 12; machineAdapter.sample = () => { calls++; return ${sampleCode}; }; ${fakeClock ? "let now = Date.now(); Date.now = () => now; const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => { if (ms > 5000) return realTimer(fn, ms); now += ms; queueMicrotask(fn); };" : ""} ${extraPreload}`;
   return spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(source)}`, "bin/muster-heavy.ts", ...args], {
     encoding: "utf8", timeout: 10000,
@@ -127,7 +127,7 @@ describe("heavy FIFO queue", () => {
     for (const older of [0, 2]) {
       const options = setup();
       for (let n = 0; n < older; n++) ticket(options, n + 1);
-      const result = cli(options, ["--wait", "6", "--", "true", "x".repeat(300)], "({ cores: 16, load: 41, freeGB: 64 })", true, "test-deploy", preload);
+      const result = cli(options, ["--wait", "6", "--", "true", "x".repeat(300)], "({ cores: 16, load: 41, freeGB: 64 })", true, null, preload);
       expect(result.status).toBe(75);
       expect(result.stderr).toContain(`POLL:${older === 0 ? 1000 : 5000}`);
       const payload = JSON.parse(result.stderr.split('\n').find((line) => line.startsWith('TICKET:'))!.slice(7));
@@ -156,9 +156,143 @@ describe("heavy FIFO queue", () => {
     const timeout = cli(options, [...flags, "--wait", "1", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })", true);
     expect(timeout.status).toBe(75);
     expect(readdirSync(dir)).toEqual([]);
-    const signal = cli(options, [...flags, "--wait", "10", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })", false, "test-deploy", "const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => realTimer(() => process.emit('SIGTERM'), 0);");
+    const signal = cli(options, [...flags, "--wait", "10", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })", false, exclusive ? "test-deploy" : null, "const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => realTimer(() => process.emit('SIGTERM'), 0);");
     expect(signal.status).toBe(128);
     expect(readdirSync(dir)).toEqual([]);
+  });
+});
+
+describe("priority deploy windows", () => {
+  const events = (home: string) => readFileSync(join(home, ".local/state/muster/heavy-exclusive.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+
+  it("jumps three older ordinary waiters without draining or fencing slots", () => {
+    const options = { ...setup(), now: () => Date.now() - 10000 };
+    const gate = tryAcquireHeavy(options, "running gate");
+    const older = [1, 2, 3].map((n) => enqueueHeavy(options, `ordinary ${n}`, "slot"));
+    const own = enqueueHeavy({ ...options, now: Date.now }, "deploy", "priority");
+    expect(heavyQueue(options).map((row) => row.name)).toEqual([own.name, ...older.map((row) => row.name)]);
+    const deploy = priorityRequest(options, "deploy", () => own.name);
+    expect(deploy.attempt().ok).toBe(true);
+    expect(readHolder(heavyLockPath(options.home))?.command).toBe("running gate");
+    expect(readHolder(slotPath(heavyLockPath(options.home), 1))?.mode).toBe("priority");
+    expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
+    deploy.release();
+    if (gate.ok) gate.release();
+    for (const row of older) row.release();
+  });
+
+  it("serializes priority requests FIFO while an ordinary job can use another slot", () => {
+    const options = { ...setup(), slots: "3" };
+    const first = enqueueHeavy({ ...options, now: () => 1 }, "first", "priority");
+    const second = enqueueHeavy({ ...options, now: () => 2 }, "second", "priority");
+    const a = priorityRequest(options, "first", () => first.name);
+    const b = priorityRequest(options, "second", () => second.name);
+    expect(b.attempt().ok).toBe(false);
+    expect(a.attempt().ok).toBe(true);
+    expect(b.attempt().ok).toBe(false);
+    const gate = tryAcquireHeavy(options, "ordinary");
+    expect(gate.ok).toBe(true);
+    a.release();
+    expect(b.attempt().ok).toBe(true);
+    b.release();
+    if (gate.ok) gate.release();
+  });
+
+  it("bypasses load-only pressure but retains memory and invalid-sample refusal", () => {
+    for (const [sample, ok] of [
+      [{ cores: 16, load: 45, freeGB: 64 }, true],
+      [{ cores: 16, load: 45, freeGB: 15 }, false],
+      [{ cores: 16, load: NaN, freeGB: 64 }, false],
+    ] as const) {
+      const options = { ...setup(), adapter: { ...adapter, sample: () => sample } };
+      const request = priorityRequest(options, "deploy");
+      expect(request.attempt().ok).toBe(ok);
+      request.release();
+    }
+    const options = setup();
+    expect(cli(options, ["--", "true"], "({ cores:16, load:45, freeGB:64 })", false, "load-window").status).toBe(0);
+  });
+
+  it.each(["", "bad window", "x".repeat(65), "../window", "ok\n"])("refuses and audits invalid priority window %j", (window) => {
+    const options = setup();
+    const result = cli(options, ["--", "true"], undefined, false, window);
+    expect(result.status).toBe(64);
+    expect(events(options.home)).toMatchObject([{ event: "refused", mode: "priority", window }]);
+    expect(existsSync(heavyLockPath(options.home))).toBe(false);
+    expect(existsSync(join(options.home, ".local/state/muster/heavy-queue"))).toBe(false);
+  });
+
+  it("CLI writes a priority ticket on refusal, jumps older gates and cleans up after acquisition", () => {
+    const options = { ...setup(), now: () => Date.now() - 10000 };
+    const older = [1, 2, 3].map((n) => enqueueHeavy(options, `ordinary ${n}`, "slot"));
+    const preload = `import {readFileSync, readdirSync} from 'node:fs'; import {join} from 'node:path'; const timer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => { const dir = join(process.env.HOME, '.local/state/muster/heavy-queue'); for (const name of readdirSync(dir)) { const ticket = JSON.parse(readFileSync(join(dir, name), 'utf8')); if (ticket.mode === 'priority') console.error('PRIORITY:' + JSON.stringify(ticket)); } return timer(fn, ms); };`;
+    const result = cli(options, ["--wait", "2", "--", "true"], "calls === 1 ? {cores:16, load:45, freeGB:15} : {cores:16, load:45, freeGB:64}", true, "cli-window", preload);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("waiting: position 1 of 4");
+    const payload = JSON.parse(result.stderr.split("\n").find((line) => line.startsWith("PRIORITY:"))!.slice(9));
+    expect(payload).toMatchObject({ mode: "priority", window: "cli-window", cwd: process.cwd(), host: hostname() });
+    expect(heavyQueue(options).map((row) => row.name)).toEqual(older.map((row) => row.name));
+    expect(events(options.home).map((entry) => entry.event)).toEqual(["requested", "acquired", "released"]);
+    expect(events(options.home).every((entry) => entry.mode === "priority")).toBe(true);
+    expect(existsSync(heavyLockPath(options.home))).toBe(false);
+  });
+
+  it("cannot raise the five minute cap through the environment", () => {
+    for (const [value, minutes] of [[undefined, 5], ["999", 5], ["Infinity", 5], ["NaN", 5], ["-3", 1], ["0", 1], ["2", 2]] as const) {
+      expect(deployCapMs({ MUSTER_DEPLOY_CAP_MIN: value })).toBe(minutes * 60000);
+    }
+  });
+
+  it("shows priority tickets and holders with window, age and remaining cap", () => {
+    const now = Date.now();
+    const options = { ...setup(), now: () => now };
+    const request = priorityRequest(options, "deploy");
+    expect(request.attempt().ok).toBe(true);
+    const own = enqueueHeavy(options, "waiting deploy", "priority");
+    const status = heavyStatus(options, now + 2000);
+    expect(status).toContain("⚡ window test-deploy");
+    expect(status).toContain("cap remaining 298s");
+    expect(status).toContain("wait 0m02s; ⚡ window test-deploy");
+    request.release(); own.release();
+  });
+
+  it("reaps stale priority holds at cap plus two minutes, not before, and preserves other slots", () => {
+    const now = Date.now();
+    const options = { ...setup(), now: () => now };
+    const gate = tryAcquireHeavy(options, "ordinary");
+    const request = priorityRequest(options, "stale deploy");
+    expect(request.attempt().ok).toBe(true);
+    const path = slotPath(heavyLockPath(options.home), 1);
+    writeFileSync(join(path, "holder.json"), JSON.stringify({ ...readHolder(path), pid: 1234567 }));
+    const signals: [number, NodeJS.Signals][] = [];
+    const reaper = { ...options, health: () => "alive" as const, kill: (pid: number, signal: NodeJS.Signals) => { signals.push([pid, signal]); } };
+    reapExclusive({ ...reaper, now: () => now + 420000 });
+    expect(existsSync(path)).toBe(true);
+    expect(heavySnapshot(options, now + 420001).holders[1]?.remainingSeconds).toBe(0);
+    reapExclusive({ ...reaper, now: () => now + 420001 });
+    expect(signals).toEqual([[1234567, "SIGTERM"], [1234567, "SIGKILL"]]);
+    expect(existsSync(path)).toBe(false);
+    expect(readHolder(heavyLockPath(options.home))?.command).toBe("ordinary");
+    expect(events(options.home).at(-1)).toMatchObject({ event: "reaped", mode: "priority" });
+    request.release(); if (gate.ok) gate.release();
+  });
+
+  it("caps the detached child group, frees its slot and exits 124", () => {
+    const options = setup();
+    const pidFile = join(options.home, "descendant.pid");
+    const descendant = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
+    const command = `const {spawn} = require('node:child_process'); const fs = require('node:fs'); const c = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], {stdio:'ignore'}); fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); setInterval(() => {}, 1000);`;
+    const source = `import {runHeavy} from ${JSON.stringify(pathToFileURL(resolve("bin/muster-heavy.ts")).href)}; await runHeavy(${JSON.stringify(["--", process.execPath, "-e", command])}, {home:${JSON.stringify(options.home)}, window:'cap-test', slots:'2', minFreeGB:'16', adapter:{performanceCores:()=>12,sample:()=>({cores:16,load:45,freeGB:64})}, testOnlyCapMs:300}, {setTimeout:(fn, ms)=>setTimeout(fn, ms === 15000 ? 50 : ms), clearTimeout});`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 10000, env: { ...process.env, HOME: options.home } });
+    expect(result.status, result.stderr).toBe(124);
+    expect(result.stderr).toContain("CAPPED priority window cap-test");
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    let alive = false;
+    try { process.kill(pid, 0); alive = true; } catch { /* Our child has been reaped. */ }
+    expect(alive).toBe(false);
+    expect(events(options.home).map((entry) => entry.event)).toEqual(["requested", "acquired", "capped", "released"]);
+    expect(events(options.home).every((entry) => entry.mode === "priority" && entry.ppid > 0)).toBe(true);
+    expect(existsSync(heavyLockPath(options.home))).toBe(false);
   });
 });
 

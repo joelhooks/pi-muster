@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { enqueueHeavy, ExclusiveRefused, exclusiveRequest, heavyQueueState, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy, waitAge } from "../src/heavy-lock.ts";
+import { enqueueHeavy, ExclusiveRefused, exclusiveRequest, priorityRequest, heavyQueueState, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy, waitAge } from "../src/heavy-lock.ts";
 import type { HeavyOptions } from "../src/heavy-lock.ts";
 
 const usage = "usage: muster-heavy status [--json] [--reap] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
@@ -36,6 +36,8 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
     process.exit(2);
   }
   const command = args.slice(split + 1);
+  const priority = !exclusive && options.window !== undefined;
+  const windowed = exclusive || priority;
   const now = options.now ?? Date.now;
   const deadline = now() + waitSeconds * 1000;
   let ticket: ReturnType<typeof enqueueHeavy> | undefined;
@@ -47,7 +49,7 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
   let capped = false;
   const signalChild = (signal: NodeJS.Signals) => {
     if (!child?.pid) return;
-    try { if (exclusive) process.kill(-child.pid, signal); else child.kill(signal); }
+    try { if (windowed) process.kill(-child.pid, signal); else child.kill(signal); }
     catch (error) {
       if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
     }
@@ -66,11 +68,12 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
   }
   process.on("exit", () => cleanup());
   try {
-    const request = exclusive ? exclusiveRequest(options, command.join(" "), () => ticket?.name) : undefined;
+    const request = exclusive ? exclusiveRequest(options, command.join(" "), () => ticket?.name)
+      : priority ? priorityRequest(options, command.join(" "), () => ticket?.name) : undefined;
     release = request?.release ?? release;
     const attempt = () => request ? request.attempt() : tryAcquireHeavy(options, command.join(" "), ticket?.name);
     let acquired = attempt();
-    if (!acquired.ok && waitSeconds > 0) ticket = enqueueHeavy(options, command.join(" "), exclusive ? "exclusive" : "slot");
+    if (!acquired.ok && waitSeconds > 0) ticket = enqueueHeavy(options, command.join(" "), exclusive ? "exclusive" : priority ? "priority" : "slot");
     while (!acquired.ok && now() < deadline) {
       const queue = heavyQueueState(options, ticket?.name);
       console.error(`muster-heavy: waiting: position ${queue.own?.position ?? queue.rows.length + 1} of ${queue.rows.length}, ${waitAge(queue.own?.ageSeconds ?? null)}; ${acquired.reason}`);
@@ -84,7 +87,7 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
     }
     ticket?.release();
     release = acquired.release;
-    child = spawn(command[0] as string, command.slice(1), { stdio: "inherit", detached: exclusive });
+    child = spawn(command[0] as string, command.slice(1), { stdio: "inherit", detached: windowed });
     if (request) capTimer = timers.setTimeout(() => {
       capped = true;
       request.capped();
@@ -95,7 +98,7 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
         signalChild("SIGKILL");
         finish(124);
       }, 15_000);
-    }, Math.max(0, request.capMs - (Date.now() - (request.acquiredAtMs ?? Date.now()))));
+    }, Math.max(0, request.capMs - (now() - (request.acquiredAtMs ?? now()))));
     child.on("exit", (code, signal) => {
       if (!capped) finish(code ?? (signal ? 128 : 1));
     });
