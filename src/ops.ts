@@ -580,6 +580,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
     const env = yield* MusterEnv;
     const slug = yield* decodeWith(decodeSlug, params.slug);
     const project = yield* load(dir);
+    yield* guardSideDesk(project, env.sessionId, "lane_open");
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
     const wantOpen = params.open !== false;
@@ -751,7 +752,8 @@ export const laneClose = (dir: string, slug: string) =>
 // ---------- agents ----------
 
 export interface AgentLaunchInput {
-  readonly action: LaunchKind;
+  readonly action: LaunchKind | "adopt";
+  readonly side?: boolean | undefined;
   readonly name: string;
   readonly role?: Role | undefined;
   readonly lane?: string | undefined;
@@ -873,6 +875,13 @@ const guardPaneBinding = (project: Project, row: AgentRow, binding: PaneBinding)
 
 const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaunchInput) =>
   Effect.gen(function* () {
+    if (params.action === "fork" && row.side) {
+      const parent = yield* findRow(project, row.side.parent);
+      const root = parent.pane ? yield* locatePane(parent.pane) : null;
+      if (!root || root.tab_id !== lane.tabId) return yield* input("side fork needs its desk parent's live pane in the lane tab");
+      const pane = yield* paneSplit(root.pane_id, "right", row.cwd);
+      return { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true } satisfies PaneBinding;
+    }
     if (params.pane) {
       const pane = yield* paneGet(params.pane);
       if (!pane) return yield* input(`no pane ${params.pane}`);
@@ -905,8 +914,12 @@ const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaun
     return { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true } satisfies PaneBinding;
   });
 
-/** The default first prompt fits the role: only workers and bosses have a packet to report. */
+const sideDeskFence = (parent: string) =>
+  `You are a side desk of ${parent}. Talk with Joel and evolve designs. Write briefs and decision notes, and hand them to the parent desk over intercom. A side desk never prompts or launches lanes or workers, never lands packets, and never acts on prod.`;
+
+/** The default first prompt fits the role; a supplied side-desk prompt cannot omit its fence. */
 export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
+  if (row.side) return [sideDeskFence(row.side.parent), prompt ?? (row.brief ? `Read your brief at ${row.brief}.` : "Say hello in one line, then wait for Joel.")].join("\n\n");
   if (prompt !== undefined) return prompt;
   if (!row.brief) return undefined;
   switch (row.role) {
@@ -920,11 +933,65 @@ export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
   }
 };
 
+const guardSideDesk = (project: Project, sessionId: string, tool: string) =>
+  Effect.gen(function* () {
+    // An explicit project argument must not let a side desk escape its own catalog's fence.
+    const ownDir = process.env.MUSTER_PROJECT;
+    const own = ownDir && resolve(ownDir) !== resolve(project.dir) ? yield* load(ownDir) : project;
+    const side = own.agents.find(row => row.sessionId === sessionId && row.side);
+    if (side) return yield* new GuardFailed({ guard: "side-desk", message: `side desk ${side.name} cannot use ${tool}; discuss designs and hand briefs to ${side.side?.parent} over intercom` });
+  });
+
+const sideParent = (project: Project, from: string | undefined, sessionId: string) =>
+  Effect.gen(function* () {
+    const parent = yield* findRow(project, from ?? "");
+    if (parent.role !== "desk" || parent.side || parent.state === "closed") return yield* input("side desks need a live, non-side desk parent");
+    if (parent.sessionId !== sessionId && parent.owner !== sessionId) return yield* input("only the parent desk or the session that owns it can create or adopt a side desk");
+    return parent;
+  });
+
+/** Catalog-only adoption: verify the moved pane, and release its former lane's root. */
+const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) =>
+  Effect.gen(function* () {
+    const env = yield* MusterEnv;
+    if (params.side !== true) return yield* input("adopt requires side: true and from: the parent desk");
+    const parent = yield* sideParent(project, params.from, env.sessionId);
+    const row = yield* findRow(project, params.name);
+    yield* requireOwner(row, env.sessionId, false);
+    if (row.name === parent.name || row.state !== "running" || !row.pane) return yield* input("adopt needs an existing running row with its own pane");
+    const lane = yield* findLane(project, params.lane ?? parent.lane);
+    if (lane.slug !== parent.lane || lane.state !== "open") return yield* input("adopt lane must be the parent desk's open lane");
+    const pane = yield* locatePane(row.pane);
+    const parentPane = parent.pane ? yield* locatePane(parent.pane) : null;
+    if (!pane || !parentPane || pane.tab_id !== lane.tabId || parentPane.tab_id !== lane.tabId || pane.workspace_id !== project.spaceId || pane.agent !== row.name) return yield* input("adopt needs the running desk's live pane in its parent's lane tab");
+    const liveSession = pane.agent_session?.kind === "path" ? sessionIdFromFile(pane.agent_session.value) : null;
+    if (liveSession !== row.sessionId) return yield* input("adopt needs the catalog session to match the live pane's Pi session");
+    const binding: PaneBinding = { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id };
+    yield* guardPaneBinding(project, row, binding);
+    const adopted = yield* mutate(dir, current => Effect.gen(function* () {
+      const latest = yield* findRow(current, row.name);
+      yield* requireOwner(latest, env.sessionId, false);
+      if (latest.state !== "running" || latest.lane !== row.lane || !latest.pane || !sharesPane(binding, latest.pane)) return yield* input("row changed during adoption; retry");
+      const latestParent = yield* sideParent(current, parent.name, env.sessionId);
+      const latestLane = yield* findLane(current, lane.slug);
+      if (latestParent.lane !== lane.slug || latestLane.state !== "open" || latestLane.tabId !== pane.tab_id || latest.sessionId !== row.sessionId) return yield* input("parent lane or session changed during adoption; retry");
+      yield* guardPaneBinding(current, latest, binding);
+      const next: AgentRow = { ...latest, role: "desk", lane: lane.slug, side: { parent: parent.name }, pane: binding, restore: latest.restore ? { ...latest.restore, env: { ...latest.restore.env, MUSTER_LANE: lane.slug, MUSTER_ROLE: "desk" } } : null, updatedAt: iso(env) };
+      const updated = withRow(current, next);
+      return [{ ...updated, lanes: updated.lanes.map(old => old.slug === row.lane && old.slug !== lane.slug && old.root && sharesPane(binding, old.root) ? { ...old, root: null, updatedAt: iso(env) } : old) }, next] as const;
+    }));
+    return { row: adopted, argv: [] as string[], readiness: "not checked (catalog adoption)", proof: null, sessionIdMatched: null, notes: ["adopted without touching the pane", `Parent desk: deliver this fence on the next conversation turn: ${sideDeskFence(parent.name)}`] };
+  });
+
 export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const name = yield* decodeWith(decodeAgentName, params.name);
     const project = yield* load(dir);
+    yield* guardSideDesk(project, env.sessionId, "agent_launch");
+    if (params.action === "adopt") return yield* adoptSideDesk(dir, project, params);
+    if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
+    const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
     const existing = project.agents.find((agent) => agent.name === name);
 
     const roster = (yield* loadRoster).roster;
@@ -952,8 +1019,8 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       }
       const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
       if (params.action === "fork" && !parent?.sessionFile) return yield* input(`fork needs --from a row with a session file`);
-      const role = params.role ?? parent?.role ?? existing?.role;
-      const laneSlug = params.lane ?? parent?.lane ?? existing?.lane;
+      const role = side ? "desk" : params.role ?? parent?.role ?? existing?.role;
+      const laneSlug = side?.lane ?? params.lane ?? parent?.lane ?? existing?.lane;
       if (!role || !laneSlug) return yield* input("a new agent needs role and lane");
       const lane = yield* findLane(project, laneSlug);
       if (lane.state !== "open") return yield* new GuardFailed({ guard: "lane-open", message: `lane ${laneSlug} is ${lane.state}; new work goes only to an open lane` });
@@ -1006,6 +1073,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       row = {
         name,
         role,
+        side: side ? { parent: side.name } : null,
         lane: laneSlug,
         cwd,
         clone,
@@ -1180,6 +1248,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const project = yield* load(dir);
+    yield* guardSideDesk(project, env.sessionId, "agent_close");
     const row = yield* findRow(project, params.name);
     yield* requireOwner(row, env.sessionId, params.takeover);
     const verified = project.packets.some((packet) => packet.agent === row.name && packet.verification !== null);
@@ -1582,6 +1651,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     const env = yield* MusterEnv;
     const proc = yield* Proc;
     const project = yield* load(dir);
+    yield* guardSideDesk(project, env.sessionId, "packet_land");
     const packet = yield* findPacket(project, params.id);
     if (TERMINAL_PACKET_STATES.includes(packet.state)) return yield* input(`packet ${packet.id.slice(0, 12)} is already ${packet.state}`);
     const row = yield* findRow(project, packet.agent);
@@ -1744,6 +1814,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const env = yield* MusterEnv;
     const intercom = yield* Intercom;
     const act = params.act !== false;
+    if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.gen(function* () {
           for (const row of current.agents) if (row.state !== "closed") yield* recordOwnerForward(row.owner, env.sessionId, current.slug, env);
@@ -1974,7 +2045,8 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       const status = yield* fleetStatus(dir, runner);
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
-    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime(), fleet.line), notes: [tokens, `brain: ${brain}`, ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
+    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime(), fleet.line), notes: [tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
@@ -1994,6 +2066,13 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
   const lanes = project.lanes.filter((lane) => !lane.archived);
   const due = reviewDue(project, nowMs);
   const pending = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state));
+  const rows = new Map(project.agents.map(row => [row.name, row]));
+  const parents = agents.filter(agent => !rows.get(agent.name)?.side);
+  const grouped = parents.flatMap(parent => [parent, ...agents.filter(agent => rows.get(agent.name)?.side?.parent === parent.name)]);
+  const orphans = agents.filter(agent => {
+    const side = rows.get(agent.name)?.side;
+    return side && !parents.some(parent => parent.name === side.parent);
+  });
   const out = [
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
     `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state}`).join(", ") || "none"}`,
@@ -2002,9 +2081,12 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
     ...(gates ? [gates] : []),
     ...(due ? [`${due}. Reconfirm the outcome; work drifting to another project's outcome goes to that project's desk.`] : []),
     "agents (cost = cacheRead×0.1 + cacheWrite×1.25 + input, input-token equivalents):",
-    ...agents.map(
-      (agent) =>
-        `- ${agent.name} ${agent.role}/${agent.lane} ${agent.state} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}`,
+    ...[...grouped, ...orphans].map(
+      (agent) => {
+        const row = rows.get(agent.name);
+        const name = row?.side ? `  ${row.profile.label.split(" ")[0]} ${agent.name} ↳ ${row.side.parent}` : agent.name;
+        return `- ${name} ${agent.role}/${agent.lane} ${agent.state} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}`;
+      },
     ),
   ];
   return out.join("\n");
