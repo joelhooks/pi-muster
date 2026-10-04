@@ -32,6 +32,7 @@ import {
 import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "../src/runtime.ts";
 import { registerDeskFeed } from "../src/desk-feed-ext.ts";
 import { registerOwnerFeed } from "../src/owner-feed-ext.ts";
+import { ownerLine, ownerReceipt, ownerToolResult } from "../src/owner-view.ts";
 import { capBody, deliverOwnerItem, findOwnerPost } from "../src/owner-queue.ts";
 import { registerDeskReport } from "../src/desk-report-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
@@ -103,23 +104,33 @@ export default function muster(host: ExtensionAPI) {
     pi.registerTool({
       name: "owner_note", label: "Muster owner note",
       description: "Post FYI, progress or done silently to your owner's queue. question and blocked mention and wake the owner. Use replyTo to thread a post. packet_report stays the single finish report.",
+      renderCall: (args, theme) => ownerLine(`🐦 owner note · ${args.kind} "${args.title}"`, theme),
+      renderResult(result, options, theme) {
+        if (options.isPartial) return ownerLine("🐦 posting owner note…", theme);
+        return ownerToolResult(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), options.expanded, theme);
+      },
       parameters: Type.Object({ kind: StringEnum(["fyi", "progress", "done", "question", "blocked"] as const), title: Type.String(), body: Type.Optional(Type.String()), refs: Type.Optional(Type.Array(Type.String())), replyTo: Type.Optional(Type.String()) }),
       async execute(_id, params, signal, _onUpdate, ctx) {
         const session = ctx.sessionManager.getSessionId();
         if (params.replyTo) findOwnerPost(session, params.replyTo);
-        return run(ctx, signal, deliverOwnerItem({ owner: env.MUSTER_OWNER!, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => JSON.stringify(result));
+        return run(ctx, signal, deliverOwnerItem({ owner: env.MUSTER_OWNER!, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => `${ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
       },
     });
   }
   pi.registerTool({
     name: "owner_reply", label: "Muster owner reply",
     description: "Reply to a post in your own owner queue. Threads root and parent, mentions the author and writes to their queue; wakes them when idle. No path to Joel's desk queue.",
+    renderCall: (args, theme) => ownerLine(`🐦 owner reply · "${args.text.split("\n")[0]}"`, theme),
+    renderResult(result, options, theme) {
+      if (options.isPartial) return ownerLine("🐦 posting owner reply…", theme);
+      return ownerToolResult(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), options.expanded, theme);
+    },
     parameters: Type.Object({ uri: Type.String(), text: Type.String() }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const session = ctx.sessionManager.getSessionId();
       const parent = findOwnerPost(session, params.uri);
       const body = capBody(params.text);
-      return run(ctx, signal, deliverOwnerItem({ owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => JSON.stringify(result));
+      return run(ctx, signal, deliverOwnerItem({ owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${parent.author} · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
     },
   });
 

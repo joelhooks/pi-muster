@@ -69,6 +69,7 @@
     "src/owner-lexicon.json",
     "src/owner-queue.ts",
     "src/owner-feed.ts",
+    "src/owner-view.ts",
     "src/owner-feed-ext.ts",
     "src/switchboard.ts",
     "src/desk-feed.ts",
