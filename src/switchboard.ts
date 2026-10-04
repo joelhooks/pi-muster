@@ -58,10 +58,14 @@ export function readQueues(dir: string): Record<string, DeskItem[]> {
 
 /** Byte offsets belong to one activated reader, never to global fleet state. */
 export class QueueReader {
-  private readonly files = new Map<string, { dev: number; ino: number; offset: number; mtime: number; tail: Buffer; items: DeskItem[] }>();
+  private readonly files = new Map<string, { dev: number; ino: number; offset: number; mtime: number; tail: Buffer; items: DeskItem[]; ids: Set<string> }>();
   bytesRead = 0;
+  /** Newly decoded ids since the previous scan, including quiet FYIs; never historical replay. */
+  arrivals: { project: string; item: DeskItem }[] = [];
+  private initialized = false;
 
   read(dir: string): Record<string, DeskItem[]> {
+    this.arrivals = [];
     const queues: Record<string, DeskItem[]> = {};
     const names = existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".jsonl")).sort() : [];
     const decode = Schema.decodeUnknownOption(DeskItemSchema);
@@ -73,8 +77,9 @@ export class QueueReader {
         // Stat the opened inode, so a rename during the read cannot mix two files.
         const stat = fstatSync(fd);
         let file = this.files.get(name);
+        const seen = file?.ids ?? new Set<string>();
         if (!file || file.dev !== stat.dev || file.ino !== stat.ino || stat.size < file.offset || (stat.size === file.offset && stat.mtimeMs !== file.mtime)) {
-          file = { dev: stat.dev, ino: stat.ino, offset: 0, mtime: stat.mtimeMs, tail: Buffer.alloc(0), items: [] };
+          file = { dev: stat.dev, ino: stat.ino, offset: 0, mtime: stat.mtimeMs, tail: Buffer.alloc(0), items: [], ids: new Set<string>() };
         }
         const bytes = Buffer.alloc(stat.size - file.offset);
         let count = 0;
@@ -91,7 +96,12 @@ export class QueueReader {
         if (end >= 0) for (const line of data.subarray(0, end).toString("utf8").split("\n")) {
           try {
             const parsed = decode(JSON.parse(line));
-            if (parsed._tag === "Some") file.items.push(parsed.value);
+            if (parsed._tag === "Some") {
+              file.items.push(parsed.value);
+              if (this.initialized && !seen.has(parsed.value.id)) this.arrivals.push({ project: name.slice(0, -6), item: parsed.value });
+              seen.add(parsed.value.id);
+              file.ids.add(parsed.value.id);
+            }
           } catch { /* Malformed complete lines do not hide later items. */ }
         }
         file.tail = data.subarray(end + 1);
@@ -103,6 +113,7 @@ export class QueueReader {
       } finally { if (fd !== undefined) closeSync(fd); }
     }
     for (const name of this.files.keys()) if (!names.includes(name)) this.files.delete(name);
+    this.initialized = true;
     return queues;
   }
 }

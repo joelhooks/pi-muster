@@ -11,6 +11,7 @@ import { Type } from "typebox";
 
 import { paneGet, reportTokens } from "./herdr.ts";
 import { deskAnswer, focusDesk, inboxText, loadSystem, loadSystemWith, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
+import { FlameAnimation, flameEnabled } from "./switchboard-flame.ts";
 import { OPEN_HINT, SwitchboardOverlay, SwitchboardState, renderWidget } from "./switchboard-view.ts";
 import type { Intent } from "./switchboard-view.ts";
 import { QueueReader, fleetGroups, inbox, itemRef, latestPost, queueDir, queueEvents, recentPosts, switchboardTokens } from "./switchboard.ts";
@@ -59,6 +60,10 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   let active = false;
   // Only requestRender is needed; a structural type avoids pi-tui version skew with the host.
   let tui: { requestRender(): void } | undefined;
+  let widgetInvalidate: (() => void) | undefined;
+  let stopInput: (() => void) | undefined;
+  let animation: FlameAnimation | undefined;
+  let overlayOpen = false;
   let stopWatch: (() => void) | undefined;
   let unregister: (() => void) | undefined;
   let overlayTui: { requestRender(): void } | undefined;
@@ -104,22 +109,32 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     ).catch(failed);
   };
 
-  const repaint = () => { tui?.requestRender(); overlayTui?.requestRender(); };
+  const repaint = () => { widgetInvalidate?.(); tui?.requestRender(); overlayTui?.requestRender(); };
   const refresh = (): Promise<void> => {
     if (!active) return Promise.resolve();
     const home = deps.env.HOME ?? homedir();
     try {
       const now = Date.now();
+      const bytes = reader.bytesRead;
       const queues = reader.read(queueDir(home));
+      const queueChanged = reader.bytesRead !== bytes;
+      if (queueChanged) animation?.wake();
       const previous = new Map(state.groups.map((group) => [group.project, group]));
+      const openKey = () => state.groups.flatMap((g) => g.items.map((i) => `${g.project}#${i.id}`)).sort().join("\n");
+      const beforeOpen = openKey();
       state.setSystem({
-        groups: fleetGroups(inbox(queues, now), [...previous.keys()]).map((group) => ({
+        groups: fleetGroups(inbox(queues, now), [...previous.keys(), ...Object.keys(queues)]).map((group) => ({
           ...group, outsideSpace: previous.get(group.project)?.outsideSpace, deadDesk: previous.get(group.project)?.deadDesk,
         })),
         posts: recentPosts(queues, now), events: queueEvents(queues, now), latest: latestPost(queues),
         fleet: state.fleet, unregistered: state.unregistered, now,
       });
-      repaint();
+      for (const { project, item } of reader.arrivals) if (!item.resolves) state.flame.land(project, now);
+      const openChanged = beforeOpen !== openKey();
+      if (openChanged) animation?.wake();
+      // Fresh ages on the next host render, without animating a frozen widget.
+      widgetInvalidate?.();
+      if (queueChanged || openChanged || overlayOpen) repaint();
       // Queue/age rendering never waits for sockets or project metadata.
       let stamp = "missing";
       try { const stat = statSync(registryPath(home)); stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}`; }
@@ -167,7 +182,22 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     else unregister = registerSwitchboardSession(home, ctx.sessionManager.getSessionId());
     ctx.ui.setWidget(WIDGET, (widgetTui, theme) => {
       tui = widgetTui;
-      return { render: (width: number) => renderWidget(state, width, theme), invalidate: () => {} };
+      animation?.dispose(); stopInput?.();
+      const widgetAnimation = new FlameAnimation(() => { state.flame.frame += 1; repaint(); });
+      animation = widgetAnimation;
+      const removeInput = widgetTui.addInputListener?.((data) => { widgetAnimation.input(data); });
+      stopInput = removeInput;
+      let cache: { width: number; lines: string[] } | undefined;
+      widgetInvalidate = () => { cache = undefined; };
+      return {
+        render: (width: number) => {
+          animation?.show(active && !overlayOpen && flameEnabled(width, theme, deps.env) && state.groups.length > 0);
+          if (!cache || cache.width !== width) cache = { width, lines: renderWidget(state, width, theme, deps.env, Date.now()) };
+          return cache.lines;
+        },
+        invalidate: widgetInvalidate,
+        dispose: () => { widgetAnimation.dispose(); removeInput?.(); },
+      };
     });
     await refresh();
   };
@@ -177,6 +207,9 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     generation += 1;
     refreshing = undefined;
     liveLayer = undefined;
+    animation?.dispose(); animation = undefined;
+    stopInput?.(); stopInput = undefined;
+    widgetInvalidate = undefined;
     stopWatch?.();
     stopWatch = undefined;
     unregister?.();
@@ -203,14 +236,19 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   const browse = async (ctx: ExtensionContext) => {
     await activate(ctx);
     for (;;) {
+      overlayOpen = true;
+      animation?.show(false);
       const intent = await ctx.ui.custom<Intent>(
         (screen, theme, _keys, done) => {
           overlayTui = screen;
           return new SwitchboardOverlay(state, theme, () => Math.max(12, Math.floor((process.stdout.rows ?? 30) * 0.8)), done, () => screen.requestRender());
         },
         { overlay: true, overlayOptions: { anchor: "center", width: "80%", minWidth: 60, maxHeight: "80%" } },
-      );
-      overlayTui = undefined;
+      ).finally(() => {
+        overlayTui = undefined;
+        overlayOpen = false;
+        repaint();
+      });
       if (!intent || intent.type === "close") return;
       if (intent.type === "desk") {
         try {

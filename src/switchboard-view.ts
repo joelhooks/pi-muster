@@ -1,6 +1,7 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 
+import { FlameState, flameEnabled, flameSummary, renderFlame } from "./switchboard-flame.ts";
 import { KIND_GLYPH, KIND_RANK, TICKER_WINDOW_MS, eventText, formatAge, itemRef, openCount } from "./switchboard.ts";
 import type { FleetStats, InboxGroup, InboxItem, LatestPost, QueueEvent, SystemView, UnregisteredSpace } from "./switchboard.ts";
 
@@ -27,6 +28,7 @@ export const OPEN_HINT = "alt+s";
  * still exists, so a new arrival never moves what Joel is reading.
  */
 export class SwitchboardState {
+  readonly flame = new FlameState();
   groups: readonly InboxGroup[] = [];
   unregistered: readonly UnregisteredSpace[] = [];
   posts: Readonly<Record<string, readonly number[]>> = {};
@@ -39,6 +41,7 @@ export class SwitchboardState {
   private seen = new Set<string>();
 
   setGroups(groups: readonly InboxGroup[], key: string | null = this.current() ? rowKey(this.current()!) : null): void {
+    this.flame.update(groups, this.now);
     this.groups = groups;
     // A project that shows up for the first time opens, so a new ask is visible without a keypress.
     for (const group of groups) {
@@ -197,8 +200,14 @@ export function systemLine(state: SwitchboardState, theme: ViewTheme, room = Num
   return [`${head}${age}${fleet}`, `${head}${fleet}`, `${head}${age}`].find(fits) ?? head;
 }
 
-/** Actions win space. Ticker uses the remaining rows; quiet desks get one count. */
-export function renderWidget(state: SwitchboardState, width: number, theme: ViewTheme): string[] {
+/** Collapsed ambient display; plain terminals get only the summary. */
+export function renderWidget(state: SwitchboardState, width: number, theme: ViewTheme, env: Readonly<Record<string, string | undefined>> = process.env, now = state.now): string[] {
+  if (!flameEnabled(width, theme, env)) return [truncateToWidth(`☎️ ${flameSummary(state.groups)} · ${OPEN_HINT}`, width)];
+  return renderFlame(state.groups, state.flame, width, theme, now);
+}
+
+/** Expanded header: globally ranked asks and recent queue activity. */
+export function renderRankedSummary(state: SwitchboardState, width: number, theme: ViewTheme): string[] {
   const hint = theme.fg("dim", OPEN_HINT);
   const lines = [spread(systemLine(state, theme, width - visibleWidth(hint) - 1), hint, width)];
   const actions = state.groups.flatMap((group) => group.items.map((item) => ({ item, group })))
@@ -232,7 +241,9 @@ export function renderOverlay(state: SwitchboardState, width: number, height: nu
   const group = current?.type === "group" ? current.group : current?.type === "item" ? state.groups.find((group) => group.project === current.item.project) : undefined;
   const detail = current?.type === "item" ? detailLines(current.item, inner, theme) : [];
   if (group?.outsideSpace) detail.push(theme.fg("warning", "↗ owner/desk outside space"));
-  const listRoom = Math.max(3, height - 4 - (detail.length ? detail.length + 1 : 0));
+  // Reserve at least three navigable rows. Header yields on short terminals.
+  const header = renderRankedSummary(state, inner, theme).slice(0, Math.max(1, Math.min(10, height - 7 - (detail.length ? detail.length + 1 : 0))));
+  const listRoom = Math.max(3, height - 4 - header.length - (detail.length ? detail.length + 1 : 0));
   const start = Math.max(0, Math.min(state.cursor - Math.floor(listRoom / 2), rows.length - listRoom));
   const list = rows.slice(start, start + listRoom).map((row, offset) => {
     const selected = start + offset === state.cursor;
@@ -243,7 +254,7 @@ export function renderOverlay(state: SwitchboardState, width: number, height: nu
   });
   if (rows.length === 0) list.push(theme.fg("muted", "Nothing waits on you."));
 
-  const out = [top, ...list.map(frame)];
+  const out = [top, ...header.map(frame), ...list.map(frame)];
   if (detail.length) out.push(frame(theme.fg("border", "─".repeat(inner))), ...detail.map(frame));
   out.push(frame(theme.fg("dim", HELP)), bottom);
   return out.map((line) => truncateToWidth(line, width));

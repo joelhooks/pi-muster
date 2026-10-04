@@ -180,7 +180,7 @@ describe("live extension opt-in", () => {
       expect(h.sent.some((message) => message.to === "inbox-session")).toBe(false);
       const text = await tools.get("desk_inbox")!.execute("id", { subscribe: true }, undefined, undefined, ctx);
       expect(text).toContain("probe (0) · quiet");
-      expect(widget?.render(100).join("\n")).toContain("+1 quiet");
+      expect(widget?.render(100).join("\n")).toContain("inbox clear");
       const browsing = browse!(ctx);
       await vi.waitFor(() => expect(closeOverlay).toBeDefined());
       await runWith(h, deskPost(dir, { kind: "decision", title: "Fresh question" }));
