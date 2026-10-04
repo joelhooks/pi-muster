@@ -8,6 +8,7 @@ import {
   admissionReason, priorityRequest, deployCapMs, enqueueHeavy, heavyQueue, exclusiveCapMs, reapExclusive, exclusivePendingPath, exclusiveRequest, heavyLockPath, heavySlotCount, heavySnapshot, heavyStatus,
   parseMemInfo, parseVmStat, readHolder, slotPath, tryAcquire, tryAcquireHeavy,
 } from "./heavy-lock.ts";
+import * as heavy from "./heavy-lock.ts";
 import type { HeavyAdapter, HeavyOptions } from "./heavy-lock.ts";
 
 const homes: string[] = [];
@@ -24,9 +25,153 @@ function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, 
   const source = `import { machineAdapter } from ${JSON.stringify(pathToFileURL(resolve("src/heavy-lock.ts")).href)}; let calls = 0; machineAdapter.performanceCores = () => 12; machineAdapter.sample = () => { calls++; return ${sampleCode}; }; ${fakeClock ? "let now = Date.now(); Date.now = () => now; const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => { if (ms > 5000) return realTimer(fn, ms); now += ms; queueMicrotask(fn); };" : ""} ${extraPreload}`;
   return spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(source)}`, "bin/muster-heavy.ts", ...args], {
     encoding: "utf8", timeout: 10000,
-    env: { ...process.env, HOME: options.home, MUSTER_HEAVY_SLOTS: "2", MUSTER_HEAVY_MIN_FREE_GB: "16", MUSTER_DEPLOY_WINDOW: window ?? undefined },
+    env: { ...process.env, HOME: options.home, MUSTER_HEAVY_SLOTS: "2", MUSTER_HEAVY_MIN_FREE_GB: "16", MUSTER_DEPLOY_WINDOW: window ?? undefined, MUSTER_HEAVY_GRANT: options.grant },
   });
 }
+
+describe("desk heavy grants", () => {
+  const audit = (options: HeavyOptions) => readFileSync(join(options.home, ".local/state/muster/heavy-exclusive.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  function desk() { return { ...setup(), window: undefined, now: () => Date.now() }; }
+
+  it("creates, lists, revokes and clamps grant TTL with an injected clock", () => {
+    const options = { ...desk(), now: () => 1_800_000_000_000 };
+    const grant = heavy.createHeavyGrant(options, "test-gate", "9h", "desk");
+    expect(grant.id).toMatch(/^[a-f0-9]{16}$/);
+    expect(grant).toMatchObject({ label: "test-gate", grantedBy: "desk", cwd: process.cwd() });
+    expect(Date.parse(grant.expiresAt) - Date.parse(grant.createdAt)).toBe(7_200_000);
+    expect(heavy.listHeavyGrants(options)).toEqual([grant]);
+    heavy.revokeHeavyGrant(options, grant.id);
+    expect(heavy.listHeavyGrants(options)).toEqual([]);
+    expect(audit(options)).toMatchObject([{ mode: "grant", event: "granted", label: "test-gate", grantedBy: "desk" }, { mode: "grant", event: "revoked", label: "test-gate", grantedBy: "desk" }]);
+    expect(heavy.grantTtlMs()).toBe(3_600_000);
+    for (const ttl of ["0h", "-1m", "garbage"]) expect(() => heavy.grantTtlMs(ttl)).toThrow();
+  });
+
+  it("refuses a fifth machine-wide grant and lists all four live ones", () => {
+    const options = desk();
+    const grants = Array.from({ length: 4 }, (_, i) => heavy.createHeavyGrant(options, `gate-${i}`));
+    expect(() => heavy.createHeavyGrant(options, "fifth")).toThrow(/four live grants/);
+    const result = cli(options, ["grant", "fifth"]);
+    expect(result.status, result.stderr).toBe(64);
+    for (const grant of grants) expect(result.stderr).toContain(grant.id);
+    expect(heavy.listHeavyGrants(options)).toHaveLength(4);
+    expect(audit(options).at(-1)).toMatchObject({ mode: "grant", event: "refused", label: "fifth" });
+  });
+
+  it("offers create/list/revoke CLI commands with the default TTL", () => {
+    const options = desk();
+    const created = cli(options, ["grant", "gate"]);
+    expect(created.status, created.stderr).toBe(0);
+    const id = created.stdout.trim();
+    expect(id).toMatch(/^[a-f0-9]{16}$/);
+    const listed = cli(options, ["grant", "--list"]);
+    expect(listed.status).toBe(0);
+    const [grant] = JSON.parse(listed.stdout);
+    expect(grant.id).toBe(id);
+    expect(Date.parse(grant.expiresAt) - Date.parse(grant.createdAt)).toBe(3_600_000);
+    expect(cli(options, ["grant", "--revoke", id]).status).toBe(0);
+    expect(JSON.parse(cli(options, ["grant", "--list"]).stdout)).toEqual([]);
+    expect(cli(options, ["grant", "bad", "--ttl", "0h"]).status).toBe(64);
+  });
+
+  it("admits ahead of three older ordinary waiters but behind a deploy waiter, FIFO within grants", () => {
+    let clock = Date.now();
+    const options = { ...desk(), slots: "1", now: () => clock++ };
+    for (let i = 0; i < 3; i++) enqueueHeavy(options, `ordinary-${i}`, "slot");
+    const first = { ...options, grant: heavy.createHeavyGrant(options, "critical").id };
+    const second = { ...options, grant: heavy.createHeavyGrant(options, "later").id };
+    const firstTicket = enqueueHeavy(first, "first grant", "grant");
+    const secondTicket = enqueueHeavy(second, "second grant", "grant");
+    const deployOptions = { ...options, window: "deploy-test" };
+    const deployTicket = enqueueHeavy(deployOptions, "deploy", "priority");
+    const firstRequest = heavy.grantRequest(first, "first grant", () => firstTicket.name);
+    const secondRequest = heavy.grantRequest(second, "second grant", () => secondTicket.name);
+    expect(firstRequest.attempt().ok).toBe(false);
+    expect(secondRequest.attempt().ok).toBe(false);
+    const deploy = priorityRequest(deployOptions, "deploy", () => deployTicket.name);
+    expect(deploy.attempt()).toMatchObject({ ok: true, slot: "deploy-0" });
+    expect(secondRequest.attempt().ok).toBe(false);
+    expect(firstRequest.attempt()).toMatchObject({ ok: true, slot: "slot-0" });
+    expect(readHolder(heavyLockPath(options.home))).toMatchObject({ mode: "grant", grant: { label: "critical" } });
+    expect(tryAcquireHeavy(options, "ordinary").ok).toBe(false);
+    firstRequest.release();
+    expect(secondRequest.attempt()).toMatchObject({ ok: true, slot: "slot-0" });
+    secondRequest.release();
+    deploy.release();
+    expect(heavyQueue(options).map((row) => row.command)).toEqual(["ordinary-0", "ordinary-1", "ordinary-2"]);
+  });
+
+  it("never takes deploy-0 or bypasses load/memory, even without a queue ticket", () => {
+    const options = { ...desk(), slots: "1" };
+    const granted = { ...options, grant: heavy.createHeavyGrant(options, "gate").id };
+    const held = tryAcquireHeavy(options, "ordinary");
+    const request = heavy.grantRequest(granted, "critical");
+    expect(request.attempt().ok).toBe(false);
+    expect(existsSync(`${heavyLockPath(options.home)}.deploy-0`)).toBe(false);
+    if (held.ok) held.release();
+    for (const sample of [{ cores: 16, load: 41, freeGB: 64 }, { cores: 16, load: 20, freeGB: 15 }]) {
+      const pressure = heavy.grantRequest({ ...granted, adapter: { ...adapter, sample: () => sample } }, "pressure");
+      expect(pressure.attempt()).toMatchObject({ ok: false, reason: expect.stringMatching(/load|memory/) });
+      pressure.release();
+    }
+    expect(request.attempt()).toMatchObject({ ok: true, slot: "slot-0" });
+    request.release();
+  });
+
+  it("reaps expiry on list/admission, refuses unknown or expired grants with exit 64, and keeps admitted work running", () => {
+    let clock = Date.now();
+    const options = { ...desk(), now: () => clock };
+    const grant = heavy.createHeavyGrant(options, "gate", "1s", "desk");
+    const granted = { ...options, grant: grant.id };
+    const request = heavy.grantRequest(granted, "long gate");
+    expect(request.attempt().ok).toBe(true);
+    clock += 1000;
+    expect(request.attempt().ok).toBe(true);
+    expect(heavy.listHeavyGrants(options)).toEqual([]);
+    expect(readHolder(heavyLockPath(options.home))?.mode).toBe("grant");
+    request.release();
+    const expiring = heavy.createHeavyGrant(options, "waiting", "1s");
+    const waiting = heavy.grantRequest({ ...options, grant: expiring.id }, "waiting");
+    clock += 1000;
+    expect(() => waiting.attempt()).toThrow(/unknown or expired/);
+    waiting.release();
+    expect(existsSync(join(heavy.heavyGrantsPath(options.home), `${expiring.id}.json`))).toBe(false);
+    for (const id of [grant.id, "../escape", "f".repeat(16)]) {
+      const result = cli({ ...options, grant: id }, ["--", "true"]);
+      expect(result.status, result.stderr).toBe(64);
+      expect(result.stderr).toContain("unknown or expired heavy grant");
+    }
+    expect(audit(options).at(-1)).toMatchObject({ mode: "grant", event: "refused" });
+  });
+
+  it("prints grant labels on holders and queue entries, live count and lifecycle audit", () => {
+    const options = desk();
+    const grant = heavy.createHeavyGrant(options, "runtime-gate", "1h", "desk");
+    const granted = { ...options, grant: grant.id };
+    const ticket = enqueueHeavy(granted, "gate", "grant");
+    expect(heavyStatus(options)).toContain("🎟️ grant runtime-gate");
+    expect(heavyStatus(options)).toContain("grants: 1/4 live");
+    const request = heavy.grantRequest(granted, "gate", () => ticket.name);
+    expect(request.attempt().ok).toBe(true);
+    expect(heavyStatus(options)).toContain("slot-0: 🎟️ grant runtime-gate");
+    expect(heavySnapshot(options).grants).toEqual([grant]);
+    expect(heavySnapshot(options).holders[0]?.holder).toMatchObject({ mode: "grant", grant });
+    request.release();
+    expect(audit(options).map((line) => line.event)).toEqual(["granted", "requested", "acquired", "released"]);
+    for (const line of audit(options)) expect(line).toMatchObject({ mode: "grant", label: "runtime-gate", grantedBy: "desk" });
+    expect(audit(options).find((line) => line.event === "acquired")).toMatchObject({ slot: "slot-0" });
+  });
+
+  it("runs a granted CLI job without a deploy hold cap and rejects window mixing", () => {
+    const options = desk();
+    const granted = { ...options, grant: heavy.createHeavyGrant(options, "cli-gate").id };
+    const result = cli(granted, ["--", process.execPath, "-e", "process.exit(3)"], undefined, false, null, "globalThis.setTimeout = () => { throw new Error('grant must have no cap timer'); };");
+    expect(result.status, result.stderr).toBe(3);
+    expect(audit(options).map((line) => line.event)).toEqual(["granted", "requested", "acquired", "released"]);
+    expect(cli(granted, ["--", "true"], undefined, false, "deploy").status).toBe(64);
+    expect(cli(granted, ["--exclusive", "--", "true"]).status).toBe(64);
+  });
+});
 
 describe("heavy FIFO queue", () => {
   function ticket(options: HeavyOptions, ms: number, pid = process.pid, extra = {}) {
