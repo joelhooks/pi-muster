@@ -1,6 +1,6 @@
 import { availableParallelism, freemem, hostname, loadavg, platform } from "node:os";
 import { join } from "node:path";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createActor, createMachine } from "xstate";
 
@@ -24,6 +24,9 @@ export interface Holder {
   readonly startedAt: string;
   /** "exclusive" marks a deploy hold on slot 0; anything else there is an ordinary busy slot. */
   readonly mode?: "slot" | "exclusive";
+  readonly window?: string;
+  readonly exclusiveAcquiredAt?: string;
+  readonly exclusiveCapMs?: number;
 }
 
 export type Acquire = { readonly ok: true; readonly release: () => void } | { readonly ok: false; readonly holder: Holder | null };
@@ -43,7 +46,11 @@ export function readHolder(lock: string): Holder | null {
     const value: unknown = JSON.parse(readFileSync(join(lock, "holder.json"), "utf8"));
     if (typeof value !== "object" || value === null || !("pid" in value) || !("host" in value) || !("command" in value) || !("startedAt" in value)) return null;
     if (typeof value.pid !== "number" || !Number.isInteger(value.pid) || value.pid <= 0 || value.pid > 2147483647 || typeof value.host !== "string" || typeof value.command !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt))) return null;
-    return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && (value.mode === "slot" || value.mode === "exclusive") ? { mode: value.mode } : {}) };
+    return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && (value.mode === "slot" || value.mode === "exclusive") ? { mode: value.mode } : {}),
+      ...("window" in value && typeof value.window === "string" ? { window: value.window } : {}),
+      ...("exclusiveAcquiredAt" in value && typeof value.exclusiveAcquiredAt === "string" && Number.isFinite(Date.parse(value.exclusiveAcquiredAt)) ? { exclusiveAcquiredAt: value.exclusiveAcquiredAt } : {}),
+      ...("exclusiveCapMs" in value && typeof value.exclusiveCapMs === "number" && value.exclusiveCapMs > 0 && Number.isFinite(value.exclusiveCapMs) ? { exclusiveCapMs: value.exclusiveCapMs } : {}),
+    };
   } catch {
     return null;
   }
@@ -198,6 +205,78 @@ export interface HeavyOptions {
   readonly adapter?: HeavyAdapter;
   readonly slots?: string;
   readonly minFreeGB?: string;
+  /** Explicit authorization: the library never infers a window from process.env. */
+  readonly window?: string;
+  readonly now?: () => number;
+  readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
+  readonly health?: (holder: Holder) => HolderHealth;
+  /** Test-only short cap; never read from an environment variable. */
+  readonly testOnlyCapMs?: number;
+}
+
+export class ExclusiveRefused extends Error {
+  constructor() { super("MUSTER_DEPLOY_WINDOW must be 1-64 characters [A-Za-z0-9._:-]; --exclusive is deploy-only"); }
+}
+
+export function exclusiveCapMs(env: Readonly<Record<string, string | undefined>> = process.env): number {
+  const minutes = Number(env.MUSTER_EXCLUSIVE_CAP_MIN ?? 20);
+  return (Number.isFinite(minutes) ? Math.min(20, Math.max(1, minutes)) : 20) * 60_000;
+}
+
+function capMs(options: HeavyOptions): number {
+  return Math.min(exclusiveCapMs(), options.testOnlyCapMs ?? Infinity);
+}
+
+export type ExclusiveEvent = "requested" | "acquired" | "released" | "capped" | "reaped" | "refused";
+export function logExclusive(options: HeavyOptions, event: ExclusiveEvent, command: string, holder?: Holder): void {
+  let parentCommand = "";
+  try {
+    parentCommand = execFileSync("ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim().slice(0, 200);
+  } catch { /* Missing parent metadata does not suppress the audit event. */ }
+  const dir = join(options.home, ".local/state/muster");
+  mkdirSync(dir, { recursive: true });
+  appendFileSync(join(dir, "heavy-exclusive.jsonl"), `${JSON.stringify({
+    ts: new Date((options.now ?? Date.now)()).toISOString(), event, window: holder?.window ?? options.window ?? null,
+    pid: holder?.pid ?? process.pid, ppid: process.ppid, parentCommand, cwd: process.cwd(), command: command.slice(0, 200),
+  })}\n`, { mode: 0o600 });
+}
+
+function sameHolder(a: Holder | null, b: Holder): boolean {
+  return a?.pid === b.pid && a.host === b.host && a.command === b.command && a.window === b.window &&
+    (b.exclusiveAcquiredAt ? a.exclusiveAcquiredAt === b.exclusiveAcquiredAt : true);
+}
+
+/** Admission backstop. Plain snapshot/status never calls this. */
+export function reapExclusive(options: HeavyOptions): void {
+  const lock = heavyLockPath(options.home);
+  const pending = exclusivePendingPath(options.home);
+  const candidates = [pending, lock];
+  for (const path of candidates) {
+    const holder = readHolder(path);
+    if (!holder || (path === lock && holder.mode !== "exclusive")) continue;
+    // A pending request has no hold clock until every slot has drained.
+    const acquiredAt = holder.exclusiveAcquiredAt ?? (path === lock && holder.window === undefined ? holder.startedAt : undefined);
+    if (!acquiredAt || (options.now ?? Date.now)() - Date.parse(acquiredAt) <= Math.min(capMs(options), holder.exclusiveCapMs ?? Infinity) + 120_000) continue;
+    // Remote and unverified holders retain their fence. Never signal reused pids.
+    const health = (options.health ?? holderHealth)(holder);
+    if (!localHost(holder.host) || health === "unknown") continue;
+    logExclusive(options, "reaped", holder.command, holder);
+    console.error(`muster-heavy: REAPED exclusive window ${holder.window ?? "legacy"}, pid ${holder.pid}: hold exceeded cap + 2 min`);
+    if (health === "alive") {
+      const kill = options.kill ?? process.kill;
+      // Backstop escalation is immediate: unlike the cooperative holder it may
+      // be frozen. Finish signalling before opening admission to another job.
+      for (const signal of ["SIGTERM", "SIGKILL"] as const) {
+        try { kill(holder.pid, signal); }
+        catch (error) {
+          if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
+        }
+      }
+    }
+    for (const heldPath of [pending, lock, ...existingSlots(lock).map((n) => slotPath(lock, n))]) {
+      if (sameHolder(readHolder(heldPath), holder)) rmSync(heldPath, { recursive: true, force: true });
+    }
+  }
 }
 
 function settings(options: HeavyOptions) {
@@ -249,6 +328,7 @@ function blocker(lock: string, allowSlot = false): string | null {
 export function tryAcquireHeavy(options: HeavyOptions, command: string): HeavyAcquire {
   const { adapter, count, minFreeGB } = settings(options);
   const lock = heavyLockPath(options.home);
+  reapExclusive(options);
   const blocked = blocker(exclusivePendingPath(options.home)) ?? blocker(lock, true);
   if (blocked) return { ok: false, reason: blocked };
   const pressure = pressureReason(adapter, minFreeGB);
@@ -279,24 +359,40 @@ const exclusiveMachine = createMachine({
     waiting: { on: { RESERVE: "reserved", CANCEL: "closed" } },
     reserved: { on: { DRAIN: "draining", CANCEL: "closed" } },
     draining: { on: { ACQUIRE: "held", CANCEL: "closed" } },
-    held: { on: { CANCEL: "closed" } },
+    held: { on: { CAP: "capped", CANCEL: "closed" } },
+    capped: { on: { CANCEL: "closed" } },
     closed: { type: "final" },
   },
 });
 
 export function exclusiveRequest(options: HeavyOptions, command: string) {
+  if (!options.window || !/^[A-Za-z0-9._:-]{1,64}$/.test(options.window)) {
+    logExclusive(options, "refused", command);
+    throw new ExclusiveRefused();
+  }
+  logExclusive(options, "requested", command);
   const { adapter, count, minFreeGB } = settings(options);
   const lock = heavyLockPath(options.home);
   const actor = createActor(exclusiveMachine).start();
   const slots = new Set(Array.from({ length: count }, (_, n) => n));
   const releases: (() => void)[] = [];
+  const ownedPaths: string[] = [];
+  let acquiredAtMs: number | undefined;
+  const decorate = (path: string, acquiredAt?: string) => {
+    const holder = readHolder(path);
+    if (!holder || holder.pid !== process.pid) throw new Error("exclusive holder lost before metadata write");
+    writeFileSync(join(path, "holder.json"), JSON.stringify({ ...holder, window: options.window, exclusiveCapMs: capMs(options), ...(acquiredAt ? { exclusiveAcquiredAt: acquiredAt } : {}) }));
+  };
   const release = () => {
+    if (actor.getSnapshot().matches("closed")) return;
     for (const unlock of releases.splice(0).reverse()) unlock();
     actor.send({ type: "CANCEL" });
     actor.stop();
+    logExclusive(options, "released", command);
   };
   const attempt = (): HeavyAcquire => {
-    if (actor.getSnapshot().matches("closed")) return { ok: false, reason: "exclusive request closed" };
+    if (actor.getSnapshot().matches("closed") || actor.getSnapshot().matches("capped")) return { ok: false, reason: "exclusive request closed" };
+    reapExclusive(options);
     if (actor.getSnapshot().matches("held")) return { ok: true, release };
     if (actor.getSnapshot().matches("waiting")) {
       // Reap even under pressure, but do not fence runnable slot jobs until
@@ -308,6 +404,8 @@ export function exclusiveRequest(options: HeavyOptions, command: string) {
       const pending = tryAcquire(exclusivePendingPath(options.home), command);
       if (!pending.ok) return { ok: false, reason: `exclusive-pending: ${describeHolder(pending.holder)}` };
       releases.push(pending.release);
+      ownedPaths.push(exclusivePendingPath(options.home));
+      decorate(exclusivePendingPath(options.home));
       actor.send({ type: "RESERVE" });
     }
     // Retain the legacy lock while draining: old sessions cannot see pending.
@@ -315,6 +413,8 @@ export function exclusiveRequest(options: HeavyOptions, command: string) {
       const legacy = tryAcquire(heavyLockPath(options.home), command, process.pid, "exclusive");
       if (!legacy.ok) return { ok: false, reason: `heavy-job.lock: ${describeHolder(legacy.holder)}` };
       releases.push(legacy.release);
+      ownedPaths.push(lock);
+      decorate(lock);
       actor.send({ type: "DRAIN" });
     }
     const pressure = pressureReason(adapter, minFreeGB);
@@ -334,7 +434,12 @@ export function exclusiveRequest(options: HeavyOptions, command: string) {
         return { ok: false, reason: `exclusive draining: ${busy.join("; ")}` };
       }
       releases.push(...acquired);
+      for (const n of slots) if (n !== 0) ownedPaths.push(slotPath(lock, n));
+      acquiredAtMs = (options.now ?? Date.now)();
+      const acquiredAt = new Date(acquiredAtMs).toISOString();
+      for (const path of ownedPaths) decorate(path, acquiredAt);
       actor.send({ type: "ACQUIRE" });
+      logExclusive(options, "acquired", command);
       return { ok: true, release };
     } catch (error) {
       for (const unlock of acquired.reverse()) unlock();
@@ -342,7 +447,12 @@ export function exclusiveRequest(options: HeavyOptions, command: string) {
       throw error;
     }
   };
-  return { attempt, release };
+  return { attempt, release, capMs: capMs(options), get acquiredAtMs() { return acquiredAtMs; }, capped: () => {
+    if (!actor.getSnapshot().matches("held")) return;
+    actor.send({ type: "CAP" });
+    logExclusive(options, "capped", command);
+    console.error(`muster-heavy: CAPPED exclusive window ${options.window}: hold reached ${capMs(options) / 60_000} min`);
+  } };
 }
 
 export interface HeavySlotView {
@@ -352,6 +462,9 @@ export interface HeavySlotView {
   readonly ageSeconds: number | null;
   readonly health: HolderHealth | null;
   readonly stale: boolean;
+  readonly window: string | null;
+  readonly exclusiveAgeSeconds: number | null;
+  readonly remainingSeconds: number | null;
 }
 
 export interface HeavySnapshot {
@@ -370,11 +483,15 @@ export function heavySnapshot(options: HeavyOptions, now = Date.now()): HeavySna
   const lock = heavyLockPath(options.home);
   const sample = adapter.sample();
   const view = (name: string, path: string): HeavySlotView => {
-    if (!existsSync(path)) return { name, holder: null, held: false, ageSeconds: null, health: null, stale: false };
+    if (!existsSync(path)) return { name, holder: null, held: false, ageSeconds: null, health: null, stale: false, window: null, exclusiveAgeSeconds: null, remainingSeconds: null };
     const holder = readHolder(path);
     const ageSeconds = holder ? Math.max(0, Math.floor((now - Date.parse(holder.startedAt)) / 1000)) : null;
     const health = holderHealth(holder);
-    return { name, holder, held: true, ageSeconds, health, stale: health === "dead" || health === "reused" };
+    const exclusive = name === "exclusive-pending" || holder?.mode === "exclusive" || holder?.window !== undefined;
+    const acquiredAt = holder?.exclusiveAcquiredAt ?? (holder?.mode === "exclusive" && holder.window === undefined ? holder.startedAt : undefined);
+    const exclusiveAgeSeconds = exclusive && acquiredAt ? Math.max(0, Math.floor((now - Date.parse(acquiredAt)) / 1000)) : null;
+    const remainingSeconds = exclusive ? Math.max(0, Math.ceil((Math.min(capMs(options), holder?.exclusiveCapMs ?? Infinity) - (acquiredAt ? Math.max(0, now - Date.parse(acquiredAt)) : 0)) / 1000)) : null;
+    return { name, holder, held: true, ageSeconds, health, stale: health === "dead" || health === "reused", window: holder?.window ?? null, exclusiveAgeSeconds, remainingSeconds };
   };
   const slots = new Set([...Array.from({ length: count }, (_, n) => n), ...existingSlots(lock)]);
   return {
@@ -392,7 +509,7 @@ export function heavyStatus(options: HeavyOptions, now = Date.now()): string {
   const snap = heavySnapshot(options, now);
   const lines = [`heavy slots: ${snap.slots}`, `load: ${snap.load.toFixed(1)} (limit ${snap.loadLimit}); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
   for (const slot of [...snap.holders, snap.exclusivePending]) {
-    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}` : `${slot.name}: free`);
+    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}${slot.remainingSeconds !== null ? `; window ${slot.window ?? "legacy"}; hold age ${slot.exclusiveAgeSeconds === null ? "pending" : `${slot.exclusiveAgeSeconds}s`}; cap remaining ${slot.remainingSeconds}s` : ""}` : `${slot.name}: free`);
   }
   return lines.join("\n");
 }

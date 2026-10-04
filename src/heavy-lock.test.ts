@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  admissionReason, exclusivePendingPath, exclusiveRequest, heavyLockPath, heavySlotCount, heavySnapshot, heavyStatus,
+  admissionReason, exclusiveCapMs, reapExclusive, exclusivePendingPath, exclusiveRequest, heavyLockPath, heavySlotCount, heavySnapshot, heavyStatus,
   parseMemInfo, parseVmStat, readHolder, slotPath, tryAcquire, tryAcquireHeavy,
 } from "./heavy-lock.ts";
 import type { HeavyAdapter, HeavyOptions } from "./heavy-lock.ts";
@@ -15,18 +15,164 @@ const adapter: HeavyAdapter = { performanceCores: () => 12, sample: () => ({ cor
 function setup(): HeavyOptions {
   const home = mkdtempSync(join(tmpdir(), "heavy-slots-test-"));
   homes.push(home);
-  return { home, adapter, slots: "2", minFreeGB: "16" };
+  return { home, adapter, slots: "2", minFreeGB: "16", window: "test-deploy" };
 }
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
 // Node's preload changes only the test child's adapter, never real machine state.
-function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, load: 20, freeGB: 64 })", fakeClock = false) {
-  const source = `import { machineAdapter } from ${JSON.stringify(pathToFileURL(resolve("src/heavy-lock.ts")).href)}; let calls = 0; machineAdapter.performanceCores = () => 12; machineAdapter.sample = () => { calls++; return ${sampleCode}; }; ${fakeClock ? "let now = Date.now(); Date.now = () => now; globalThis.setTimeout = (fn, ms) => { now += ms; queueMicrotask(fn); };" : ""}`;
+function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, load: 20, freeGB: 64 })", fakeClock = false, window: string | null = "test-deploy", extraPreload = "") {
+  const source = `import { machineAdapter } from ${JSON.stringify(pathToFileURL(resolve("src/heavy-lock.ts")).href)}; let calls = 0; machineAdapter.performanceCores = () => 12; machineAdapter.sample = () => { calls++; return ${sampleCode}; }; ${fakeClock ? "let now = Date.now(); Date.now = () => now; const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => { if (ms > 5000) return realTimer(fn, ms); now += ms; queueMicrotask(fn); };" : ""} ${extraPreload}`;
   return spawnSync(process.execPath, ["--import", `data:text/javascript,${encodeURIComponent(source)}`, "bin/muster-heavy.ts", ...args], {
     encoding: "utf8", timeout: 10000,
-    env: { ...process.env, HOME: options.home, MUSTER_HEAVY_SLOTS: "2", MUSTER_HEAVY_MIN_FREE_GB: "16" },
+    env: { ...process.env, HOME: options.home, MUSTER_HEAVY_SLOTS: "2", MUSTER_HEAVY_MIN_FREE_GB: "16", MUSTER_DEPLOY_WINDOW: window ?? undefined },
   });
 }
+
+describe("exclusive deploy policy", () => {
+  const events = (home: string) => readFileSync(join(home, ".local/state/muster/heavy-exclusive.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+
+  it.each([null, "", "bad window", "x".repeat(65), "../window", "ok\n"])("CLI refuses window %j without a lock", (window) => {
+    const options = setup();
+    const result = cli(options, ["--exclusive", "--", "true"], undefined, false, window);
+    expect(result.status).toBe(64);
+    expect(result.stderr.trim().split("\n")).toHaveLength(1);
+    expect(result.stderr).toMatch(/MUSTER_DEPLOY_WINDOW.*deploy-only/);
+    expect(events(options.home)).toMatchObject([{ event: "refused", window: window ?? null }]);
+    expect(existsSync(heavyLockPath(options.home))).toBe(false);
+    expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
+  });
+
+  it("library refuses an omitted window even with environment authorization", () => {
+    const options = setup();
+    expect(() => exclusiveRequest({ ...options, window: undefined }, "gate")).toThrow(/MUSTER_DEPLOY_WINDOW/);
+    expect(events(options.home)).toMatchObject([{ event: "refused" }]);
+    expect(existsSync(heavyLockPath(options.home))).toBe(false);
+  });
+
+  it("logs requested, acquired and released with bounded context", () => {
+    const options = setup();
+    expect(cli(options, ["--exclusive", "--", "true"]).status).toBe(0);
+    const log = events(options.home);
+    expect(log.map((entry) => entry.event)).toEqual(["requested", "acquired", "released"]);
+    for (const entry of log) {
+      expect(entry).toMatchObject({ window: "test-deploy", cwd: process.cwd(), command: "true" });
+      expect(entry.pid).toBeGreaterThan(0);
+      expect(entry.ppid).toBeGreaterThan(0);
+      expect(entry.parentCommand.length).toBeLessThanOrEqual(200);
+      expect(Number.isFinite(Date.parse(entry.ts))).toBe(true);
+    }
+  });
+
+  it("clamps environmental cap to 1-20 minutes", () => {
+    for (const [value, minutes] of [[undefined, 20], ["999", 20], ["Infinity", 20], ["NaN", 20], ["-3", 1], ["0", 1], ["5", 5]] as const) {
+      expect(exclusiveCapMs({ MUSTER_EXCLUSIVE_CAP_MIN: value })).toBe(minutes * 60000);
+    }
+  });
+
+  it.each(["legacy", "pending"])("slot admission reaps an overdue %s hold and signals only injected pids", (kind) => {
+    const options = setup();
+    const request = exclusiveRequest(options, "stale deploy");
+    expect(request.attempt().ok).toBe(true);
+    const paths = [exclusivePendingPath(options.home), ...[0, 1].map((n) => slotPath(heavyLockPath(options.home), n))];
+    const now = Date.now();
+    for (const path of paths) {
+      const holder = readHolder(path)!;
+      writeFileSync(join(path, "holder.json"), JSON.stringify({ ...holder, pid: 1234567, startedAt: new Date(now - 24 * 60000).toISOString(), exclusiveAcquiredAt: new Date(now - 23 * 60000).toISOString() }));
+    }
+    if (kind === "pending") rmSync(heavyLockPath(options.home), { recursive: true });
+    const signals: [number, NodeJS.Signals][] = [];
+    const reaperOptions: HeavyOptions = { ...options, now: () => now, health: () => "alive", kill: (pid, signal) => { signals.push([pid, signal]); } };
+    // Both status variants leave even overdue locks untouched.
+    expect(heavyStatus(reaperOptions)).toContain("test-deploy");
+    expect(heavySnapshot(reaperOptions).exclusivePending.remainingSeconds).toBe(0);
+    expect(signals).toEqual([]);
+    const acquired = tryAcquireHeavy(reaperOptions, "next slot");
+    expect(acquired.ok).toBe(true);
+    expect(signals).toEqual([[1234567, "SIGTERM"], [1234567, "SIGKILL"]]);
+    expect(events(options.home).filter((entry) => entry.event === "reaped")).toMatchObject([{ window: "test-deploy", pid: 1234567 }]);
+    expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
+    expect(existsSync(slotPath(heavyLockPath(options.home), 1))).toBe(false);
+    if (acquired.ok) acquired.release();
+    request.release();
+  });
+
+  it("status --reap reclaims an old legacy hold, while plain status leaves it", () => {
+    const options = setup();
+    const lock = heavyLockPath(options.home);
+    tryAcquire(lock, "legacy deploy", 99999999, "exclusive");
+    writeFileSync(join(lock, "holder.json"), JSON.stringify({ ...readHolder(lock), startedAt: "2000-01-01T00:00:00.000Z" }));
+    expect(cli(options, ["status", "--json"]).status).toBe(0);
+    expect(existsSync(lock)).toBe(true);
+    const result = cli(options, ["status", "--reap", "--json"]);
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("REAPED exclusive window legacy");
+    expect(JSON.parse(result.stdout).holders[0].held).toBe(false);
+    expect(events(options.home).map((entry) => entry.event)).toEqual(["reaped"]);
+  });
+
+  it("does not reap a waiting request, a foreign holder or an in-cap hold", () => {
+    const options = setup();
+    const hold = tryAcquireHeavy(options, "busy");
+    const request = exclusiveRequest(options, "waiting");
+    request.attempt();
+    const signals: number[] = [];
+    reapExclusive({ ...options, now: () => Date.now() + 30 * 60000, kill: (pid) => { signals.push(pid); } });
+    expect(existsSync(exclusivePendingPath(options.home))).toBe(true);
+    if (hold.ok) hold.release();
+    expect(request.attempt().ok).toBe(true);
+    reapExclusive({ ...options, now: () => Date.now() + 21 * 60000, kill: (pid) => { signals.push(pid); } });
+    expect(signals).toEqual([]);
+    for (const path of [exclusivePendingPath(options.home), heavyLockPath(options.home)]) {
+      writeFileSync(join(path, "holder.json"), JSON.stringify({ ...readHolder(path), host: "foreign.example" }));
+    }
+    reapExclusive({ ...options, now: () => Date.now() + 30 * 60000, health: () => "alive", kill: (pid) => { signals.push(pid); } });
+    expect(signals).toEqual([]);
+    expect(existsSync(heavyLockPath(options.home))).toBe(true);
+    request.release();
+  });
+
+  it("CLI caps and kills the whole group even after its leader exits", () => {
+    const options = setup();
+    const pidFile = join(options.home, "descendant.pid");
+    const descendantCode = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
+    const command = `const {spawn} = require('node:child_process'); const fs = require('node:fs'); const c = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], {stdio:'ignore'}); fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); setInterval(() => {}, 1000);`;
+    const source = `import {runHeavy} from ${JSON.stringify(pathToFileURL(resolve("bin/muster-heavy.ts")).href)}; await runHeavy(${JSON.stringify(["--exclusive", "--", process.execPath, "-e", command])}, {home:${JSON.stringify(options.home)}, window:'cap-test', slots:'2', minFreeGB:'16', adapter:{performanceCores:()=>12,sample:()=>({cores:16,load:20,freeGB:64})}, testOnlyCapMs:300}, {setTimeout:(fn, ms)=>setTimeout(fn, ms === 15000 ? 50 : ms), clearTimeout});`;
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 10000 });
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    // The child is ours. Probe only; no foreign processes are signalled.
+    let alive = false;
+    try { process.kill(pid, 0); alive = true; } catch { /* Reaped by init. */ }
+    expect(alive).toBe(false);
+    expect(result.status, result.stderr).toBe(124);
+    expect(result.stderr).toContain("CAPPED exclusive window cap-test");
+    expect(events(options.home).map((entry) => entry.event)).toEqual(["requested", "acquired", "capped", "released"]);
+    for (const path of [exclusivePendingPath(options.home), ...[0, 1].map((n) => slotPath(heavyLockPath(options.home), n))]) expect(existsSync(path)).toBe(false);
+  });
+
+  it("starts the hold clock only after drain and shows the window and remaining cap", () => {
+    let now = Date.now();
+    const options = { ...setup(), now: () => now };
+    const slot = tryAcquireHeavy(options, "busy");
+    const other = tryAcquireHeavy(options, "other busy");
+    const request = exclusiveRequest(options, "deploy");
+    expect(request.attempt().ok).toBe(false);
+    if (slot.ok) slot.release();
+    expect(request.attempt().ok).toBe(false);
+    now += 30 * 60000;
+    const signals: number[] = [];
+    reapExclusive({ ...options, kill: (pid) => { signals.push(pid); } });
+    expect(signals).toEqual([]);
+    expect(heavySnapshot(options, now).exclusivePending).toMatchObject({ window: "test-deploy", remainingSeconds: 1200 });
+    expect(heavySnapshot(options, now).holders[0]).toMatchObject({ window: "test-deploy", remainingSeconds: 1200, exclusiveAgeSeconds: null });
+    expect(readHolder(exclusivePendingPath(options.home))?.exclusiveAcquiredAt).toBeUndefined();
+    if (other.ok) other.release();
+    expect(request.attempt().ok).toBe(true);
+    const acquired = readHolder(exclusivePendingPath(options.home))!.exclusiveAcquiredAt!;
+    expect(heavySnapshot(options, Date.parse(acquired) + 10000).exclusivePending).toMatchObject({ window: "test-deploy", remainingSeconds: 1190, exclusiveAgeSeconds: 10 });
+    expect(heavyStatus(options, Date.parse(acquired) + 10000)).toContain("window test-deploy; hold age 10s; cap remaining 1190s");
+    request.release();
+  });
+});
 
 describe("heavy gate slots", () => {
   it("derives the count from performance cores (fallback takes half the available CPUs)", () => {
