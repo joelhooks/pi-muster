@@ -1659,18 +1659,6 @@ export interface StatusInput {
   readonly takeover?: boolean | undefined;
 }
 
-// Reuse the lifecycle's existing routes: reported work needs rework before
-// failure; an interrupted row's attempted launch can fail without opening a pane.
-const modelFailureEvents = (state: AgentRow["state"]): readonly AgentEvent[] => {
-  switch (state) {
-    case "launching": case "restoring": return [{ type: "LAUNCH_FAILED" }];
-    case "running": case "silent": case "nudged": case "restarted": return [{ type: "FAIL" }];
-    case "reported": case "verified": case "landed": return [{ type: "REWORK" }, { type: "FAIL" }];
-    case "interrupted": return [{ type: "LAUNCH" }, { type: "LAUNCH_FAILED" }];
-    case "failed": case "planned": case "closed": return [];
-  }
-};
-
 export const projectStatus = (dir: string, params: StatusInput = {}) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -1701,13 +1689,16 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       }
       let action: string | null = null;
       let current = row;
-      const issue = pane ? modelOutputIssue(yield* paneRead(pane.pane_id, 20).pipe(Effect.orElseSucceed(() => ""))) : null;
-      const modelError = issue?.severity === "error" ? issue.line : row.state === "failed" ? row.events?.filter((event) => event.type === "MODEL_ERROR").at(-1)?.detail : undefined;
-      const adoptionCandidate = !modelError && (row.state === "failed" || row.state === "launching");
+      const idleLive = pane && pane.agent_status !== "working" && ["running", "silent", "nudged", "restarted"].includes(row.state);
+      const issue = idleLive && pane ? modelOutputIssue(yield* paneRead(pane.pane_id, 20).pipe(Effect.orElseSucceed(() => ""))) : null;
+      const modelError = issue?.severity === "error" ? issue.line : undefined;
+      // A failed model launch requires an explicit restore, not automatic adoption.
+      const failedModel = row.state === "failed" && row.events?.some((event) => event.type === "MODEL_ERROR");
+      const adoptionCandidate = !failedModel && (row.state === "failed" || row.state === "launching");
       if (modelError) {
         action = `FAILED (model error: ${modelError})`;
-        if (act && row.owner === env.sessionId && row.state !== "failed") {
-          current = yield* patchRow(dir, row.name, row.state, modelFailureEvents(row.state), {
+        if (act && row.owner === env.sessionId) {
+          current = yield* patchRow(dir, row.name, row.state, [{ type: "FAIL" }], {
             delivery: "unproven", events: [...(row.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: modelError }],
           });
         }

@@ -52,7 +52,7 @@ Use `opus`, `fable`, or `sol` in launch and policy models; roster aliases can ov
 
 Every launch, fork, and restore runs `pi --list-models` once in the launch cwd, with a 20-second timeout, before writing a row or opening a pane. A missing authenticated model fails with working-route suggestions. A failed or empty listing permits launch with a `model check skipped` note.
 
-Delivery requires Herdr `working` and two clean pane reads, three seconds apart. Auth/model errors fail the launch and row, record the line in row events, and leave the pane open. Rate limits warn without failing. `project_status` flags these errors and fails owned live rows when `act: true`; failed rows are never nudged or adopted while their model error remains.
+Delivery requires Herdr `working` and two clean pane reads, three seconds apart. Only Pi-rendered `Error:` lines in the newest output above its editor count; prose, older errors, editor text, and footer text do not. Auth/model errors fail the launch and row, record the line in row events, and leave the pane open. Rate limits under the same prefix warn without failing. `project_status` checks only running, silent, nudged, and restarted rows whose Herdr status is not working. With `act: true`, it fails owned rows with a current model error. Finished rows keep their state. Model-failed rows require an explicit restore, not automatic adoption.
 
 Role and alternate `skills` name standing skills (names or absolute paths); launch skills append after project policy skills, de-duplicated. Workers keep `-ns` and search the installed catalog with `skill_find`, then read a matching `SKILL.md`.
 

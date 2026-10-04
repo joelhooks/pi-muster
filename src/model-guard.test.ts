@@ -80,10 +80,10 @@ it("keeps clean proof proven, and rate limits only warn", async () => {
   const { h, launch } = await setup();
   const handle = h.herdr.handle.bind(h.herdr);
   vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => method === "pane.read"
-    ? { type: "pane_read", read: { text: "rate limit exceeded" } } : handle(method, params));
+    ? { type: "pane_read", read: { text: "Error: rate limit exceeded" } } : handle(method, params));
   const result = await runWith(h, launch("sol"));
   expect(result.row.delivery).toBe("proven");
-  expect(result.notes.join("\n")).toContain("model warning: rate limit exceeded");
+  expect(result.notes.join("\n")).toContain("model warning: Error: rate limit exceeded");
 });
 it("rejects forbidden policy before writing it", async () => {
   const { h, dir } = await setup();
@@ -113,14 +113,14 @@ it.each(["idle", "startup"])("records model failures even with %s instead of a m
   if (phase === "startup") h.herdr.startSessions = false;
   const handle = h.herdr.handle.bind(h.herdr);
   vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => method === "pane.read"
-    ? { type: "pane_read", read: { text: "Unknown model bad" } } : handle(method, params));
+    ? { type: "pane_read", read: { text: "Error: Unknown model bad" } } : handle(method, params));
   const error = await failWith(h, launch("sol"));
-  expect(error.message).toContain("delivery: unproven (model error: Unknown model bad)");
+  expect(error.message).toContain("delivery: unproven (model error: Error: Unknown model bad)");
   const row = (await runWith(h, load(dir))).agents[0];
   expect(row?.state).toBe("failed");
-  expect(row?.events?.at(-1)?.detail).toBe("Unknown model bad");
+  expect(row?.events?.at(-1)?.detail).toBe("Error: Unknown model bad");
 });
-it.each(["running", "reported", "verified", "landed", "interrupted"] as const)("status flags model errors on %s without adoption or nudging, then fails on act", async (state) => {
+it.each(["running"] as const)("status flags model errors on %s without adoption or nudging, then fails on act", async (state) => {
   const { h, dir, launch } = await setup();
   await runWith(h, launch("sol"));
   const handle = h.herdr.handle.bind(h.herdr);
@@ -130,10 +130,7 @@ it.each(["running", "reported", "verified", "landed", "interrupted"] as const)("
     const row = project.agents[0];
     if (!row) throw new Error("missing launched row");
     let next = row.state;
-    if (state === "reported" || state === "verified" || state === "landed") next = yield* stepAgent(row.name, next, { type: "REPORT" });
-    if (state === "verified") next = yield* stepAgent(row.name, next, { type: "VERIFY" });
-    if (state === "landed") next = yield* stepAgent(row.name, next, { type: "LAND" });
-    if (state === "interrupted") next = yield* stepAgent(row.name, next, { type: "PANE_GONE" });
+
     return [{ ...project, agents: [{ ...row, state: next }] }, undefined] as const;
   })));
   const preview = await runWith(h, projectStatus(dir, { act: false }));
@@ -143,4 +140,45 @@ it.each(["running", "reported", "verified", "landed", "interrupted"] as const)("
   expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
   await runWith(h, projectStatus(dir, { act: true }));
   expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
+});
+
+it.each([
+  ["working prose", "authentication middleware returns 401", true],
+  ["working Pi error", "Error: No API key found for anthropic.", true],
+  ["idle prose", "authentication middleware returns 401", false],
+  ["old error", "Error: No API key found for anthropic.\nTests passed; continuing work", false],
+] as const)("does not fail healthy status for %s", async (_case, output, working) => {
+  const { h, dir, launch } = await setup();
+  await runWith(h, launch("sol"));
+  const handle = h.herdr.handle.bind(h.herdr);
+  vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => {
+    if (method === "pane.read") return { type: "pane_read", read: { text: output } };
+    const result = handle(method, params);
+    if (method === "pane.list" && working && typeof result === "object" && result !== null && "panes" in result && Array.isArray(result.panes)) {
+      return { ...result, panes: result.panes.map((pane) => ({ ...pane, agent_status: "working" })) };
+    }
+    return result;
+  });
+  const result = await runWith(h, projectStatus(dir, { act: true }));
+  expect(result.board).not.toContain("FAILED (model error:");
+  expect((await runWith(h, load(dir))).agents[0]?.state).toBe("running");
+});
+it.each(["reported", "verified", "landed", "closed"] as const)("keeps %s work finished even with a Pi error line", async (state) => {
+  const { h, dir, launch } = await setup();
+  await runWith(h, launch("sol"));
+  await runWith(h, mutate(dir, (project) => Effect.gen(function* () {
+    const row = project.agents[0];
+    if (!row) throw new Error("missing row");
+    let next = yield* stepAgent(row.name, row.state, { type: "REPORT" });
+    if (state === "verified") next = yield* stepAgent(row.name, next, { type: "VERIFY" });
+    if (state === "landed") next = yield* stepAgent(row.name, next, { type: "LAND" });
+    if (state === "closed") next = yield* stepAgent(row.name, next, { type: "CLOSE" });
+    return [{ ...project, agents: [{ ...row, state: next }] }, undefined] as const;
+  })));
+  const handle = h.herdr.handle.bind(h.herdr);
+  vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => method === "pane.read"
+    ? { type: "pane_read", read: { text: "Error: No API key found for anthropic." } } : handle(method, params));
+  const result = await runWith(h, projectStatus(dir, { act: true }));
+  expect(result.board).not.toContain("FAILED (model error:");
+  expect((await runWith(h, load(dir))).agents[0]?.state).toBe(state);
 });

@@ -25,9 +25,28 @@ it("suggests exact and prefix routes, preferring the Claude bridge and limiting 
     "claude-bridge/claude-opus-5", "claude-bridge/claude-opus-5-5", "another/claude-opus-5",
   ]);
 });
-it.each(["NO API KEY FOUND", "HTTP 401", "Unauthorized", "invalid api key", "authentication failed", "Model xyz not found", "Unknown model", "No models available"])("classifies %s as a model error", (line) => {
-  expect(modelOutputIssue(`header\n${line}\nfooter`)).toEqual({ severity: "error", line });
+it.each(["No API key found for anthropic.", "HTTP 401", "Unauthorized", "invalid api key", "authentication failed", "Model xyz not found", "Unknown model", "No models available"])("classifies Pi's Error: %s as a model error", (message) => {
+  const line = `Error: ${message}`;
+  expect(modelOutputIssue(`header\n${line}\n`)).toEqual({ severity: "error", line });
 });
-it("treats rate limit exceeded as a warning, not a model failure", () => {
-  expect(modelOutputIssue("Rate limit exceeded")).toEqual({ severity: "warning", line: "Rate limit exceeded" });
+it("treats Pi-rendered rate limit exceeded as a warning, not a model failure", () => {
+  expect(modelOutputIssue("Error: Rate limit exceeded")).toEqual({ severity: "warning", line: "Error: Rate limit exceeded" });
+});
+it.each(["authentication middleware returns 401", "Unauthorized requests are rejected", "invalid api key fixture", "authentication failed test passes", "Model xyz not found in test", "Unknown model fixture", "No models available example", "Rate limit exceeded fixture", "Error: authentication middleware returns success"])("ignores prose or test output: %s", (line) => {
+  expect(modelOutputIssue(line)).toBeNull();
+});
+it("ignores an old Pi error followed by newer normal output above the editor", () => {
+  expect(modelOutputIssue("Error: No API key found for anthropic.\n\nTests passed\n───────────────\n\n───────────────\n~/repo\n↑0 ↓0 claude-opus-5-5 • high")).toBeNull();
+});
+it("ignores an old auth error when the newest Pi output is a rate-limit warning", () => {
+  expect(modelOutputIssue("Error: No API key found for anthropic.\nError: rate limit exceeded")).toEqual({ severity: "warning", line: "Error: rate limit exceeded" });
+});
+it("ignores model error text typed into the editor and printed in the footer", () => {
+  expect(modelOutputIssue("Healthy assistant output\n───────────────\nError: No API key found for anthropic.\n───────────────\nauthentication project\nError: Unknown model")).toBeNull();
+});
+it.each(["───────────────", "─── ↑ 2 more ───"])("retains the current Pi error above editor border %s", (top) => {
+  expect(modelOutputIssue(`Older output\n\u001b[31m Error: No API key found for anthropic.\u001b[0m\n\n${top}\n\n───────────────\n~/repo\n↑0 ↓0 claude-opus-5-5 • high`)).toEqual({ severity: "error", line: "Error: No API key found for anthropic." });
+});
+it("ignores clipped editor output when only its bottom border is visible", () => {
+  expect(modelOutputIssue("Error: No API key found for anthropic.\n───────────────\n~/repo")).toBeNull();
 });

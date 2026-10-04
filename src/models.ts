@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { Effect } from "effect";
 import type { Roster, Thinking } from "./domain.ts";
 import { InputError } from "./errors.ts";
@@ -63,21 +64,32 @@ export const checkRunnableModel = (model: string, cwd: string) => Effect.gen(fun
   return yield* new InputError({ message: `${model} has no auth here; ${routes.length ? `use ${routes.join(", ")}${alias ? ` (alias ${alias})` : ""}` : "no working route found in pi --list-models"}` });
 });
 
+// Pi 0.79.10: dist/modes/interactive/components/assistant-message.js,
+// AssistantMessageComponent.updateContent(stopReason === "error"), and
+// dist/modes/interactive/interactive-mode.js, InteractiveMode.showError,
+// both render `Error: ${errorMessage}` via Text(..., 1, 0). Prose is not an error.
 export const MODEL_ERROR_PATTERNS = [
-  { pattern: /No API key found/i, severity: "error" },
-  { pattern: /\b401\b/i, severity: "error" },
-  { pattern: /Unauthorized/i, severity: "error" },
-  { pattern: /invalid api key/i, severity: "error" },
-  { pattern: /authentication/i, severity: "error" },
-  { pattern: /Model .* not found/i, severity: "error" },
-  { pattern: /Unknown model/i, severity: "error" },
-  { pattern: /No models available/i, severity: "error" },
-  { pattern: /rate limit exceeded/i, severity: "warning" },
+  { pattern: /^\s*Error:\s*No API key found for \S+/i, severity: "error" },
+  { pattern: /^\s*Error:.*\b401\b/i, severity: "error" },
+  { pattern: /^\s*Error:.*\bUnauthorized\b/i, severity: "error" },
+  { pattern: /^\s*Error:.*\binvalid api key\b/i, severity: "error" },
+  { pattern: /^\s*Error:.*\bauthentication failed\b/i, severity: "error" },
+  { pattern: /^\s*Error:\s*Model .* not found\b/i, severity: "error" },
+  { pattern: /^\s*Error:\s*Unknown model\b/i, severity: "error" },
+  { pattern: /^\s*Error:\s*No models available\b/i, severity: "error" },
+  { pattern: /^\s*Error:.*\brate limit exceeded\b/i, severity: "warning" },
 ] as const;
 export function modelOutputIssue(output: string) {
-  const matches = output.split(/\r?\n/).flatMap((line) => {
-    const match = MODEL_ERROR_PATTERNS.find(({ pattern }) => pattern.test(line));
-    return match ? [{ line: line.trim().slice(0, 1500), severity: match.severity }] : [];
-  });
-  return matches.find((match) => match.severity === "error") ?? matches.at(-1) ?? null;
+  const lines = stripVTControlCharacters(output).split(/\r?\n/);
+  // pi-tui dist/components/editor.js, Editor.render: top and bottom horizontal
+  // borders (createScrollBorder adds ↑/↓ N more). Exclude the final editor pair,
+  // its text and all footer/status rows. One border means the chat was clipped:
+  // fail conservatively rather than classify text typed into the editor.
+  const borders = lines.flatMap((line, index) => /^\s*─{3,}(?:\s*[↑↓]\s+\d+ more\s*─*)?\s*$/.test(line) ? [index] : []);
+  if (borders.length === 1) return null;
+  const chat = borders.length >= 2 ? lines.slice(0, borders[borders.length - 2]) : lines;
+  const line = chat.filter((value) => value.trim().length > 0).at(-1);
+  if (!line) return null;
+  const match = MODEL_ERROR_PATTERNS.find(({ pattern }) => pattern.test(line));
+  return match ? { line: line.trim().slice(0, 1500), severity: match.severity } : null;
 }
