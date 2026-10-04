@@ -1152,7 +1152,18 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       argv: buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile, parentSessionFile: null, profile, musterExtension: project.musterExtension }),
       env: agentEnv(project, row),
     };
-    const closed = row.state === "closed" ? row : yield* patchRow(dir, row.name, row.state, [{ type: "CLOSE" }], { pane: null, sessionFile, restore });
+    // Pane I/O can overlap landing or another close. Transition the locked,
+    // current row, not the snapshot read before closing the pane.
+    const closed = yield* mutate(dir, (current) => Effect.gen(function* () {
+      const latest = yield* findRow(current, row.name);
+      yield* requireOwner(latest, env.sessionId, params.takeover);
+      if (latest.state === "closed") return [current, latest] as const;
+      if (latest.sessionId !== row.sessionId || latest.cwd !== row.cwd || latest.pane?.terminalId !== row.pane?.terminalId) {
+        return yield* new GuardFailed({ guard: "close-binding", message: `${row.name} changed session or pane during close; re-read its row before closing the replacement` });
+      }
+      const next: AgentRow = { ...latest, state: yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), pane: null, sessionFile, restore, updatedAt: iso(env) };
+      return [withRow(current, next), next] as const;
+    }));
 
     let cloneError: string | null = null;
     if (row.clone && existsSync(row.cwd)) {
@@ -1244,7 +1255,7 @@ export const packetReport = (params: PacketReportInput) =>
     if (!project.packets.some((packet) => packet.id === id) && earlier) {
       const ancestor = !!params.commit && earlier.kind === "commit" &&
         (yield* proc.run("git", ["merge-base", "--is-ancestor", earlier.id, id], { cwd: params.cwd })).code === 0;
-      if (!ancestor) return yield* input(`earlier packet ${earlier.id.slice(0, 12)} needs an outcome first; land or reject it before reporting a non-ancestor follow-up`);
+      if (!ancestor) return yield* input(`earlier packet ${earlier.id.slice(0, 12)} needs an outcome first; land or reject it before reporting a non-ancestor follow-up; the owner can record it \`rejected\` or \`no_changes\` with evidence; verification is not needed for those`);
     }
     const report = join(reportsDir(params.dir), row.lane, `${row.name}-${id.slice(0, 12)}.svx`);
     const now = iso(env);
@@ -1309,10 +1320,12 @@ export const packetVerify = (dir: string, id: string) =>
     const checks = yield* verifyPacket(project, lane, row, packet);
     const failed = failures(checks);
     if (failed.length > 0) {
+      const artifactChanged = packet.kind === "artifact" && failed.some(check => check.name === "artifact hash" && check.detail?.startsWith("sha256 is "));
+      const recovery = artifactChanged ? "; the file changed after packet_report: record this packet `rejected` with evidence, then have the worker packet_report the current file" : "";
       return yield* new PacketCheckFailed({
         packet: packet.id,
         failures: failed.map((check) => `${check.name}: ${check.detail ?? "failed"}`),
-        message: `packet ${packet.id.slice(0, 12)} failed ${failed.length} check(s)`,
+        message: `packet ${packet.id.slice(0, 12)} failed ${failed.length} check(s)${recovery}`,
       });
     }
     const verified = yield* mutate(dir, (current) =>

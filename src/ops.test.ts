@@ -26,7 +26,7 @@ import {
 } from "./ops.ts";
 import { readOwnerQueue, writeReader, ownerPath } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
-import { Proc, liveProc } from "./runtime.ts";
+import { Herdr, Proc, liveProc } from "./runtime.ts";
 import { ProcError } from "./errors.ts";
 import { parsePorcelainZ } from "./packet.ts";
 import { load, mutate } from "./store.ts";
@@ -791,6 +791,84 @@ describe("a lane from launch to close", () => {
     expect(done.paneNote).toContain("herdr_watch action=cancel before agent_close or lane_close");
     expect(h.herdr.panes.size).toBe(0);
     expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 1/1 lanes");
+  });
+
+  it("lands then closes once in the same process, even when close was constructed before landing", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    const close = agentClose(dir, { name: "probe_w" });
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed" }).pipe(Effect.andThen(close)));
+    expect(result.row.state).toBe("closed");
+    expect(h.herdr.calls.filter(call => call.method === "pane.close")).toHaveLength(1);
+  });
+
+  it.each(["landed", "closed"] as const)("closes once when the row concurrently becomes %s during pane close", async (state) => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const artifact = join(h.root, "race-report.txt");
+    writeFileSync(artifact, "verified bytes\n");
+    const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, reported.packet.id));
+    const client = h.herdr.client();
+    const result = await runWith(h, agentClose(dir, { name: "probe_w" }).pipe(Effect.provideService(Herdr, {
+      ...client,
+      request: request => request.method !== "pane.close" ? client.request(request) : Effect.gen(function* () {
+        yield* packetLand(dir, { id: reported.packet.id, outcome: "committed", evidence: "verified current bytes" });
+        if (state === "closed") yield* agentClose(dir, { name: "probe_w" }).pipe(Effect.provideService(Herdr, client));
+        // The concurrent close may already have removed this pane.
+        return state === "closed" ? { type: "ok" as const } : yield* client.request(request);
+      }),
+    })));
+    expect(result.row.state).toBe("closed");
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("closed");
+    expect((await runWith(h, load(dir))).packets[0]?.state).toBe("committed");
+    expect(h.herdr.calls.filter(call => call.method === "pane.close")).toHaveLength(1);
+  });
+
+  it("does not clear a replacement pane bound during close", async () => {
+    const h = harness();
+    const { dir } = await launchedWorker(h);
+    const replacement = h.herdr.addPane("w1", "replacement-tab", dir);
+    const client = h.herdr.client();
+    const error = await failWith(h, agentClose(dir, { name: "probe_w" }).pipe(Effect.provideService(Herdr, {
+      ...client,
+      request: request => request.method !== "pane.close" ? client.request(request) : Effect.gen(function* () {
+        yield* mutate(dir, current => Effect.succeed([{
+          ...current,
+          agents: current.agents.map(row => row.name === "probe_w" ? {
+            ...row,
+            pane: { paneId: replacement.pane_id, terminalId: replacement.terminal_id, tabId: replacement.tab_id, openedByMuster: true },
+          } : row),
+        }, undefined] as const));
+        return yield* client.request(request);
+      }),
+    })));
+    expect(error._tag).toBe("GuardFailed");
+    expect(error.message).toContain("changed session or pane during close");
+    expect((await runWith(h, load(dir))).agents[0]?.pane?.terminalId).toBe(replacement.terminal_id);
+    expect(h.herdr.panes.has(replacement.pane_id)).toBe(true);
+  });
+
+  it.each(["rejected", "no_changes"] as const)("names the changed-artifact recovery and permits %s without verification", async outcome => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const artifact = join(h.root, "changed-report.txt");
+    writeFileSync(artifact, "old bytes\n");
+    const params = { dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "s", checks: [] };
+    const reported = await runWith(h, packetReport(params));
+    writeFileSync(artifact, "current bytes\n");
+    const verification = await failWith(h, packetVerify(dir, reported.packet.id));
+    expect.soft(verification.message).toContain("the file changed after packet_report: record this packet `rejected` with evidence, then have the worker packet_report the current file");
+    const fence = await failWith(h, packetReport(params));
+    expect(fence.message).toContain("the owner can record it `rejected` or `no_changes` with evidence; verification is not needed for those");
+    const recorded = await runWith(h, packetLand(dir, { id: reported.packet.id, outcome, evidence: "artifact changed after report" }));
+    expect(recorded.packet.verification).toBeNull();
+    const current = await runWith(h, packetReport(params));
+    expect(current.packet.id).not.toBe(reported.packet.id);
+    expect(current.packet.state).toBe("reported");
   });
 
   it("records an artifact packet with evidence and no merge, which lets the lane close", async () => {
