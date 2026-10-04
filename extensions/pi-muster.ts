@@ -35,6 +35,7 @@ import { registerOwnerFeed } from "../src/owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "../src/owner-view.ts";
 import { capBody, deliverOwnerItem, findOwnerPost } from "../src/owner-queue.ts";
 import { registerDeskReport } from "../src/desk-report-ext.ts";
+import { registerDigest } from "../src/digest-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
 import { findSkills, skillIndex } from "../src/skills.ts";
 import { createVersionSkew, withVersionSkew } from "../src/version-skew.ts";
@@ -207,6 +208,7 @@ export default function muster(host: ExtensionAPI) {
   registerDeskFeed(pi, env);
   registerSwitchboard(pi, { env, layer, run });
   registerDeskReport(pi, { run });
+  registerDigest(pi, env);
 
   pi.registerTool({
     name: "project_open",

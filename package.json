@@ -28,12 +28,16 @@
     ]
   },
   "bin": {
-    "muster-heavy": "./bin/muster-heavy.ts"
+    "muster-heavy": "./bin/muster-heavy.ts",
+    "muster-digest": "./bin/muster-digest.ts"
   },
   "files": [
     "AGENTS.md",
     "LICENSE",
     "bin/muster-heavy.ts",
+    "bin/muster-digest.ts",
+    "src/digest.ts",
+    "src/digest-ext.ts",
     "extensions/pi-muster.ts",
     "README.md",
     "skills/muster/references/gotchas.md",
