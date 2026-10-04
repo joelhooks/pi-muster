@@ -64,6 +64,8 @@
     "src/session-file.ts",
     "src/session-tree.ts",
     "src/rewind.ts",
+    "src/remote.ts",
+    "skills/muster/references/remote-lanes.md",
     "src/silence.ts",
     "src/skills.ts",
     "src/store.ts",

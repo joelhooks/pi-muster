@@ -875,7 +875,7 @@ describe("field-use regressions", () => {
     const h = harness();
     const dir = join(h.root, "project"); mkdirSync(dir);
     await open(h, dir);
-    const row: AgentRow = { name: "probe_w", role: "worker", side: null, lane: "probe", cwd: dir, clone: null,
+    const row: AgentRow = { machine: "local", name: "probe_w", role: "worker", side: null, lane: "probe", cwd: dir, clone: null,
       profile: profileFor("worker", { label: "worker" }), sessionId: "probe", sessionFile: null, parentSessionFile: null,
       pane: null, owner: "owner-session", brief: null, state: "planned", delivery: "none", restarts: 0, restore: null,
       createdAt: h.now.toISOString(), updatedAt: h.now.toISOString() };

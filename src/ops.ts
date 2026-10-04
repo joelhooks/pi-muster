@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 
@@ -13,6 +13,7 @@ import {
   sessionDirFor,
   sessionIdFromFile,
   shellPrelude,
+  shellQuote,
 } from "./argv.ts";
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
@@ -42,7 +43,9 @@ import {
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepLane, stepProject } from "./machines.ts";
-import { failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from "./packet.ts";
+import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from "./packet.ts";
+import { cloneUrl, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
+import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
@@ -54,6 +57,7 @@ import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts"
 import { resolveSkills, skillIndex } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
+import { readRegistry } from "./registry.ts";
 import { relayEvent, watchFallback } from "./relay-events.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
@@ -64,6 +68,334 @@ const GATE_TIMEOUT_MS = 45 * 60_000;
 const CLOSE_READ_LINES = 40;
 const SHELL_RETRY_STEP_MS = 250;
 const SHELL_RETRY_BUDGET_MS = 15_000;
+
+
+// ---------- remote lanes (the owner catalog always stays local) ----------
+
+const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, nameOfMachine: string) => withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const machine = yield* machineConfig(nameOfMachine);
+  const catalogs = [project];
+  if (machine.maxPanes !== undefined) {
+    const registered = yield* decodeWith(() => [...readRegistry(env.home).values()], null);
+    for (const entry of registered) if (entry.dir !== project.dir && exists(entry.dir)) catalogs.push(yield* load(entry.dir));
+  }
+  const openCount = catalogs.flatMap(catalog => catalog.agents).filter(row => row.machine === nameOfMachine && row.state !== "closed").length;
+  if (machine.maxPanes !== undefined && openCount >= machine.maxPanes) return yield* input(`machine ${nameOfMachine}: maxPanes ${machine.maxPanes} reached (${openCount} open Muster rows); close one before launching`);
+  const wrap = machine.wrap.map(arg => arg.replaceAll("{name}", params.name));
+  if (params.action === "adopt" || params.side || params.pane) return yield* input("remote launch does not adopt supplied panes or side desks");
+  const name = yield* decodeWith(decodeAgentName, params.name);
+  const existing = project.agents.find(row => row.name === name);
+  const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
+  const role = params.role ?? parent?.role ?? existing?.role;
+  const lane = yield* findLane(project, params.lane ?? parent?.lane ?? existing?.lane ?? "");
+  if (lane.state !== "open") return yield* input(`lane ${lane.slug} is ${lane.state}`);
+  if (!role) return yield* input("a remote agent needs a role");
+  if (params.action === "restore" && !existing) return yield* input(`no row ${name} to restore`);
+  if (params.action !== "restore" && existing && !["planned", "failed"].includes(existing.state)) return yield* input(`row ${name} is ${existing.state}; restore it or choose another name`);
+  if (parent && !parent.sessionFile) return yield* input("fork needs a parent session file");
+  const source = lane.repo ?? project.dir;
+  const remoteSource = mapPath(source, machine);
+  yield* prerequisites(nameOfMachine, machine, remoteSource);
+  const roster = (yield* loadRoster).roster;
+  const label = params.label ?? parent?.profile.label ?? existing?.profile.label;
+  if (!label) return yield* input("a remote agent needs a label");
+  const profile = profileFor(role, { ...(parent?.profile ?? existing?.profile), label,
+    ...(params.model !== undefined ? { model: params.model } : {}),
+    ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
+    ...(params.skills !== undefined ? { skills: params.skills } : {}),
+    ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
+    ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
+    ...(params.env !== undefined ? { env: params.env } : {}),
+    ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
+    ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
+  }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model, project.slug), null));
+  const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug), null);
+  const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
+  const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
+  // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
+  const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
+  const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path)))) };
+  const remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
+    skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
+    appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
+  return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
+    const requiredPaths = [...remoteProfile.skills, ...remoteProfile.extensions, ...remoteProfile.appendSystemPrompt,
+      ...(params.brief ? [mapPath(params.brief, machine)] : []), ...(params.action === "restore" && existing?.sessionFile ? [existing.sessionFile] : [])];
+    for (const path of requiredPaths) yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 });
+    let cwd = params.cwd ? mapPath(yield* requireAbsolute("cwd", params.cwd), machine) : existing?.cwd ?? parent?.cwd ?? remoteSource;
+    let clone = existing?.clone ?? null;
+    if (params.clone && params.action !== "restore") {
+      const out = yield* must(machine.workerWorktree, ["create", remoteSource, name.replace(/_/g, "-"), ...(lane.base ? ["--base", lane.base] : [])], { cwd: remoteSource, timeoutMs: 300_000 });
+      const path = /^worktree:\s+(.+)$/m.exec(out)?.[1]?.trim();
+      const branch = /^branch:\s+(.+)$/m.exec(out)?.[1]?.trim();
+      const base = /^base:[ \t]+(.+)[ \t]+([0-9a-f]{40}|[0-9a-f]{64})[ \t]*$/m.exec(out);
+      if (!path || !branch || !base) return yield* input(`machine ${nameOfMachine}: worker-worktree.sh omitted worktree, branch or base`);
+      cwd = yield* requireAbsolute("remote clone", path);
+      const sha = base[2]!;
+      if ((yield* git(cwd, "rev-parse", "HEAD")).trim() !== sha) return yield* input(`machine ${nameOfMachine}: clone HEAD differs from base`);
+      clone = { source, branch, base: { ref: base[1]!.trim(), sha } };
+    }
+    yield* must("test", ["-d", cwd], { cwd: "/", timeoutMs: 10_000 });
+    yield* guardDurable(project, "remote cwd", cwd);
+    const sessionFile = params.action === "restore" ? existing?.sessionFile ?? null : null;
+    if (params.action === "restore" && !sessionFile) return yield* input(`machine ${nameOfMachine}: no session file to restore`);
+    let parentSessionFile = parent?.sessionFile ?? null;
+    if (params.at) {
+      const script = `import {forkSessionAt} from ${JSON.stringify(`${machine.musterExtension}/src/session-tree.ts`)}; console.log(forkSessionAt(process.argv[1], process.argv[2], process.argv[3]));`;
+      // This Proc is already SSH-backed; do not nest SSH.
+      parentSessionFile = (yield* must("node", ["--input-type=module", "-e", script, parentSessionFile ?? "", params.at, `${cwd}/.pi/muster/forks`], { cwd, timeoutMs: 30_000 })).trim();
+    }
+    const now = iso(env);
+    let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
+      profile: remoteProfile, owner: env.sessionId, sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
+      brief: params.brief ? mapPath(params.brief, machine) : existing?.brief ?? null,
+      state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
+      restore: null, createdAt: existing?.createdAt ?? now, updatedAt: now };
+    const launchProfile = extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row);
+    const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension });
+    const agentEnvironment = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, MUSTER_COMMS: "intercom", MUSTER_REMOTE_ROW: JSON.stringify(row) };
+    yield* mutate(dir, current => Effect.succeed([withRow(current, row), row] as const));
+    const launch = Effect.gen(function* () {
+      const spaces = yield* workspaceList();
+      const matches = spaces.filter(space => space.label === project.label);
+      if (matches.length > 1) return yield* input(`machine ${nameOfMachine}: multiple workspaces labelled ${project.label}; resolve ambiguity first`);
+      const spaceId = matches[0]?.workspace_id ?? (yield* workspaceCreate(project.label, remoteSource)).workspace.workspace_id;
+      const laneRows = project.agents.filter(other => other.machine === nameOfMachine && other.lane === lane.slug && other.state !== "closed" && other.pane);
+      const sibling = laneRows[0]?.pane ? yield* locatePane(laneRows[0].pane) : null;
+      if (sibling && laneRows.length >= MAX_WORKERS_PER_TAB) return yield* input(`machine ${nameOfMachine}: lane tab is full`);
+      const pane = sibling ? yield* paneSplit(sibling.pane_id, "right", cwd) : (yield* tabCreate(spaceId, cwd, lane.label)).root_pane;
+      const binding: PaneBinding = { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true };
+      row = yield* patchRow(dir, name, row.state, [], { pane: binding });
+      // Shell execution is required for the owner's argv prefix; Herdr agent.start always executes pi directly.
+      yield* paneRun(binding.paneId, `${shellPrelude(cwd, agentEnvironment)} && exec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
+      const wait = yield* waitForSession(binding.paneId, null);
+      if (wait.state !== "ready") return yield* input(`machine ${nameOfMachine}: Pi session not ready in ${binding.paneId}; inspect it before retrying (${wait.state})`);
+      const requestedId = row.sessionId;
+      const actual = sessionIdFromFile(wait.sessionFile) ?? requestedId;
+      const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: launchProfile, musterExtension: machine.musterExtension });
+      const restore = { cwd, argv: [...wrap, "pi", ...restoreArgv], env: agentEnvironment };
+      row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore });
+      yield* paneRename(binding.paneId, label);
+      const prompt = workPrompt(row, params.prompt);
+      const proof = prompt ? yield* promptWithProof(binding.paneId, prompt) : null;
+      if (proof?.state === "unproven" && proof.modelError) {
+        yield* patchRow(dir, name, row.state, [{ type: "FAIL" }], { delivery: "unproven", events: [...(row.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: proof.modelError }] });
+        return yield* input(`machine ${nameOfMachine}: model error: ${proof.modelError}`);
+      }
+      if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven" });
+      return { row, argv, readiness: "proven", proof, sessionIdMatched: actual === requestedId, notes: resolved.notes };
+    });
+    return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
+  }));
+}));
+
+const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const machine = yield* machineConfig(row.machine);
+  if (params.force && !project.packets.some(packet => packet.agent === row.name && packet.verification)) return yield* input("force close requires a verified packet");
+  const notes: string[] = [];
+  yield* onRemote(row.machine, machine, Effect.gen(function* () {
+    if (row.state !== "closed") {
+      yield* stepAgent(row.name, row.state, { type: "CLOSE" });
+      const holder = project.agents.find(other => other.machine === row.machine && other.name !== row.name && other.state !== "closed" && row.pane && sharesPane(row.pane, other.pane));
+      if (row.pane && !holder) {
+        const pane = yield* locatePane(row.pane);
+        if (pane) {
+          const tail = yield* paneRead(pane.pane_id, CLOSE_READ_LINES);
+          const saved = join(closedDir(dir), `${row.name}-${env.now().getTime()}.txt`);
+          mkdirSync(dirname(saved), { recursive: true }); writeFileSync(saved, tail);
+          notes.push(`pane log saved to ${saved}`);
+          // Do not broadcast a remote pane id onto the local Bellwether bus.
+          if (row.pane.openedByMuster) yield* paneClose(pane.pane_id);
+          else notes.push("left adopted pane open");
+        }
+      }
+    }
+    if (row.clone) {
+      const proc = yield* Proc;
+      const present = yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 });
+      if (present.code === 0) notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
+    }
+  }));
+  const closed = yield* mutate(dir, current => Effect.gen(function* () {
+    const latest = yield* findRow(current, row.name);
+    yield* requireOwner(latest, env.sessionId, params.takeover);
+    if (latest.sessionId !== row.sessionId || latest.pane?.terminalId !== row.pane?.terminalId) return yield* input("remote row changed during close; re-read it");
+    const next = { ...latest, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
+    return [withRow(current, next), next] as const;
+  }));
+  return { row: closed, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: null, notes };
+});
+
+const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const comms = yield* Comms;
+  const row = yield* decodeJsonWith(decodeAgentRow, process.env.MUSTER_REMOTE_ROW ?? "null");
+  if (row.machine !== process.env.MUSTER_MACHINE || row.name !== params.agent || row.cwd !== params.cwd) return yield* input("remote report identity differs from the launch row");
+  const artifact = params.artifact ? yield* requireAbsolute("artifact", params.artifact) : null;
+  const id = params.commit ? (yield* git(params.cwd, "rev-parse", "--verify", `${params.commit}^{commit}`)).trim() : yield* decodeWith(() => sha256File(artifact!), null);
+  const root = join(params.cwd, ".pi/muster/packets", id);
+  const report = join(root, "report.svx");
+  const packet: Packet = { id, kind: params.commit ? "commit" : "artifact", artifact, lane: row.lane, agent: row.name, report, checks: [...params.checks], state: "reported", verification: null, landedAs: null, gate: null, supersedes: null, reportedAt: iso(env), updatedAt: iso(env) };
+  const sidecar = yield* decodeWith(decodeRemotePacket, { project: process.env.MUSTER_PROJECT_SLUG, machine: row.machine, packet, reportText: reportMarkdown(row, packet, params.summary, params.body) });
+  mkdirSync(root, { recursive: true });
+  writeFileSync(report, sidecar.reportText);
+  // Publishing the sidecar last makes an interrupted report invisible to ingestion.
+  const temporary = join(root, `packet-${env.createId()}.tmp`);
+  writeFileSync(temporary, JSON.stringify(sidecar));
+  renameSync(temporary, join(root, "packet.json"));
+  const message = `Packet ${id.slice(0, 12)} from ${row.intercomAddress}: ${params.summary.trim().split("\n")[0]}. Remote sidecar: ${root}/packet.json. Run project_status to ingest it.`;
+  const notice = yield* deliverOwnerItem({ owner: params.owner, home: env.home, session: env.sessionId, project: sidecar.project, item: { author: env.sessionId, lane: row.lane, kind: "action", title: `Packet ${id.slice(0,12)} from ${row.name}`, refs: [report], body: message }, send: comms.send, message });
+  return { packet, delivery: notice.delivery, notice };
+});
+
+export const ingestRemotePackets = (dir: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const project = yield* load(dir);
+  const notes: string[] = [];
+  const failedMachines = new Set<string>();
+  for (const row of project.agents.filter(row => row.machine !== "local" && row.state !== "closed")) {
+    const skipped = (reason: string) => notes.push(`machine ${row.machine}: ingest skipped for ${row.name}: ${reason}`);
+    if (failedMachines.has(row.machine)) { skipped("machine unavailable earlier in this pass"); continue; }
+    const fetched = yield* Effect.gen(function* () {
+      const machine = yield* machineConfig(row.machine);
+      const output = yield* remoteNode(row.machine, machine, `import {existsSync,readdirSync,readFileSync} from 'node:fs'; const root=process.argv[1]; const files=existsSync(root)?readdirSync(root).filter(n=>/^[a-f0-9]{40,64}$/.test(n)).slice(0,100):[]; console.log(JSON.stringify(files.flatMap(id=>{const p=root+'/'+id+'/packet.json';if(!existsSync(p))return [];try{return [{id,value:JSON.parse(readFileSync(p,'utf8')),error:null}]}catch(error){return [{id,value:null,error:String(error)}]}})));`, [join(row.cwd, ".pi/muster/packets")]);
+      const values = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ id: Schema.String, value: Schema.Unknown, error: Schema.NullOr(Schema.String) }))), output);
+      return { machine, values };
+    }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(row.machine); skipped(error.message); return null; })));
+    if (!fetched) continue;
+    const { machine, values } = fetched;
+    for (const entry of values) {
+      if (failedMachines.has(row.machine)) break;
+      if (entry.error) { skipped(`sidecar ${entry.id}: ${entry.error}`); continue; }
+      yield* Effect.gen(function* () {
+        const sidecar = yield* decodeWith(decodeRemotePacket, entry.value);
+        const packet = sidecar.packet;
+        if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
+        const report = join(reportsDir(dir), row.lane, `${row.name}-${packet.id.slice(0,12)}.svx`);
+        yield* mutate(dir, current => Effect.gen(function* () {
+          if (current.packets.some(prior => prior.id === packet.id)) return [current, false] as const;
+          const latest = yield* findRow(current, row.name);
+          const earlier = [...current.packets].reverse().find(prior => prior.agent === latest.name && !TERMINAL_PACKET_STATES.includes(prior.state));
+          if (earlier) {
+            if (packet.kind !== "commit" || earlier.kind !== "commit") return yield* input(`machine ${row.machine}: earlier packet needs an outcome first`);
+            const runner = yield* Proc;
+            const ancestry = yield* sshProc(row.machine, machine, runner, env.home).run("git", ["merge-base", "--is-ancestor", earlier.id, packet.id], { cwd: row.cwd, timeoutMs: 15_000 });
+            if (ancestry.code !== 0) return yield* input(`machine ${row.machine}: non-ancestor follow-up requires an outcome first`);
+          }
+          const reportingAgain = ["reported", "verified", "landed"].includes(latest.state);
+          const live = reportingAgain && latest.pane ? yield* onRemote(row.machine, machine, locatePane(latest.pane)) : null;
+          const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!live?.agent });
+          yield* Effect.try({ try: () => { mkdirSync(dirname(report), { recursive: true }); writeFileSync(report, sidecar.reportText); }, catch: error => new StoreError({ path: report, message: String(error) }) });
+          const ingested: Packet = { ...packet, report, verification: null, gate: null, landedAs: null, supersedes: earlier?.id ?? null };
+          return [withPacket(withRow(current, { ...latest, state, updatedAt: iso(env) }), ingested), true] as const;
+        }));
+      }).pipe(Effect.catch(error => Effect.sync(() => {
+        skipped(`sidecar ${entry.id}: ${error.message}`);
+        if (error._tag === "ProcError" && (error.code === null || error.code === 255)) failedMachines.add(row.machine);
+      })));
+    }
+  }
+  return { notes, failedMachines };
+});
+
+const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[]) => Effect.gen(function* () {
+  const result = new Map<string, number | null>();
+  const names = [...new Set(project.agents.filter(row => row.machine !== "local" && row.state !== "closed").map(row => row.machine))];
+  for (const name of names) {
+    if (failedMachines.has(name)) continue;
+    yield* Effect.gen(function* () {
+      const machine = yield* machineConfig(name);
+      const files = project.agents.filter(row => row.machine === name).slice(0, 100).map(row => row.sessionFile).filter((file): file is string => file !== null);
+      const raw = yield* remoteNode(name, machine, `import {statSync} from 'node:fs';console.log(JSON.stringify(process.argv.slice(1).map(p=>{try{return [p,statSync(p).mtimeMs]}catch{return [p,null]}})));`, files);
+      const entries = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.String, Schema.NullOr(Schema.Number)]))), raw);
+      for (const [file, mtime] of entries) result.set(`${name}:${file}`, mtime);
+    }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(name); notes.push(`machine ${name}: session stats skipped: ${error.message}`); })));
+  }
+  return result;
+});
+
+const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: boolean, mtimes: Map<string, number | null>) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const machine = yield* machineConfig(row.machine);
+  return yield* onRemote(row.machine, machine, Effect.gen(function* () {
+    const pane = row.pane ? yield* locatePane(row.pane) : null;
+    let current = row;
+    let action: string | null = null;
+    const mine = row.owner === env.sessionId;
+    if (!pane && row.pane && PROCESS_STATES.includes(row.state)) {
+      current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: null }); action = "remote pane gone: interrupted";
+    } else if (pane && !pane.agent && PROCESS_STATES.includes(row.state)) {
+      current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }]); action = "remote agent exited: interrupted";
+    } else if (pane && row.pane) {
+      const file = pane.agent_session?.kind === "path" ? pane.agent_session.value : null;
+      const matches = file !== null && (file === row.sessionFile || file.endsWith(`_${row.sessionId}.jsonl`));
+      const failedModel = row.state === "failed" && row.events?.some(event => event.type === "MODEL_ERROR");
+      const adopt = !failedModel && matches && ["launching", "failed"].includes(row.state);
+      if (adopt && act && mine) current = yield* patchRow(dir, row.name, row.state, [{ type: "ADOPT" }], { sessionFile: file });
+      if (pane.pane_id !== row.pane.paneId || (file && file !== current.sessionFile && !["launching", "failed"].includes(current.state))) current = yield* patchRow(dir, row.name, current.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id }, ...(file ? { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId } : {}) });
+    }
+    const mtime = current.sessionFile ? mtimes.get(`${row.machine}:${current.sessionFile}`) ?? null : null;
+    const silent = mtime === null ? null : Math.max(0, env.now().getTime() - mtime);
+    if (pane && silent !== null && ["running", "silent", "nudged", "restarted"].includes(current.state)) {
+      const decision = silenceDecision(current.state, silent, silenceLimits(project.policy));
+      if (decision.action !== "none") {
+        action = `${decision.action} due on ${row.machine}`;
+        if (act && mine) {
+          yield* paneSendKeys(pane.pane_id, ["Escape"]);
+          if (decision.action === "nudge") yield* paneRun(pane.pane_id, nudgeNote(silent));
+          else {
+            const tail = yield* paneRead(pane.pane_id, CLOSE_READ_LINES);
+            const saved = join(closedDir(dir), `${row.name}-restart-${env.now().getTime()}.txt`);
+            mkdirSync(dirname(saved), { recursive: true }); writeFileSync(saved, tail);
+            yield* paneRun(pane.pane_id, "/new");
+            const wait = yield* waitForSession(pane.pane_id, current.sessionFile);
+            if (wait.state !== "ready") return yield* input(`machine ${row.machine}: restart submitted but no fresh session evidence`);
+            current = yield* patchRow(dir, row.name, current.state, decision.events, { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? row.sessionId, restarts: current.restarts + 1 });
+            const prompt = workPrompt(current, undefined);
+            if (prompt) yield* promptWithProof(pane.pane_id, prompt);
+          }
+          if (decision.action === "nudge") current = yield* patchRow(dir, row.name, current.state, decision.events);
+          action = `${decision.action} on ${row.machine}`;
+        }
+      }
+    }
+    return { name: row.name, role: row.role, lane: row.lane, state: current.state, pane: pane?.pane_id ?? null, silentMin: silent === null ? null : Math.floor(silent/60_000), cache: null, cost: null, intercom: "unknown" as const, sessionId: row.intercomAddress ?? `${row.name}@${machine.herdr}`, action } satisfies AgentLine;
+  }));
+});
+
+const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const runner = yield* Proc;
+  const machine = yield* machineConfig(row.machine);
+  const remote = sshProc(row.machine, machine, runner, env.home);
+  const checks: CheckOutcome[] = [{ name: "report exists", outcome: existsSync(packet.report) && statSync(packet.report).size > 0 ? "pass" : "fail", detail: packet.report }];
+  const probe = (name: string, args: string[]) => remote.run("git", args, { cwd: row.cwd, timeoutMs: 30_000 }).pipe(Effect.map(result => ({ name, outcome: result.code === 0 ? "pass" as const : "fail" as const, detail: (result.stdout + result.stderr).trim() })));
+  if (packet.kind === "artifact") {
+    const raw = yield* remoteNode(row.machine, machine, `import {readFileSync} from 'node:fs';import {createHash} from 'node:crypto';console.log(createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));`, [packet.artifact ?? ""]);
+    checks.push({ name: "artifact hash", outcome: raw.trim() === packet.id ? "pass" : "fail", detail: `sha256 is ${raw.trim()}` });
+    return checks;
+  }
+  checks.push(yield* probe("commit exists", ["cat-file", "-e", `${packet.id}^{commit}`]));
+  checks.push(yield* probe("on lane branch", ["merge-base", "--is-ancestor", packet.id, row.clone?.branch ?? "HEAD"]));
+  if (row.clone?.base) checks.push(yield* probe("clone base", ["merge-base", "--is-ancestor", row.clone.base.sha, packet.id]));
+  const roots = yield* remote.run("git", ["rev-list", "--max-parents=0", packet.id], { cwd: row.cwd, timeoutMs: 30_000 });
+  const sourceRoots = (yield* git(sourceOf(project, lane, row), "rev-list", "--max-parents=0", "HEAD")).split("\n");
+  checks.push({ name: "expected repo", outcome: roots.code === 0 && roots.stdout.split("\n").filter(Boolean).some(root => sourceRoots.includes(root)) ? "pass" : "fail" });
+  const dirty = yield* remote.run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: row.cwd, timeoutMs: 30_000 });
+  const generated = [...(lane?.generated ?? []), ...DEFAULT_GENERATED];
+  const paths = parsePorcelainZ(dirty.stdout).filter(path => !isGenerated(path, generated));
+  // Compare hashes, not file contents; private files never cross the transport.
+  const hashes = paths.length ? yield* remoteNode(row.machine, machine, `import {readFileSync} from 'node:fs';import {createHash} from 'node:crypto';console.log(JSON.stringify(process.argv.slice(2).map(p=>{try{return createHash('sha256').update(readFileSync(process.argv[1]+'/'+p)).digest('hex')}catch{return null}})));`, [row.cwd, ...paths]) : "[]";
+  const remoteHashes = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.NullOr(Schema.String))), hashes);
+  const differing = paths.filter((path, i) => {
+    const local = join(sourceOf(project, lane, row), path);
+    return remoteHashes[i] === null ? existsSync(local) : !existsSync(local) || statSync(local).isDirectory() || sha256File(local) !== remoteHashes[i];
+  });
+  checks.push({ name: "dirty paths", outcome: dirty.code === 0 && differing.length === 0 ? "pass" : "fail", detail: differing.join(", ") });
+  return checks;
+});
 
 // ---------- small pure helpers ----------
 
@@ -85,7 +417,7 @@ export function findLane(project: Project, slug: string) {
   return lane ? Effect.succeed(lane) : Effect.fail(new NotFound({ kind: "lane", id: slug, message: `no lane named ${slug}` }));
 }
 
-export function findPacket(project: Project, id: string) {
+export function findPacket(project: Project, id: string): Effect.Effect<Packet, NotFound | InputError> {
   const matches = project.packets.filter((packet) => packet.id === id || (id.length >= 7 && packet.id.startsWith(id)));
   if (matches.length === 1) return Effect.succeed(matches[0] as Packet);
   return Effect.fail(
@@ -157,6 +489,8 @@ const guardDurable = (project: Pick<Project, "ephemeral">, label: string, path: 
       )
     : Effect.void;
 
+const decodeJsonWith = <A>(decode: (value: unknown) => A, raw: string) => Effect.try({ try: () => decode(JSON.parse(raw)), catch: error => input(`invalid remote JSON: ${String(error)}`) });
+
 const decodeWith = <A>(decode: (value: unknown) => A, value: unknown) =>
   Effect.try({ try: () => decode(value), catch: (error) => input(String(error instanceof Error ? error.message : error)) });
 
@@ -226,7 +560,7 @@ export function brainSummary(project: Project): string {
     "| --- | --- | --- | --- | --- |",
     ...project.agents.map(
       (agent) =>
-        `| ${agent.name} | ${agent.role} | ${agent.lane} | ${agent.state} | ${agent.restore ? `\`cd ${esc(agent.restore.cwd)} && pi ${esc(agent.restore.argv.join(" "))}\`` : "-"} |`,
+        `| ${agent.name} | ${agent.role} | ${agent.lane} | ${agent.state} | ${agent.restore ? `\`cd ${esc(agent.restore.cwd)} && ${agent.machine === "local" ? "pi " : ""}${esc(agent.restore.argv.join(" "))}\`` : "-"} |`,
     ),
     "",
   ];
@@ -754,6 +1088,7 @@ export const laneClose = (dir: string, slug: string) =>
 
 export interface AgentLaunchInput {
   readonly action: LaunchKind | "adopt";
+  readonly machine?: string | undefined;
   readonly side?: boolean | undefined;
   readonly name: string;
   readonly role?: Role | undefined;
@@ -881,7 +1216,7 @@ const sharesPane = (binding: PaneBinding, other: PaneBinding | null) =>
 const blocksPane = (row: AgentRow) => !["failed", "interrupted", "closed"].includes(row.state);
 
 const guardPaneBinding = (project: Project, row: AgentRow, binding: PaneBinding) => {
-  const holder = project.agents.find((other) => other.name !== row.name && blocksPane(other) && sharesPane(binding, other.pane));
+  const holder = project.agents.find((other) => other.machine === row.machine && other.name !== row.name && blocksPane(other) && sharesPane(binding, other.pane));
   return holder ? input(`pane ${binding.paneId} already bound to ${holder.name} (${holder.state}); choose another pane`) : Effect.void;
 };
 
@@ -1002,6 +1337,10 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const name = yield* decodeWith(decodeAgentName, params.name);
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "agent_launch");
+    const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
+    const machine = params.machine ?? previous?.machine ?? "local";
+    if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
+    if (machine !== "local") return yield* remoteLaunch(dir, project, params, machine);
     if (params.action === "adopt") return yield* adoptSideDesk(dir, project, params);
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
     const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
@@ -1085,6 +1424,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       skillNotes.push(...resolved.notes);
       const now = iso(env);
       row = {
+        machine: "local",
         name,
         role,
         side: side ? { parent: side.name } : null,
@@ -1138,8 +1478,8 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     // Claim and release stale bindings together, before sending anything to the shell.
     const binding = yield* mutate(dir, (current) => Effect.gen(function* () {
       yield* guardPaneBinding(current, row, picked);
-      const stale = current.agents.filter((other) => other.name !== row.name && sharesPane(picked, other.pane));
-      const binding = { ...picked, openedByMuster: picked.openedByMuster || current.agents.some((other) => sharesPane(picked, other.pane) && other.pane?.openedByMuster) };
+      const stale = current.agents.filter((other) => other.machine === row.machine && other.name !== row.name && sharesPane(picked, other.pane));
+      const binding = { ...picked, openedByMuster: picked.openedByMuster || current.agents.some((other) => other.machine === row.machine && sharesPane(picked, other.pane) && other.pane?.openedByMuster) };
       const agents = current.agents.map((other) => other.name === row.name
         ? { ...other, pane: binding, updatedAt: iso(env) }
         : stale.includes(other) ? { ...other, pane: null, updatedAt: iso(env) } : other);
@@ -1265,6 +1605,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     yield* guardSideDesk(project, env.sessionId, "agent_close");
     const row = yield* findRow(project, params.name);
     yield* requireOwner(row, env.sessionId, params.takeover);
+    if (row.machine !== "local") return yield* remoteClose(dir, project, row, params);
     const verified = project.packets.some((packet) => packet.agent === row.name && packet.verification !== null);
     if (params.force && !verified) {
       return yield* new GuardFailed({ guard: "force-after-verify", message: `--force removes unharvested work; ${row.name} has no packet that passed packet_verify` });
@@ -1274,7 +1615,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       if (row.pane) {
         const binding = row.pane;
-        const holder = project.agents.find((other) => other.name !== row.name && other.state !== "closed" && sharesPane(binding, other.pane));
+        const holder = project.agents.find((other) => other.machine === row.machine && other.name !== row.name && other.state !== "closed" && sharesPane(binding, other.pane));
         const located = holder ? null : yield* locatePane(row.pane);
         if (holder) {
           notes.push(`pane ${row.pane.paneId} kept: ${holder.name} is bound to it`);
@@ -1384,6 +1725,7 @@ export const packetReport = (params: PacketReportInput) =>
     const intercom = yield* Comms;
     const proc = yield* Proc;
     if (!params.commit === !params.artifact) return yield* input("packet_report needs exactly one of commit or artifact");
+    if (process.env.MUSTER_MACHINE && process.env.MUSTER_MACHINE !== "local") return yield* remoteReport(params);
     const project = yield* load(params.dir);
     const row = yield* findRow(project, params.agent);
     let id: string;
@@ -1458,11 +1800,17 @@ export const packetReport = (params: PacketReportInput) =>
 export const packetVerify = (dir: string, id: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
-    const project = yield* load(dir);
-    const packet = yield* findPacket(project, id);
+    let project = yield* load(dir);
+    let ingestNotes: string[] = [];
+    if (!project.packets.some(packet => packet.id === id || (id.length >= 7 && packet.id.startsWith(id)))) {
+      ingestNotes = (yield* ingestRemotePackets(dir)).notes;
+      project = yield* load(dir);
+    }
+    const packet = yield* findPacket(project, id).pipe(Effect.mapError(error => error._tag === "NotFound" && ingestNotes.length
+      ? new NotFound({ ...error, message: `${error.message}; ${ingestNotes.join("; ")}` }) : error));
     const row = yield* findRow(project, packet.agent);
     const lane = project.lanes.find((candidate) => candidate.slug === packet.lane);
-    const checks = yield* verifyPacket(project, lane, row, packet);
+    const checks = row.machine === "local" ? yield* verifyPacket(project, lane, row, packet) : yield* verifyRemotePacket(project, lane, row, packet);
     const failed = failures(checks);
     if (failed.length > 0) {
       const artifactChanged = packet.kind === "artifact" && failed.some(check => check.name === "artifact hash" && check.detail?.startsWith("sha256 is "));
@@ -1588,7 +1936,10 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
       if (/^[RC]|^.[RC]/.test(dirtyFields[i] ?? "")) dirty.push(dirtyFields[++i] ?? "");
     }
     const branch = row.clone.branch;
-    if (existsSync(row.cwd)) yield* git(source, "fetch", "-q", row.cwd, `${branch}:${branch}`);
+    if (row.machine !== "local") {
+      const machine = yield* machineConfig(row.machine);
+      yield* must("git", ["fetch", "-q", cloneUrl(machine, row.cwd), `${branch}:${branch}`], { cwd: source, timeoutMs: 120_000, env: { GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2" } }).pipe(Effect.mapError(error => new ProcError({ ...error, message: `machine ${row.machine}: harvest failed: ${error.message}` })));
+    } else if (existsSync(row.cwd)) yield* git(source, "fetch", "-q", row.cwd, `${branch}:${branch}`);
     const onBranch = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, branch], { cwd: source })).code === 0;
     if (!onBranch) return yield* new GuardFailed({ guard: "harvest", message: `${packet.id.slice(0, 12)} is not on ${branch} in ${source}` });
     const merged = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, "HEAD"], { cwd: source })).code === 0;
@@ -1828,6 +2179,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const env = yield* MusterEnv;
     const intercom = yield* Comms;
     const act = params.act !== false;
+    const ingestion = yield* ingestRemotePackets(dir);
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.gen(function* () {
@@ -1846,8 +2198,18 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const lines: AgentLine[] = [];
     let stuck = 0;
 
+    const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     for (const row of project.agents) {
       if (row.state === "closed" || row.state === "planned") continue;
+      if (row.machine !== "local") {
+        const unavailable: AgentLine = { name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action: `machine ${row.machine}: remote status unavailable; row unchanged` };
+        lines.push(ingestion.failedMachines.has(row.machine) ? unavailable : yield* remoteStatusRow(dir, project, row, act, remoteTimes).pipe(Effect.catch(error => Effect.sync(() => {
+          ingestion.failedMachines.add(row.machine);
+          ingestion.notes.push(`machine ${row.machine}: status skipped for ${row.name}: ${error.message}`);
+          return unavailable;
+        }))));
+        continue;
+      }
       let pane: PaneInfo | undefined;
       if (row.pane) {
         const direct = byId.get(row.pane.paneId);
@@ -2060,7 +2422,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
-    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime(), fleet.line), notes: [tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    return { project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes].join("\n"), notes: [...ingestion.notes, tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));

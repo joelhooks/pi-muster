@@ -353,6 +353,7 @@ export default function muster(host: ExtensionAPI) {
     parameters: Type.Object({
       project: ProjectParam,
       action: StringEnum(["launch", "fork", "restore", "adopt"] as const),
+      machine: Type.Optional(Type.String({ description: "Saved Muster machine; default local. Fork and restore reuse the row machine." })),
       name: Type.String({ description: "Catalog and Herdr agent name, [a-z][a-z0-9_-]{0,31}" }),
       role: Type.Optional(StringEnum(["desk", "hawk", "boss", "worker", "judge"] as const)),
       lane: Type.Optional(Type.String()),
@@ -418,7 +419,7 @@ export default function muster(host: ExtensionAPI) {
           `${result.row.name} closed.`,
           ...result.notes,
           result.cloneError ? `clone kept: ${result.cloneError}` : "",
-          `restore: cd ${result.restore.cwd} && pi ${result.restore.argv.join(" ")}`,
+          `restore (${result.row.machine}): cd ${result.restore.cwd} && ${result.row.machine === "local" ? "pi " : ""}${result.restore.argv.join(" ")}`,
         ]
           .filter(Boolean)
           .join("\n"),

@@ -68,6 +68,9 @@ export interface EnvShape {
   /** Optional test seam; absent uses the live OS sample at wait time. */
   readonly startupLoad?: () => { readonly load: number; readonly cpus: number };
   readonly emitPaneClose: EmitPaneClose;
+  /** Injection seams; live config and forwards are resolved only by tools. */
+  readonly machines?: unknown;
+  readonly remoteHerdr?: (name: string, machine: import("./domain.ts").MachineConfig) => Effect.Effect<HerdrClient, ProcError>;
 }
 
 export class MusterEnv extends Context.Service<MusterEnv, EnvShape>()("muster/Env") {}

@@ -140,7 +140,24 @@ export const RestoreCommand = Schema.Struct({
 });
 export type RestoreCommand = typeof RestoreCommand.Type;
 
+const RemotePath = Schema.String.check(Schema.isPattern(/^\/[^\x00-\x1f\x7f]*$/));
+export const MachineConfig = Schema.Struct({
+  herdr: Schema.String,
+  maxPanes: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+  ssh: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_][A-Za-z0-9_.@-]*$/)),
+  paths: Schema.Record(RemotePath, RemotePath),
+  musterExtension: RemotePath,
+  workerWorktree: RemotePath,
+  env: Schema.Record(Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/)), Schema.String),
+  wrap: Schema.Array(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  socket: RemotePath.pipe(Schema.withDecodingDefaultKey(Effect.succeed("/home/joel/.config/herdr/herdr.sock"))),
+});
+export type MachineConfig = typeof MachineConfig.Type;
+export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
+
 export const AgentRow = Schema.Struct({
+  machine: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("local"))),
+  intercomAddress: Schema.optionalKey(Schema.String),
   events: Schema.optionalKey(Schema.Array(Schema.Struct({ type: Schema.String, at: Iso, detail: Schema.String }))),
   name: AgentName,
   role: Role,
@@ -221,6 +238,9 @@ export const Packet = Schema.Struct({
   updatedAt: Iso,
 });
 export type Packet = typeof Packet.Type;
+export const RemotePacket = Schema.Struct({ project: Slug, machine: Schema.String, packet: Packet, reportText: Schema.String });
+export const decodeRemotePacket = Schema.decodeUnknownSync(RemotePacket);
+export const decodeAgentRow = Schema.decodeUnknownSync(AgentRow);
 
 export const Lane = Schema.Struct({
   slug: Slug,

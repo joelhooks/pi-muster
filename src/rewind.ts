@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
+import { machineConfig, onRemote, remoteNode } from "./remote.ts";
 import { GuardFailed, InputError } from "./errors.ts";
 import { agentGet, call, paneGet, paneRun, paneSendKeys } from "./herdr.ts";
 import { MusterEnv } from "./runtime.ts";
@@ -37,6 +38,38 @@ export function registerWorkerNavigation(pi: ExtensionAPI, worker: boolean) {
   });
 }
 
+
+const remoteRewind = (row: import("./domain.ts").AgentRow, params: { to: string; note?: string | undefined }) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const machine = yield* machineConfig(row.machine);
+  const imported = `import {openSessionTree,resolveSessionTarget,navigationLeaf} from ${JSON.stringify(`${machine.musterExtension}/src/session-tree.ts`)}; const tree=openSessionTree(process.argv[1]);`;
+  const raw = yield* remoteNode(row.machine, machine, `${imported} const entryId=resolveSessionTarget(tree,process.argv[2]);console.log(JSON.stringify({entryId,leaf:tree.getLeafId(),expected:navigationLeaf(tree,entryId),ids:tree.getEntries().map(e=>e.id)}));`, [row.sessionFile!, params.to]);
+  const snapshot = yield* sessionIO(() => Schema.decodeUnknownSync(Schema.Struct({ entryId: Schema.String, leaf: Schema.NullOr(Schema.String), expected: Schema.NullOr(Schema.String), ids: Schema.Array(Schema.String) }))(JSON.parse(raw)));
+  if (!/^[A-Za-z0-9_.-]+$/.test(snapshot.entryId)) return yield* new InputError({ message: "remote rewind entry id is unsafe" });
+  if (snapshot.leaf === snapshot.entryId) return yield* new GuardFailed({ guard: "rewind-target", message: "remote session is already at target; nothing submitted" });
+  const binding = row.pane!;
+  yield* onRemote(row.machine, machine, Effect.gen(function* () {
+    const checkBinding = () => paneGet(binding.paneId).pipe(Effect.flatMap(pane => pane && pane.terminal_id === binding.terminalId && pane.agent_session?.value === row.sessionFile ? Effect.void : Effect.fail(new GuardFailed({ guard: "pane-binding", message: `${row.name}: remote terminal or session changed; nothing submitted` }))));
+    yield* checkBinding();
+    const state = yield* agentGet(binding.paneId);
+    if (state.agent_status === "working") yield* paneSendKeys(binding.paneId, ["Escape"]);
+    if (state.agent_status !== "idle") {
+      const wait = yield* call({ method: "agent.wait", params: { target: binding.paneId, until: ["idle"], timeout_ms: 30_000 }, timeoutMs: 35_000 });
+      if (wait.agent.agent_status !== "idle") return yield* new GuardFailed({ guard: "rewind-idle", message: "remote session did not become idle; nothing submitted" });
+    }
+    yield* checkBinding();
+    yield* paneRun(binding.paneId, `/muster-rewind ${snapshot.entryId}${params.note ? ` ${params.note}` : ""}`);
+  }));
+  // Each poll returns only entry ids. No transcript text crosses SSH or enters a local file.
+  const deadline = Date.now() + 60_000;
+  for (let attempt = 0; attempt < 30 && Date.now() < deadline; attempt++) {
+    const evidence = (yield* remoteNode(row.machine, machine, `${imported} const old=new Set(JSON.parse(process.argv[2]));const expected=process.argv[3]||null;const branch=tree.getBranch();const found=branch.find(e=>!old.has(e.id)&&e.type==='branch_summary'&&e.parentId===expected);const leaf=tree.getLeafEntry();const label=leaf&&!old.has(leaf.id)&&leaf.type==='label'&&leaf.label==='rewound'&&leaf.parentId===expected;console.log(found?.id||(label?leaf.id:tree.getLeafId()===expected&&process.argv[4]!==expected?expected:'')||'');`, [row.sessionFile!, JSON.stringify(snapshot.ids), snapshot.expected ?? "", snapshot.leaf ?? ""])).trim();
+    if (evidence) return { name: row.name, entryId: snapshot.entryId, note: params.note, evidence };
+    yield* env.sleep(500);
+  }
+  return yield* new GuardFailed({ guard: "rewind-proof", message: `machine ${row.machine}: submitted once but no fresh branch evidence; inspect the pane before sending anything else` });
+});
+
 const sessionIO = <A>(run: () => A) => Effect.try({
   try: run, catch: error => new InputError({ message: String(error instanceof Error ? error.message : error) }),
 });
@@ -51,10 +84,11 @@ export const agentRewind = (dir: string, params: { name: string; to: string; not
     if (!row) return yield* new InputError({ message: `no row ${params.name}` });
     if (row.owner !== env.sessionId) return yield* new GuardFailed({ guard: "owner", message: `${row.name} belongs to owner session ${row.owner}; only its owner can rewind it` });
     if (!row.pane || !row.sessionFile) return yield* new InputError({ message: `${row.name} needs a live pane and session file` });
-    if (row.pane.paneId === env.paneId) return yield* new InputError({ message: "cannot rewind the calling pane" });
+    if (row.machine === "local" && row.pane.paneId === env.paneId) return yield* new InputError({ message: "cannot rewind the calling pane" });
     if (params.note?.includes("\n") || params.note?.includes("\r") || /[\x00-\x1f\x7f]/.test(params.note ?? "")) {
       return yield* new InputError({ message: "rewind note must be one line without control characters" });
     }
+    if (row.machine !== "local") return yield* remoteRewind(row, params);
     const pane = yield* paneGet(row.pane.paneId);
     if (!pane || pane.terminal_id !== row.pane.terminalId || pane.agent_session?.value !== row.sessionFile) {
       return yield* new GuardFailed({ guard: "pane-binding", message: `${row.name}'s pane no longer matches its terminal and session file` });
