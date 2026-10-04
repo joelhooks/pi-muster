@@ -71,7 +71,7 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
     if (catalog.slug !== address.project) return yield* Effect.fail(new CommsError(`unknown project alias: ${address.project}`));
     const row = catalog.agents.find(row => row.name === address.row);
     if (!row) return yield* Effect.fail(new CommsError(`unknown agent alias: ${address.project}/${address.row}`));
-    return row.sessionId;
+    return row.intercomAddress ?? row.sessionId;
   });
   const adapter = Effect.gen(function* () {
     const env = options.adapterEnv();

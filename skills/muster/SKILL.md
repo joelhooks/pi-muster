@@ -100,4 +100,6 @@ Messages must be plain sentences with spaces between words; put code, paths and 
 - Cache reads are most of the cost, and the fixed prefix is about a quarter of them. Give workers only the skills their packet needs.
 - The owner's tokens are the scarce resource. Owners verify, land, record, and dispatch; browsing, suites, big diffs, and diagnosis are worker items.
 
+For worker panes on a saved machine, read [remote lanes](references/remote-lanes.md) for configuration, prerequisites and recovery. The desk and landings stay on the owner machine.
+
 Read [gotchas](references/gotchas.md) when a lane stalls, a bridge lane misbehaves, or a restore surprises you.
