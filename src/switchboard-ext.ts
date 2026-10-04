@@ -11,7 +11,7 @@ import { Type } from "typebox";
 
 import { paneGet, reportTokens } from "./herdr.ts";
 import { deskAnswer, focusDesk, inboxText, loadSystem, loadSystemWith, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
-import { FlameAnimation, flameEnabled } from "./switchboard-flame.ts";
+import { ActivityClock, activityEnabled } from "./switchboard-flame.ts";
 import { OPEN_HINT, SwitchboardOverlay, SwitchboardState, renderWidget } from "./switchboard-view.ts";
 import type { Intent } from "./switchboard-view.ts";
 import { QueueReader, fleetGroups, inbox, itemRef, latestPost, queueDir, queueEvents, recentPosts, switchboardTokens } from "./switchboard.ts";
@@ -62,7 +62,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   let tui: { requestRender(): void } | undefined;
   let widgetInvalidate: (() => void) | undefined;
   let stopInput: (() => void) | undefined;
-  let animation: FlameAnimation | undefined;
+  let animation: ActivityClock | undefined;
   let overlayOpen = false;
   let stopWatch: (() => void) | undefined;
   let unregister: (() => void) | undefined;
@@ -118,7 +118,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       const bytes = reader.bytesRead;
       const queues = reader.read(queueDir(home));
       const queueChanged = reader.bytesRead !== bytes;
-      if (queueChanged) animation?.wake();
+      const activityChanged = state.activity.update(queues);
       const previous = new Map(state.groups.map((group) => [group.project, group]));
       const openKey = () => state.groups.flatMap((g) => g.items.map((i) => `${g.project}#${i.id}`)).sort().join("\n");
       const beforeOpen = openKey();
@@ -129,12 +129,8 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
         posts: recentPosts(queues, now), events: queueEvents(queues, now), latest: latestPost(queues),
         fleet: state.fleet, unregistered: state.unregistered, now,
       });
-      for (const { project, item } of reader.arrivals) if (!item.resolves) state.flame.land(project, now);
       const openChanged = beforeOpen !== openKey();
-      if (openChanged) animation?.wake();
-      // Fresh ages on the next host render, without animating a frozen widget.
-      widgetInvalidate?.();
-      if (queueChanged || openChanged || overlayOpen) repaint();
+      if (queueChanged || activityChanged || openChanged || overlayOpen) repaint();
       // Queue/age rendering never waits for sockets or project metadata.
       let stamp = "missing";
       try { const stat = statSync(registryPath(home)); stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}`; }
@@ -183,7 +179,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     ctx.ui.setWidget(WIDGET, (widgetTui, theme) => {
       tui = widgetTui;
       animation?.dispose(); stopInput?.();
-      const widgetAnimation = new FlameAnimation(() => { state.flame.frame += 1; repaint(); });
+      const widgetAnimation = new ActivityClock(repaint);
       animation = widgetAnimation;
       const removeInput = widgetTui.addInputListener?.((data) => { widgetAnimation.input(data); });
       stopInput = removeInput;
@@ -191,7 +187,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       widgetInvalidate = () => { cache = undefined; };
       return {
         render: (width: number) => {
-          animation?.show(active && !overlayOpen && flameEnabled(width, theme, deps.env) && state.groups.length > 0);
+          animation?.show(active && !overlayOpen && activityEnabled(width, theme, deps.env));
           if (!cache || cache.width !== width) cache = { width, lines: renderWidget(state, width, theme, deps.env, Date.now()) };
           return cache.lines;
         },
