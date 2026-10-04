@@ -3,13 +3,28 @@ import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
-import { enqueueHeavy, ExclusiveRefused, exclusiveRequest, priorityRequest, heavyQueueState, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy, waitAge } from "../src/heavy-lock.ts";
+import { createHeavyGrant, listHeavyGrants, revokeHeavyGrant, GrantRefused, grantRequest, logExclusive, enqueueHeavy, ExclusiveRefused, exclusiveRequest, priorityRequest, heavyQueueState, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy, waitAge } from "../src/heavy-lock.ts";
 import type { HeavyOptions } from "../src/heavy-lock.ts";
 
-const usage = "usage: muster-heavy status [--json] [--reap] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
+const usage = "usage: muster-heavy grant <label> [--ttl <duration>] | grant --list | grant --revoke <id> | muster-heavy status [--json] [--reap] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
 
 /** Explicit timer and cap options let tests exercise deadlines without long sleeps. */
 export async function runHeavy(args: string[], options: HeavyOptions, timers = { setTimeout, clearTimeout }) {
+  if (args[0] === "grant") {
+    try {
+      if (args.length === 2 && args[1] === "--list") console.log(JSON.stringify(listHeavyGrants(options), null, 2));
+      else if (args.length === 3 && args[1] === "--revoke") revokeHeavyGrant(options, args[2]!);
+      else if ((args.length === 2 || (args.length === 4 && args[2] === "--ttl")) && args[1] && !args[1].startsWith("--")) console.log(createHeavyGrant(options, args[1], args[3]).id);
+      else {
+        logExclusive(options, "refused", args.join(" "), undefined, "grant");
+        throw new GrantRefused(usage);
+      }
+      process.exit(0);
+    } catch (error) {
+      console.error(`muster-heavy: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(error instanceof GrantRefused ? 64 : 2);
+    }
+  }
   if (args[0] === "status" && args.slice(1).every((arg) => arg === "--json" || arg === "--reap")) {
     try {
       if (args.includes("--reap")) reapExclusive(options);
@@ -36,7 +51,8 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
     process.exit(2);
   }
   const command = args.slice(split + 1);
-  const priority = !exclusive && options.window !== undefined;
+  const granted = options.grant !== undefined;
+  const priority = !exclusive && !granted && options.window !== undefined;
   const windowed = exclusive || priority;
   const now = options.now ?? Date.now;
   const deadline = now() + waitSeconds * 1000;
@@ -68,12 +84,17 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
   }
   process.on("exit", () => cleanup());
   try {
+    if (granted && exclusive) {
+      logExclusive(options, "refused", command.join(" "), undefined, "grant", undefined, listHeavyGrants(options).find((grant) => grant.id === options.grant));
+      throw new GrantRefused("grant cannot be combined with --exclusive");
+    }
+    const grant = granted ? grantRequest(options, command.join(" "), () => ticket?.name) : undefined;
     const request = exclusive ? exclusiveRequest(options, command.join(" "), () => ticket?.name)
       : priority ? priorityRequest(options, command.join(" "), () => ticket?.name) : undefined;
-    release = request?.release ?? release;
-    const attempt = () => request ? request.attempt() : tryAcquireHeavy(options, command.join(" "), ticket?.name);
+    release = grant?.release ?? request?.release ?? release;
+    const attempt = () => grant ? grant.attempt() : request ? request.attempt() : tryAcquireHeavy(options, command.join(" "), ticket?.name);
     let acquired = attempt();
-    if (!acquired.ok && waitSeconds > 0) ticket = enqueueHeavy(options, command.join(" "), exclusive ? "exclusive" : priority ? "priority" : "slot");
+    if (!acquired.ok && waitSeconds > 0) ticket = enqueueHeavy(options, command.join(" "), exclusive ? "exclusive" : priority ? "priority" : granted ? "grant" : "slot");
     while (!acquired.ok && now() < deadline) {
       const queue = heavyQueueState(options, ticket?.name);
       console.error(`muster-heavy: waiting: position ${queue.own?.position ?? queue.rows.length + 1} of ${queue.rows.length}, ${waitAge(queue.own?.ageSeconds ?? null)}; ${acquired.reason}`);
@@ -109,10 +130,10 @@ export async function runHeavy(args: string[], options: HeavyOptions, timers = {
   } catch (error) {
     cleanup();
     console.error(`muster-heavy: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(error instanceof ExclusiveRefused ? 64 : 2);
+    process.exit(error instanceof ExclusiveRefused || error instanceof GrantRefused ? 64 : 2);
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  await runHeavy(process.argv.slice(2), { home: homedir(), window: process.env.MUSTER_DEPLOY_WINDOW });
+  await runHeavy(process.argv.slice(2), { home: homedir(), window: process.env.MUSTER_DEPLOY_WINDOW, grant: process.env.MUSTER_HEAVY_GRANT });
 }

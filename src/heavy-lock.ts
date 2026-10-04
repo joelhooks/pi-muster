@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createActor, createMachine } from "xstate";
+import { randomBytes } from "node:crypto";
 
 /**
  * Bounded full gates per machine, with load/memory admission. Eight parallel
@@ -28,7 +29,8 @@ export interface Holder {
   readonly command: string;
   readonly startedAt: string;
   /** Only "exclusive" fences admission; "priority" is a capped single-slot window. */
-  readonly mode?: "slot" | "exclusive" | "priority";
+  readonly mode?: "slot" | "exclusive" | "priority" | "grant";
+  readonly grant?: HeavyGrant;
   readonly window?: string;
   readonly exclusiveAcquiredAt?: string;
   readonly exclusiveCapMs?: number;
@@ -57,7 +59,9 @@ export function readHolder(lock: string): Holder | null {
 function decodeHolder(value: unknown): Holder | null {
   if (typeof value !== "object" || value === null || !("pid" in value) || !("host" in value) || !("command" in value) || !("startedAt" in value)) return null;
   if (typeof value.pid !== "number" || !Number.isInteger(value.pid) || value.pid <= 0 || value.pid > 2147483647 || typeof value.host !== "string" || typeof value.command !== "string" || typeof value.startedAt !== "string" || !Number.isFinite(Date.parse(value.startedAt))) return null;
-  return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && (value.mode === "slot" || value.mode === "exclusive" || value.mode === "priority") ? { mode: value.mode } : {}),
+  const grant = "grant" in value ? decodeGrant(value.grant) : null;
+  return { pid: value.pid, host: value.host, command: value.command, startedAt: value.startedAt, ...("mode" in value && (value.mode === "slot" || value.mode === "exclusive" || value.mode === "priority" || value.mode === "grant") ? { mode: value.mode } : {}),
+    ...(grant ? { grant } : {}),
     ...("window" in value && typeof value.window === "string" ? { window: value.window } : {}),
     ...("exclusiveAcquiredAt" in value && typeof value.exclusiveAcquiredAt === "string" && Number.isFinite(Date.parse(value.exclusiveAcquiredAt)) ? { exclusiveAcquiredAt: value.exclusiveAcquiredAt } : {}),
     ...("exclusiveCapMs" in value && typeof value.exclusiveCapMs === "number" && value.exclusiveCapMs > 0 && Number.isFinite(value.exclusiveCapMs) ? { exclusiveCapMs: value.exclusiveCapMs } : {}),
@@ -92,7 +96,7 @@ function stale(holder: Holder | null): boolean {
   return health === "dead" || health === "reused";
 }
 
-export function tryAcquire(lock: string, command: string, pid = process.pid, mode?: "slot" | "exclusive" | "priority"): Acquire {
+export function tryAcquire(lock: string, command: string, pid = process.pid, mode?: "slot" | "exclusive" | "priority" | "grant"): Acquire {
   mkdirSync(join(lock, ".."), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -215,11 +219,159 @@ export interface HeavyOptions {
   readonly minFreeGB?: string;
   /** Explicit authorization: the library never infers a window from process.env. */
   readonly window?: string;
+  readonly grant?: string;
   readonly now?: () => number;
   readonly kill?: (pid: number, signal: NodeJS.Signals) => void;
   readonly health?: (holder: Holder) => HolderHealth;
   /** Test-only short cap; never read from an environment variable. */
   readonly testOnlyCapMs?: number;
+}
+
+export interface HeavyGrant {
+  readonly id: string;
+  readonly label: string;
+  readonly grantedBy: string;
+  readonly cwd: string;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+}
+
+export class GrantRefused extends Error {}
+
+export function heavyGrantsPath(home: string): string {
+  return join(home, ".local/state/muster/heavy-grants");
+}
+
+function decodeGrant(value: unknown): HeavyGrant | null {
+  if (typeof value !== "object" || value === null || !("id" in value) || typeof value.id !== "string" || !/^[a-f0-9]{16}$/.test(value.id) ||
+    !("label" in value) || typeof value.label !== "string" || !value.label.trim() || value.label.length > 128 ||
+    !("grantedBy" in value) || typeof value.grantedBy !== "string" || !("cwd" in value) || typeof value.cwd !== "string" ||
+    !("createdAt" in value) || typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt)) ||
+    !("expiresAt" in value) || typeof value.expiresAt !== "string" || !Number.isFinite(Date.parse(value.expiresAt))) return null;
+  const ttl = Date.parse(value.expiresAt) - Date.parse(value.createdAt);
+  if (ttl <= 0 || ttl > 7_200_000) return null;
+  return { id: value.id, label: value.label, grantedBy: value.grantedBy, cwd: value.cwd, createdAt: value.createdAt, expiresAt: value.expiresAt };
+}
+
+/** Status is read-only; admission and explicit listing reap expired records. */
+export function listHeavyGrants(options: HeavyOptions, reap = true): HeavyGrant[] {
+  const dir = heavyGrantsPath(options.home);
+  if (!existsSync(dir)) return [];
+  const now = (options.now ?? Date.now)();
+  const live: HeavyGrant[] = [];
+  for (const name of readdirSync(dir).sort()) {
+    if (!/^[a-f0-9]{16}\.json$/.test(name)) continue;
+    const grant = decodeGrant(JSON.parse(readFileSync(join(dir, name), "utf8")));
+    if (!grant || name !== `${grant.id}.json`) throw new GrantRefused(`invalid heavy grant record: ${name}`);
+    if (Date.parse(grant.expiresAt) <= now) {
+      if (reap) rmSync(join(dir, name), { force: true });
+    } else live.push(grant);
+  }
+  return live;
+}
+
+export function grantTtlMs(duration = "1h"): number {
+  const match = /^(\d+(?:\.\d+)?)(ms|s|m|h)$/.exec(duration);
+  if (!match) throw new GrantRefused("grant ttl must be a positive duration, e.g. 30m or 1h (maximum 2h)");
+  const units: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000 };
+  const ttl = Number(match[1]) * (units[match[2]!] ?? 0);
+  if (!Number.isFinite(ttl) || ttl < 1) throw new GrantRefused("grant ttl must be positive");
+  return Math.min(ttl, 7_200_000);
+}
+
+function manageGrant<T>(options: HeavyOptions, command: string, action: () => T): T {
+  const guard = tryAcquire(join(options.home, ".local/state/muster/heavy-admission.lock"), command);
+  if (!guard.ok) {
+    logExclusive(options, "refused", command, undefined, "grant");
+    throw new GrantRefused("heavy admission decision busy; retry grant operation");
+  }
+  try { return action(); } finally { guard.release(); }
+}
+
+export function createHeavyGrant(options: HeavyOptions, label: string, duration = "1h", grantedBy = process.env.MUSTER_AGENT ?? process.env.PI_SESSION_ID ?? "cli"): HeavyGrant {
+  return manageGrant(options, `grant ${label}`, () => {
+    const now = (options.now ?? Date.now)();
+    const grant: HeavyGrant = { id: randomBytes(8).toString("hex"), label, grantedBy, cwd: process.cwd(), createdAt: new Date(now).toISOString(), expiresAt: new Date(now + 3_600_000).toISOString() };
+    let ttl: number;
+    try { ttl = grantTtlMs(duration); }
+    catch (error) {
+      logExclusive(options, "refused", `grant ${label}`, undefined, "grant", undefined, grant);
+      throw error;
+    }
+    const issued = { ...grant, expiresAt: new Date(now + ttl).toISOString() };
+    const live = listHeavyGrants(options);
+    if (!decodeGrant(issued) || live.length >= 4) {
+      logExclusive(options, "refused", `grant ${label}`, undefined, "grant", undefined, grant);
+      throw new GrantRefused(live.length >= 4 ? `four live grants already issued: ${live.map((g) => `${g.id} (${g.label}, ${g.grantedBy}, expires ${g.expiresAt})`).join("; ")}` : "grant label must contain 1-128 characters");
+    }
+    mkdirSync(heavyGrantsPath(options.home), { recursive: true, mode: 0o700 });
+    writeFileSync(join(heavyGrantsPath(options.home), `${grant.id}.json`), `${JSON.stringify(issued)}\n`, { flag: "wx", mode: 0o600 });
+    logExclusive(options, "granted", `grant ${label}`, undefined, "grant", undefined, issued);
+    return issued;
+  });
+}
+
+export function revokeHeavyGrant(options: HeavyOptions, id: string): void {
+  manageGrant(options, `revoke ${id}`, () => {
+    const grant = validateGrant({ ...options, grant: id }, `revoke ${id}`);
+    rmSync(join(heavyGrantsPath(options.home), `${grant.id}.json`));
+    logExclusive(options, "revoked", `revoke ${id}`, undefined, "grant", undefined, grant);
+  });
+}
+
+function validateGrant(options: HeavyOptions, command: string): HeavyGrant {
+  const id = options.grant;
+  let record: HeavyGrant | null = null;
+  if (id && /^[a-f0-9]{16}$/.test(id)) {
+    try { record = decodeGrant(JSON.parse(readFileSync(join(heavyGrantsPath(options.home), `${id}.json`), "utf8"))); }
+    catch { /* Unknown ids are refused below. */ }
+  }
+  const grant = listHeavyGrants(options).find((g) => g.id === id);
+  if (!grant || options.window !== undefined) {
+    logExclusive(options, "refused", command, undefined, "grant", undefined, record ?? undefined);
+    throw new GrantRefused(options.window !== undefined ? "grant cannot be combined with a deploy window" : `unknown or expired heavy grant: ${options.grant ?? "missing"}`);
+  }
+  return grant;
+}
+
+// A grant only changes admission order: waiting -> held -> closed. No hold clock.
+const grantMachine = createMachine({
+  initial: "waiting",
+  states: {
+    waiting: { on: { ACQUIRE: "held", CANCEL: "closed" } },
+    held: { on: { CANCEL: "closed" } },
+    closed: { type: "final" },
+  },
+});
+
+export function grantRequest(options: HeavyOptions, command: string, ticket: () => string | undefined = () => undefined) {
+  const grant = validateGrant(options, command);
+  const actor = createActor(grantMachine).start();
+  let unlock = () => {};
+  let slot: string | undefined;
+  const audit = (event: ExclusiveEvent) => logExclusive(options, event, command, undefined, "grant", slot, grant);
+  audit("requested");
+  const release = () => {
+    if (actor.getSnapshot().matches("closed")) return;
+    unlock();
+    actor.send({ type: "CANCEL" });
+    actor.stop();
+    audit("released");
+  };
+  return {
+    attempt: (): HeavyAcquire => {
+      if (actor.getSnapshot().matches("held")) return { ok: true, release, slot };
+      if (!actor.getSnapshot().matches("waiting")) return { ok: false, reason: "grant request closed" };
+      const result = withAdmission(options, command, () => acquireHeavy(options, command, ticket(), false, validateGrant(options, command)));
+      if (!result.ok) return result;
+      unlock = result.release;
+      slot = result.slot;
+      actor.send({ type: "ACQUIRE" });
+      audit("acquired");
+      return { ok: true, release, slot };
+    },
+    release,
+  };
 }
 
 export class ExclusiveRefused extends Error {
@@ -240,8 +392,8 @@ function capMs(options: HeavyOptions, mode: "exclusive" | "priority" = "exclusiv
   return Math.min(mode === "priority" ? deployCapMs() : exclusiveCapMs(), options.testOnlyCapMs ?? Infinity);
 }
 
-export type ExclusiveEvent = "requested" | "acquired" | "released" | "capped" | "reaped" | "refused";
-export function logExclusive(options: HeavyOptions, event: ExclusiveEvent, command: string, holder?: Holder, mode: "exclusive" | "priority" = "exclusive", slot?: string): void {
+export type ExclusiveEvent = "requested" | "acquired" | "released" | "capped" | "reaped" | "refused" | "granted" | "revoked";
+export function logExclusive(options: HeavyOptions, event: ExclusiveEvent, command: string, holder?: Holder, mode: "exclusive" | "priority" | "grant" = "exclusive", slot?: string, grant?: HeavyGrant): void {
   let parentCommand = "";
   try {
     parentCommand = execFileSync("ps", ["-o", "command=", "-p", String(process.ppid)], { encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim().slice(0, 200);
@@ -250,6 +402,7 @@ export function logExclusive(options: HeavyOptions, event: ExclusiveEvent, comma
   mkdirSync(dir, { recursive: true });
   appendFileSync(join(dir, "heavy-exclusive.jsonl"), `${JSON.stringify({
     ts: new Date((options.now ?? Date.now)()).toISOString(), event, mode: holder?.mode === "priority" ? "priority" : mode, window: holder?.window ?? options.window ?? null,
+    ...(mode === "grant" ? { grant: grant?.id ?? options.grant ?? null, label: grant?.label ?? null, grantedBy: grant?.grantedBy ?? null } : {}),
     pid: holder?.pid ?? process.pid, ppid: process.ppid, parentCommand, cwd: process.cwd(), command: command.slice(0, 200), ...(slot ? { slot } : {}),
   })}\n`, { mode: 0o600 });
 }
@@ -348,7 +501,7 @@ export function heavyQueuePath(home: string): string {
 export interface HeavyTicket extends Holder {
   readonly enqueuedAt: number;
   readonly cwd: string;
-  readonly mode: "slot" | "exclusive" | "priority";
+  readonly mode: "slot" | "exclusive" | "priority" | "grant";
 }
 
 export interface HeavyQueueView {
@@ -365,8 +518,9 @@ function readTicket(path: string): HeavyTicket | null {
   try {
     const value: unknown = JSON.parse(readFileSync(path, "utf8"));
     const holder = decodeHolder(value);
-    if (!holder || typeof value !== "object" || value === null || !("enqueuedAt" in value) || typeof value.enqueuedAt !== "number" || !Number.isSafeInteger(value.enqueuedAt) || value.enqueuedAt < 0 || !("cwd" in value) || typeof value.cwd !== "string" || (holder.mode !== "slot" && holder.mode !== "exclusive" && holder.mode !== "priority")) return null;
+    if (!holder || typeof value !== "object" || value === null || !("enqueuedAt" in value) || typeof value.enqueuedAt !== "number" || !Number.isSafeInteger(value.enqueuedAt) || value.enqueuedAt < 0 || !("cwd" in value) || typeof value.cwd !== "string" || (holder.mode !== "slot" && holder.mode !== "exclusive" && holder.mode !== "priority" && holder.mode !== "grant")) return null;
     if (holder.mode === "priority" && (!holder.window || !/^[A-Za-z0-9._:-]{1,64}$/.test(holder.window))) return null;
+    if (holder.mode === "grant" && !holder.grant) return null;
     return { ...holder, mode: holder.mode, enqueuedAt: value.enqueuedAt, cwd: value.cwd };
   } catch { return null; }
 }
@@ -389,11 +543,13 @@ export function heavyQueue(options: HeavyOptions, now = (options.now ?? Date.now
   }
   // Preserve arrival-name FIFO within each class. Unknown tickets retain their
   // ordinary place; priority is a validated, audited window, not a role flag.
-  rows.sort((a, b) => Number(b.ticket?.mode === "priority") - Number(a.ticket?.mode === "priority"));
+  const tier = (row: HeavyQueueView) => row.ticket?.mode === "priority" || (row.ticket?.mode === "exclusive" && row.ticket.window) ? 2 : row.ticket?.mode === "grant" ? 1 : 0;
+  rows.sort((a, b) => tier(b) - tier(a));
   return rows.map((row, index) => ({ ...row, position: index + 1 }));
 }
 
-export function enqueueHeavy(options: HeavyOptions, command: string, mode: "slot" | "exclusive" | "priority") {
+export function enqueueHeavy(options: HeavyOptions, command: string, mode: "slot" | "exclusive" | "priority" | "grant") {
+  const grant = mode === "grant" ? validateGrant(options, command) : undefined;
   if (mode === "priority") validateWindow(options, command, mode);
   const dir = heavyQueuePath(options.home);
   mkdirSync(dir, { recursive: true });
@@ -403,7 +559,7 @@ export function enqueueHeavy(options: HeavyOptions, command: string, mode: "slot
     startedAt = execFileSync("ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", timeout: 2000, env: { ...process.env, LC_ALL: "C" }, stdio: ["ignore", "pipe", "ignore"] }).trim();
     if (!Number.isFinite(Date.parse(startedAt))) startedAt = new Date().toISOString();
   } catch { /* Same conservative timestamp fallback as lock holders. */ }
-  const ticket: HeavyTicket = { pid: process.pid, host: hostname(), startedAt, enqueuedAt, command: command.slice(0, 200), cwd: process.cwd(), mode, ...(mode === "priority" ? { window: options.window } : {}) };
+  const ticket: HeavyTicket = { pid: process.pid, host: hostname(), startedAt, enqueuedAt, command: command.slice(0, 200), cwd: process.cwd(), mode, ...(grant ? { grant } : {}), ...(mode === "priority" || mode === "exclusive" ? { window: options.window } : {}) };
   for (let stamp = enqueuedAt; ; stamp++) {
     const name = `${String(stamp).padStart(16, "0")}-${process.pid}.json`;
     const path = join(dir, name);
@@ -446,7 +602,8 @@ export function tryAcquireHeavy(options: HeavyOptions, command: string, ticket?:
   return withAdmission(options, command, () => acquireHeavy(options, command, ticket));
 }
 
-function acquireHeavy(options: HeavyOptions, command: string, ticket?: string, priority = false): HeavyAcquire {
+function acquireHeavy(options: HeavyOptions, command: string, ticket?: string, priority = false, grant?: HeavyGrant): HeavyAcquire {
+  listHeavyGrants(options);
   const { adapter, count, minFreeGB } = settings(options);
   const lock = heavyLockPath(options.home);
   reapExclusive(options);
@@ -462,14 +619,17 @@ function acquireHeavy(options: HeavyOptions, command: string, ticket?: string, p
     const olderPriority = queue.rows.filter((row) => row.ticket?.mode === "priority" && (!queue.own || row.position < queue.own.position));
     if (olderPriority.length) return { ok: false, reason: `heavy queue: ${olderPriority.length} older priority waiters` };
   }
-  if (!priority && queue.older >= queue.freeSlots && queue.older > 0) return { ok: false, reason: `heavy queue: ${queue.older} older waiters, ${queue.freeSlots} free slots` };
+  if (grant && queue.rows.some((row) => row.ticket?.mode === "priority" || (row.ticket?.mode === "exclusive" && row.ticket.window))) return { ok: false, reason: "deploy-window waiter ahead of grant" };
+  if (grant && !queue.own && queue.rows.some((row) => row.ticket?.mode === "grant")) return { ok: false, reason: "older grant waiters" };
+  const older = grant && !queue.own ? 0 : queue.older;
+  if (!priority && older >= queue.freeSlots && older > 0) return { ok: false, reason: `heavy queue: ${queue.older} older waiters, ${queue.freeSlots} free slots` };
   const holders: string[] = [];
   const candidates = [
     ...(priority ? [{ name: "deploy-0", path: deploySlotPath(options.home) }] : []),
     ...Array.from({ length: count }, (_, n) => ({ name: `slot-${n}`, path: slotPath(lock, n) })),
   ];
   for (const { name, path } of candidates) {
-    const slot = tryAcquire(path, command, process.pid, priority ? "priority" : "slot");
+    const slot = tryAcquire(path, command, process.pid, priority ? "priority" : grant ? "grant" : "slot");
     if (!slot.ok) {
       holders.push(`${name}: ${describeHolder(slot.holder)}`);
       continue;
@@ -485,6 +645,11 @@ function acquireHeavy(options: HeavyOptions, command: string, ticket?: string, p
         const holder = readHolder(path);
         if (!holder) throw new Error("priority holder lost before metadata write");
         writeFileSync(join(path, "holder.json"), JSON.stringify({ ...holder, window: options.window, exclusiveAcquiredAt: new Date((options.now ?? Date.now)()).toISOString(), exclusiveCapMs: capMs(options, "priority") }));
+      }
+      if (grant) {
+        const holder = readHolder(path);
+        if (!holder) throw new Error("grant holder lost before metadata write");
+        writeFileSync(join(path, "holder.json"), JSON.stringify({ ...holder, grant }));
       }
       if (queue.own) rmSync(join(heavyQueuePath(options.home), queue.own.name), { force: true });
     } catch (error) {
@@ -686,6 +851,7 @@ export interface HeavySnapshot {
   readonly deploySlot: HeavySlotView;
   readonly exclusivePending: HeavySlotView;
   readonly queue: readonly HeavyQueueView[];
+  readonly grants: readonly HeavyGrant[];
 }
 
 /** Read-only: one sample of the machine and every slot. Never takes or clears a lock. */
@@ -715,20 +881,21 @@ export function heavySnapshot(options: HeavyOptions, now = Date.now()): HeavySna
     deploySlot: view("deploy-0", deploySlotPath(options.home)),
     exclusivePending: view("exclusive-pending", exclusivePendingPath(options.home)),
     queue: heavyQueue(options, now),
+    grants: listHeavyGrants({ ...options, now: () => now }, false),
   };
 }
 
 export function heavyStatus(options: HeavyOptions, now = Date.now()): string {
   const snap = heavySnapshot(options, now);
-  const lines = [`heavy slots: ${snap.slots} + 1 deploy`, `load: ${snap.load.toFixed(1)} (limit ${snap.loadLimit}); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
+  const lines = [`heavy slots: ${snap.slots} + 1 deploy`, `grants: ${snap.grants.length}/4 live`, `load: ${snap.load.toFixed(1)} (limit ${snap.loadLimit}); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
   for (const slot of [...snap.holders, snap.deploySlot, snap.exclusivePending]) {
     if (slot.name === "deploy-0" && slot.held && slot.holder?.mode === "priority") {
       lines.push(`${slot.name}: ⚡ window ${slot.window}; ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}; hold age ${slot.exclusiveAgeSeconds}s; left ${slot.remainingSeconds}s`);
       continue;
     }
-    lines.push(slot.held ? `${slot.name}: ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}${slot.remainingSeconds !== null ? `; ${slot.holder?.mode === "priority" ? "⚡ " : ""}window ${slot.window ?? "legacy"}; hold age ${slot.exclusiveAgeSeconds === null ? "pending" : `${slot.exclusiveAgeSeconds}s`}; cap remaining ${slot.remainingSeconds}s` : ""}` : `${slot.name}: free`);
+    lines.push(slot.held ? `${slot.name}: ${slot.holder?.mode === "grant" ? `🎟️ grant ${slot.holder.grant?.label ?? "unknown"}; ` : ""}${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}${slot.remainingSeconds !== null ? `; ${slot.holder?.mode === "priority" ? "⚡ " : ""}window ${slot.window ?? "legacy"}; hold age ${slot.exclusiveAgeSeconds === null ? "pending" : `${slot.exclusiveAgeSeconds}s`}; cap remaining ${slot.remainingSeconds}s` : ""}` : `${slot.name}: free`);
   }
   lines.push(`heavy queue: ${snap.queue.length}`);
-  for (const row of snap.queue) lines.push(`position ${row.position}: pid ${row.pid ?? "unknown"}; ${row.health}; wait ${waitAge(row.ageSeconds)}; ${row.ticket?.mode === "priority" ? `⚡ window ${row.ticket.window}; ` : ""}${row.command ?? "unknown ticket"}`);
+  for (const row of snap.queue) lines.push(`position ${row.position}: pid ${row.pid ?? "unknown"}; ${row.health}; wait ${waitAge(row.ageSeconds)}; ${row.ticket?.mode === "priority" ? `⚡ window ${row.ticket.window}; ` : ""}${row.ticket?.mode === "grant" ? `🎟️ grant ${row.ticket.grant?.label}; ` : ""}${row.command ?? "unknown ticket"}`);
   return lines.join("\n");
 }
