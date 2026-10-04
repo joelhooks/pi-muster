@@ -51,6 +51,7 @@ import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts"
 import { resolveSkills, skillIndex } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
+import { relayEvent, watchFallback } from "./relay-events.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
 import type { LiveCounts } from "./tokens.ts";
 
@@ -673,7 +674,7 @@ const closeOwnedPane = (binding: PaneBinding | null) =>
     const located = yield* locatePane(binding);
     if (!located) return `pane ${binding.paneId} already gone`;
     yield* paneClose(located.pane_id);
-    return `closed ${located.pane_id}`;
+    return `closed ${located.pane_id}; ${watchFallback([binding.paneId, located.pane_id])}`;
   });
 
 /** Pane ids change on moves; the terminal id does not. */
@@ -1290,6 +1291,7 @@ export const packetReport = (params: PacketReportInput) =>
       }),
     );
     const message = `🐑 packet ${id.slice(0, 12)} from ${row.name} (${row.lane}): ${(params.summary.trim().split("\n")[0] ?? "").slice(0, 200).replace(/[.\s]+$/, "")}. Report: ${report}`;
+    relayEvent({ ts: iso(env), session: env.sessionId, kind: "packet_report", project: project.slug, packetId: id }, env.home);
     const delivery = yield* intercom.send(saved.owner, message);
     return { packet: saved.packet, delivery };
   });

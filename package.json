@@ -64,6 +64,7 @@
     "src/switchboard-ops.ts",
     "src/switchboard-view.ts",
     "src/registry.ts",
+    "src/relay-events.ts",
     "src/switchboard.ts",
     "src/desk-feed.ts",
     "src/desk-feed-ext.ts",

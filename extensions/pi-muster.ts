@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { deskWriteId, watchEntries, withDeskWrites } from "../src/relay-events.ts";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,7 +56,7 @@ function failure(cause: Cause.Cause<unknown>) {
 }
 
 export default function muster(host: ExtensionAPI) {
-  const pi = withVersionSkew(host, createVersionSkew({ root: MUSTER_ROOT }));
+  const pi = withDeskWrites(withVersionSkew(host, createVersionSkew({ root: MUSTER_ROOT })));
   const env = process.env;
   const role = env.MUSTER_ROLE;
   const worker = role === "worker";
@@ -74,14 +75,14 @@ export default function muster(host: ExtensionAPI) {
         paneId: env.HERDR_PANE_ID,
         musterRoot: MUSTER_ROOT,
         workerWorktree: env.MUSTER_WORKER_WORKTREE ?? DEFAULT_WORKER_WORKTREE,
-        createId: () => randomUUID(),
+        createId: () => deskWriteId(randomUUID()),
         sleep: (ms) => Effect.sleep(ms),
       }),
       Layer.succeed(Intercom)((intercom ??= createIntercom(pi.events, () => randomUUID()))),
     );
 
   const run = async <A>(ctx: ExtensionContext, signal: AbortSignal | undefined, program: Effect.Effect<A, unknown, Services>, render: (value: A) => string) => {
-    const exit = await Effect.runPromiseExit(program.pipe(Effect.provide(layer(ctx))), signal ? { signal } : undefined);
+    const exit = await watchEntries.run(ctx.sessionManager.getBranch(), () => Effect.runPromiseExit(program.pipe(Effect.provide(layer(ctx))), signal ? { signal } : undefined));
     if (Exit.isSuccess(exit)) return text(render(exit.value), JSON.parse(JSON.stringify(exit.value)) as unknown);
     return failure(exit.cause);
   };

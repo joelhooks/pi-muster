@@ -94,6 +94,16 @@ One inbox over every project's desk queue. It reads and routes; project desks st
 - `alt+s` or `/switchboard` browses everything: `j`/`k` move, `space` folds, `enter` puts an `[project#id]` reference in the editor, `a` answers, `d` marks done.
 - `desk_inbox` lists open items ranked blocked, approval, decision, oldest first. It is read-only; only `subscribe: true`, `--switchboard`, or `/switchboard` makes a session the Switchboard that is paged on every queue change, and never one Muster launched (any `MUSTER_ROLE`). `desk_answer` appends a resolving line to the item's own queue and nudges that project's desk.
 
+## Relay diet
+
+Packet reports still send one actionable intercom message to the owner. The owner must verify and land them.
+
+The Muster desk feed suppresses ids created by this session's `desk_post`, `desk_answer`, and `desk_rulings` tools. It reserves the queue id before writing, keeps it in memory, and saves a `muster-desk-self-post` custom session entry for reload. A failed attempt may leave an unused reserved id. Other sessions' items still arrive, even when their sender label matches. The queue and inbox remain unchanged; only self-delivery is suppressed.
+
+Before `agent_close` or `lane_close`, list the pane's Bellwether watches and cancel them with `herdr_watch action=cancel id=<id>`. Bellwether's live registry and wake router are private to its extension; Muster cannot cancel a watch or withdraw a held wake through its library exports. Close receipts name candidate watch ids when session receipts identify running watches on the pane. These are hints, not proof of a live watch; named agent targets need inspection too. No automatic retirement is claimed.
+
+`~/.local/state/muster/relay-events.jsonl` holds best-effort metadata counters, one line per packet relay attempt or queue item delivered/skipped. Each line contains `{ts, session, kind, project, packetId?, itemId?}`; no bodies, titles or refs. `kind` is `packet_report`, `desk_note`, `desk_note_skipped_self`, or `watch_retired`. The latter is reserved for supported automatic retirement and is not emitted by the current fallback. A batch delivered before a user turn records one `desk_note` per item, not one per card. These counts measure relay boundaries, not completed model turns. Write failures never fail a tool or feed delivery.
+
 ## Desk report
 
 When a desk holds several decisions, it publishes one static feedback page instead of a chat digest. `desk_report` builds it from report items: one card per decision, radio sets per decision axis, and a copy-feedback button. The page is noindex and holds no links or addresses. `desk_rulings` turns the pasted feedback into one resolving line per desk item, plus one message for the owner. The contract is in [skills/muster/references/desk-report.md](skills/muster/references/desk-report.md). The page inlines ratstack's `app.css` when it is on the machine (`MUSTER_DESK_REPORT_CSS` overrides the path).

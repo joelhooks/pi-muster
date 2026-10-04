@@ -16,7 +16,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 - Intercom delivers when the recipient's turn ends. To steer a running turn in a pane you own, type into it.
 - Address sessions by the exact id in the catalog, never by cwd.
 - Chatty intercom drowns owners: in one pilot, 34 of about 985 messages were results. Acks and progress go to pane tokens and lane notes.
-- Never tell a worker to `/quit`. In a tiny pane it arrived as the chat message "quit". Close the pane after sign-off with `agent_close`.
+- Never tell a worker to `/quit`. In a tiny pane it arrived as the chat message "quit". Cancel its Bellwether watches, then close the pane after sign-off with `agent_close`. Close receipts may name candidate ids from session receipts, but cannot cancel them or withdraw an already-held wake.
+- Pi 0.79.10 (Muster's development pin) ignores `triggerTurn: false` while streaming: `sendCustomMessage` queues default delivery as steering, including at `agent_end`. Custom cards become user messages at the model boundary, so the bridge sees prompt input, not the trigger flag. Newer fleet Pi explicitly keeps non-triggering streaming messages out of steering. Check the desk's loaded Pi version before blaming the bridge. Self-post suppression removes our own cards before either path; foreign delivery is unchanged.
 
 ## Heavy gates and deploy windows
 

@@ -765,6 +765,7 @@ describe("a lane from launch to close", () => {
 
     const closed = await runWith(h, agentClose(dir, { name: "probe_w" }));
     expect(closed.row.state).toBe("closed");
+    expect(closed.notes.join("\n")).toContain("watch fallback: cancel this pane's Bellwether watches");
     expect(closed.cloneError).toBeNull();
     expect(existsSync(clone)).toBe(false);
     expect(closed.restore.argv.slice(0, 2)[0]).toBe("--session");
@@ -772,6 +773,7 @@ describe("a lane from launch to close", () => {
 
     const done = await runWith(h, laneClose(dir, "probe"));
     expect(done.closed).toBe(true);
+    expect(done.paneNote).toContain("herdr_watch action=cancel before agent_close or lane_close");
     expect(h.herdr.panes.size).toBe(0);
     expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 1/1 lanes");
   });
