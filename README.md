@@ -19,6 +19,12 @@ Muster expects [Herdr](https://herdr.dev), pi-intercom, and pi-until in the same
 - `MUSTER_WORKER_WORKTREE`: the script that allocates, harvests, and removes worker clones.
 - `MUSTER_DESK_EXTENSION`: the Pi extension a desk agent loads to read its queue.
 
+## Long-lived sessions
+
+Muster records the package commit when the extension loads, without spawning Git. Every tool, including desk and Switchboard tools, checks for changes at most once per minute. A changed commit adds a stale-tools warning with both short SHAs and the commit count when Git can calculate it. `project_status` also marks its board header. Restart the session or use `/reload` to load the new tools; Claude bridge sessions need a restart.
+
+Outside a Git checkout, the check uses the package version and newest mtime of the extension's local source imports. Missing metadata or a failed check never blocks a tool. Startup reads version metadata only; it opens no socket or bus channel.
+
 ## Roster
 
 Role models are data. Muster reads `~/.config/muster/roster.json` (or `MUSTER_ROSTER`) on every call, so one edited and synced file changes what every machine launches next. Without it, built-in defaults apply. Precedence: built-in, roster role, the alternate matching the chosen model, project policy, explicit `agent_launch` arguments.

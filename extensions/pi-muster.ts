@@ -33,6 +33,7 @@ import { registerDeskFeed } from "../src/desk-feed-ext.ts";
 import { registerDeskReport } from "../src/desk-report-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
 import { findSkills, skillIndex } from "../src/skills.ts";
+import { createVersionSkew, withVersionSkew } from "../src/version-skew.ts";
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_WORKER_WORKTREE = join(homedir(), "Code", "joelhooks", "dark-wizard", "scripts", "worker-worktree.sh");
@@ -53,7 +54,8 @@ function failure(cause: Cause.Cause<unknown>) {
   };
 }
 
-export default function muster(pi: ExtensionAPI) {
+export default function muster(host: ExtensionAPI) {
+  const pi = withVersionSkew(host, createVersionSkew({ root: MUSTER_ROOT }));
   const env = process.env;
   const role = env.MUSTER_ROLE;
   const worker = role === "worker";

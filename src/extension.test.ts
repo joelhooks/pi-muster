@@ -1,4 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as versionSkew from "./version-skew.ts";
 
 import muster from "../extensions/pi-muster.ts";
 
@@ -42,6 +47,7 @@ beforeEach(() => {
   for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_PROJECT", "MUSTER_OWNER"]) delete process.env[key];
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_PROJECT", "MUSTER_OWNER"]) delete process.env[key];
   Object.assign(process.env, saved);
 });
@@ -90,6 +96,26 @@ describe("extension modes", () => {
     const fake = fakePi();
     muster(fake.pi as never);
     expect(fake.tools).toEqual(["packet_report", "skill_find", ...OWNER_TOOLS]);
+  });
+});
+
+describe("registered tool version skew", () => {
+  it("appends the warning to the real thinking_set tool through extension registration", async () => {
+    const root = mkdtempSync(join(tmpdir(), "muster-extension-skew-"));
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    git("init", "-q");
+    git("config", "user.name", "test");
+    git("config", "user.email", "test@example.com");
+    git("commit", "-q", "--allow-empty", "-m", "loaded");
+    const loaded = git("rev-parse", "HEAD");
+    const skew = versionSkew.createVersionSkew({ root });
+    vi.spyOn(versionSkew, "createVersionSkew").mockReturnValue(skew);
+    const fake = fakePi();
+    muster(fake.pi as never);
+    git("commit", "-q", "--allow-empty", "-m", "updated");
+    const disk = git("rev-parse", "HEAD");
+    const result = await fake.defs.get("thinking_set")?.execute("id", { level: "low" });
+    expect(result?.content[0]?.text).toBe(`Thinking high → low, from the next model call.\n⚠ Muster tools are stale: loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (1 commits). Restart this session (or /reload) to load them.`);
   });
 });
 

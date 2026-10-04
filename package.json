@@ -70,7 +70,8 @@
     "src/desk-report-icons.ts",
     "src/desk-report-ops.ts",
     "src/desk-report-ext.ts",
-    "src/tokens.ts"
+    "src/tokens.ts",
+    "src/version-skew.ts"
   ],
   "scripts": {
     "check": "tsc --project tsconfig.json",
