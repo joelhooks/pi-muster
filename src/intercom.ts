@@ -4,7 +4,7 @@ import {
   INTERCOM_EXTENSION_REGISTRY_READY_EVENT,
 } from "@joelhooks/pi-bellwether/intercom";
 
-import type { IntercomShape, OutboxStatus } from "./runtime.ts";
+import type { IntercomTransport, OutboxStatus } from "./runtime.ts";
 
 /**
  * pi-intercom from inside Muster. Sends go through pi-intercom's consent-aware
@@ -28,7 +28,7 @@ interface Channel {
   listSessions(): Promise<readonly unknown[]>;
 }
 
-export interface LiveIntercom extends IntercomShape {
+export interface LiveIntercom extends IntercomTransport {
   readonly dispose: () => void;
 }
 
@@ -73,7 +73,7 @@ export function createIntercom(events: EventBus, createId: () => string): LiveIn
           if (result?.requestId !== requestId) return;
           const status = result.status;
           finish(
-            status === "sent" || status === "rejected" || status === "blocked" || status === "failed" ? status : "failed",
+            status === "sent" || status === "queued" || status === "rejected" || status === "blocked" || status === "failed" ? status : "failed",
             [result.code, result.detail].filter((part) => typeof part === "string").join(": ") || undefined,
           );
         });

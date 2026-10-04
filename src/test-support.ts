@@ -9,7 +9,10 @@ import type { HerdrClient, HerdrRequest } from "@joelhooks/pi-bellwether/herdr-c
 
 import { sessionDirFor } from "./argv.ts";
 import type { ProcShape } from "./runtime.ts";
-import { Herdr, Intercom, MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
+import { IntercomComms } from "./comms.ts";
+import { readRegistry } from "./registry.ts";
+import { load } from "./store.ts";
+import { CommsError, Herdr, Comms, MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
 import type { EmitPaneClose } from "./runtime.ts";
 
 export interface FakePane {
@@ -197,7 +200,7 @@ export interface Harness {
   readonly home: string;
   readonly herdr: FakeHerdr;
   readonly sent: Array<{ to: string; message: string }>;
-  readonly layer: Layer.Layer<Herdr | Proc | MusterEnv | Intercom>;
+  readonly layer: Layer.Layer<Herdr | Proc | MusterEnv | Comms>;
   readonly workerWorktree: string;
   proc: ProcShape;
   emitPaneClose: EmitPaneClose;
@@ -295,24 +298,27 @@ export function harness(): Harness {
           startupLoad: () => h.startupLoad,
           emitPaneClose: h.emitPaneClose,
         }),
-        Layer.succeed(Intercom)({
+        Layer.succeed(Comms)(IntercomComms({
           send: (to, message) =>
             Effect.sync(() => {
               sent.push({ to, message });
               return { status: "sent" as const };
             }),
           sessions: () => Effect.succeed(h.live),
-        }),
+        }, address => load(readRegistry(home).get(address.project)?.dir ?? "").pipe(
+          Effect.map(project => project.agents.find(row => row.name === address.row)?.sessionId ?? ""),
+          Effect.mapError(error => new CommsError(error.message)),
+        ))),
       );
     },
   };
   return h;
 }
 
-export const runWith = <A, E>(h: Harness, program: Effect.Effect<A, E, Herdr | Proc | MusterEnv | Intercom>) =>
+export const runWith = <A, E>(h: Harness, program: Effect.Effect<A, E, Herdr | Proc | MusterEnv | Comms>) =>
   Effect.runPromise(program.pipe(Effect.provide(h.layer)));
 
-export const failWith = async <A, E>(h: Harness, program: Effect.Effect<A, E, Herdr | Proc | MusterEnv | Intercom>) => {
+export const failWith = async <A, E>(h: Harness, program: Effect.Effect<A, E, Herdr | Proc | MusterEnv | Comms>) => {
   const exit = await Effect.runPromiseExit(program.pipe(Effect.provide(h.layer)));
   if (exit._tag === "Success") throw new Error(`expected failure, got ${JSON.stringify(exit.value)}`);
   const { Cause } = await import("effect");

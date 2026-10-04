@@ -9,7 +9,7 @@ import { InputError, NotFound } from "./errors.ts";
 import { agentGet, call, paneGet, paneList, paneSendText, workspaceList } from "./herdr.ts";
 import { PROCESS_STATES } from "./machines.ts";
 import { readRegistry } from "./registry.ts";
-import { Intercom, MusterEnv } from "./runtime.ts";
+import { Comms, MusterEnv } from "./runtime.ts";
 import { load } from "./store.ts";
 import { KIND_GLYPH, answerPost, deadDesk, fleetGroups, fleetStats, formatAge, inbox, itemRef, latestPost, openCount, queueDir, queueEvents, readQueues, recentPosts } from "./switchboard.ts";
 import type { InboxGroup, SystemView, UnregisteredSpace } from "./switchboard.ts";
@@ -44,7 +44,7 @@ export const loadSystemWith = (read = readQueues) => Effect.gen(function* () {
     || project.lanes.some((lane) => lane.slug === "desk" && lane.root &&
     panes.some((pane) => pane.pane_id === lane.root?.paneId && pane.terminal_id === lane.root?.terminalId && pane.workspace_id !== project.spaceId),
   )).map((project) => project.slug));
-  const intercom = yield* Intercom;
+  const intercom = yield* Comms;
   const sessions = yield* intercom.sessions().pipe(Effect.catchCause(() => Effect.succeed(undefined)));
   const registeredSpaces = new Set(entries.map((entry) => entry.spaceId));
   const view: SystemView = {
@@ -92,7 +92,7 @@ export const nudgeSwitchboards = (project: string, record: { id: string; kind: s
   Effect.gen(function* () {
     if (!record.resolves && !["blocked", "approval", "decision"].includes(record.kind)) return;
     const env = yield* MusterEnv;
-    const intercom = yield* Intercom;
+    const intercom = yield* Comms;
     const dir = switchboardSessionsDir(env.home);
     const named = process.env.MUSTER_SWITCHBOARD_SESSION?.trim();
     const targets = new Set([...(named ? [named] : []), ...(existsSync(dir) ? readdirSync(dir).map(decodeURIComponent) : [])]);
@@ -138,7 +138,7 @@ export interface DeskAnswerInput {
 export const deskAnswer = (params: DeskAnswerInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
-    const intercom = yield* Intercom;
+    const intercom = yield* Comms;
     const path = queuePath(params.project, env.home);
     const open = openDeskItems(readDesk(path));
     const item = open.find((candidate) => candidate.id === params.id);
@@ -159,8 +159,8 @@ export const deskAnswer = (params: DeskAnswerInput) =>
     const nudged: string[] = [];
     for (const desk of desks) {
       const message = `☎️ Joel answered ${itemRef({ project: params.project, id: item.id })} "${item.title}": ${params.answer.trim()}`;
-      const result = yield* intercom.send(desk.sessionId, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
-      const status = result.status === "sent" && live && !live.includes(desk.sessionId) ? "queued, no live session" : result.status;
+      const result = yield* intercom.send({ kind: "alias", project: params.project, row: desk.name }, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
+      const status = result.status === "delivered" && live && !live.includes(desk.sessionId) ? "queued, no live session" : result.status === "delivered" ? "sent" : result.status;
       nudged.push(`${desk.name} (${desk.sessionId}): ${status}`);
     }
     return { record, item, remaining: open.length - 1, nudged };

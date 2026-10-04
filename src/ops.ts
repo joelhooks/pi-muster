@@ -43,7 +43,7 @@ import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepLane, stepProject } from "./machines.ts";
 import { failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from "./packet.ts";
-import { BOT_EMAIL, BOT_NAME, Intercom, MusterEnv, Proc, git, must } from "./runtime.ts";
+import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
@@ -1381,7 +1381,7 @@ export function reportMarkdown(row: AgentRow, packet: Pick<Packet, "id" | "kind"
 export const packetReport = (params: PacketReportInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
-    const intercom = yield* Intercom;
+    const intercom = yield* Comms;
     const proc = yield* Proc;
     if (!params.commit === !params.artifact) return yield* input("packet_report needs exactly one of commit or artifact");
     const project = yield* load(params.dir);
@@ -1826,7 +1826,7 @@ export interface StatusInput {
 export const projectStatus = (dir: string, params: StatusInput = {}) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
-    const intercom = yield* Intercom;
+    const intercom = yield* Comms;
     const act = params.act !== false;
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const project = params.takeover

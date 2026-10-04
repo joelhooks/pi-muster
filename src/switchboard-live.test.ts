@@ -5,7 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { queuePath, readDesk } from "./desk.ts";
 import { deskPost, projectOpen, agentLaunch } from "./ops.ts";
-import { Herdr, Intercom } from "./runtime.ts";
+import { NetworkComms } from "./comms.ts";
+import { Herdr, Comms } from "./runtime.ts";
 import { load } from "./store.ts";
 import { focusDesk, deskAnswer, loadSystem, nudgeSwitchboards, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
 import { watchSwitchboard, registerSwitchboard } from "./switchboard-ext.ts";
@@ -119,7 +120,7 @@ describe("switchboard queue delivery", () => {
   it("doesn't turn an intercom failure into a failed write", async () => {
     const { h, dir } = await setup();
     registerSwitchboardSession(h.home, "switchboard-session");
-    const broken = Layer.succeed(Intercom)({ sessions: () => Effect.succeed(undefined), send: () => Effect.die("disconnected") });
+    const broken = Layer.succeed(Comms)({ ...NetworkComms, sessions: () => Effect.succeed(undefined), send: () => Effect.die("disconnected") });
     const posted = await runWith(h, deskPost(dir, { kind: "decision", title: "Still writes" }).pipe(Effect.provide(broken)));
     await runWith(h, deskAnswer({ project: "probe", id: posted.record.id, answer: "yes" }).pipe(Effect.provide(broken)));
     expect(readDesk(queuePath("probe", h.home))).toHaveLength(2);
