@@ -1,5 +1,6 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { availableParallelism, loadavg } from "node:os";
 
 import { Effect, Schema } from "effect";
 
@@ -803,18 +804,50 @@ const waitForCwd = (paneId: string, cwd: string) =>
     return yield* new GuardFailed({ guard: "pane-cwd", message: `pane ${paneId} cwd is ${seen ?? "unknown"}, expected ${cwd}` });
   });
 
-/** The session file Herdr reports for the Pi in this pane; the new id after `/new` or a restore. */
-const waitForSession = (paneId: string, previous: string | null) =>
+/** Tail text is UNTRUSTED: it can buy time, never prove a session or prompt delivery. */
+const piStarting = (tail: string) => tail.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line =>
+  /^(?:pi\s*[:·-]\s*)?creating a new session(?:\s|[.…]|$)/i.test(line.trim()) ||
+  /^Warning: No project session found with id '[^'\r\n]+'; creating a new session with that id\.$/.test(line.trim()) ||
+  /^pi v\d+\.\d+\.\d+(?:\s|$)/i.test(line.trim()));
+
+/** Shared launch/restart wait: budget → evidenced extension → ready, missing or pending. */
+const waitForSession = (paneId: string, previous: string | null, fallback: () => string | null = () => null) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
-    for (let i = 0; i < 40; i++) {
+    const sample = env.startupLoad?.() ?? { load: loadavg()[0] ?? 0, cpus: availableParallelism() };
+    const load = Number.isFinite(sample.load) ? Math.max(0, sample.load) : 0;
+    const cpus = Number.isFinite(sample.cpus) ? Math.max(1, sample.cpus) : 1;
+    const budget = Math.min(60_000, Math.max(10_000, 10_000 * Math.ceil(load / cpus)));
+    const started = env.now().getTime();
+    let slept = 0;
+    let extended = false;
+    let nextTail = budget;
+    while (true) {
+      const elapsed = Math.max(slept, env.now().getTime() - started);
       const pane = yield* paneGet(paneId);
       const value = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
-      if (value && value !== previous) return value;
-      yield* env.sleep(250);
+      const sessionFile = value && value !== previous ? value : fallback();
+      if (sessionFile) return { state: "ready" as const, sessionFile, elapsed, load, slow: extended || elapsed > 10_000 };
+      if (elapsed >= nextTail) {
+        const tail = yield* paneRead(paneId, 12).pipe(Effect.orElseSucceed(() => "(pane unreadable)"));
+        if (modelOutputIssue(tail)?.severity === "error" || !piStarting(tail)) {
+          return { state: "missing" as const, tail, elapsed, load };
+        }
+        if (elapsed >= 120_000) return { state: "pending" as const, tail, elapsed, load };
+        extended = true;
+        nextTail = Math.min(120_000, elapsed + 1_000);
+      }
+      const pause = Math.min(250, nextTail - elapsed);
+      yield* env.sleep(pause);
+      slept += pause;
     }
-    return null;
   });
+
+const slowStartNote = (wait: { elapsed: number; load: number }) =>
+  `slow start: Pi session appeared after ${Math.ceil(wait.elapsed / 1_000)}s (load ${wait.load})`;
+const pendingPromptNote = (paneId: string, text: string | undefined) =>
+  `slow start, prompt pending: Pi still starting after 120 s in ${paneId}; delivery: none (pending). ` +
+  (text ? `Run herdr_agent ${JSON.stringify({ action: "prompt", target: paneId, prompt: text })}` : "No work prompt supplied.");
 
 const findSessionFile = (cwd: string, sessionId: string, home: string) => {
   const dir = sessionDirFor(cwd, home);
@@ -1049,9 +1082,12 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
           }),
         );
       const agent = yield* start(0);
-      const sessionFile = (yield* waitForSession(binding.paneId, null)) ?? findSessionFile(row.cwd, row.sessionId, env.home);
-      if (!sessionFile) {
-        const tail = yield* paneRead(binding.paneId, 12).pipe(Effect.catch(() => Effect.succeed("(pane unreadable)")));
+      const wait = yield* waitForSession(binding.paneId, null, () => findSessionFile(row.cwd, row.sessionId, env.home));
+      const sessionFile = wait.state === "ready" ? wait.sessionFile : null;
+      if (wait.state === "ready" && wait.slow) skillNotes.push(slowStartNote(wait));
+      if (wait.state === "pending") skillNotes.push(pendingPromptNote(binding.paneId, workPrompt(row, params.prompt)));
+      if (wait.state === "missing") {
+        const tail = wait.tail;
         const issue = modelOutputIssue(tail);
         if (issue?.severity === "error") {
           yield* patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }], {
@@ -1065,7 +1101,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         });
       }
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
-      return { binding, agent, sessionFile };
+      return { binding, agent, sessionFile, pending: wait.state === "pending" };
     }).pipe(Effect.tapError(failLaunch));
 
     const actualId = launched.sessionFile ? sessionIdFromFile(launched.sessionFile) : null;
@@ -1081,7 +1117,8 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       }),
       env: agentEnvironment,
     };
-    let running = yield* patchRow(dir, row.name, row.state, [{ type: "STARTED" }], {
+    let running = yield* patchRow(dir, row.name, row.state, launched.pending ? [] : [{ type: "STARTED" }], {
+      ...(launched.pending ? { delivery: "none" as const } : {}),
       pane: launched.binding,
       sessionFile: launched.sessionFile,
       sessionId: actualId ?? row.sessionId,
@@ -1090,7 +1127,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
 
     const text = workPrompt(running, params.prompt);
     let proof: Proof | null = null;
-    if (text) {
+    if (text && !launched.pending) {
       proof = yield* promptWithProof(launched.binding.paneId, text).pipe(
         Effect.catch((error) =>
           Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: `${error.operation}: ${error.message}. Read the pane before resending.` }),
@@ -1846,18 +1883,32 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
             writeFileSync(saved, tail);
             yield* paneSendKeys(paneId, ["Escape"]);
             yield* paneRun(paneId, "/new");
-            const fresh = yield* waitForSession(paneId, current.sessionFile);
+            const wait = yield* waitForSession(paneId, current.sessionFile);
             const text = workPrompt(current, undefined);
-            const proof = text
+            const issue = wait.state === "missing" ? modelOutputIssue(wait.tail) : null;
+            if (issue?.severity === "error") {
+              yield* patchRow(dir, current.name, current.state, [{ type: "FAIL" }], {
+                delivery: "unproven", events: [...(current.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: issue.line }],
+              });
+              return yield* new GuardFailed({ guard: "model-proof", message: `pane ${paneId}: delivery: unproven (model error: ${issue.line})` });
+            }
+            if (wait.state === "missing") {
+              yield* patchRow(dir, current.name, current.state, [{ type: "FAIL" }], { delivery: "unproven" });
+              return yield* new GuardFailed({ guard: "launch", message: `Herdr restarted ${current.name} but no Pi session appeared in ${paneId}. Pane tail (UNTRUSTED):\n${wait.tail.trim().slice(-1500)}` });
+            }
+            const proof = text && wait.state === "ready"
               ? yield* promptWithProof(paneId, text).pipe(
                   Effect.catch((error) => Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: error.message })),
                 )
               : null;
-            action = `restarted with /new after ${Math.floor(silentFor / 60_000)}m; ${proof ? `re-prompt ${proof.state}` : "no brief to re-prompt"}; tail saved to ${saved}`;
+            const receipt = wait.state === "pending" ? pendingPromptNote(paneId, text)
+              : wait.state === "ready" && wait.slow ? slowStartNote(wait)
+              : "";
+            action = `restarted with /new after ${Math.floor(silentFor / 60_000)}m; ${proof ? `re-prompt ${proof.state}` : text ? "re-prompt pending" : "no brief to re-prompt"}; ${receipt}; tail saved to ${saved}`;
             current = yield* patchRow(dir, current.name, current.state, decision.events, {
               restarts: current.restarts + 1,
-              ...(fresh ? { sessionFile: fresh, sessionId: sessionIdFromFile(fresh) ?? current.sessionId } : {}),
-              delivery: proof?.state === "proven" ? "proven" : "unproven",
+              ...(wait.state === "ready" ? { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? current.sessionId } : {}),
+              delivery: wait.state === "pending" ? "none" : proof?.state === "proven" ? "proven" : "unproven",
             }).pipe(Effect.catch(() => Effect.succeed(current)));
           }
           if (decision.action !== "restart") {

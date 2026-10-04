@@ -82,6 +82,113 @@ function commitInClone(clone: string, file = "work.txt") {
   return sh(clone, "rev-parse", "HEAD").trim();
 }
 
+describe("slow Pi startup", () => {
+  async function setup(load = 0, appearAt = Infinity, tail = "creating a new session…") {
+    const h = harness();
+    h.startupLoad = { load, cpus: 8 };
+    h.herdr.startSessions = false;
+    let elapsed = 0;
+    h.sleep = ms => { elapsed += ms; h.now = new Date(h.now.getTime() + ms); };
+    const handle = h.herdr.handle.bind(h.herdr);
+    vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => {
+      if (method === "pane.read") return { type: "pane_read", read: { text: tail } };
+      if (method === "pane.get" && elapsed >= appearAt) {
+        const pane = h.herdr.panes.get(String(params.pane_id));
+        if (pane?.agent) pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: join(h.root, "2026-10-04T00-00-00Z_delayed.jsonl") };
+      }
+      return handle(method, params);
+    });
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "startup" }));
+    const launch = agentLaunch(dir, { action: "launch", name: "slow", role: "worker", lane: "probe", label: "🐢 slow", cwd: dir, prompt: "do the work" });
+    return { h, dir, launch, elapsed: () => elapsed };
+  }
+
+  it("succeeds at 25 s under high load with a slow-start receipt", async () => {
+    const { h, launch, elapsed } = await setup(20, 25_000, "no marker");
+    const result = await runWith(h, launch);
+    expect(elapsed()).toBe(28_000); // Startup plus the existing 3 s model-proof observation.
+    expect(result.row.delivery).toBe("proven");
+    expect(result.notes.join("\n")).toContain("slow start: Pi session appeared after 25s (load 20)");
+  });
+
+  it("keeps the low-load budget at 10 s without Pi evidence", async () => {
+    const { h, launch, elapsed } = await setup(1, Infinity, "last lines");
+    const error = await failWith(h, launch);
+    expect(error.guard).toBe("launch");
+    expect(elapsed()).toBe(10_000);
+  });
+
+  it("caps the load budget at 60 s without Pi evidence", async () => {
+    const { h, launch, elapsed } = await setup(1000, Infinity, "last lines");
+    expect((await failWith(h, launch)).guard).toBe("launch");
+    expect(elapsed()).toBe(60_000);
+  });
+
+  it("extends low-load startup and records the successful extension", async () => {
+    const { h, launch, elapsed } = await setup(0, 25_000);
+    const result = await runWith(h, launch);
+    expect(elapsed()).toBe(28_000); // Startup plus the existing 3 s model-proof observation.
+    expect(result.notes.join("\n")).toContain("slow start: Pi session appeared after 25s (load 0)");
+  });
+
+  it.each(["creating a new session…", "pi v0.66.0", "\u001b[33mWarning: No project session found with id 'slow'; creating a new session with that id.\u001b[0m"]) ("leaves visibly starting Pi pending at 120 s: %s", async tail => {
+    const { h, dir, launch, elapsed } = await setup(0, Infinity, tail);
+    const result = await runWith(h, launch);
+    expect(elapsed()).toBe(120_000);
+    expect(result.row.state).toBe("launching");
+    expect(result.row.delivery).toBe("none");
+    expect(result.proof).toBeNull();
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("launching");
+    expect(h.herdr.calls.filter(call => call.method === "agent.prompt")).toHaveLength(0);
+    expect(result.notes.join("\n")).toContain(`slow start, prompt pending: Pi still starting after 120 s in ${result.row.pane?.paneId}`);
+    expect(result.notes.join("\n")).toContain(`herdr_agent ${JSON.stringify({ action: "prompt", target: result.row.pane?.paneId, prompt: "do the work" })}`);
+  });
+
+  it.each(["Error: No API key found for anthropic", "creating a new session…\nError: Unknown model bad"]) ("preserves model-proof failure: %s", async tail => {
+    const { h, dir, launch, elapsed } = await setup(0, Infinity, tail);
+    expect((await failWith(h, launch)).guard).toBe("model-proof");
+    expect(elapsed()).toBe(10_000);
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
+  });
+
+  it("does not treat quoted work instructions as startup evidence", async () => {
+    const { h, launch, elapsed } = await setup(0, Infinity, 'task: print "creating a new session"');
+    expect((await failWith(h, launch)).guard).toBe("launch");
+    expect(elapsed()).toBe(10_000);
+  });
+
+  it.each([25_000, Infinity])("shares the evidenced wait with restart (session at %s)", async appearAt => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    const file = launched.row.sessionFile!;
+    const age = (min: number) => { const at = new Date(h.now.getTime() - min * 60_000); utimesSync(file, at, at); };
+    age(31);
+    await runWith(h, projectStatus(dir));
+    age(61);
+    h.startupLoad = { load: 20, cpus: 8 };
+    let elapsed = 0;
+    h.sleep = ms => { elapsed += ms; h.now = new Date(h.now.getTime() + ms); };
+    const handle = h.herdr.handle.bind(h.herdr);
+    vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => {
+      if (method === "pane.send_input" && params.text === "/new") return { type: "ok" };
+      if (method === "pane.read") return { type: "pane_read", read: { text: "creating a new session…" } };
+      if (method === "pane.get" && elapsed >= appearAt) {
+        const pane = h.herdr.panes.get(String(params.pane_id));
+        if (pane) pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: join(h.root, "2026-10-04T00-00-00Z_restarted.jsonl") };
+      }
+      return handle(method, params);
+    });
+    const prompts = h.herdr.calls.filter(call => call.method === "agent.prompt").length;
+    const result = await runWith(h, projectStatus(dir));
+    expect(elapsed).toBe(appearAt === Infinity ? 120_000 : appearAt + 3_000);
+    expect(result.agents[0]?.state).toBe("restarted");
+    expect(result.agents[0]?.action).toContain(appearAt === Infinity ? "slow start, prompt pending" : "slow start: Pi session appeared after 25s (load 20)");
+    expect(h.herdr.calls.filter(call => call.method === "agent.prompt")).toHaveLength(prompts + (appearAt === Infinity ? 0 : 1));
+  });
+});
+
 describe("pane close watch retirement", () => {
   it.each(["agent", "lane"] as const)("emits before %s close and records each retired watch", async kind => {
     const h = harness();

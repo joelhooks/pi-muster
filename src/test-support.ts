@@ -202,6 +202,8 @@ export interface Harness {
   proc: ProcShape;
   emitPaneClose: EmitPaneClose;
   now: Date;
+  startupLoad: { load: number; cpus: number };
+  sleep: (ms: number) => void;
   sessionId: string;
   live: string[] | undefined;
 }
@@ -272,6 +274,8 @@ export function harness(): Harness {
       ? Effect.succeed({ code: 0, stdout: "", stderr: "" })
       : liveProc.run(command, args, options) },
     now: new Date("2026-09-29T06:00:00Z"),
+    startupLoad: { load: 0, cpus: 8 },
+    sleep: () => {},
     sessionId: "owner-session",
     live: undefined,
     emitPaneClose: noEmitPaneClose,
@@ -287,7 +291,8 @@ export function harness(): Harness {
           musterRoot: "/muster",
           workerWorktree,
           createId: () => `id${(counter += 1).toString().padStart(6, "0")}`,
-          sleep: () => Effect.void,
+          sleep: (ms) => Effect.sync(() => h.sleep(ms)),
+          startupLoad: () => h.startupLoad,
           emitPaneClose: h.emitPaneClose,
         }),
         Layer.succeed(Intercom)({
