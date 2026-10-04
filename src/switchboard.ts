@@ -1,9 +1,12 @@
-import { existsSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+
+import { Schema } from "effect";
 
 import { readDesk } from "./desk.ts";
 import type { DeskItem, DeskKind, Project } from "./domain.ts";
-import { TERMINAL_PACKET_STATES } from "./domain.ts";
+import { DeskItem as DeskItemSchema, TERMINAL_PACKET_STATES } from "./domain.ts";
+import { PROCESS_STATES } from "./machines.ts";
 import { openDeskItems } from "./tokens.ts";
 
 /**
@@ -36,6 +39,8 @@ export interface InboxGroup {
   readonly oldestMs: number;
   /** A live owner or desk is bound to a different Herdr space. */
   readonly outsideSpace?: boolean;
+  /** Undefined means intercom cannot establish liveness. */
+  readonly deadDesk?: boolean;
 }
 
 export const queueDir = (home: string) => join(home, ".local", "state", "herdr-desk");
@@ -49,6 +54,64 @@ export function readQueues(dir: string): Record<string, DeskItem[]> {
     queues[name.slice(0, -".jsonl".length)] = readDesk(join(dir, name));
   }
   return queues;
+}
+
+/** Byte offsets belong to one activated reader, never to global fleet state. */
+export class QueueReader {
+  private readonly files = new Map<string, { dev: number; ino: number; offset: number; mtime: number; tail: Buffer; items: DeskItem[] }>();
+  bytesRead = 0;
+
+  read(dir: string): Record<string, DeskItem[]> {
+    const queues: Record<string, DeskItem[]> = {};
+    const names = existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".jsonl")).sort() : [];
+    const decode = Schema.decodeUnknownOption(DeskItemSchema);
+    for (const name of names) {
+      const path = join(dir, name);
+      let fd: number | undefined;
+      try {
+        fd = openSync(path, "r");
+        // Stat the opened inode, so a rename during the read cannot mix two files.
+        const stat = fstatSync(fd);
+        let file = this.files.get(name);
+        if (!file || file.dev !== stat.dev || file.ino !== stat.ino || stat.size < file.offset || (stat.size === file.offset && stat.mtimeMs !== file.mtime)) {
+          file = { dev: stat.dev, ino: stat.ino, offset: 0, mtime: stat.mtimeMs, tail: Buffer.alloc(0), items: [] };
+        }
+        const bytes = Buffer.alloc(stat.size - file.offset);
+        let count = 0;
+        while (count < bytes.length) {
+          const got = readSync(fd, bytes, count, bytes.length - count, file.offset + count);
+          if (!got) break;
+          count += got;
+        }
+        this.bytesRead += count;
+        file.offset += count;
+        file.mtime = stat.mtimeMs;
+        const data = Buffer.concat([file.tail, bytes.subarray(0, count)]);
+        const end = data.lastIndexOf(10);
+        if (end >= 0) for (const line of data.subarray(0, end).toString("utf8").split("\n")) {
+          try {
+            const parsed = decode(JSON.parse(line));
+            if (parsed._tag === "Some") file.items.push(parsed.value);
+          } catch { /* Malformed complete lines do not hide later items. */ }
+        }
+        file.tail = data.subarray(end + 1);
+        this.files.set(name, file);
+        queues[name.slice(0, -6)] = file.items;
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+        this.files.delete(name);
+      } finally { if (fd !== undefined) closeSync(fd); }
+    }
+    for (const name of this.files.keys()) if (!names.includes(name)) this.files.delete(name);
+    return queues;
+  }
+}
+
+type DeskCatalog = { readonly agents: readonly Pick<Project["agents"][number], "role" | "state" | "sessionId" | "owner">[] };
+
+export function deadDesk(project: DeskCatalog | undefined, sessions: readonly string[] | undefined): boolean | undefined {
+  if (sessions === undefined) return undefined;
+  return !project?.agents.some((agent) => (agent.role === "desk" && PROCESS_STATES.includes(agent.state) && sessions.includes(agent.sessionId)) || sessions.includes(agent.owner));
 }
 
 const rank = (item: InboxItem) => KIND_RANK[item.kind];
@@ -189,6 +252,21 @@ export function latestPost(queues: Readonly<Record<string, readonly DeskItem[]>>
   return latest;
 }
 
+export const TICKER_WINDOW_MS = 60 * 60_000;
+export type QueueEvent = LatestPost & { readonly resolves?: string };
+
+export function queueEvents(queues: Readonly<Record<string, readonly DeskItem[]>>, now: number): QueueEvent[] {
+  return Object.entries(queues).flatMap(([project, items]) => items.map((item) => ({
+    project, kind: item.kind, title: item.title, ts: Date.parse(item.ts), ...(item.resolves ? { resolves: item.resolves } : {}),
+  }))).filter((event) => event.ts <= now && now - event.ts < TICKER_WINDOW_MS)
+    .sort((a, b) => b.ts - a.ts).slice(0, 5);
+}
+
+export function eventText(event: QueueEvent, now: number): string {
+  const glyph = event.resolves ? "✓" : POST_GLYPH[event.kind];
+  return `${event.project} ${glyph} ${event.resolves ? "resolved" : event.title.replace(/\s+/g, " ")} ${formatAge(Math.max(0, now - event.ts))}`;
+}
+
 export interface UnregisteredSpace {
   readonly spaceId: string;
   readonly label: string;
@@ -213,6 +291,7 @@ export interface SystemView {
   readonly fleet: FleetStats | null;
   readonly latest: LatestPost | null;
   readonly now: number;
+  readonly events?: readonly QueueEvent[];
 }
 
 const POST_GLYPH: Readonly<Record<DeskKind, string>> = { ...KIND_GLYPH, done: "🏁", fyi: "📎" };

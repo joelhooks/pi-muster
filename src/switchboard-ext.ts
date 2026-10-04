@@ -1,4 +1,4 @@
-import { mkdirSync, watch } from "node:fs";
+import { mkdirSync, statSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
@@ -10,10 +10,10 @@ import type { Layer } from "effect";
 import { Type } from "typebox";
 
 import { paneGet, reportTokens } from "./herdr.ts";
-import { deskAnswer, focusDesk, inboxText, loadSystem, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
+import { deskAnswer, focusDesk, inboxText, loadSystem, loadSystemWith, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
 import { OPEN_HINT, SwitchboardOverlay, SwitchboardState, renderWidget } from "./switchboard-view.ts";
 import type { Intent } from "./switchboard-view.ts";
-import { itemRef, queueDir, switchboardTokens } from "./switchboard.ts";
+import { QueueReader, fleetGroups, inbox, itemRef, latestPost, queueDir, queueEvents, recentPosts, switchboardTokens } from "./switchboard.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS } from "./tokens.ts";
 
 const WIDGET = "muster-switchboard";
@@ -66,12 +66,26 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   let pending: ReturnType<typeof setTimeout> | undefined;
   let lastTokens = "";
   let lastPublish = 0;
-  let current: ExtensionContext | undefined;
+  let liveLayer: Layer.Layer<any> | undefined;
+  let reader = new QueueReader();
+  let topologyAt = 0;
+  let registryStamp = "";
+  let generation = 0;
+  let loggedFailure = false;
+  const failed = (error: unknown) => {
+    if (loggedFailure) return;
+    loggedFailure = true;
+    console.error(`☎️ Switchboard refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+  };
+  const provideLive = <A>(program: Effect.Effect<A, unknown, any>) => {
+    if (!liveLayer) throw new Error("Switchboard is not activated");
+    return Effect.runPromise(program.pipe(Effect.provide(liveLayer)) as Effect.Effect<A>);
+  };
 
   const provide = <A>(ctx: ExtensionContext, program: Effect.Effect<A, unknown, any>) =>
     Effect.runPromise(program.pipe(Effect.provide(deps.layer(ctx) as Layer.Layer<any>)) as Effect.Effect<A>);
 
-  const publish = async (ctx: ExtensionContext) => {
+  const publish = async () => {
     const paneId = deps.env.HERDR_PANE_ID;
     if (!paneId) return;
     const now = Date.now();
@@ -81,40 +95,69 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     lastTokens = key;
     lastPublish = now;
     // `progress` marks the space as managed, so Bellwether leaves `needs` to us.
-    await provide(
-      ctx,
+    await provideLive(
       Effect.gen(function* () {
         const pane = yield* paneGet(paneId);
         if (!pane) return;
         yield* reportTokens(pane.workspace_id, TOKEN_SOURCE, tokens, now, TOKEN_TTL_MS);
       }),
-    ).catch(() => undefined);
+    ).catch(failed);
   };
 
-  const refresh = (ctx: ExtensionContext): Promise<void> => {
-    if (refreshing) return refreshing;
-    refreshing = (async () => {
-      const view = await provide(ctx, loadSystem).catch(() => null);
-      if (!view || !active) return;
-      state.setSystem(view);
-      tui?.requestRender();
-      overlayTui?.requestRender();
-      await publish(ctx);
-    })().finally(() => { refreshing = undefined; });
-    return refreshing;
+  const repaint = () => { tui?.requestRender(); overlayTui?.requestRender(); };
+  const refresh = (): Promise<void> => {
+    if (!active) return Promise.resolve();
+    const home = deps.env.HOME ?? homedir();
+    try {
+      const now = Date.now();
+      const queues = reader.read(queueDir(home));
+      const previous = new Map(state.groups.map((group) => [group.project, group]));
+      state.setSystem({
+        groups: fleetGroups(inbox(queues, now), [...previous.keys()]).map((group) => ({
+          ...group, outsideSpace: previous.get(group.project)?.outsideSpace, deadDesk: previous.get(group.project)?.deadDesk,
+        })),
+        posts: recentPosts(queues, now), events: queueEvents(queues, now), latest: latestPost(queues),
+        fleet: state.fleet, unregistered: state.unregistered, now,
+      });
+      repaint();
+      // Queue/age rendering never waits for sockets or project metadata.
+      let stamp = "missing";
+      try { const stat = statSync(registryPath(home)); stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}`; }
+      catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; }
+      if (refreshing) return refreshing;
+      if (stamp === registryStamp && now - topologyAt < 30_000) return Promise.resolve();
+      const epoch = generation;
+      refreshing = provideLive(loadSystemWith(() => queues)).then((view) => {
+        if (!active || epoch !== generation) return;
+        const flags = new Map(view.groups.map((group) => [group.project, group]));
+        // Keep queues that arrived while topology was loading.
+        state.setSystem({ ...view, now: state.now, events: state.events, posts: state.posts, latest: state.latest,
+          groups: fleetGroups(state.groups.filter((group) => group.items.length > 0), view.groups.map((group) => group.project)).map((group) => ({
+            ...group, outsideSpace: flags.get(group.project)?.outsideSpace, deadDesk: flags.get(group.project)?.deadDesk,
+          })),
+        });
+        topologyAt = Date.now(); registryStamp = stamp;
+        repaint();
+      }).catch(failed).finally(() => { if (epoch === generation) refreshing = undefined; });
+      return refreshing;
+    } catch (error) { failed(error); return Promise.resolve(); }
   };
 
   const schedule = () => {
     if (pending) clearTimeout(pending);
     pending = setTimeout(() => {
       pending = undefined;
-      if (current) void refresh(current);
+      void refresh();
+      if (active) void publish().catch(failed);
     }, DEBOUNCE_MS);
   };
 
   const activate = async (ctx: ExtensionContext) => {
-    current = ctx;
     if (active) return;
+    // Resolve session-bound getters once. Background reads never touch a captured ctx.
+    liveLayer = deps.layer(ctx) as Layer.Layer<any>;
+    reader = new QueueReader();
+    topologyAt = 0; registryStamp = ""; loggedFailure = false;
     active = true;
     const home = deps.env.HOME ?? homedir();
     stopWatch = watchSwitchboard(home, schedule);
@@ -126,11 +169,14 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       tui = widgetTui;
       return { render: (width: number) => renderWidget(state, width, theme), invalidate: () => {} };
     });
-    await refresh(ctx);
+    await refresh();
   };
 
   const deactivate = (ctx?: ExtensionContext) => {
     active = false;
+    generation += 1;
+    refreshing = undefined;
+    liveLayer = undefined;
     stopWatch?.();
     stopWatch = undefined;
     unregister?.();
@@ -139,6 +185,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     pending = undefined;
     ctx?.ui.setWidget(WIDGET, undefined);
     tui = undefined;
+    overlayTui = undefined;
   };
 
   const answer = async (ctx: ExtensionContext, item: Extract<Intent, { item: unknown }>["item"], text: string, kind: "done" | "fyi" = "done") => {
@@ -149,7 +196,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     } catch (error) {
       ctx.ui.notify(`☎️ answer failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
-    await refresh(ctx);
+    await refresh();
   };
 
   /** Browse until Joel closes the overlay or hands an item to the agent. */
@@ -198,11 +245,11 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     if (wasActive || pi.getFlag("switchboard") === true || deps.env.MUSTER_SWITCHBOARD === "1") await activate(ctx);
   });
   pi.on("session_shutdown", () => deactivate());
-  pi.on("before_agent_start", async (_event, ctx) => {
-    if (active) await refresh(ctx);
+  pi.on("before_agent_start", async () => {
+    if (active) await refresh();
   });
-  pi.on("agent_end", (_event, ctx) => {
-    if (active) void refresh(ctx);
+  pi.on("agent_end", () => {
+    if (active) void refresh();
   });
 
   pi.registerCommand("switchboard", {
@@ -256,7 +303,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       const result = await deps.run(ctx, signal, deskAnswer(params), (value) =>
         `Answered ${itemRef({ project: params.project, id: value.item.id })} (${value.remaining} left in ${params.project}). ${value.nudged.length ? `Nudged: ${value.nudged.join(", ")}` : "No Muster desk to nudge; the queue carries it."}`,
       );
-      if (current && active) void refresh(current);
+      if (active) void refresh();
       return result;
     },
   });
