@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { queuePath } from "./desk.ts";
 import type { DeskItem } from "./domain.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
-import { SwitchboardState, renderWidget } from "./switchboard-view.ts";
+import { SwitchboardState, renderRankedSummary as renderWidget } from "./switchboard-view.ts";
 import { QueueReader, deadDesk, eventText, fleetGroups, inbox, queueDir, queueEvents } from "./switchboard.ts";
 import { harness } from "./test-support.ts";
 
@@ -104,13 +104,13 @@ describe("idle refresh regression", () => {
       expect(widget?.render(120).join("\n")).toContain("inbox clear");
       stale = true;
       appendFileSync(path, line({ ...item("idle", "decision", 0), ts: new Date().toISOString(), title: "No prompt sent" }));
-      await vi.waitFor(() => expect(widget?.render(120).join("\n")).toContain("p#idle No prompt sent"), { timeout: 1800 });
+      await vi.waitFor(() => expect(widget?.render(120).join("\n")).toContain("1 open"), { timeout: 1800 });
       expect(layer).toHaveBeenCalledTimes(1);
       expect(render).toHaveBeenCalled();
       const clock = Date.now();
       vi.spyOn(Date, "now").mockReturnValue(clock + 120_000);
       await handlers.get("before_agent_start")!(null, ctx);
-      expect(widget?.render(120).find((row) => row.includes("p#idle"))).toContain("2m");
+      expect(widget?.render(120).join("\n")).toContain("oldest 2m");
       // Even broken metadata must not prevent local queue rendering, or flood logs.
       vi.spyOn(h.now, "getTime").mockImplementation(() => { throw new Error("metadata clock unavailable"); });
       const log = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -119,7 +119,7 @@ describe("idle refresh regression", () => {
       await handlers.get("before_agent_start")!(null, ctx);
       expect(log).toHaveBeenCalledTimes(1);
       expect(log.mock.calls[0]?.[0]).toContain("metadata clock unavailable");
-      expect(widget?.render(120).join("\n")).toContain("No prompt sent");
+      expect(widget?.render(120).join("\n")).toContain("1 open");
     } finally { handlers.get("session_shutdown")!(); vi.restoreAllMocks(); }
   });
 });

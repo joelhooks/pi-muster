@@ -60,6 +60,7 @@
     "src/skills.ts",
     "src/store.ts",
     "src/switchboard-ext.ts",
+    "src/switchboard-flame.ts",
     "src/switchboard-ops.ts",
     "src/switchboard-view.ts",
     "src/registry.ts",

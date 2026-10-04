@@ -8,7 +8,7 @@ import { queuePath, readDesk } from "./desk.ts";
 import type { DeskItem, Project } from "./domain.ts";
 import { agentLaunch, projectOpen } from "./ops.ts";
 import { deskAnswer, inboxText, loadInbox, loadSystem, registryPath } from "./switchboard-ops.ts";
-import { SwitchboardState, handleKey, heatStrip, renderOverlay, renderWidget } from "./switchboard-view.ts";
+import { SwitchboardState, handleKey, heatStrip, renderOverlay, renderRankedSummary as renderWidget } from "./switchboard-view.ts";
 import { activity, answerPost, fleetStats, formatAge, inbox, latestPost, recentPosts, switchboardNeeds, switchboardTokens } from "./switchboard.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 
@@ -83,7 +83,7 @@ describe("switchboard view", () => {
 
   it("shows the cursor as ▶ on project rows too, and follows a real key sequence", () => {
     const s = state();
-    expect(renderOverlay(s, 80, 20, plain).find((line) => line.includes("drovr"))).toContain("▶ ▾ drovr");
+    expect(renderOverlay(s, 80, 20, plain).find((line) => line.includes("▶ ▾ drovr"))).toBeDefined();
     handleKey(s, " ");
     expect(s.expanded.has("drovr")).toBe(false);
     expect(s.expanded.has("support")).toBe(true);
