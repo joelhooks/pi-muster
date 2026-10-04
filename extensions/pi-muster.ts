@@ -278,7 +278,7 @@ export default function muster(pi: ExtensionAPI) {
       cwd: Type.Optional(Type.String()),
       clone: Type.Optional(Type.Boolean({ description: "Allocate a rift clone of the lane repo as cwd" })),
       from: Type.Optional(Type.String({ description: "fork: the parent row" })),
-      model: Type.Optional(Type.String()),
+      model: Type.Optional(Type.String({ description: "an alias (opus, fable, sol) or provider/model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       appendSystemPrompt: Type.Optional(Type.Array(Type.String())),
       skills: Type.Optional(Type.Array(Type.String())),
@@ -406,7 +406,7 @@ export default function muster(pi: ExtensionAPI) {
 
   const RolePolicyParam = Type.Optional(
     Type.Object({
-      model: Type.Optional(Type.String()),
+      model: Type.Optional(Type.String({ description: "an alias (opus, fable, sol) or provider/model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       compactAt: Type.Optional(Type.Union([Type.Integer(), Type.Null()], { description: "null turns compaction off" })),
       noSkills: Type.Optional(Type.Boolean()),

@@ -47,6 +47,7 @@ import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
+import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts";
 import { resolveSkills, skillIndex } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
@@ -876,6 +877,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const project = yield* load(dir);
     const existing = project.agents.find((agent) => agent.name === name);
 
+    const roster = (yield* loadRoster).roster;
     const skillNotes: string[] = [];
     let row: AgentRow;
     if (params.action === "restore") {
@@ -932,7 +934,10 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
-      }, roleDefaults((yield* loadRoster).roster, project.policy, role, params.model));
+      }, yield* Effect.try({
+        try: () => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model),
+        catch: (error) => input(String(error instanceof Error ? error.message : error)),
+      }));
       const resolved = requestedProfile.skills.length > 0
         ? yield* Effect.try({
           try: () => resolveSkills({ skills: requestedProfile.skills, index: skillIndex({ cwd }) }),
@@ -965,6 +970,13 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     }
     if (params.brief && params.action === "restore") row = { ...row, brief: params.brief };
 
+    const resolvedModel = yield* Effect.try({
+      try: () => resolveModel(params.model ?? row.profile.model, roster),
+      catch: (error) => input(String(error instanceof Error ? error.message : error)),
+    });
+    row = { ...row, profile: { ...row.profile, model: resolvedModel.model, thinking: params.thinking ?? resolvedModel.thinking ?? row.profile.thinking } };
+    const modelNote = yield* checkRunnableModel(row.profile.model, row.cwd);
+    if (modelNote) skillNotes.push(modelNote);
     const kind: LaunchKind = params.action;
     const launchProfile = extensionsFor(project, row);
     const argv = buildArgv({
@@ -1014,6 +1026,13 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       const sessionFile = (yield* waitForSession(binding.paneId, null)) ?? findSessionFile(row.cwd, row.sessionId, env.home);
       if (!sessionFile) {
         const tail = yield* paneRead(binding.paneId, 12).pipe(Effect.catch(() => Effect.succeed("(pane unreadable)")));
+        const issue = modelOutputIssue(tail);
+        if (issue?.severity === "error") {
+          yield* patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }], {
+            delivery: "unproven", events: [...(row.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: issue.line }],
+          });
+          return yield* new GuardFailed({ guard: "model-proof", message: `pane ${binding.paneId}: delivery: unproven (model error: ${issue.line})` });
+        }
         return yield* new GuardFailed({
           guard: "launch",
           message: `Herdr started ${row.name} but no Pi session appeared in ${binding.paneId}. Pane tail (UNTRUSTED):\n${tail.trim().slice(-1500)}`,
@@ -1051,6 +1070,19 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
           Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: `${error.operation}: ${error.message}. Read the pane before resending.` }),
         ),
       );
+      if (proof.state === "unproven" && !proof.modelError) {
+        const issue = modelOutputIssue(yield* paneRead(launched.binding.paneId, 20).pipe(Effect.orElseSucceed(() => "")));
+        if (issue?.severity === "error") proof = { ...proof, modelError: issue.line, detail: `model error: ${issue.line}` };
+      }
+      if (proof.state === "unproven" && proof.modelError) {
+        running = yield* patchRow(dir, row.name, "running", [{ type: "FAIL" }], {
+          delivery: "unproven",
+          events: [...(running.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: proof.modelError }],
+        });
+        yield* publishTokens(yield* load(dir));
+        return yield* new GuardFailed({ guard: "model-proof", message: `pane ${launched.binding.paneId}: delivery: unproven (model error: ${proof.modelError})` });
+      }
+      if (proof.warning) skillNotes.push(`model warning: ${proof.warning}`);
       running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven" });
     }
     const tokens = yield* publishTokens(yield* load(dir));
@@ -1657,8 +1689,20 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       }
       let action: string | null = null;
       let current = row;
-      const adoptionCandidate = row.state === "failed" || row.state === "launching";
-      if (adoptionCandidate) {
+      const idleLive = pane && pane.agent_status !== "working" && ["running", "silent", "nudged", "restarted"].includes(row.state);
+      const issue = idleLive && pane ? modelOutputIssue(yield* paneRead(pane.pane_id, 20).pipe(Effect.orElseSucceed(() => ""))) : null;
+      const modelError = issue?.severity === "error" ? issue.line : undefined;
+      // A failed model launch requires an explicit restore, not automatic adoption.
+      const failedModel = row.state === "failed" && row.events?.some((event) => event.type === "MODEL_ERROR");
+      const adoptionCandidate = !failedModel && (row.state === "failed" || row.state === "launching");
+      if (modelError) {
+        action = `FAILED (model error: ${modelError})`;
+        if (act && row.owner === env.sessionId) {
+          current = yield* patchRow(dir, row.name, row.state, [{ type: "FAIL" }], {
+            delivery: "unproven", events: [...(row.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: modelError }],
+          });
+        }
+      } else if (adoptionCandidate) {
         // Never learn identity from an unrelated session: that would make it
         // match on the next pass. Read the bound terminal before adopting it.
         const mine = row.owner === env.sessionId;
@@ -1706,6 +1750,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         );
         action = `rebound moved pane to ${pane.pane_id}`;
       }
+      if (!modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
       const herdrFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
       if (!adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
         current = yield* patchRow(dir, row.name, current.state, [], {
@@ -1719,7 +1764,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       let cost = file && existsSync(file) ? yield* Effect.promise(() => readSessionCost(file, CAPTURE_REFRESH_MARK)) : null;
       // Adoption only records evidence; do not nudge, restart, or refresh the
       // live agent in the same pass, even if its session file looks stale.
-      const working = !adoptionCandidate && ["running", "silent", "nudged", "restarted"].includes(current.state);
+      const working = !modelError && !adoptionCandidate && ["running", "silent", "nudged", "restarted"].includes(current.state);
 
       // A bridge lane whose wake failed prompt capture stays dead until someone
       // types to it: timer and intercom wakes skip the hook that records a prompt.
@@ -1915,6 +1960,12 @@ export interface UpdateInput {
 export const projectUpdate = (dir: string, params: UpdateInput) =>
   Effect.gen(function* () {
     const patch = params.policy === undefined ? null : yield* decodeWith(decodePolicy, params.policy);
+    const { roster, path } = yield* loadRoster;
+    const before = yield* load(dir);
+    yield* Effect.try({
+      try: () => effectivePolicy(roster, patch ? mergePolicy(before.policy, patch) : before.policy),
+      catch: (error) => input(String(error instanceof Error ? error.message : error)),
+    });
     const label = params.label?.trim();
     const project = yield* mutate(dir, (current) =>
       Effect.sync(() => {
@@ -1934,7 +1985,6 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     if (label) notes.push((yield* keepSpaceLabel(project, true)) ?? `space label is "${project.label}"`);
     notes.push(yield* publishTokens(project));
     notes.push(`brain: ${yield* writeBrain(project)}`);
-    const { roster, path } = yield* loadRoster;
     notes.push(`roster: ${path ?? "built-in defaults"}`);
     return { project, policy: effectivePolicy(roster, project.policy), notes };
   });

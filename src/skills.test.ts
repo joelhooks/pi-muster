@@ -99,9 +99,9 @@ describe("skill discovery", () => {
     const alias = join(f.cwd, "alias.md");
     symlinkSync(f.exact, alias);
     const roster = decodeRoster({ version: 1, roles: { worker: {
-      skills: ["testing"], alternates: [{ model: "other", skills: ["alternate", "testing"], useFor: [] }],
+      skills: ["testing"], alternates: [{ model: "test/other", skills: ["alternate", "testing"], useFor: [] }],
     } } });
-    const defaults = roleDefaults(roster, { roles: { worker: { skills: ["policy"] } } }, "worker", "other");
+    const defaults = roleDefaults(roster, { roles: { worker: { skills: ["policy"] } } }, "worker", "test/other");
     const profile = profileFor("worker", { label: "w", skills: ["launch", alias, "missing"] }, defaults);
     const result = resolveSkills({ skills: profile.skills, index: skillIndex(f) });
     expect(result.paths).toEqual([f.exact, alt, policy, launch].map((p) => realpathSync(p)));
