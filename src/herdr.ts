@@ -8,7 +8,8 @@ import {
 } from "@joelhooks/pi-bellwether/herdr-client";
 
 import { HerdrFailure } from "./errors.ts";
-import { Herdr } from "./runtime.ts";
+import { Herdr, MusterEnv } from "./runtime.ts";
+import { modelOutputIssue } from "./models.ts";
 
 /**
  * The Herdr operations Muster needs, over Bellwether's socket client. Every
@@ -109,7 +110,7 @@ export const reportTokens = (workspaceId: string, source: string, tokens: Readon
     params: { workspace_id: workspaceId, source, tokens, seq, ttl_ms: ttlMs },
   }).pipe(Effect.asVoid);
 
-export type Proof = { readonly state: "proven"; readonly via: "prompt" | "wait" | "enter" } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string };
+export type Proof = { readonly state: "proven"; readonly via: "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly warning?: string };
 
 const waitWorking = (paneId: string, timeoutMs: number) =>
   call({
@@ -124,7 +125,19 @@ const waitWorking = (paneId: string, timeoutMs: number) =>
  * when proof fails on an idle agent Muster sends exactly one Enter (never the
  * text again) and waits once more.
  */
-export const promptWithProof = (paneId: string, text: string): Effect.Effect<Proof, HerdrFailure, Herdr> =>
+const checkProof = (paneId: string, via: "prompt" | "enter") => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  let warning: string | undefined;
+  for (let pass = 0; pass < 2; pass++) {
+    if (pass === 1) yield* env.sleep(3_000);
+    const issue = modelOutputIssue(yield* paneRead(paneId, 20));
+    if (issue?.severity === "error") return { state: "unproven", submission: "submitted", detail: `model error: ${issue.line}`, modelError: issue.line } satisfies Proof;
+    if (issue) warning = issue.line;
+  }
+  return { state: "proven", via, ...(warning ? { warning } : {}) } satisfies Proof;
+});
+
+export const promptWithProof = (paneId: string, text: string): Effect.Effect<Proof, HerdrFailure, Herdr | MusterEnv> =>
   Effect.gen(function* () {
     const started = Date.now();
     const remaining = () => Math.max(1_000, PROOF_OF_LIFE_MS - (Date.now() - started));
@@ -143,12 +156,12 @@ export const promptWithProof = (paneId: string, text: string): Effect.Effect<Pro
         () => waitWorking(paneId, remaining()).pipe(Effect.orElseSucceed(() => false)),
       ),
     );
-    if (submitted) return { state: "proven", via: "prompt" } satisfies Proof;
+    if (submitted) return yield* checkProof(paneId, "prompt");
     const recovered = yield* paneSendKeys(paneId, ["Enter"]).pipe(
       Effect.andThen(waitWorking(paneId, 15_000)),
       Effect.orElseSucceed(() => false),
     );
-    if (recovered) return { state: "proven", via: "enter" } satisfies Proof;
+    if (recovered) return yield* checkProof(paneId, "enter");
     return {
       state: "unproven",
       submission: "submitted",

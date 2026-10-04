@@ -8,6 +8,7 @@ import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import type { HerdrClient, HerdrRequest } from "@joelhooks/pi-bellwether/herdr-client";
 
 import { sessionDirFor } from "./argv.ts";
+import type { ProcShape } from "./runtime.ts";
 import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "./runtime.ts";
 
 export interface FakePane {
@@ -197,6 +198,7 @@ export interface Harness {
   readonly sent: Array<{ to: string; message: string }>;
   readonly layer: Layer.Layer<Herdr | Proc | MusterEnv | Intercom>;
   readonly workerWorktree: string;
+  proc: ProcShape;
   now: Date;
   sessionId: string;
   live: string[] | undefined;
@@ -264,13 +266,16 @@ export function harness(): Harness {
     herdr,
     sent,
     workerWorktree,
+    proc: { run: (command, args, options) => command === "pi"
+      ? Effect.succeed({ code: 0, stdout: "", stderr: "" })
+      : liveProc.run(command, args, options) },
     now: new Date("2026-09-29T06:00:00Z"),
     sessionId: "owner-session",
     live: undefined,
     get layer() {
       return Layer.mergeAll(
         Layer.succeed(Herdr)(herdr.client()),
-        Layer.succeed(Proc)(liveProc),
+        Layer.succeed(Proc)(h.proc),
         Layer.succeed(MusterEnv)({
           home,
           now: () => h.now,

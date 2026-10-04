@@ -51,6 +51,7 @@
     "src/intercom.ts",
     "src/machines.ts",
     "src/ops.ts",
+    "src/models.ts",
     "src/packet.ts",
     "src/roster.ts",
     "src/runtime.ts",

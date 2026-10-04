@@ -1,4 +1,5 @@
 import { Effect, Schema } from "effect";
+import { modelAliases, resolveModel } from "./models.ts";
 
 /**
  * Muster's domain values. Every file Muster reads or writes decodes through
@@ -98,6 +99,7 @@ export const RestoreCommand = Schema.Struct({
 export type RestoreCommand = typeof RestoreCommand.Type;
 
 export const AgentRow = Schema.Struct({
+  events: Schema.optionalKey(Schema.Array(Schema.Struct({ type: Schema.String, at: Iso, detail: Schema.String }))),
   name: AgentName,
   role: Role,
   lane: Slug,
@@ -338,6 +340,7 @@ export type RosterRole = typeof RosterRole.Type;
  */
 export const Roster = Schema.Struct({
   version: Schema.Literal(1),
+  aliases: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   roles: Schema.Struct({
     desk: Schema.optionalKey(RosterRole),
     hawk: Schema.optionalKey(RosterRole),
@@ -377,9 +380,10 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
 export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string): RoleDefaults {
   const { alternates = [], ...fleet } = roster?.roles?.[role] ?? {};
   const project = policy?.roles?.[role] ?? {};
-  const chosen = model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model;
-  const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => candidate.model === chosen) ?? { useFor: [] };
-  return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen,
+  const resolved = resolveModel(model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster);
+  const chosen = resolved.model;
+  const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => resolveModel(candidate.model, roster).model === chosen) ?? { useFor: [] };
+  return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen, ...(resolved.thinking ? { thinking: resolved.thinking } : {}),
     skills: [...new Set([...(fleet.skills ?? []), ...("skills" in alternate ? alternate.skills ?? [] : []), ...(project.skills ?? [])])],
   };
 }
@@ -405,7 +409,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 export const decodePolicy = Schema.decodeUnknownSync(Policy);
