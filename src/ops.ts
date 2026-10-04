@@ -16,6 +16,7 @@ import {
 } from "./argv.ts";
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
+import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
 import { GateReceipt, Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
@@ -1934,6 +1935,34 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       });
     }
 
+    const autolandNotes: string[] = [];
+    if (act) {
+      const snapshot = yield* load(dir);
+      const candidates = snapshot.packets.filter(packet => autolandEligible(packet) &&
+        snapshot.agents.some(row => row.name === packet.agent && row.owner === env.sessionId) &&
+        (!packet.autolandCheckedAt || now - Date.parse(packet.autolandCheckedAt) >= AUTOLAND_RECHECK_MS))
+        .sort((a, b) => a.reportedAt.localeCompare(b.reportedAt)).slice(0, AUTOLAND_CAP);
+      for (const packet of candidates) {
+        const landing = yield* findLanding(snapshot, packet, { notes: autolandNotes });
+        const recorded = yield* mutate(dir, current => Effect.gen(function* () {
+          const latest = yield* findPacket(current, packet.id);
+          const row = yield* findRow(current, latest.agent);
+          if (!autolandEligible(latest) || row.owner !== env.sessionId ||
+            (latest.autolandCheckedAt && now - Date.parse(latest.autolandCheckedAt) < AUTOLAND_RECHECK_MS)) return [current, false] as const;
+          const checked = { ...latest, autolandCheckedAt: iso(env) };
+          if (!landing) return [withPacket(current, checked), false] as const;
+          const result = yield* recordPacketOutcome(current, checked, "no_changes", landing.sha, landingEvidence(landing, landing.base), iso(env));
+          // Do not retire a live worker or a newer report from the same agent.
+          const newer = current.packets.some(other => other.agent === row.name && other.id !== packet.id &&
+            autolandEligible(other) && other.reportedAt >= latest.reportedAt);
+          const updated = !newer && (row.state === "reported" || row.state === "verified")
+            ? withRow(result.project, { ...row, state: yield* stepAgent(row.name, row.state, { type: "LAND" }), updatedAt: iso(env) })
+            : result.project;
+          return [updated, true] as const;
+        }));
+        if (recorded && landing) autolandNotes.push(`autoland: ${packet.id.slice(0, 8)} → ${landing.sha.slice(0, 8)}${landing.how === "squash" ? ` (PR #${landing.pr})` : ""}`);
+      }
+    }
     const final = yield* load(dir);
     const label = yield* keepSpaceLabel(final, act);
     const tokens = yield* publishTokens(final, { stuck });
@@ -1945,7 +1974,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       const status = yield* fleetStatus(dir, runner);
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
-    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime(), fleet.line), notes: [tokens, `brain: ${brain}`, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    return { project: final, agents: lines, openDesk: desk, board: board(final, lines, desk.length, env.now().getTime(), fleet.line), notes: [tokens, `brain: ${brain}`, ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));

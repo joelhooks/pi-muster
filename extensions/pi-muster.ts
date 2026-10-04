@@ -394,7 +394,7 @@ export default function muster(host: ExtensionAPI) {
     name: "packet_land",
     label: "Muster packet land",
     description:
-      "Record a packet's outcome: committed, rejected, or no_changes. In rift-merge mode, committed fetches the worker branch into a clean source checkout and merges it --no-ff as shitratgit[bot], running the optional gate under the machine-wide heavy-job lock between merge and commit (a failed gate aborts the merge). Other modes pass landedAs, the merge commit made elsewhere. An artifact packet, or any packet without a clone branch, is recorded without a merge and requires evidence (what you checked and where). Never pushes.",
+      "Record a packet's outcome: committed, rejected, or no_changes. In rift-merge mode, committed fetches the worker branch into a clean source checkout and merges it --no-ff as shitratgit[bot], running the optional gate under the machine-wide heavy-job lock between merge and commit (a failed gate aborts the merge). Other modes pass landedAs, the merge commit made elsewhere. An artifact packet, or any packet without a clone branch, is recorded without a merge and requires evidence (what you checked and where). Never pushes. project_status records packets that already landed outside Muster (on the base branch or in a merged PR) automatically.",
     parameters: Type.Object({
       project: ProjectParam,
       id: Type.String(),

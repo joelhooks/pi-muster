@@ -192,6 +192,8 @@ export const Packet = Schema.Struct({
   state: PacketState,
   verification: Schema.NullOr(Schema.Struct({ at: Iso, checks: Schema.Array(CheckOutcome) })),
   landedAs: Schema.NullOr(Schema.String),
+  /** Missing in old files means never checked. */
+  autolandCheckedAt: Schema.optionalKey(Iso),
   gate: Schema.NullOr(PacketGate).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
   /** Earlier packet whose commit this follow-up includes. */
   supersedes: Schema.NullOr(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
