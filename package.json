@@ -48,6 +48,7 @@
     "src/autoland.ts",
     "src/compact.ts",
     "src/comms.ts",
+    "src/ratking-lexicon.ts",
     "src/desk.ts",
     "src/domain.ts",
     "src/errors.ts",
