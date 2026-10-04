@@ -33,7 +33,7 @@ import { Herdr, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
 import { watchEntries } from "./relay-events.ts";
 import { ProcError } from "./errors.ts";
 import { parsePorcelainZ } from "./packet.ts";
-import { load, mutate } from "./store.ts";
+import { load, mutate, projectPath } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
 import type { Harness } from "./test-support.ts";
 
@@ -41,6 +41,7 @@ import type { Harness } from "./test-support.ts";
 // and never reach a real fleet-compute runner from the environment or PATH.
 beforeEach(() => {
   vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
+  vi.stubEnv("MUSTER_PROJECT", "");
   vi.spyOn(machineAdapter, "performanceCores").mockReturnValue(12);
   vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 16, load: 20, freeGB: 64 });
 });
@@ -81,6 +82,116 @@ function commitInClone(clone: string, file = "work.txt") {
   sh(clone, "commit", "-q", "-m", "work");
   return sh(clone, "rev-parse", "HEAD").trim();
 }
+
+describe("side desks", () => {
+  async function setup() {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "desk", label: "💬 desk", goal: "talk with Joel" }));
+    const parent = await runWith(h, agentLaunch(dir, { action: "launch", name: "desk", role: "desk", lane: "desk", cwd: dir, label: "💬 desk" }));
+    return { h, dir, parent };
+  }
+
+  it("forks a fenced desk as a split of the parent, regardless of lane/slot overrides", async () => {
+    const { h, dir, parent } = await setup();
+    const tabs = h.herdr.tabs.size;
+    h.sessionId = parent.row.sessionId;
+    const result = await runWith(h, agentLaunch(dir, { action: "fork", from: "desk", side: true, name: "patterns", label: "🧭 patterns", lane: "ignored", role: "worker", slot: "root", prompt: "Discuss patterns" }));
+    expect(result.row.side).toEqual({ parent: "desk" });
+    expect(result.row.role).toBe("desk");
+    expect(result.row.lane).toBe("desk");
+    expect(result.row.pane?.tabId).toBe(parent.row.pane?.tabId);
+    expect(h.herdr.tabs.size).toBe(tabs);
+    expect(h.herdr.calls.find(call => call.method === "pane.split")?.params.target_pane_id).toBe(parent.row.pane?.paneId);
+    expect(result.argv).toContain("--fork");
+    const prompt = String(h.herdr.calls.find(call => call.method === "agent.prompt")?.params.text);
+    expect(prompt).toContain("Discuss patterns");
+    expect(prompt).toContain("never prompts or launches lanes or workers");
+    expect(prompt).toContain("intercom");
+    expect(workPrompt(result.row, undefined)).toContain("never acts on prod");
+  });
+
+  it("refuses non-desk parents and callers who neither are nor own the parent", async () => {
+    const { h, dir } = await setup();
+    const launch = () => agentLaunch(dir, { action: "fork", from: "desk", side: true, name: "patterns", label: "🧭 patterns" });
+    h.sessionId = "stranger";
+    expect((await failWith(h, launch())).message).toContain("owns");
+    h.sessionId = "owner-session";
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, role: "worker" as const })) }, null] as const)));
+    expect((await failWith(h, launch())).message).toContain("desk parent");
+  });
+
+  it("refuses operational tools before side effects, including status takeover", async () => {
+    const { h, dir } = await setup();
+    const side = await runWith(h, agentLaunch(dir, { action: "fork", from: "desk", side: true, name: "patterns", label: "🧭 patterns" }));
+    h.sessionId = side.row.sessionId;
+    for (const effect of [
+      agentLaunch(dir, { action: "launch", name: "worker" }).pipe(Effect.asVoid),
+      agentLaunch(dir, { action: "adopt", name: "desk", from: "patterns", side: true }).pipe(Effect.asVoid),
+      agentClose(dir, { name: "desk", takeover: true }).pipe(Effect.asVoid),
+      laneOpen(dir, { slug: "bad", label: "bad", goal: "bad" }).pipe(Effect.asVoid),
+      packetLand(dir, { id: "missing", outcome: "committed" }).pipe(Effect.asVoid),
+      projectStatus(dir).pipe(Effect.asVoid),
+      projectStatus(dir, { act: false, takeover: true }).pipe(Effect.asVoid),
+    ]) {
+      const before = h.herdr.calls.length;
+      expect((await failWith<unknown, unknown>(h, effect)).message).toMatch(/side desk.*design/i);
+      expect(h.herdr.calls.length).toBe(before);
+    }
+    expect((await runWith(h, projectStatus(dir, { act: false }))).board).toContain("🧭 patterns ↳ desk");
+  });
+
+  it("keeps the fence when a side desk names a different project", async () => {
+    const { h, dir } = await setup();
+    const other = makeRepo(join(h.root, "other"));
+    await open(h, other);
+    const side = await runWith(h, agentLaunch(dir, { action: "fork", from: "desk", side: true, name: "patterns", label: "🧭 patterns" }));
+    h.sessionId = side.row.sessionId;
+    vi.stubEnv("MUSTER_PROJECT", dir);
+    expect((await failWith(h, laneOpen(other, { slug: "escape", label: "escape", goal: "escape" }))).message).toContain("side desk patterns");
+    expect((await failWith(h, projectStatus(other, { takeover: true }))).message).toContain("side desk patterns");
+    expect((await runWith(h, load(other))).lanes).toEqual([]);
+  });
+
+  it("groups the board under the parent and keeps orphaned side desks alive", async () => {
+    const { h, dir } = await setup();
+    const side = await runWith(h, agentLaunch(dir, { action: "fork", from: "desk", side: true, name: "patterns", label: "🧭 patterns" }));
+    const board = (await runWith(h, projectStatus(dir, { act: false }))).board;
+    expect(board).toContain("🧭 patterns ↳ desk");
+    expect(board.indexOf("- desk desk/desk")).toBeLessThan(board.indexOf("🧭 patterns ↳ desk"));
+    await runWith(h, agentClose(dir, { name: "desk" }));
+    expect(h.herdr.panes.has(side.row.pane!.paneId)).toBe(true);
+    expect((await runWith(h, projectStatus(dir, { act: false }))).notes.join("\n")).toContain("orphan side desk patterns");
+  });
+
+  it("adopts a moved desk without touching its pane and closes the old lane safely", async () => {
+    const { h, dir, parent } = await setup();
+    await runWith(h, laneOpen(dir, { slug: "patterns", label: "🧭 patterns", goal: "design" }));
+    const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "patterns", role: "desk", lane: "patterns", label: "🧭 patterns", cwd: dir }));
+    const call = () => agentLaunch(dir, { action: "adopt", name: "patterns", lane: "desk", side: true, from: "desk" });
+    expect((await failWith(h, call())).message).toContain("tab");
+    const pane = h.herdr.panes.get(launched.row.pane!.paneId)!;
+    pane.tab_id = parent.row.pane!.tabId;
+    const before = h.herdr.calls.length;
+    const adopted = await runWith(h, call());
+    expect(adopted.row.restore?.env.MUSTER_LANE).toBe("desk");
+    expect(adopted.row).toMatchObject({ lane: "desk", role: "desk", side: { parent: "desk" }, state: "running", sessionId: launched.row.sessionId });
+    expect(adopted.row.pane?.tabId).toBe(parent.row.pane!.tabId);
+    expect(h.herdr.calls.slice(before).some(call => ["pane.split", "pane.send_input", "pane.rename", "agent.start", "agent.prompt", "pane.close"].includes(call.method))).toBe(false);
+    expect((await runWith(h, laneClose(dir, "patterns"))).closed).toBe(true);
+    expect(h.herdr.panes.has(pane.pane_id)).toBe(true);
+  });
+
+  it("decodes an old catalog with no side field", async () => {
+    const { h, dir } = await setup();
+    const path = projectPath(dir);
+    const raw = JSON.parse(readFileSync(path, "utf8"));
+    for (const row of raw.agents) delete row.side;
+    writeFileSync(path, JSON.stringify(raw));
+    expect((await runWith(h, load(dir))).agents[0]?.side).toBeNull();
+  });
+});
 
 describe("slow Pi startup", () => {
   it.each(["last lines", "Error: No API key found for anthropic"])("continues the owner pass after one restart fails: %s", async tail => {
@@ -764,7 +875,7 @@ describe("field-use regressions", () => {
     const h = harness();
     const dir = join(h.root, "project"); mkdirSync(dir);
     await open(h, dir);
-    const row: AgentRow = { name: "probe_w", role: "worker", lane: "probe", cwd: dir, clone: null,
+    const row: AgentRow = { name: "probe_w", role: "worker", side: null, lane: "probe", cwd: dir, clone: null,
       profile: profileFor("worker", { label: "worker" }), sessionId: "probe", sessionFile: null, parentSessionFile: null,
       pane: null, owner: "owner-session", brief: null, state: "planned", delivery: "none", restarts: 0, restore: null,
       createdAt: h.now.toISOString(), updatedAt: h.now.toISOString() };

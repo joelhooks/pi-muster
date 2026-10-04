@@ -24,6 +24,10 @@ No project, no Muster. Before any lane, launch, or `desk_post`, call `project_st
 - A space that serves two outcomes is two projects. Split at the weekly review, not mid-pass.
 - Work goes to the project whose outcome it serves. Send a request for another project's outcome to that project's desk. If no project owns it, `project_open` one instead of cutting a lane in your own space. A shared platform's desk keeps main and the deploy gate; tenant desks own their asks and cut lanes with `repo` pointing at the platform. drovr lost 30 hours on its own outcome running another tenant's deploys.
 
+## Side desks
+
+Use a side desk when Joel wants to explore an evolving design alongside the main conversation. Fork it with `agent_launch action=fork from=<desk row> side=true name=<name> label=<emoji + words>`; it shares the parent's desk tab. Keep execution with the parent desk: the side desk writes briefs and decision notes and hands them over intercom. For a running desk already moved into that tab, use `action=adopt` with `name`, `from`, `side=true`, and the parent's `lane`; adoption changes the catalog, not the pane. Deliver the returned fence in its next conversation turn.
+
 ## How to cut a lane
 
 - A lane is a feature. Its boss owns the feature end to end: it plans the packets, lands them, and closes the lane when the feature ships. A lane whose outcome you cannot name yet is `open: false` (proposed).

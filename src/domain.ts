@@ -128,6 +128,8 @@ export const AgentRow = Schema.Struct({
   events: Schema.optionalKey(Schema.Array(Schema.Struct({ type: Schema.String, at: Iso, detail: Schema.String }))),
   name: AgentName,
   role: Role,
+  /** Design-only desk, sharing its parent's lane; absent in older catalogs. */
+  side: Schema.NullOr(Schema.Struct({ parent: AgentName })).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
   lane: Slug,
   cwd: Path,
   /** Set when Muster allocated `cwd` as a rift clone; close removes it through worker-worktree.sh. */
