@@ -9,7 +9,8 @@ import type { HerdrClient, HerdrRequest } from "@joelhooks/pi-bellwether/herdr-c
 
 import { sessionDirFor } from "./argv.ts";
 import type { ProcShape } from "./runtime.ts";
-import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "./runtime.ts";
+import { Herdr, Intercom, MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
+import type { EmitPaneClose } from "./runtime.ts";
 
 export interface FakePane {
   pane_id: string;
@@ -199,6 +200,7 @@ export interface Harness {
   readonly layer: Layer.Layer<Herdr | Proc | MusterEnv | Intercom>;
   readonly workerWorktree: string;
   proc: ProcShape;
+  emitPaneClose: EmitPaneClose;
   now: Date;
   sessionId: string;
   live: string[] | undefined;
@@ -272,6 +274,7 @@ export function harness(): Harness {
     now: new Date("2026-09-29T06:00:00Z"),
     sessionId: "owner-session",
     live: undefined,
+    emitPaneClose: noEmitPaneClose,
     get layer() {
       return Layer.mergeAll(
         Layer.succeed(Herdr)(herdr.client()),
@@ -285,6 +288,7 @@ export function harness(): Harness {
           workerWorktree,
           createId: () => `id${(counter += 1).toString().padStart(6, "0")}`,
           sleep: () => Effect.void,
+          emitPaneClose: h.emitPaneClose,
         }),
         Layer.succeed(Intercom)({
           send: (to, message) =>

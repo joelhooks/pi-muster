@@ -29,7 +29,7 @@ import {
   projectStatus,
   projectUpdate,
 } from "../src/ops.ts";
-import { Herdr, Intercom, MusterEnv, Proc, liveProc } from "../src/runtime.ts";
+import { Herdr, Intercom, MusterEnv, Proc, liveProc, createEmitPaneClose } from "../src/runtime.ts";
 import { registerDeskFeed } from "../src/desk-feed-ext.ts";
 import { registerOwnerFeed } from "../src/owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "../src/owner-view.ts";
@@ -80,6 +80,7 @@ export default function muster(host: ExtensionAPI) {
         workerWorktree: env.MUSTER_WORKER_WORKTREE ?? DEFAULT_WORKER_WORKTREE,
         createId: () => deskWriteId(randomUUID()),
         sleep: (ms) => Effect.sleep(ms),
+        emitPaneClose: createEmitPaneClose(pi.events),
       }),
       Layer.succeed(Intercom)((intercom ??= createIntercom(pi.events, () => randomUUID()))),
     );

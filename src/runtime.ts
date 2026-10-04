@@ -27,6 +27,33 @@ export interface ProcShape {
 
 export class Proc extends Context.Service<Proc, ProcShape>()("muster/Proc") {}
 
+export interface PaneCloseNotice {
+  readonly paneId: string;
+  readonly terminalId?: string;
+  readonly reason: string;
+}
+
+/** Undefined means no synchronous acknowledgement; [] means supported, with no matches. */
+export type EmitPaneClose = (notice: PaneCloseNotice) => readonly string[] | undefined;
+export const noEmitPaneClose: EmitPaneClose = () => undefined;
+
+/** Bellwether owns retirement; Muster only emits the supported bus contract. */
+export function createEmitPaneClose(events: { emit(event: string, payload: unknown): void }): EmitPaneClose {
+  return (notice) => {
+    let retired: readonly string[] | undefined;
+    events.emit("bellwether/pane-close/v1", {
+      ...notice,
+      reply: (value: unknown) => {
+        if (typeof value === "object" && value !== null && "retired" in value &&
+          Array.isArray(value.retired) && value.retired.every((id: unknown) => typeof id === "string")) {
+          retired = [...value.retired];
+        }
+      },
+    });
+    return retired;
+  };
+}
+
 export interface EnvShape {
   readonly home: string;
   readonly now: () => Date;
@@ -38,6 +65,7 @@ export interface EnvShape {
   readonly workerWorktree: string;
   readonly createId: () => string;
   readonly sleep: (ms: number) => Effect.Effect<void>;
+  readonly emitPaneClose: EmitPaneClose;
 }
 
 export class MusterEnv extends Context.Service<MusterEnv, EnvShape>()("muster/Env") {}
