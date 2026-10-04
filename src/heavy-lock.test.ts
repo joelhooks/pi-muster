@@ -20,6 +20,21 @@ function setup(): HeavyOptions {
 }
 afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 
+describe("status --json contract", () => {
+  it("keeps every field fleet-compute placement reads (ping the fleet desk before changing these)", () => {
+    const options = setup();
+    const held = tryAcquireHeavy(options, "contract");
+    expect(held.ok).toBe(true);
+    const snap = JSON.parse(JSON.stringify(heavySnapshot(options)));
+    for (const key of ["slots", "load", "loadLimit", "availableGB", "minFreeGB"]) expect(typeof snap[key], key).toBe("number");
+    expect(Array.isArray(snap.holders)).toBe(true);
+    expect(snap).toHaveProperty("exclusivePending");
+    const holder = snap.holders.find((slot: { held: boolean }) => slot.held);
+    for (const key of ["name", "held", "holder", "ageSeconds", "stale"]) expect(holder, key).toHaveProperty(key);
+    for (const key of ["pid", "host", "command", "startedAt", "mode"]) expect(holder.holder, key).toHaveProperty(key);
+  });
+});
+
 // Node's preload changes only the test child's adapter, never real machine state.
 function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, load: 20, freeGB: 64 })", fakeClock = false, window: string | null = args.includes("--exclusive") ? "test-deploy" : null, extraPreload = "") {
   const source = `import { machineAdapter } from ${JSON.stringify(pathToFileURL(resolve("src/heavy-lock.ts")).href)}; let calls = 0; machineAdapter.performanceCores = () => 12; machineAdapter.sample = () => { calls++; return ${sampleCode}; }; ${fakeClock ? "let now = Date.now(); Date.now = () => now; const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => { if (ms > 5000) return realTimer(fn, ms); now += ms; queueMicrotask(fn); };" : ""} ${extraPreload}`;
