@@ -26,7 +26,8 @@ import {
 } from "./ops.ts";
 import { readOwnerQueue, writeReader, ownerPath } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
-import { Herdr, Proc, liveProc } from "./runtime.ts";
+import { Herdr, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
+import { watchEntries } from "./relay-events.ts";
 import { ProcError } from "./errors.ts";
 import { parsePorcelainZ } from "./packet.ts";
 import { load, mutate } from "./store.ts";
@@ -77,6 +78,100 @@ function commitInClone(clone: string, file = "work.txt") {
   sh(clone, "commit", "-q", "-m", "work");
   return sh(clone, "rev-parse", "HEAD").trim();
 }
+
+describe("pane close watch retirement", () => {
+  it.each(["agent", "lane"] as const)("emits before %s close and records each retired watch", async kind => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    const binding = launched.row.pane!;
+    if (kind === "lane") await runWith(h, agentClose(dir, { name: "probe_w" }));
+    const target = kind === "agent" ? binding : (await runWith(h, load(dir))).lanes[0]!.root!;
+    const callsBefore = h.herdr.calls.filter(call => call.method === "pane.close").length;
+    const notices: unknown[] = [];
+    h.emitPaneClose = createEmitPaneClose({ emit: (event, payload) => {
+      expect(event).toBe("bellwether/pane-close/v1");
+      expect(h.herdr.panes.has(target.paneId)).toBe(true);
+      expect(h.herdr.calls.filter(call => call.method === "pane.close")).toHaveLength(callsBefore);
+      notices.push(payload);
+      if (typeof payload === "object" && payload !== null && "reply" in payload && typeof payload.reply === "function") {
+        payload.reply({ retired: ["watch-a", "watch-b"] });
+      }
+    } });
+    const receipt = kind === "agent"
+      ? (await runWith(h, agentClose(dir, { name: "probe_w" }))).notes.join("\n")
+      : (await runWith(h, laneClose(dir, "probe"))).paneNote;
+    expect(notices).toEqual([{ paneId: target.paneId, terminalId: target.terminalId,
+      reason: kind === "agent" ? "agent_close probe_w" : "lane_close probe", reply: expect.any(Function) }]);
+    expect(receipt).toContain("watches retired: watch-a, watch-b");
+    expect(receipt).not.toContain("watch fallback");
+    expect(h.herdr.panes.has(target.paneId)).toBe(false);
+    const events = readFileSync(join(h.home, ".local/state/muster/relay-events.jsonl"), "utf8")
+      .trim().split("\n").map(line => JSON.parse(line)).filter(event => event.kind === "watch_retired");
+    expect(events).toEqual(["watch-a", "watch-b"].map(itemId => ({ ts: h.now.toISOString(),
+      session: h.sessionId, kind: "watch_retired", project: dir, itemId })));
+  });
+
+  it.each(["agent", "lane"] as const)("keeps candidate fallback without a listener for %s close", async kind => {
+    const h = harness(); const { dir, launched } = await launchedWorker(h);
+    if (kind === "lane") await runWith(h, agentClose(dir, { name: "probe_w" }));
+    const target = kind === "agent" ? launched.row.pane! : (await runWith(h, load(dir))).lanes[0]!.root!;
+    const emit = vi.fn(); h.emitPaneClose = createEmitPaneClose({ emit });
+    const receipt = await watchEntries.run([{ type: "custom", customType: "bellwether-herdr-watch-started",
+      data: { id: "candidate-watch", status: "running", pane: target.paneId } }], async () => kind === "agent"
+      ? (await runWith(h, agentClose(dir, { name: "probe_w" }))).notes.join("\n")
+      : (await runWith(h, laneClose(dir, "probe"))).paneNote);
+    expect(emit).toHaveBeenCalledOnce();
+    expect(receipt).toContain("watch fallback:");
+    expect(receipt).toContain("watch ids to cancel from session receipts: candidate-watch");
+    expect(receipt).not.toContain("watches retired:");
+    const path = join(h.home, ".local/state/muster/relay-events.jsonl");
+    expect(existsSync(path) ? readFileSync(path, "utf8") : "").not.toContain('"watch_retired"');
+  });
+
+  it("acknowledges no matches, even after a pane id changes", async () => {
+    const h = harness(); const { dir, launched } = await launchedWorker(h);
+    const binding = launched.row.pane!;
+    const pane = h.herdr.panes.get(binding.paneId)!;
+    h.herdr.panes.delete(binding.paneId);
+    pane.pane_id = "moved-pane";
+    h.herdr.panes.set(pane.pane_id, pane);
+    const emit = vi.fn(() => []);
+    h.emitPaneClose = emit;
+    const result = await runWith(h, agentClose(dir, { name: "probe_w" }));
+    expect(emit).toHaveBeenCalledExactlyOnceWith({ paneId: "moved-pane", terminalId: binding.terminalId, reason: "agent_close probe_w" });
+    expect(result.notes.join("\n")).toContain("closed moved-pane; watches retired: none");
+    expect(result.notes.join("\n")).not.toContain("watch fallback");
+  });
+
+  it("still closes when retirement telemetry cannot be written", async () => {
+    const h = harness(); const { dir } = await launchedWorker(h);
+    h.emitPaneClose = () => ["watch-a"];
+    mkdirSync(join(h.home, ".local/state/muster/relay-events.jsonl"), { recursive: true });
+    const result = await runWith(h, agentClose(dir, { name: "probe_w" }));
+    expect(result.row.state).toBe("closed");
+    expect(result.notes.join("\n")).toContain("watches retired: watch-a");
+  });
+
+  it.each(["agent", "lane"] as const)("does not emit for an adopted %s pane", async kind => {
+    const h = harness(); const { dir } = await launchedWorker(h);
+    if (kind === "lane") await runWith(h, agentClose(dir, { name: "probe_w" }));
+    const target = await runWith(h, mutate(dir, project => {
+      if (kind === "agent") {
+        const row = project.agents[0]!; const pane = { ...row.pane!, openedByMuster: false };
+        return Effect.succeed([{ ...project, agents: [{ ...row, pane }] }, pane] as const);
+      }
+      const lane = project.lanes[0]!; const root = { ...lane.root!, openedByMuster: false };
+      return Effect.succeed([{ ...project, lanes: [{ ...lane, root }] }, root] as const);
+    }));
+    const emit = vi.fn(); h.emitPaneClose = createEmitPaneClose({ emit });
+    const receipt = kind === "agent"
+      ? (await runWith(h, agentClose(dir, { name: "probe_w" }))).notes.join("\n")
+      : (await runWith(h, laneClose(dir, "probe"))).paneNote;
+    expect(emit).not.toHaveBeenCalled();
+    expect(receipt).toContain("Muster did not open it");
+    expect(h.herdr.panes.has(target.paneId)).toBe(true);
+  });
+});
 
 describe("packet owner queue delivery", () => {
   it.each(["fresh", "missing", "stale", "queue-failure", "event-failure"])("queues action and preserves fallback for %s reader", async mode => {

@@ -668,14 +668,24 @@ const laneCounts = (project: Project, slug: string) => ({
 });
 
 /** Close a pane only when it is still the terminal Muster opened. Never by name. */
-const closeOwnedPane = (binding: PaneBinding | null) =>
+const closeOwnedPane = (binding: PaneBinding | null, dir: string, reason: string) =>
   Effect.gen(function* () {
     if (!binding) return "no pane";
     if (!binding.openedByMuster) return `left ${binding.paneId} open: Muster did not open it`;
     const located = yield* locatePane(binding);
     if (!located) return `pane ${binding.paneId} already gone`;
+    const env = yield* MusterEnv;
+    const retired = yield* Effect.sync(() => env.emitPaneClose({
+      paneId: located.pane_id, terminalId: binding.terminalId, reason,
+    }));
+    if (retired !== undefined) {
+      for (const itemId of retired) relayEvent({ ts: iso(env), session: env.sessionId, kind: "watch_retired", project: dir, itemId }, env.home);
+    }
     yield* paneClose(located.pane_id);
-    return `closed ${located.pane_id}; ${watchFallback([binding.paneId, located.pane_id])}`;
+    const watches = retired === undefined
+      ? watchFallback([binding.paneId, located.pane_id])
+      : `watches retired: ${retired.length ? retired.join(", ") : "none"}`;
+    return `closed ${located.pane_id}; ${watches}`;
   });
 
 /** Pane ids change on moves; the terminal id does not. */
@@ -714,7 +724,7 @@ export const laneClose = (dir: string, slug: string) =>
       };
     }
     yield* stepLane(slug, lane.state, { type: "CLOSE", liveAgents: 0, openPackets: 0 });
-    const paneNote = lane.root ? yield* closeOwnedPane(lane.root) : "no root pane";
+    const paneNote = lane.root ? yield* closeOwnedPane(lane.root, dir, `lane_close ${slug}`) : "no root pane";
     const closed = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findLane(current, slug);
@@ -1139,7 +1149,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
           mkdirSync(dirname(saved), { recursive: true });
           writeFileSync(saved, tail);
           notes.push(`last ${CLOSE_READ_LINES} lines saved to ${saved}`);
-          notes.push(yield* closeOwnedPane(row.pane));
+          notes.push(yield* closeOwnedPane(row.pane, dir, `agent_close ${row.name}`));
         } else {
           notes.push(`pane ${row.pane.paneId} already gone`);
         }
