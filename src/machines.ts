@@ -11,6 +11,12 @@ import { IllegalTransition } from "./errors.ts";
  * transition is a pure function of (state, event).
  */
 
+/** Owner feeds hold arrivals while a turn runs; polls never wake silent items. */
+export const ownerFeedMachine = setup({ types: { events: {} as { type: "START" | "END" } } }).createMachine({
+  initial: "idle",
+  states: { idle: { on: { START: "busy" } }, busy: { on: { END: "idle" } } },
+});
+
 export type AgentEvent =
   | { type: "LAUNCH" }
   | { type: "STARTED" }

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-export type RelayKind = "packet_report" | "desk_note" | "desk_note_skipped_self" | "watch_retired";
+export type RelayKind = "packet_report" | "desk_note" | "desk_note_skipped_self" | "watch_retired" | "owner_note" | "owner_digest";
 export interface RelayEvent {
   readonly ts: string;
   readonly session: string;
@@ -12,19 +12,29 @@ export interface RelayEvent {
   readonly project: string;
   readonly packetId?: string;
   readonly itemId?: string;
+  readonly noteKind?: string;
+  readonly woke?: boolean;
+  readonly path?: "queue" | "intercom";
+  readonly itemCount?: number;
 }
 
 /** Explicit projection: even callers carrying queue bodies cannot leak them here. */
-export function relayEvent(event: RelayEvent, home = homedir()): void {
+export function relayEvent(event: RelayEvent, home = homedir()): boolean {
   try {
     const path = join(home, ".local", "state", "muster", "relay-events.jsonl");
     mkdirSync(dirname(path), { recursive: true });
     appendFileSync(path, `${JSON.stringify({ ts: event.ts, session: event.session, kind: event.kind, project: event.project,
       ...(event.packetId === undefined ? {} : { packetId: event.packetId }),
       ...(event.itemId === undefined ? {} : { itemId: event.itemId }),
+      ...(event.noteKind === undefined ? {} : { noteKind: event.noteKind }),
+      ...(event.woke === undefined ? {} : { woke: event.woke }),
+      ...(event.path === undefined ? {} : { path: event.path }),
+      ...(event.itemCount === undefined ? {} : { itemCount: event.itemCount }),
     })}\n`, { mode: 0o600 });
+    return true;
   } catch {
-    // Telemetry must never fail queue delivery or an otherwise successful tool.
+    // Callers may fall back to the outbox; telemetry never throws.
+    return false;
   }
 }
 

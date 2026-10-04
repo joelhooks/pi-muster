@@ -1,5 +1,6 @@
 import { Effect, Schema } from "effect";
 import { modelAliases, resolveModel } from "./models.ts";
+import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
 
 /**
  * Muster's domain values. Every file Muster reads or writes decodes through
@@ -26,6 +27,26 @@ export const Slug = Schema.String.check(
 export const SessionId = Schema.String.check(
   Schema.isPattern(SESSION_ID_RE, { message: "invalid Pi session id" }),
 );
+export const OwnerKind = Schema.Literals(["fyi", "progress", "done", "question", "blocked", "action"]);
+export type OwnerKind = typeof OwnerKind.Type;
+const StrongRef = Schema.Struct({ uri: Schema.String, cid: Schema.String });
+export const OwnerItem = Schema.Struct({
+  $type: Schema.Literal(POST_NSID), uri: Schema.String, cid: Schema.String,
+  author: SessionId, createdAt: Schema.String, text: Schema.String, kind: OwnerKind,
+  lane: Schema.optional(Schema.String), refs: Schema.optional(Schema.Array(Schema.String)),
+  reply: Schema.optional(Schema.Struct({ root: StrongRef, parent: StrongRef })),
+  facets: Schema.optional(Schema.Array(Schema.Struct({
+    index: Schema.Struct({ byteStart: Schema.Number, byteEnd: Schema.Number }),
+    features: Schema.Array(Schema.Struct({ $type: Schema.Literal(MENTION_NSID), did: SessionId })),
+  }))),
+});
+export type OwnerItem = typeof OwnerItem.Type;
+export const decodeOwnerItem = Schema.decodeUnknownSync(OwnerItem);
+export const OwnerReader = Schema.Struct({ pid: Schema.Number, startedAt: Schema.String, heartbeatAt: Schema.String });
+export const decodeOwnerReader = Schema.decodeUnknownSync(OwnerReader);
+export const OwnerCursor = Schema.Struct({ cursor: Schema.Number, delivered: Schema.Array(Schema.String) });
+export const decodeOwnerCursor = Schema.decodeUnknownSync(OwnerCursor);
+export const decodeOwnerSession = Schema.decodeUnknownSync(SessionId);
 const Iso = Schema.String;
 const Path = Schema.String;
 
