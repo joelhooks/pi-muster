@@ -64,6 +64,21 @@ describe("whole fleet rows", () => {
     expect(renderOverlay(s, 120, 20, plain).join("\n")).toContain("↗ owner/desk outside space");
   });
 
+  it("marks open projects with no live desk or owner, but not when sessions are unknown", async () => {
+    const { h, dir } = await setup();
+    await runWith(h, deskPost(dir, { kind: "blocked", title: "Needs a live desk" }));
+    h.live = [];
+    expect((await runWith(h, loadSystem)).groups[0]?.deadDesk).toBe(true);
+    await runWith(h, agentLaunch(dir, { action: "launch", name: "desk", role: "desk", lane: "desk", label: "desk", cwd: dir }));
+    const desk = (await runWith(h, load(dir))).agents.find((agent) => agent.name === "desk")!;
+    h.live = [desk.sessionId];
+    expect((await runWith(h, loadSystem)).groups[0]?.deadDesk).toBe(false);
+    h.live = [desk.owner];
+    expect((await runWith(h, loadSystem)).groups[0]?.deadDesk).toBe(false);
+    h.live = undefined;
+    expect((await runWith(h, loadSystem)).groups[0]?.deadDesk).toBeUndefined();
+  });
+
   it("keeps urgent asks above quiet rows and never duplicates a registered project", () => {
     const groups = fleetGroups(inbox({ probe: [ask] }, Date.now()), ["quiet", "probe", "quiet"]);
     expect(groups.map((g) => g.project)).toEqual(["probe", "quiet"]);
@@ -165,7 +180,7 @@ describe("live extension opt-in", () => {
       expect(h.sent.some((message) => message.to === "inbox-session")).toBe(false);
       const text = await tools.get("desk_inbox")!.execute("id", { subscribe: true }, undefined, undefined, ctx);
       expect(text).toContain("probe (0) · quiet");
-      expect(widget?.render(100).join("\n")).toContain("0 · quiet");
+      expect(widget?.render(100).join("\n")).toContain("+1 quiet");
       const browsing = browse!(ctx);
       await vi.waitFor(() => expect(closeOverlay).toBeDefined());
       await runWith(h, deskPost(dir, { kind: "decision", title: "Fresh question" }));

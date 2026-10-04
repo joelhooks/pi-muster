@@ -11,7 +11,7 @@ import { PROCESS_STATES } from "./machines.ts";
 import { readRegistry } from "./registry.ts";
 import { Intercom, MusterEnv } from "./runtime.ts";
 import { load } from "./store.ts";
-import { KIND_GLYPH, answerPost, fleetGroups, fleetStats, formatAge, inbox, itemRef, latestPost, openCount, queueDir, readQueues, recentPosts } from "./switchboard.ts";
+import { KIND_GLYPH, answerPost, deadDesk, fleetGroups, fleetStats, formatAge, inbox, itemRef, latestPost, openCount, queueDir, queueEvents, readQueues, recentPosts } from "./switchboard.ts";
 import type { InboxGroup, SystemView, UnregisteredSpace } from "./switchboard.ts";
 import { openDeskItems } from "./tokens.ts";
 
@@ -23,10 +23,10 @@ export const loadInbox = Effect.gen(function* () {
 });
 
 /** Inbox, heat, and fleet in one read. A project whose file is gone or unreadable drops out of the fleet line. */
-export const loadSystem = Effect.gen(function* () {
+export const loadSystemWith = (read = readQueues) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const now = env.now().getTime();
-  const queues = readQueues(queueDir(env.home));
+  const queues = read(queueDir(env.home));
   const entries = [...readRegistry(env.home).values()];
   const projects = yield* Effect.forEach(entries, (entry) => load(entry.dir).pipe(Effect.option));
   const live = projects.flatMap((project) => (project._tag === "Some" ? [project.value] : []));
@@ -44,17 +44,24 @@ export const loadSystem = Effect.gen(function* () {
     || project.lanes.some((lane) => lane.slug === "desk" && lane.root &&
     panes.some((pane) => pane.pane_id === lane.root?.paneId && pane.terminal_id === lane.root?.terminalId && pane.workspace_id !== project.spaceId),
   )).map((project) => project.slug));
+  const intercom = yield* Intercom;
+  const sessions = yield* intercom.sessions().pipe(Effect.catchCause(() => Effect.succeed(undefined)));
   const registeredSpaces = new Set(entries.map((entry) => entry.spaceId));
   const view: SystemView = {
-    groups: fleetGroups(inbox(queues, now), entries.map((entry) => entry.slug), outside),
+    groups: fleetGroups(inbox(queues, now), entries.map((entry) => entry.slug), outside).map((group) => ({
+      ...group, deadDesk: deadDesk(live.find((project) => project.slug === group.project), sessions),
+    })),
     unregistered: spaces.filter((space) => !registeredSpaces.has(space.workspace_id)).map((space) => ({ spaceId: space.workspace_id, label: space.label })),
     posts: recentPosts(queues, now),
     fleet: entries.length > 0 ? fleetStats(live) : null,
     latest: latestPost(queues),
+    events: queueEvents(queues, now),
     now,
   };
   return view;
 });
+
+export const loadSystem = loadSystemWith();
 
 export function inboxText(groups: readonly InboxGroup[], unregistered: readonly UnregisteredSpace[] = []): string {
   const lines = groups.length === 0 ? ["Inbox clear: nothing waits on Joel."] : [`${openCount(groups)} open across ${groups.length} project${groups.length === 1 ? "" : "s"} (blocked, then approvals, then decisions; oldest first):`];

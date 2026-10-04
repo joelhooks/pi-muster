@@ -80,7 +80,9 @@ Slot 0 retains `heavy-job.lock`; other slots use `heavy-job.lock.<n>`. Slot hold
 
 One inbox over every project's desk queue. It reads and routes; project desks stay the authority for their own work. Start a session as the Switchboard with `pi --switchboard` (or `MUSTER_SWITCHBOARD=1`, or `/switchboard on`). Nothing starts on its own otherwise.
 
-- The widget holds three rows at most: open asks by kind and age plus the Muster fleet (projects, lanes, running agents, packets to land), then the two most urgent desks with a 24-hour heat strip of queue traffic.
+- The widget fits in ten lines: summary, up to four `project#id` action rows (blocked, approvals, decisions; oldest first), `+N more`, recent queue events, then `+N quiet`. The ticker keeps the newest five events across projects for an hour, using whatever rows remain after actions. A resolving line shows `✓ resolved`.
+- Queue changes repaint without a model turn, with a one-second timer as the watch backstop. Queue reads retain byte offsets and reset on truncation or replacement; ages tick from cached records. Fleet topology and desk liveness refresh every 30 seconds or on registry changes. `☠ no live desk` means no catalog desk or owner is in the live intercom session list; an unavailable session list shows no marker. The first refresh failure is logged with its message.
+- Nudges are only a courtesy: writes before Switchboard registration, old extension versions, and external queue writers can miss them. Activation and filesystem reads show the entire open queue anyway.
 - `alt+s` or `/switchboard` browses everything: `j`/`k` move, `space` folds, `enter` puts an `[project#id]` reference in the editor, `a` answers, `d` marks done.
 - `desk_inbox` lists open items ranked blocked, approval, decision, oldest first. It is read-only; only `subscribe: true`, `--switchboard`, or `/switchboard` makes a session the Switchboard that is paged on every queue change, and never one Muster launched (any `MUSTER_ROLE`). `desk_answer` appends a resolving line to the item's own queue and nudges that project's desk.
 

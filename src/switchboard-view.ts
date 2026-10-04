@@ -1,8 +1,8 @@
 import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Component, Focusable } from "@earendil-works/pi-tui";
 
-import { KIND_GLYPH, activity, formatAge, itemRef, openCount } from "./switchboard.ts";
-import type { FleetStats, InboxGroup, InboxItem, LatestPost, SystemView, UnregisteredSpace } from "./switchboard.ts";
+import { KIND_GLYPH, KIND_RANK, TICKER_WINDOW_MS, eventText, formatAge, itemRef, openCount } from "./switchboard.ts";
+import type { FleetStats, InboxGroup, InboxItem, LatestPost, QueueEvent, SystemView, UnregisteredSpace } from "./switchboard.ts";
 
 /** The slice of Pi's theme the view uses, so tests can pass a plain stub. */
 export interface ViewTheme {
@@ -33,6 +33,7 @@ export class SwitchboardState {
   fleet: FleetStats | null = null;
   latest: LatestPost | null = null;
   now = Date.now();
+  events: readonly QueueEvent[] = [];
   readonly expanded = new Set<string>();
   cursor = 0;
   private seen = new Set<string>();
@@ -57,6 +58,7 @@ export class SwitchboardState {
     this.fleet = view.fleet;
     this.latest = view.latest;
     this.now = view.now;
+    this.events = view.events ?? [];
     this.setGroups(view.groups, key);
   }
 
@@ -142,8 +144,6 @@ export function headline(groups: readonly InboxGroup[], theme: ViewTheme): strin
   return `${theme.fg("accent", "☎️ Switchboard")} ${theme.fg("muted", `· ${total} open · ${groups.length} project${groups.length === 1 ? "" : "s"}`)}`;
 }
 
-const WIDGET_ROWS = 2;
-const HEAT_CELLS = 24;
 const HEAT = [
   ["dim", "░"],
   ["muted", "▒"],
@@ -197,46 +197,22 @@ export function systemLine(state: SwitchboardState, theme: ViewTheme, room = Num
   return [`${head}${age}${fleet}`, `${head}${fleet}`, `${head}${age}`].find(fits) ?? head;
 }
 
-/** Desks worth a row: every desk with open asks in inbox order, then quiet desks by recent traffic. */
-function widgetProjects(state: SwitchboardState): string[] {
-  const asked = state.groups.map((group) => group.project);
-  const busy = Object.entries(state.posts)
-    .filter(([project]) => !asked.includes(project))
-    .sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]))
-    .map(([project]) => project);
-  return [...asked, ...busy];
-}
-
-/**
- * The always-on widget, three rows at most: the system line, then one row per
- * desk with its open asks and a 24-hour heat strip, newest hour on the right.
- */
+/** Actions win space. Ticker uses the remaining rows; quiet desks get one count. */
 export function renderWidget(state: SwitchboardState, width: number, theme: ViewTheme): string[] {
   const hint = theme.fg("dim", OPEN_HINT);
   const lines = [spread(systemLine(state, theme, width - visibleWidth(hint) - 1), hint, width)];
-  const projects = widgetProjects(state);
-  const shown = projects.slice(0, WIDGET_ROWS);
-  if (shown.length === 0) return lines.map((line) => truncateToWidth(line, width));
-
-  const nameWidth = Math.min(18, Math.max(...shown.map((project) => visibleWidth(project))));
-  const hidden = projects.length - shown.length;
-  const more = hidden > 0 ? theme.fg("dim", ` +${hidden}`) : "";
-  const lefts = shown.map((project) => {
-    const group = state.groups.find((candidate) => candidate.project === project);
-    const name = truncateToWidth(project, nameWidth, "…");
-    const pad = " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
-    const asks = group?.items.length ? `${counts(group, theme)} ${theme.fg("dim", formatAge(group.oldestMs))}` : theme.fg("dim", "0 · quiet");
-    return `  ${theme.bold(name)}${pad}  ${asks}`;
-  });
-  // The asks win the width; the strip takes what is left, the same size on every row so the hours line up.
-  const room = width - Math.max(...lefts.map((left) => visibleWidth(left))) - visibleWidth(more) - 2;
-  const cells = Math.min(HEAT_CELLS, room);
-  const strips = shown.map((project) => activity(state.posts[project] ?? [], state.now, Math.max(0, cells)));
-  const peak = Math.max(0, ...strips.flat());
-  lefts.forEach((left, index) => {
-    const tail = index === lefts.length - 1 ? more : " ".repeat(visibleWidth(more));
-    lines.push(cells >= 6 ? spread(left, `${heatStrip(strips[index] ?? [], peak, theme)}${tail}`, width) : `${left}${tail}`);
-  });
+  const actions = state.groups.flatMap((group) => group.items.map((item) => ({ item, group })))
+    .sort((a, b) => KIND_RANK[a.item.kind] - KIND_RANK[b.item.kind] || b.item.ageMs - a.item.ageMs || a.item.project.localeCompare(b.item.project));
+  for (const { item, group } of actions.slice(0, 4)) {
+    const flag = group.deadDesk ? " ☠ no live desk" : "";
+    // Keep the liveness marker visible even when the title is long.
+    lines.push(spread(`${KIND_GLYPH[item.kind]} ${item.project}#${item.id} ${item.title.replace(/\s+/g, " ")}`, `${formatAge(item.ageMs)}${flag}`, width));
+  }
+  if (actions.length > 4) lines.push(theme.fg("dim", `+${actions.length - 4} more`));
+  const quiet = state.groups.filter((group) => group.items.length === 0).length;
+  const events = state.events.filter((event) => state.now - event.ts < TICKER_WINDOW_MS && event.ts <= state.now).slice(0, 5);
+  for (const event of events.slice(0, 10 - lines.length - (quiet ? 1 : 0))) lines.push(theme.fg("muted", eventText(event, state.now)));
+  if (quiet) lines.push(theme.fg("dim", `+${quiet} quiet`));
   return lines.map((line) => truncateToWidth(line, width));
 }
 

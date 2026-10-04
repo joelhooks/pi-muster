@@ -95,18 +95,18 @@ describe("switchboard view", () => {
     expect(s.expanded.has("support")).toBe(true);
   });
 
-  it("never draws past the width and the widget stays at three rows", () => {
+  it("never draws past the width and shows ranked action references", () => {
     const s = state();
     for (const width of [40, 80, 140]) {
       for (const line of renderWidget(s, width, plain)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
       for (const line of renderOverlay(s, width, 20, plain)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
     const widget = renderWidget(s, 80, plain);
-    expect(widget).toHaveLength(3);
+    expect(widget).toHaveLength(5);
     expect(widget[0]).toContain("4 open ⛔1 ❓3 · oldest 2d");
-    expect(widget[1]).toMatch(/^ {2}drovr +⛔1 ❓1 1d/);
-    // Quiet posted a done an hour ago: it has traffic but no asks, so it is the hidden third desk.
-    expect(widget[2]).toMatch(/support .*\+1$/);
+    expect(widget[1]).toContain("drovr#");
+    expect(widget[1]).toMatch(/^⛔/);
+    expect(widget.slice(2).join("\n")).toContain("support#");
     expect(renderWidget(new SwitchboardState(), 80, plain)).toEqual([expect.stringContaining("inbox clear")]);
 
     s.fleet = { projects: 2, lanes: 14, lanesClosed: 12, running: 9, toLand: 0 };
