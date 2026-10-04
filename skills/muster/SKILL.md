@@ -52,6 +52,7 @@ Roster skills are a role's standing set; name extras at launch; workers pull the
 
 - The intercom report is a claim. `packet_verify` plus the worker's check receipts are the evidence. Screen state, `DONE`, age, or a commit alone are not.
 - Record exactly one outcome per packet: committed, rejected, or no_changes.
+- Before `agent_close` or `lane_close`, cancel the pane's Bellwether watches with `herdr_watch action=cancel`. Muster cannot retire them through the current Bellwether API. Inspect named targets as well as pane targets; otherwise closing a pane wakes its owner with `targetGone`.
 - Land through `packet_land` with the repo's full gate (`muster-heavy --wait 1200 -- <cmd>` for workers). For a deploy window that must drain and hold every heavy slot, use `muster-heavy --exclusive --wait 1200 -- <cmd>`.
 - An artifact packet (remote-machine ops, config, no clone branch) lands by recording: `packet_land` with `evidence`, no merge.
 - A customer-facing check counts only when loaded signed out, as the recipient sees it.

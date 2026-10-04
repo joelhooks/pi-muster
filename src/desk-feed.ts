@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
 import type { DeskItem } from "./domain.ts";
+import { relayEvent, selfPosts } from "./relay-events.ts";
 import { formatAge } from "./switchboard.ts";
 import { openDeskItems } from "./tokens.ts";
 
@@ -87,12 +88,19 @@ export interface FeedDeps {
   readonly sendMessage: (message: NoteMessage) => void;
   readonly appendEntry: (type: string, data: unknown) => void;
   readonly now?: () => number;
+  readonly session?: string;
+  readonly home?: string;
 }
 
 export function deskFeed(deps: FeedDeps) {
   const now = deps.now ?? Date.now;
   let cursor: number | undefined;
   let busy = false;
+  const posted = selfPosts(deps.session ?? "");
+  const count = (kind: "desk_note" | "desk_note_skipped_self", itemId: string) => {
+    if (deps.session === undefined) return;
+    relayEvent({ ts: new Date(now()).toISOString(), session: deps.session, project: deps.project, kind, itemId }, deps.home);
+  };
 
   const note = (items: readonly DeskItem[]): NoteMessage => {
     const inbox = inboxSummary(readSince(deps.path, 0).items, now());
@@ -104,13 +112,18 @@ export function deskFeed(deps: FeedDeps) {
     if (next === cursor) return [];
     cursor = next;
     deps.appendEntry(CURSOR_ENTRY, { cursor });
-    return items;
+    return items.filter((item) => {
+      if (!posted.has(item.id)) return true;
+      count("desk_note_skipped_self", item.id);
+      return false;
+    });
   };
 
   return {
     /** The newest cursor entry on the branch wins. A fresh desk starts at the end: no replay of history Joel never asked for. */
     restore(entries: ReadonlyArray<{ type?: string; customType?: string; data?: unknown }>) {
       cursor = undefined;
+      posted.restore(entries);
       for (const entry of entries) {
         const saved = (entry.data as { cursor?: unknown } | undefined)?.cursor;
         if (entry.type === "custom" && entry.customType === CURSOR_ENTRY && Number.isInteger(saved)) cursor = saved as number;
@@ -121,7 +134,10 @@ export function deskFeed(deps: FeedDeps) {
     flush(): number {
       if (busy || cursor === undefined) return 0;
       const items = take();
-      for (const item of items) deps.sendMessage(note([item]));
+      for (const item of items) {
+        deps.sendMessage(note([item]));
+        count("desk_note", item.id);
+      }
       return items.length;
     },
     /** Joel just sent a prompt: anything not yet delivered rides along as one note. */
@@ -129,6 +145,7 @@ export function deskFeed(deps: FeedDeps) {
       busy = true;
       if (cursor === undefined) return undefined;
       const items = take();
+      for (const item of items) count("desk_note", item.id);
       return items.length ? { message: note(items) } : undefined;
     },
     turnStarted() {
