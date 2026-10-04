@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as versionSkew from "./version-skew.ts";
+import { Effect, Schema } from "effect";
+import * as ops from "./ops.ts";
+import * as ownerQueue from "./owner-queue.ts";
+import { Packet, decodeOwnerItem } from "./domain.ts";
+import { deskRecord } from "./desk.ts";
+import { POST_NSID } from "./owner-lexicon.ts";
 
 import muster from "../extensions/pi-muster.ts";
 
@@ -15,6 +21,7 @@ function fakePi() {
   const commands: string[] = [];
   const shortcuts: string[] = [];
   const handlers: string[] = [];
+  const hooks = new Map<string, Array<(event: { toolName: string; input: Record<string, unknown> }) => unknown>>();
   const emitted: string[] = [];
   const pi = {
     registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }) => {
@@ -29,26 +36,29 @@ function fakePi() {
     registerFlag: (name: string) => flags.push(name),
     registerCommand: (name: string) => commands.push(name),
     registerShortcut: (key: string) => shortcuts.push(key),
-    on: (event: string) => handlers.push(event),
+    on: (event: string, handler: (event: { toolName: string; input: Record<string, unknown> }) => unknown) => {
+      handlers.push(event);
+      hooks.set(event, [...(hooks.get(event) ?? []), handler]);
+    },
     getFlag: () => undefined,
     registerMessageRenderer: () => {},
     sendMessage: () => {},
-    appendEntry: () => {},
+    appendEntry: vi.fn(),
     events: {
       emit: (event: string) => emitted.push(event),
       on: () => () => {},
     },
   };
-  return { pi, tools, defs, flags, commands, shortcuts, handlers, emitted };
+  return { pi, tools, defs, flags, commands, shortcuts, handlers, hooks, emitted };
 }
 
 const saved = { ...process.env };
 beforeEach(() => {
-  for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_PROJECT", "MUSTER_OWNER"]) delete process.env[key];
+  for (const key of Object.keys(process.env)) if (key.startsWith("MUSTER_")) delete process.env[key];
 });
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_PROJECT", "MUSTER_OWNER"]) delete process.env[key];
+  for (const key of Object.keys(process.env)) if (key.startsWith("MUSTER_")) delete process.env[key];
   Object.assign(process.env, saved);
 });
 
@@ -126,5 +136,100 @@ describe("thinking_set", () => {
     const tool = fake.defs.get("thinking_set");
     expect((await tool?.execute("id", { level: "low" }))?.content[0]?.text).toBe("Thinking high → low, from the next model call.");
     expect((await tool?.execute("id", { level: "xhigh" }))?.content[0]?.text).toContain("this model clamps xhigh to high");
+  });
+});
+
+const JOINED = "Collectionfence4/4behavior/propertytests";
+const PLAIN = "Collection fence: all four behavior and property tests passed.";
+const HINT = "Rewrite in plain sentences with spaces between words; put code, paths and ids in backticks.";
+const notice = { id: "uri", uri: "uri", queued: true, woke: false, path: "queue" as const, delivery: { status: "sent" as const }, owner: "boss", resolution: "explicit recipient" };
+const cleanReport = { commit: "HEAD", summary: PLAIN, body: PLAIN, checks: [{ name: "Unit tests", outcome: "pass", detail: PLAIN }] };
+const refusalCases: Array<[string, Record<string, unknown>]> = [
+  ["packet_report", { ...cleanReport, summary: JOINED }],
+  ["packet_report", { ...cleanReport, body: JOINED }],
+  ["packet_report", { ...cleanReport, checks: [{ name: JOINED, outcome: "pass" }] }],
+  ["packet_report", { ...cleanReport, checks: [{ name: "Unit tests", outcome: "pass", detail: JOINED }] }],
+  ["owner_note", { kind: "fyi", title: JOINED, body: PLAIN }],
+  ["owner_note", { kind: "fyi", title: PLAIN, body: JOINED, replyTo: "uri" }],
+  ["owner_reply", { uri: "uri", text: JOINED }],
+  ["owner_reply", { uri: "uri", text: `${PLAIN.repeat(100)}\n${JOINED}` }],
+  ["desk_post", { kind: "fyi", title: JOINED, body: PLAIN }],
+  ["desk_post", { kind: "fyi", title: PLAIN, body: JOINED }],
+];
+
+describe("readable message boundaries", () => {
+  beforeEach(() => {
+    Object.assign(process.env, { MUSTER_ROLE: "boss", MUSTER_AGENT: "b1", MUSTER_PROJECT: "/p", MUSTER_OWNER: "hawk" });
+    vi.spyOn(versionSkew, "createVersionSkew").mockReturnValue({ check: async () => undefined });
+    vi.spyOn(ops, "packetReport").mockReturnValue(Effect.succeed({
+      packet: Schema.decodeUnknownSync(Packet)({ id: "1234567890ab", kind: "commit", lane: "test", agent: "b1", artifact: null, report: "/p/report.svx", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-04T00:00:00Z", updatedAt: "2026-10-04T00:00:00Z" }),
+      delivery: notice.delivery, notice,
+    }));
+    vi.spyOn(ops, "deskPost").mockReturnValue(Effect.succeed({ record: deskRecord({ kind: "fyi", title: PLAIN, from: "test" }, "12345678", new Date()), open: 1, path: "/p/desk.jsonl", notes: [] }));
+    vi.spyOn(ownerQueue, "deliverOwnerItem").mockReturnValue(Effect.succeed(notice));
+    vi.spyOn(ownerQueue, "findOwnerPost").mockReturnValue(decodeOwnerItem({ $type: POST_NSID, uri: "uri", cid: "cid", author: "boss", createdAt: "2026-10-04T00:00:00Z", text: PLAIN, kind: "fyi" }));
+  });
+
+  const context = () => ({ cwd: "/p", sessionManager: { getSessionId: () => "test-session", getBranch: () => [] } });
+
+  it.each(refusalCases)("refuses %s before operations, queue reads, writes or intercom", async (name, params) => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const result = await fake.defs.get(name)!.execute("id", params, undefined, undefined, context());
+    expect(result).toMatchObject({ isError: true, details: { ok: false } });
+    expect(result.content[0]?.text).toContain(JSON.stringify(JOINED));
+    expect(result.content[0]?.text).toContain(HINT);
+    expect(ops.packetReport).not.toHaveBeenCalled();
+    expect(ops.deskPost).not.toHaveBeenCalled();
+    expect(ownerQueue.deliverOwnerItem).not.toHaveBeenCalled();
+    expect(ownerQueue.findOwnerPost).not.toHaveBeenCalled();
+    expect(fake.pi.appendEntry).not.toHaveBeenCalled();
+    expect(fake.emitted).toEqual([]);
+  });
+
+  it.each([
+    ["packet_report", cleanReport, "Packet"],
+    ["owner_note", { kind: "fyi", title: PLAIN, body: PLAIN }, "owner:"],
+    ["owner_reply", { uri: "uri", text: PLAIN }, "reply to:"],
+    ["desk_post", { kind: "fyi", title: PLAIN, body: PLAIN }, "Posted desk item"],
+  ])("accepts clean text for %s and reaches the operation", async (name, params, receipt) => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const result = await fake.defs.get(String(name))!.execute("id", params, undefined, undefined, context());
+    expect(result).not.toHaveProperty("isError", true);
+    expect(result.content[0]?.text).toContain(String(receipt));
+    if (name === "packet_report") expect(ops.packetReport).toHaveBeenCalledOnce();
+    else if (name === "desk_post") expect(ops.deskPost).toHaveBeenCalledOnce();
+    else expect(ownerQueue.deliverOwnerItem).toHaveBeenCalledOnce();
+  });
+
+  it("quotes at most three squashed samples across all report fields", async () => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const samples = ["FirstJoinedWordsWithoutSpaces", "SecondJoinedWordsWithoutSpaces", "ThirdJoinedWordsWithoutSpaces", "FourthJoinedWordsWithoutSpaces"];
+    const result = await fake.defs.get("packet_report")!.execute("id", { ...cleanReport, summary: samples[0], body: samples[1], checks: [{ name: samples[2], detail: samples[3], outcome: "pass" }] });
+    for (const sample of samples.slice(0, 3)) expect(result.content[0]?.text).toContain(JSON.stringify(sample));
+    expect(result.content[0]?.text).not.toContain(samples[3]);
+  });
+
+  it.each(["send", "ask", "reply"])("blocks squashed intercom %s only in a launched Muster session", async action => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const call = { toolName: "intercom", input: { action, message: JOINED } };
+    const results = await Promise.all(fake.hooks.get("tool_call")!.map(hook => hook(call)));
+    expect(results).toContainEqual({ block: true, reason: expect.stringContaining(HINT) });
+    expect(fake.emitted).toEqual([]);
+  });
+
+  it("leaves ordinary Pi and unrelated intercom actions alone", async () => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const call = (action: string, message: unknown, toolName = "intercom") => Promise.all(fake.hooks.get("tool_call")!.map(hook => hook({ toolName, input: { action, message } })));
+    for (const action of ["list", "status", "handover", "cancel"]) expect((await call(action, JOINED)).every(value => value === undefined)).toBe(true);
+    expect((await call("send", PLAIN)).every(value => value === undefined)).toBe(true);
+    expect((await call("send", 123)).every(value => value === undefined)).toBe(true);
+    expect((await call("send", JOINED, "another_tool")).every(value => value === undefined)).toBe(true);
+    for (const key of Object.keys(process.env)) if (key.startsWith("MUSTER_")) delete process.env[key];
+    for (const action of ["send", "ask", "reply"]) expect((await call(action, JOINED)).every(value => value === undefined)).toBe(true);
   });
 });

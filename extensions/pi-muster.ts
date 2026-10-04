@@ -38,6 +38,7 @@ import { registerDeskReport } from "../src/desk-report-ext.ts";
 import { registerSwitchboard } from "../src/switchboard-ext.ts";
 import { findSkills, skillIndex } from "../src/skills.ts";
 import { createVersionSkew, withVersionSkew } from "../src/version-skew.ts";
+import { squashed } from "../src/readable.ts";
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_WORKER_WORKTREE = join(homedir(), "Code", "joelhooks", "dark-wizard", "scripts", "worker-worktree.sh");
@@ -56,6 +57,19 @@ function failure(cause: Cause.Cause<unknown>) {
     details: { ok: false, error: JSON.parse(JSON.stringify({ ...error, _tag: tag, message })) as unknown },
     isError: true as const,
   };
+}
+
+const READABLE_HINT = "Rewrite in plain sentences with spaces between words; put code, paths and ids in backticks.";
+
+function unreadable(fields: readonly (string | undefined)[]) {
+  const samples = fields.flatMap(field => {
+    if (field === undefined) return [];
+    const result = squashed(field);
+    return result.ok ? [] : result.samples;
+  });
+  if (!samples.length) return undefined;
+  const message = `Squashed text: ${[...new Set(samples)].slice(0, 3).map(sample => JSON.stringify(sample)).join(", ")}. ${READABLE_HINT}`;
+  return { ...text(message, { ok: false, samples: samples.slice(0, 3) }), isError: true as const };
 }
 
 export default function muster(host: ExtensionAPI) {
@@ -94,6 +108,13 @@ export default function muster(host: ExtensionAPI) {
   const projectDir = (ctx: ExtensionContext, project: string | undefined) => resolve(project ?? env.MUSTER_PROJECT ?? ctx.cwd);
   const ProjectParam = Type.Optional(Type.String({ description: "Project dir (absolute). Default: MUSTER_PROJECT, then cwd." }));
 
+  pi.on("tool_call", event => {
+    if (!env.MUSTER_AGENT || !env.MUSTER_PROJECT || !env.MUSTER_ROLE || event.toolName !== "intercom") return;
+    if (!["send", "ask", "reply"].includes(String(event.input.action)) || typeof event.input.message !== "string") return;
+    const error = unreadable([event.input.message]);
+    if (error) return { block: true, reason: error.content[0]!.text };
+  });
+
   pi.on("session_shutdown", () => {
     intercom?.dispose();
     intercom = undefined;
@@ -112,6 +133,8 @@ export default function muster(host: ExtensionAPI) {
       },
       parameters: Type.Object({ kind: StringEnum(["fyi", "progress", "done", "question", "blocked"] as const), title: Type.String(), body: Type.Optional(Type.String()), refs: Type.Optional(Type.Array(Type.String())), replyTo: Type.Optional(Type.String()) }),
       async execute(_id, params, signal, _onUpdate, ctx) {
+        const error = unreadable([params.title, params.body]);
+        if (error) return error;
         const session = ctx.sessionManager.getSessionId();
         if (params.replyTo) findOwnerPost(session, params.replyTo);
         return run(ctx, signal, deliverOwnerItem({ owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Intercom, service => service.send(to, message)) }), result => `${ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
@@ -128,6 +151,8 @@ export default function muster(host: ExtensionAPI) {
     },
     parameters: Type.Object({ uri: Type.String(), text: Type.String() }),
     async execute(_id, params, signal, _onUpdate, ctx) {
+      const error = unreadable([params.text]);
+      if (error) return error;
       const session = ctx.sessionManager.getSessionId();
       const parent = findOwnerPost(session, params.uri);
       const body = capBody(params.text);
@@ -160,6 +185,8 @@ export default function muster(host: ExtensionAPI) {
         body: Type.Optional(Type.String({ description: "Extra notes: open questions with a recommendation, risks" })),
       }),
       async execute(_id, params, signal, _onUpdate, ctx) {
+        const error = unreadable([params.summary, params.body, ...params.checks.flatMap(check => [check.name, check.detail])]);
+        if (error) return error;
         return run(
           ctx,
           signal,
@@ -424,6 +451,8 @@ export default function muster(host: ExtensionAPI) {
       resolves: Type.Optional(Type.String({ description: "Id of an earlier item this one closes" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
+      const error = unreadable([params.title, params.body]);
+      if (error) return error;
       const { project, ...rest } = params;
       return run(ctx, signal, deskPost(projectDir(ctx, project), rest), (result) =>
         [`Posted desk item ${result.record.id} [${result.record.kind}]. ${result.open} open for Joel.`, ...result.notes].join("\n"),
