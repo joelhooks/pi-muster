@@ -60,7 +60,7 @@ Every launch, fork, and restore runs `pi --list-models` once in the launch cwd, 
 
 Delivery requires Herdr `working` and two clean pane reads, three seconds apart. Only Pi-rendered `Error:` lines in the newest output above its editor count; prose, older errors, editor text, and footer text do not. Auth/model errors fail the launch and row, record the line in row events, and leave the pane open. Rate limits under the same prefix warn without failing. `project_status` checks only running, silent, nudged, and restarted rows whose Herdr status is not working. With `act: true`, it fails owned rows with a current model error. Finished rows keep their state. Model-failed rows require an explicit restore, not automatic adoption.
 
-Role and alternate `skills` name standing skills (names or absolute paths); launch skills append after project policy skills, de-duplicated. Workers keep `-ns` and search the installed catalog with `skill_find`, then read a matching `SKILL.md`.
+Role and alternate `skills` name standing skills (names or absolute paths); launch skills append after project policy skills, de-duplicated. Desk, boss, hawk and judge launches also load the package's `skills/muster`, unless `noSkills` is set. Workers keep `-ns` and search the installed catalog with `skill_find`, then read a matching `SKILL.md`.
 
 ## Tools
 
@@ -94,7 +94,9 @@ Slot 0 retains `heavy-job.lock`; other slots use `heavy-job.lock.<n>`. Ordinary 
 
 Owner messages and inbox results share a styled timeline: mention cards first, quiet posts grouped by agent, with expandable threads and refs and a plain `NO_COLOR` view.
 
-Workers and bosses use `owner_note({kind, title, body?, refs?, replyTo?})`. FYI, progress and done accumulate silently. Questions, blocked notices and packet actions automatically mention the owner resolved from `MUSTER_OWNER`. Only a mention wakes a reader, and only when idle; busy arrivals ride on the next turn. One digest groups unread posts by author, keeps the latest progress, and includes all FYI/done titles.
+Workers and bosses use `owner_note({kind, title, body?, refs?, replyTo?})`. FYI, progress and done accumulate silently. Questions, blocked notices and packet actions automatically mention the owner resolved at send time. `owner_note` reads the `MUSTER_PROJECT` catalog row named by `MUSTER_AGENT`; if the catalog is unreadable or the row is absent, its receipt names the `MUSTER_OWNER` fallback. Takeover and restored or relaunched rows leave an owner-queue forward. New senders follow up to four hops and rewrite owner mentions; cycles and longer routes fail closed. The new owner's feed also tails old queues, so workers still on old code need no restart. Forwarded records appear in `owner_inbox` with `via <old owner short id>`. Each source keeps a branch cursor across reloads. History at takeover is included only after the old reader's last heartbeat, or entirely when no reader file exists. `owner_reply` still targets the parent's author.
+
+Only a mention wakes a reader, and only when idle; busy arrivals ride on the next turn. One digest groups unread posts by author, keeps the latest progress, and includes all FYI/done titles.
 
 `owner_inbox({since?, kinds?, limit?, ack?})` reads this session's queue. Without `since`, it returns undelivered posts; `since` includes recent delivered posts. `ack` consumes only returned items. `owner_reply({uri, text})` replies to a post in this session's queue, threads its root and parent, and mentions the author in their queue. Workers run the reader too.
 

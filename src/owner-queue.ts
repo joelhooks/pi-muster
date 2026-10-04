@@ -1,11 +1,12 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { appendFileSync, readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
-import { decodeOwnerItem, decodeOwnerReader, decodeOwnerSession } from "./domain.ts";
+import { decodeOwnerItem, decodeOwnerReader, decodeOwnerSession, decodeOwnerForward, decodeProject } from "./domain.ts";
 import type { OwnerItem, OwnerKind } from "./domain.ts";
+import { projectPath } from "./store.ts";
 import { StoreError } from "./errors.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
 import { relayEvent } from "./relay-events.ts";
@@ -27,15 +28,81 @@ export function canonicalJson(value: unknown): string {
   if (typeof value === "object" && value !== null) return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
   return JSON.stringify(value);
 }
+const forwardPath = (session: string, home: string) => ownerPath(session, home).replace(/jsonl$/, "forward");
+function readForward(session: string, home: string) {
+  try { return decodeOwnerForward(JSON.parse(readFileSync(forwardPath(session, home), "utf8"))); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+}
+/** Four hops at most; corrupt records and cycles fail closed. */
+export function ownerRoute(owner: string, home = homedir()) {
+  const sources: Array<{ owner: string; forward: ReturnType<typeof decodeOwnerForward> }> = [];
+  const seen = new Set<string>();
+  for (;;) {
+    decodeOwnerSession(owner);
+    if (seen.has(owner)) throw new Error("owner forward cycle");
+    seen.add(owner);
+    const forward = readForward(owner, home);
+    if (!forward) return { owner, sources };
+    if (sources.length === 4) throw new Error("owner forward depth exceeds 4");
+    sources.push({ owner, forward }); owner = forward.to;
+  }
+}
+export function forwardOwner(params: { from: string; to: string; project: string; home: string; at?: string }) {
+  if (params.from === params.to) return;
+  const route = ownerRoute(params.to, params.home);
+  if (route.owner === params.from || route.sources.some(s => s.owner === params.from)) throw new Error("owner forward cycle");
+  if (route.sources.length >= 4) throw new Error("owner forward depth exceeds 4");
+  const existing = readForward(params.from, params.home);
+  if (existing?.to === params.to) return; // Never move the history boundary on a repeated takeover.
+  let heartbeatAt: string | undefined;
+  try { heartbeatAt = decodeOwnerReader(JSON.parse(readFileSync(readerPath(params.from, params.home), "utf8"))).heartbeatAt; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  if (heartbeatAt && !Number.isFinite(Date.parse(heartbeatAt))) throw new Error("invalid owner reader heartbeat");
+  const record = decodeOwnerForward({ to: params.to, at: params.at ?? new Date().toISOString(), project: params.project, cursor: readOwnerQueue(params.from, params.home).cursor, ...(heartbeatAt ? { heartbeatAt } : {}) });
+  const path = forwardPath(params.from, params.home);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = `${path}.${process.pid}.tmp`;
+  writeFileSync(temp, JSON.stringify(record), { mode: 0o600 }); renameSync(temp, path);
+}
+/** The original records stay intact; source aliases carry routing and display context. */
+export function readOwnerSources(owner: string, home = homedir()) {
+  const names = [owner];
+  try {
+    for (const name of readdirSync(dirname(ownerPath(owner, home)))) {
+      if (!name.endsWith(".forward")) continue;
+      const source = name.slice(0, -8);
+      if (source !== owner && ownerRoute(source, home).owner === owner) names.push(source);
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return names.map(source => {
+    const read = readOwnerQueue(source, home);
+    const route = source === owner ? undefined : ownerRoute(source, home);
+    const boundary = route?.sources[0]?.forward;
+    return { source, cursor: read.cursor, items: read.items.filter(({ item, line }) =>
+      !boundary || line > boundary.cursor || !boundary.heartbeatAt || Date.parse(item.createdAt) > Date.parse(boundary.heartbeatAt)),
+      aliases: route?.sources.map(s => s.owner) ?? [] };
+  });
+}
+export function resolveOwner(params: { owner: string; project: string; agent?: string; home: string }) {
+  if (!params.agent) return { owner: params.owner, resolution: "explicit recipient" };
+  try {
+    const project = decodeProject(JSON.parse(readFileSync(projectPath(params.project), "utf8")));
+    const row = project.agents.find(row => row.name === params.agent);
+    if (row) return { owner: row.owner, resolution: "catalog row" };
+    return { owner: params.owner, resolution: "MUSTER_OWNER fallback: no catalog row" };
+  } catch { return { owner: params.owner, resolution: "MUSTER_OWNER fallback: catalog unreadable" }; }
+}
 export function findOwnerPost(session: string, uri: string, home = homedir()) {
-  const post = readOwnerQueue(session, home).items.find(({ item }) => item.uri === uri)?.item;
+  const post = readOwnerSources(session, home).flatMap(s => s.items).find(({ item }) => item.uri === uri)?.item;
   if (!post) throw new Error(`post not found in this session's queue: ${uri}`);
   return post;
 }
 export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = homedir()): OwnerItem {
+  const originalOwner = owner;
+  owner = ownerRoute(owner, home).owner;
   const author = decodeOwnerSession(input.author);
   const parent = input.replyTo ? findOwnerPost(author, input.replyTo, home) : undefined;
-  const mention = input.mention ?? (wakeKind(input.kind) ? owner : undefined);
+  const mention = input.mention === originalOwner ? owner : input.mention ?? (wakeKind(input.kind) ? owner : undefined);
   if (mention) decodeOwnerSession(mention);
   const prefix = mention ? `@${mention} ` : "";
   const title = [...input.title.replace(/\r?\n/g, " ")].slice(0, 200).join("");
@@ -86,15 +153,19 @@ export function retireReader(owner: string, home: string, startedAt: string) {
   } catch { /* missing or replaced presence is not ours */ }
 }
 /** Queue first. Missing readers and any queue/telemetry failure keep the old outbox path. */
-export const deliverOwnerItem = <R>(params: { owner: string; home: string; session: string; project: string; item: OwnerNoteInput; send: (to: string, message: string) => Effect.Effect<{ readonly status: OutboxStatus; readonly detail?: string }, never, R>; message?: string }) => Effect.gen(function* () {
+export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; home: string; session: string; project: string; item: OwnerNoteInput; send: (to: string, message: string) => Effect.Effect<{ readonly status: OutboxStatus; readonly detail?: string }, never, R>; message?: string }) => Effect.gen(function* () {
+  const resolved = resolveOwner(params);
+  const route = yield* Effect.try({ try: () => ownerRoute(resolved.owner, params.home), catch: error => new StoreError({ path: ownerPath(resolved.owner, params.home), message: String(error) }) });
+  const owner = route.owner;
+  const note = params.item.mention === params.owner ? { ...params.item, mention: owner } : params.item;
   let item: OwnerItem | undefined;
   let queueError: unknown;
-  try { item = appendOwnerItem(params.owner, params.item, params.home); } catch (error) { queueError = error; }
-  const woke = item ? mentions(item, params.owner) : params.item.mention === params.owner || wakeKind(params.item.kind);
+  try { item = appendOwnerItem(owner, note, params.home); } catch (error) { queueError = error; }
+  const woke = item ? mentions(item, owner) : note.mention === owner || wakeKind(params.item.kind);
   if (!item && !woke) return yield* new StoreError({ path: ownerPath(params.owner, params.home), message: `silent owner note not queued: ${String(queueError)}` });
-  let path: "queue" | "intercom" = item && (!woke || readerFresh(params.owner, params.home)) ? "queue" : "intercom";
+  let path: "queue" | "intercom" = item && (!woke || readerFresh(owner, params.home)) ? "queue" : "intercom";
   const logged = relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path, ...(item ? { itemId: item.uri } : {}) }, params.home);
   if (!logged && woke) path = "intercom";
-  const delivery = path === "intercom" ? yield* params.send(params.owner, params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`) : { status: "sent" as const, detail: "owner queue" };
-  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke, path, delivery };
+  const delivery = path === "intercom" ? yield* params.send(owner, params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`) : { status: "sent" as const, detail: "owner queue" };
+  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke, path, delivery, owner, resolution: resolved.resolution };
 });

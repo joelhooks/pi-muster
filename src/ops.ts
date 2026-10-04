@@ -45,7 +45,7 @@ import { BOT_EMAIL, BOT_NAME, Intercom, MusterEnv, Proc, git, must } from "./run
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
-import { deliverOwnerItem } from "./owner-queue.ts";
+import { deliverOwnerItem, forwardOwner } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts";
@@ -65,6 +65,10 @@ const SHELL_RETRY_BUDGET_MS = 15_000;
 // ---------- small pure helpers ----------
 
 const iso = (env: { now: () => Date }) => env.now().toISOString();
+const recordOwnerForward = (from: string, to: string, project: string, env: { home: string; now: () => Date }) => Effect.try({
+  try: () => forwardOwner({ from, to, project, home: env.home, at: iso(env) }),
+  catch: error => new StoreError({ path: env.home, message: `owner handover failed: ${String(error)}` }),
+});
 
 const input = (message: string) => new InputError({ message });
 
@@ -900,7 +904,13 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       }
       const sessionFile = existing.sessionFile ?? findSessionFile(existing.cwd, existing.sessionId, env.home);
       if (!sessionFile) return yield* new GuardFailed({ guard: "session", message: `row ${name} has no session file to restore; use launch` });
-      row = { ...existing, cwd, sessionFile, owner: env.sessionId, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
+      const restoredProfile = profileFor(existing.role, existing.profile);
+      const restoredSkills = yield* Effect.try({
+        try: () => resolveSkills({ skills: restoredProfile.skills, index: restoredProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
+        catch: error => input(`restore skills: ${String(error)}`),
+      });
+      skillNotes.push(...restoredSkills.notes);
+      row = { ...existing, profile: { ...restoredProfile, skills: restoredSkills.paths }, cwd, sessionFile, owner: env.sessionId, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
     } else {
       const relaunchable = existing?.state === "planned" || existing?.state === "failed" || (existing?.state === "interrupted" && !existing.sessionFile);
       if (existing && !relaunchable) {
@@ -952,7 +962,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       }));
       const resolved = requestedProfile.skills.length > 0
         ? yield* Effect.try({
-          try: () => resolveSkills({ skills: requestedProfile.skills, index: skillIndex({ cwd }) }),
+          try: () => resolveSkills({ skills: requestedProfile.skills, index: requestedProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
           catch: (cause) => new InputError({ message: `skill discovery: ${String(cause)}` }),
         })
         : { paths: [], notes: [] };
@@ -1000,7 +1010,11 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       musterExtension: project.musterExtension,
     });
     const agentEnvironment = agentEnv(project, row);
-    yield* mutate(dir, (current) => Effect.succeed([withRow(current, row), row] as const));
+    yield* mutate(dir, (current) => Effect.gen(function* () {
+      const previous = current.agents.find(agent => agent.name === row.name);
+      if (previous) yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
+      return [withRow(current, row), row] as const;
+    }));
 
     const lane = yield* findLane(project, row.lane);
     const failLaunch = () => patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void));
@@ -1693,11 +1707,12 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const intercom = yield* Intercom;
     const act = params.act !== false;
     const project = params.takeover
-      ? yield* mutate(dir, (current) => {
+      ? yield* mutate(dir, (current) => Effect.gen(function* () {
+          for (const row of current.agents) if (row.state !== "closed") yield* recordOwnerForward(row.owner, env.sessionId, current.slug, env);
           const next = { ...current, agents: current.agents.map((row) =>
             row.state === "closed" ? row : { ...row, owner: env.sessionId, updatedAt: iso(env) }) };
-          return Effect.succeed([next, next] as const);
-        })
+          return [next, next] as const;
+        }))
       : yield* load(dir);
     const panes = yield* paneList();
     const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));

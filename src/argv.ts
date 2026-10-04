@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import type { AgentRow, LaunchProfile, Project, Role, RoleDefaults } from "./domain.ts";
 import { ROLE_DEFAULTS } from "./domain.ts";
 
@@ -66,13 +67,19 @@ export interface ProfileInput {
 }
 
 export function profileFor(role: Role, input: ProfileInput, d: RoleDefaults = ROLE_DEFAULTS[role]): LaunchProfile {
+  const noSkills = input.noSkills ?? d.noSkills;
+  const requested = [...(d.skills ?? []), ...(input.skills ?? [])];
+  const musterSkill = fileURLToPath(new URL("../skills/muster", import.meta.url));
+  const roleSkills = !noSkills && role !== "worker"
+    ? [musterSkill, ...requested.filter(skill => skill !== "muster" && skill !== musterSkill && skill !== `${musterSkill}/SKILL.md`)]
+    : requested;
   return {
     label: input.label,
     model: input.model ?? d.model,
     thinking: input.thinking === undefined ? d.thinking : input.thinking,
     appendSystemPrompt: [...(input.appendSystemPrompt ?? [])],
-    noSkills: input.noSkills ?? d.noSkills,
-    skills: [...new Set([...(d.skills ?? []), ...(input.skills ?? [])])],
+    noSkills,
+    skills: [...new Set(roleSkills)],
     extensions: [...(input.extensions ?? [])],
     env: { ...(input.env ?? {}) },
     compactAt: input.compactAt === undefined ? d.compactAt : input.compactAt,
