@@ -41,6 +41,7 @@
     "skills/muster/references/stop-the-line.md",
     "skills/muster/SKILL.md",
     "src/argv.ts",
+    "src/autoland.ts",
     "src/compact.ts",
     "src/desk.ts",
     "src/domain.ts",

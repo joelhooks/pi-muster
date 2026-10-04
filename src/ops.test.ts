@@ -1858,3 +1858,70 @@ describe("desk and review", () => {
     expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 archived");
   });
 });
+
+
+describe("project_status autoland", () => {
+  async function candidate() {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const origin = join(h.root, "upstream");
+    sh(h.root, "clone", "-q", dir, origin);
+    sh(dir, "remote", "add", "origin", origin);
+    const id = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: h.sessionId, cwd: clone, commit: id, summary: "autoland", checks: [] }));
+    return { h, dir, clone, origin, id };
+  }
+  it.each(["rift-merge", "pr-merge", "herdr-workflow"] as const)("records external ancestors in %s without touching worktrees or panes", async mode => {
+    const f = await candidate();
+    await runWith(f.h, mutate(f.dir, p => Effect.succeed([{ ...p, mode }, null] as const)));
+    sh(f.origin, "fetch", "-q", f.clone, f.id); sh(f.origin, "merge", "--ff-only", "FETCH_HEAD");
+    const before = sh(f.dir, "rev-parse", "HEAD");
+    const status = await runWith(f.h, projectStatus(f.dir));
+    expect(status.project.packets[0]).toMatchObject({ state: "no_changes", landedAs: f.id, evidence: `auto: ${f.id.slice(0, 8)} is on origin/main` });
+    expect(status.notes).toContain(`autoland: ${f.id.slice(0, 8)} → ${f.id.slice(0, 8)}`);
+    expect(sh(f.dir, "rev-parse", "HEAD")).toBe(before);
+    expect(status.project.agents.find(a => a.name === "probe_w")?.state).toBe("landed");
+  });
+  it("records squash sha and evidence", async () => {
+    const f = await candidate(); const merged = sh(f.origin, "rev-parse", "HEAD").trim();
+    f.h.proc = { run: (cmd, args, opts) => cmd === "gh"
+      ? Effect.succeed({ code: 0, stdout: JSON.stringify([[{ number: 42, merged_at: "today", merge_commit_sha: merged, base: { ref: "main" }, merged_by: { login: "kodiak" } }]]), stderr: "" })
+      : args[0] === "remote" ? Effect.succeed({ code: 0, stdout: "git@github.com:owner/repo.git", stderr: "" }) : liveProc.run(cmd, args, opts) };
+    const status = await runWith(f.h, projectStatus(f.dir));
+    expect(status.project.packets[0]).toMatchObject({ state: "no_changes", landedAs: merged, evidence: `auto: PR #42 squash-merged by kodiak as ${merged.slice(0, 8)} on main` });
+    expect(status.notes).toContain(`autoland: ${f.id.slice(0, 8)} → ${merged.slice(0, 8)} (PR #42)`);
+  });
+  it("no match changes only the recheck timestamp; missing gh remains nonfatal", async () => {
+    const f = await candidate(); const before = (await runWith(f.h, load(f.dir))).packets[0];
+    f.h.proc = { run: (cmd, args, opts) => cmd === "gh"
+      ? Effect.fail(new ProcError({ command: "gh", code: null, stderr: "", message: "missing" }))
+      : args[0] === "remote" ? Effect.succeed({ code: 0, stdout: "https://github.com/owner/repo.git", stderr: "" }) : liveProc.run(cmd, args, opts) };
+    const status = await runWith(f.h, projectStatus(f.dir));
+    const { autolandCheckedAt, ...rest } = status.project.packets[0]!;
+    expect(rest).toEqual(before); expect(autolandCheckedAt).toBe(f.h.now.toISOString());
+    expect(status.notes.join(" ")).toContain("ancestor-only");
+  });
+  it.each(["read-only", "other owner", "rejected", "committed"])("does not check or change packets for %s", async reason => {
+    const f = await candidate();
+    if (reason === "other owner") f.h.sessionId = "someone-else";
+    if (reason === "rejected" || reason === "committed") await runWith(f.h, mutate(f.dir, p => Effect.succeed([{ ...p, packets: p.packets.map(a => ({ ...a, state: reason })) }, null] as const)));
+    const before = (await runWith(f.h, load(f.dir))).packets;
+    let fetches = 0; f.h.proc = { run: (cmd, args, opts) => { if (args[0] === "fetch") fetches++; return liveProc.run(cmd, args, opts); } };
+    await runWith(f.h, projectStatus(f.dir, { act: reason !== "read-only" }));
+    expect((await runWith(f.h, load(f.dir))).packets).toEqual(before); expect(fetches).toBe(0);
+  });
+  it("caps at ten oldest and waits ten minutes before rechecking", async () => {
+    const f = await candidate();
+    await runWith(f.h, mutate(f.dir, p => Effect.succeed([{ ...p, packets: Array.from({ length: 12 }, (_, i) => ({ ...p.packets[0]!, id: (i + 1).toString(16).padStart(40, "0"), reportedAt: new Date(f.h.now.getTime() - (12 - i) * 1000).toISOString() })).reverse() }, null] as const)));
+    let fetches = 0; f.h.proc = { run: (cmd, args, opts) => { if (args[0] === "fetch") fetches++; return liveProc.run(cmd, args, opts); } };
+    await runWith(f.h, projectStatus(f.dir));
+    const first = (await runWith(f.h, load(f.dir))).packets;
+    expect(first.filter(p => p.autolandCheckedAt)).toHaveLength(10);
+    expect(first.slice(0, 2).every(p => !p.autolandCheckedAt)).toBe(true); expect(fetches).toBe(10);
+    await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(12);
+    f.h.now = new Date(f.h.now.getTime() + 599_999);
+    await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(12);
+    f.h.now = new Date(f.h.now.getTime() + 1);
+    await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(22);
+  }, 20_000);
+});
