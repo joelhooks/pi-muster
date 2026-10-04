@@ -11,6 +11,7 @@ import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 const table = `provider       model                     context  max-out  thinking  images
 claude-bridge  claude-opus-5-5           1M       128K     yes       yes
 claude-bridge  claude-fable-5-1          1M       128K     yes       yes
+claude-bridge  claude-sonnet-5-5         1M       128K     yes       yes
 openai-codex   gpt-6.1-sol               400K     128K     yes       yes
 `;
 beforeEach(() => {
@@ -20,11 +21,11 @@ beforeEach(() => {
     ? Effect.succeed({ code: 0, stdout: table, stderr: "" }) : run(command, args, options));
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-async function setup() {
+async function setup(slug = "probe") {
   const h = harness();
   h.proc = liveProc;
   const dir = makeRepo(join(h.root, "repo"));
-  await runWith(h, projectOpen({ dir, slug: "probe", outcome: "model guard", reviewTrigger: "weekly", nextAction: "test", space: "w1", ephemeral: true }));
+  await runWith(h, projectOpen({ dir, slug, outcome: "model guard", reviewTrigger: "weekly", nextAction: "test", space: "w1", ephemeral: true }));
   await runWith(h, laneOpen(dir, { slug: "probe", label: "probe", goal: "test" }));
   const launch = (model?: string) => agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "probe", label: "worker", cwd: dir, prompt: "start", ...(model ? { model } : {}) });
   return { h, dir, launch };
@@ -37,7 +38,7 @@ it("refuses an unauthenticated route before pane or catalog allocation", async (
   expect([...h.herdr.panes.keys()]).toEqual(panes);
   expect((await runWith(h, load(dir))).agents).toEqual([]);
 });
-it.each([ ["opus", "claude-bridge/claude-opus-5-5"], ["fable", "claude-bridge/claude-fable-5-1"], ["sol", "openai-codex/gpt-6.1-sol"] ])("resolves %s in launch and policy", async (alias, model) => {
+it.each([ ["opus", "claude-bridge/claude-opus-5-5"], ["sol", "openai-codex/gpt-6.1-sol"] ])("resolves %s in launch and policy", async (alias, model) => {
   const { h, dir, launch } = await setup();
   const update = await runWith(h, projectUpdate(dir, { policy: { roles: { worker: { model: alias } } } }));
   expect(update.policy).toHaveProperty("aliases.opus", "claude-bridge/claude-opus-5-5");
@@ -47,10 +48,20 @@ it.each([ ["opus", "claude-bridge/claude-opus-5-5"], ["fable", "claude-bridge/cl
   const explicit = await runWith(h, agentLaunch(dir, { action: "launch", name: "explicit", role: "worker", lane: "probe", label: "explicit", cwd: dir, model: alias }));
   expect(explicit.row.profile.model).toBe(model);
 });
-it.each(["sonnet", "anthropic/claude-sonnet-5", "nope"])("rejects forbidden/unknown choice %s", async (model) => {
+it.each(["sonnet", "anthropic/claude-sonnet-5", "claude-bridge/claude-sonnet-5-5", "fable", "fable:high", "claude-bridge/claude-fable-5-1", "nope"])("rejects forbidden/unknown choice %s", async (model) => {
   const { h, launch } = await setup();
   const error = await failWith(h, launch(model));
-  expect(error.message).toMatch(model.includes("sonnet") ? /Sonnet is not used/ : /aliases:.*fable.*opus.*sol/);
+  expect(error.message).toMatch(model.includes("sonnet") ? /Sonnet is not used/ : model.includes("fable") ? /Fable is off fleet-wide \(Joel, 2026-10-04\); use opus/ : /aliases: opus, sol$/);
+});
+it("allows Joel's named front-desk Sonnet route there only, and Fable nowhere", async () => {
+  const front = await setup("front-desk");
+  const update = await runWith(front.h, projectUpdate(front.dir, { policy: { roles: { worker: { model: "claude-bridge/claude-sonnet-5-5", thinking: "medium" } } } }));
+  expect(update.policy.roles.worker).toMatchObject({ model: "claude-bridge/claude-sonnet-5-5", thinking: "medium" });
+  expect((await runWith(front.h, front.launch())).row.profile.model).toBe("claude-bridge/claude-sonnet-5-5");
+  expect((await failWith(front.h, projectUpdate(front.dir, { policy: { roles: { judge: { model: "claude-bridge/claude-sonnet-5" } } } }))).message).toContain("Sonnet is not used");
+  expect((await failWith(front.h, projectUpdate(front.dir, { policy: { roles: { judge: { model: "claude-bridge/claude-fable-5-1" } } } }))).message).toContain("Fable is off");
+  const other = await setup("not-front-desk");
+  expect((await failWith(other.h, projectUpdate(other.dir, { policy: { roles: { worker: { model: "claude-bridge/claude-sonnet-5-5" } } } }))).message).toContain("Sonnet is not used");
 });
 it.each(["nonzero", "empty", "timeout"])("allows a %s model listing with a skip note", async (kind) => {
   const { h, launch } = await setup();

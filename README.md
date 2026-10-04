@@ -34,7 +34,6 @@ Role models are data. Muster reads `~/.config/muster/roster.json` (or `MUSTER_RO
   "version": 1,
   "aliases": {
     "opus": "claude-bridge/claude-opus-5-5",
-    "fable": "claude-bridge/claude-fable-5-1",
     "sol": "openai-codex/gpt-6.1-sol"
   },
   "roles": {
@@ -54,7 +53,7 @@ Role models are data. Muster reads `~/.config/muster/roster.json` (or `MUSTER_RO
 }
 ```
 
-Use `opus`, `fable`, or `sol` in launch and policy models; roster aliases can override these built-ins or add names. Thinking suffixes such as `opus:high` are supported. Aliases resolve before alternate settings are selected. Sonnet is refused, including aliases that point to it. `project_update` returns the aliases with the effective policy.
+Use `opus` or `sol` in launch and policy models; roster aliases can override these built-ins or add names. Thinking suffixes such as `opus:high` are supported. Aliases resolve before alternate settings are selected. Sonnet is refused, including aliases that point to it, except front-desk's `claude-bridge/claude-sonnet-5-5` (Joel, 2026-10-04: "front desk needs to be opus 5 5 and sonnet 5 5"); exceptions live in `MODEL_EXCEPTIONS` in `src/models.ts`. Fable is off fleet-wide (Joel, 2026-10-04) and refused everywhere; the judge defaults to Opus. `project_update` returns the aliases with the effective policy.
 
 Every launch, fork, and restore runs `pi --list-models` once in the launch cwd, with a 20-second timeout, before writing a row or opening a pane. A missing authenticated model fails with working-route suggestions. A failed or empty listing permits launch with a `model check skipped` note.
 

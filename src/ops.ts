@@ -957,7 +957,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
       }, yield* Effect.try({
-        try: () => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model),
+        try: () => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model, project.slug),
         catch: (error) => input(String(error instanceof Error ? error.message : error)),
       }));
       const resolved = requestedProfile.skills.length > 0
@@ -993,7 +993,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     if (params.brief && params.action === "restore") row = { ...row, brief: params.brief };
 
     const resolvedModel = yield* Effect.try({
-      try: () => resolveModel(params.model ?? row.profile.model, roster),
+      try: () => resolveModel(params.model ?? row.profile.model, roster, project.slug),
       catch: (error) => input(String(error instanceof Error ? error.message : error)),
     });
     row = { ...row, profile: { ...row.profile, model: resolvedModel.model, thinking: params.thinking ?? resolvedModel.thinking ?? row.profile.thinking } };
@@ -2006,7 +2006,7 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     const { roster, path } = yield* loadRoster;
     const before = yield* load(dir);
     yield* Effect.try({
-      try: () => effectivePolicy(roster, patch ? mergePolicy(before.policy, patch) : before.policy),
+      try: () => effectivePolicy(roster, patch ? mergePolicy(before.policy, patch) : before.policy, before.slug),
       catch: (error) => input(String(error instanceof Error ? error.message : error)),
     });
     const label = params.label?.trim();
@@ -2029,5 +2029,5 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     notes.push(yield* publishTokens(project));
     notes.push(`brain: ${yield* writeBrain(project)}`);
     notes.push(`roster: ${path ?? "built-in defaults"}`);
-    return { project, policy: effectivePolicy(roster, project.policy), notes };
+    return { project, policy: effectivePolicy(roster, project.policy, project.slug), notes };
   });

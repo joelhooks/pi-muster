@@ -6,19 +6,29 @@ import { Proc } from "./runtime.ts";
 
 export const DEFAULT_ALIASES: Readonly<Record<string, string>> = {
   opus: "claude-bridge/claude-opus-5-5",
-  fable: "claude-bridge/claude-fable-5-1",
   sol: "openai-codex/gpt-6.1-sol",
 };
 export const modelAliases = (roster?: Roster): Readonly<Record<string, string>> => ({ ...DEFAULT_ALIASES, ...roster?.aliases });
 
-export function resolveModel(choice: string, roster?: Roster): { model: string; thinking?: Thinking } {
-  if (/sonnet/i.test(choice)) throw new Error("Sonnet is not used (Joel, 2026-10-03); use sol or opus");
+/** Joel's named exceptions to a fleet-wide refusal: one project, one exact route, his words. */
+export const MODEL_EXCEPTIONS: ReadonlyArray<{ project: string; model: string; ruling: string; date: string }> = [
+  { project: "front-desk", model: "claude-bridge/claude-sonnet-5-5", ruling: "front desk needs to be opus 5 5 and sonnet 5 5", date: "2026-10-04" },
+];
+const allowed = (model: string, project?: string) => MODEL_EXCEPTIONS.some((e) => e.project === project && e.model === model);
+
+function refuse(model: string, project?: string) {
+  if (/fable/i.test(model)) throw new Error("Fable is off fleet-wide (Joel, 2026-10-04); use opus");
+  if (/sonnet/i.test(model) && !allowed(model, project)) throw new Error("Sonnet is not used (Joel, 2026-10-03); use sol or opus");
+}
+
+export function resolveModel(choice: string, roster?: Roster, project?: string): { model: string; thinking?: Thinking } {
+  if (/fable/i.test(choice) || (/sonnet/i.test(choice) && !choice.includes("/"))) refuse(choice, project); // a bare alias never matches an exception route
   const suffix = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(choice);
   const name = suffix ? choice.slice(0, suffix.index) : choice;
   const aliases = modelAliases(roster);
   const model = name.includes("/") ? name : aliases[name];
   if (!model) throw new Error(`Unknown model alias ${name}; aliases: ${Object.keys(aliases).sort().join(", ")}`);
-  if (/sonnet/i.test(model)) throw new Error("Sonnet is not used (Joel, 2026-10-03); use sol or opus");
+  refuse(model, project);
   if (!/^[^/\s:]+\/[^/\s:]+$/.test(model)) throw new Error(`Invalid model route ${model}; expected provider/model`);
   const thinking = suffix?.[1];
   switch (thinking) {
@@ -41,7 +51,7 @@ export function parseRunnableModels(output: string): string[] {
 
 export function workingRoutes(model: string, runnable: readonly string[]): string[] {
   const id = model.slice(model.indexOf("/") + 1);
-  const candidates = runnable.filter((route) => !/sonnet/i.test(route) && route.slice(route.indexOf("/") + 1).startsWith(id));
+  const candidates = runnable.filter((route) => !/sonnet|fable/i.test(route) && route.slice(route.indexOf("/") + 1).startsWith(id));
   return candidates.sort((a, b) => {
     const rank = (route: string) => (id.startsWith("claude-") && route.startsWith("claude-bridge/") ? 0 : 2)
       + (route.slice(route.indexOf("/") + 1) === id ? 0 : 1);

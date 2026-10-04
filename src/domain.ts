@@ -340,7 +340,7 @@ export const ROLE_DEFAULTS: Readonly<Record<Role, RoleDefaults>> = {
   hawk: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 450_000, noSkills: false },
   boss: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 400_000, noSkills: false },
   worker: { model: "openai-codex/gpt-6.1-sol", thinking: "medium", compactAt: 200_000, noSkills: true },
-  judge: { model: "claude-bridge/claude-fable-5-1", thinking: "high", compactAt: 350_000, noSkills: false },
+  judge: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 350_000, noSkills: false },
 };
 
 /** A model a role may run instead of its default, with the jobs it suits. */
@@ -403,12 +403,12 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
  * choice; picking an alternate brings its settings (a smaller window's
  * compact-at, say) with it.
  */
-export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string): RoleDefaults {
+export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string): RoleDefaults {
   const { alternates = [], ...fleet } = roster?.roles?.[role] ?? {};
   const project = policy?.roles?.[role] ?? {};
-  const resolved = resolveModel(model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster);
+  const resolved = resolveModel(model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug);
   const chosen = resolved.model;
-  const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => resolveModel(candidate.model, roster).model === chosen) ?? { useFor: [] };
+  const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => { try { return resolveModel(candidate.model, roster, slug).model === chosen; } catch { return false; } }) ?? { useFor: [] };
   return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen, ...(resolved.thinking ? { thinking: resolved.thinking } : {}),
     skills: [...new Set([...(fleet.skills ?? []), ...("skills" in alternate ? alternate.skills ?? [] : []), ...(project.skills ?? [])])],
   };
@@ -427,12 +427,12 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
 }
 
 /** The policy in force, every default spelled out, so an owner sees what it is tuning. */
-export function effectivePolicy(roster: Roster | undefined, policy: Policy | undefined) {
+export function effectivePolicy(roster: Roster | undefined, policy: Policy | undefined, project?: string) {
   const limits = silenceLimits(policy);
   const roles = Object.fromEntries(
     Role.literals.map((role) => {
       const alternates = (roster?.roles?.[role]?.alternates ?? []).map(({ model, useFor, avoidFor, skills }) => ({ model, useFor, ...(avoidFor ? { avoidFor } : {}), ...(skills ? { skills } : {}) }));
-      return [role, { ...roleDefaults(roster, policy, role), ...(alternates.length ? { alternates } : {}) }];
+      return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
   return { aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
