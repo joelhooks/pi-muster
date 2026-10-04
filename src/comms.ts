@@ -3,7 +3,8 @@ import { decodeAgentName, decodeSlug, type Policy } from "./domain.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
 import { exists, load } from "./store.ts";
-import { Comms, CommsError, Unsupported, type CommsAddress, type CommsDelivery, type CommsLease, type CommsShape, type CommsTarget, type IntercomTransport } from "./runtime.ts";
+import { Comms, CommsError, Unsupported, type CommsAddress, type CommsDelivery, type CommsLease, type CommsShape, type CommsTarget, type IntercomTransport, type LeaseAuthorityShape, type NetworkMailboxShape } from "./runtime.ts";
+import type { Lease, Receipt } from "./ratking-lexicon.ts";
 
 export type CommsAdapter = "intercom" | "network";
 export function selectComms(env: string | undefined, policy?: Pick<Policy, "comms">): CommsAdapter {
@@ -49,7 +50,50 @@ export function IntercomComms(transport: IntercomTransport, lookup: (address: Ex
   };
 }
 
+/** Unknown knownValues remain valid on the wire, but cannot prove delivery. */
+export function receiptDelivery(receipt: Receipt): Effect.Effect<CommsDelivery, Unsupported> {
+  switch (receipt.state) {
+    case "accepted": case "queued": case "delivered": case "acked": case "expired": case "failed":
+      return Effect.succeed({ status: receipt.state, ...(receipt.detail === undefined ? {} : { detail: receipt.detail }) });
+    default: return Effect.fail(new Unsupported(`unsupported Rat King receipt state: ${receipt.state}`));
+  }
+}
+
 const networkError = () => new Unsupported("NetworkComms is not implemented; delivery refused (no fallback to intercom)");
+export const LeaseAuthority: LeaseAuthorityShape = {
+  acquire: () => Effect.fail(networkError()),
+  resolve: () => Effect.fail(networkError()),
+  release: () => Effect.fail(networkError()),
+};
+export const NetworkMailbox: NetworkMailboxShape = {
+  send: () => Effect.fail(networkError()),
+  ack: () => Effect.fail(networkError()),
+  list: () => Effect.fail(networkError()),
+};
+
+export type HarnessSessionAdapter = (lease: Lease) => Effect.Effect<string, CommsError>;
+/** An adapter must explicitly resolve a session; paneId is never a session or identity. */
+export function leaseToComms(lease: Lease, adapters: Readonly<Record<string, HarnessSessionAdapter>> = {}): Effect.Effect<CommsLease, CommsError> {
+  const adapter = Object.hasOwn(adapters, lease.harness.$type) ? adapters[lease.harness.$type] : undefined;
+  if (!adapter) return Effect.fail(new Unsupported(`unsupported Rat King harness: ${lease.harness.$type}`));
+  return adapter(lease).pipe(Effect.flatMap(session => session.length === 0
+    ? Effect.fail(new Unsupported("Rat King adapter did not resolve a session"))
+    : Effect.succeed({ address: { kind: "did" as const, did: lease.did }, session, expiresAt: lease.expiresAt })));
+}
+/** Private seam for future network wiring. The live NetworkComms never invokes it yet. */
+export function resolveNetworkAddress(identity: CommsTarget, options: {
+  readonly localDid: (address: Exclude<CommsAddress, { kind: "did" }>) => Effect.Effect<Lease["did"], CommsError>;
+  readonly authority: LeaseAuthorityShape;
+  readonly adapters: Readonly<Record<string, HarnessSessionAdapter>>;
+}): Effect.Effect<CommsLease, CommsError> {
+  return Effect.gen(function* () {
+    const address = yield* Effect.try({ try: () => commsAddress(identity), catch: error => new CommsError(String(error)) });
+    const did = address.kind === "did" ? address.did : yield* options.localDid(address);
+    const lease = yield* options.authority.resolve(did);
+    if (lease.did !== did) return yield* Effect.fail(new CommsError("Rat King authority returned a lease for another DID"));
+    return yield* leaseToComms(lease, options.adapters);
+  });
+}
 export const NetworkComms: CommsShape = {
   send: () => Effect.succeed({ status: "failed", detail: networkError().message }),
   ask: () => Effect.fail(networkError()),

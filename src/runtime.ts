@@ -4,6 +4,7 @@ import { Context, Effect } from "effect";
 import type { HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
 
 import { ProcError } from "./errors.ts";
+import type { AckInput, AckOutput, KnownDeliveryState, Lease, LeaseFence, ListInput, ListOutput, SendInput, SendOutput } from "./ratking-lexicon.ts";
 
 /** Bellwether's Herdr socket client. Tests provide a stub with the same shape. */
 export class Herdr extends Context.Service<Herdr, HerdrClient>()("muster/Herdr") {}
@@ -93,7 +94,19 @@ export interface CommsLease {
   readonly session: string;
   readonly expiresAt?: string;
 }
-export type DeliveryStatus = "accepted" | "queued" | "delivered" | "acked" | "expired" | "failed";
+export type DeliveryStatus = KnownDeliveryState;
+/** Private authority, not a public record or mailbox endpoint. */
+export interface LeaseAuthorityShape {
+  readonly acquire: (request: Pick<Lease, "did" | "harness" | "expiresAt">) => Effect.Effect<Lease, CommsError>;
+  readonly resolve: (did: Lease["did"]) => Effect.Effect<Lease, CommsError>;
+  readonly release: (fence: LeaseFence) => Effect.Effect<void, CommsError>;
+}
+/** Typed XRPC seam only; no transport, auth or crypto implementation yet. */
+export interface NetworkMailboxShape {
+  readonly send: (input: SendInput) => Effect.Effect<SendOutput, CommsError>;
+  readonly ack: (input: AckInput) => Effect.Effect<AckOutput, CommsError>;
+  readonly list: (input: ListInput) => Effect.Effect<ListOutput, CommsError>;
+}
 export interface CommsDelivery { readonly status: DeliveryStatus; readonly detail?: string }
 export class CommsError extends Error {
   readonly _tag: string = "CommsError";
