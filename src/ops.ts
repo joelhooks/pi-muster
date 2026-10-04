@@ -56,6 +56,7 @@ import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { relayEvent, watchFallback } from "./relay-events.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
+import { forkSessionAt } from "./session-tree.ts";
 import type { LiveCounts } from "./tokens.ts";
 
 const MAX_WORKERS_PER_TAB = 4;
@@ -759,6 +760,7 @@ export interface AgentLaunchInput {
   readonly cwd?: string | undefined;
   readonly clone?: boolean | undefined;
   readonly from?: string | undefined;
+  readonly at?: string | undefined;
   readonly model?: string | undefined;
   readonly thinking?: Thinking | undefined;
   readonly appendSystemPrompt?: readonly string[] | undefined;
@@ -772,6 +774,16 @@ export interface AgentLaunchInput {
   readonly pane?: string | undefined;
   readonly slot?: "root" | "split" | undefined;
 }
+
+/** Keep warm selection independent of side-desk fork topology. */
+const warmForkSource = (dir: string, parent: AgentRow | null, at: string | undefined) =>
+  at === undefined ? Effect.succeed(parent?.sessionFile ?? null) : Effect.try({
+    try: () => {
+      if (!parent?.sessionFile) throw new Error("at requires action fork and a parent session file");
+      return forkSessionAt(parent.sessionFile, at, join(dataDir(dir), "forks"));
+    },
+    catch: error => input(String(error instanceof Error ? error.message : error)),
+  });
 
 const cloneFor = (source: string, name: string, lane: Lane) =>
   Effect.gen(function* () {
@@ -923,6 +935,7 @@ export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
 export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
+    if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
     const name = yield* decodeWith(decodeAgentName, params.name);
     const project = yield* load(dir);
     const existing = project.agents.find((agent) => agent.name === name);
@@ -952,6 +965,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       }
       const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
       if (params.action === "fork" && !parent?.sessionFile) return yield* input(`fork needs --from a row with a session file`);
+      const parentSessionFile = yield* warmForkSource(dir, parent, params.at);
       const role = params.role ?? parent?.role ?? existing?.role;
       const laneSlug = params.lane ?? parent?.lane ?? existing?.lane;
       if (!role || !laneSlug) return yield* input("a new agent needs role and lane");
@@ -1012,7 +1026,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         profile,
         sessionId: existing?.sessionId ?? mintSessionId(name, env.now()),
         sessionFile: null,
-        parentSessionFile: parent?.sessionFile ?? null,
+        parentSessionFile,
         pane: existing?.pane ?? null,
         owner: env.sessionId,
         brief: params.brief ?? existing?.brief ?? null,

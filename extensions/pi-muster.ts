@@ -11,6 +11,7 @@ import { Cause, Effect, Exit, Layer } from "effect";
 import { Type } from "typebox";
 
 import { registerCompaction } from "../src/compact.ts";
+import { agentRewind, registerWorkerNavigation } from "../src/rewind.ts";
 import { MAX_CADENCE_MINUTES } from "../src/domain.ts";
 import { createIntercom } from "../src/intercom.ts";
 import type { LiveIntercom } from "../src/intercom.ts";
@@ -213,6 +214,8 @@ export default function muster(host: ExtensionAPI) {
     },
   });
 
+  registerWorkerNavigation(pi, worker);
+
   if (worker) return;
 
   pi.registerTool({
@@ -350,6 +353,7 @@ export default function muster(host: ExtensionAPI) {
       cwd: Type.Optional(Type.String()),
       clone: Type.Optional(Type.Boolean({ description: "Allocate a rift clone of the lane repo as cwd" })),
       from: Type.Optional(Type.String({ description: "fork: the parent row" })),
+      at: Type.Optional(Type.String({ description: "fork: context label or entry id in the parent session; omitted forks the full session" })),
       model: Type.Optional(Type.String({ description: "an alias (opus, sol) or provider/model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       appendSystemPrompt: Type.Optional(Type.Array(Type.String())),
@@ -375,6 +379,16 @@ export default function muster(host: ExtensionAPI) {
           ...result.notes,
         ].join("\n"),
       );
+    },
+  });
+
+  pi.registerTool({
+    name: "agent_rewind", label: "Muster agent rewind",
+    description: "Rewind an owned worker to a label or entry id with a branch summary. Interrupts working agents, waits for idle, submits once and verifies fresh session-file evidence. Send the corrected instruction afterwards.",
+    parameters: Type.Object({ project: ProjectParam, name: Type.String(), to: Type.String(), note: Type.Optional(Type.String()) }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      return run(ctx, signal, agentRewind(projectDir(ctx, params.project), params), result =>
+        `Rewound ${result.name} to ${result.entryId} (${result.evidence}).${result.note ? ` Steering note: ${result.note}` : ""} Send the corrected instruction as usual.`);
     },
   });
 

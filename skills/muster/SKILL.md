@@ -42,6 +42,12 @@ Defaults fit most work. Role models come from the fleet roster (`~/.config/muste
 
 Roster skills are a role's standing set; name extras at launch; workers pull the rest with `skill_find` and read matching `SKILL.md` files.
 
+## Warm forks and rewind
+
+Workers mark `ctx:ready` with `context_mark` once the code they need is read, before editing. Fork related work with `agent_launch action=fork from=<row> at=ctx:ready`, a fresh name and its own brief; use `clone: true` for an independent checkout. Omitting `at` keeps the full-session fork.
+
+When an instruction is overruled, use `agent_rewind name=<worker> to=<label or entry id> note=<correction>` rather than stacking an “ignore that” message. Wait for verified branch evidence, then send the corrected instruction as usual. Rewind changes conversation context, not files or commits.
+
 ## The sidebar
 
 - The space label is the project's name. Status never goes there; `project_status` puts a drifted label back.
