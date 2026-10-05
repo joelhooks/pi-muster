@@ -51,7 +51,7 @@ describe("closing proposed lanes", () => {
     const closed = await runWith(h, laneClose(dir, "three", { discard: true }));
     expect(closed.lane.state).toBe("closed");
     expect(closed.lane.discarded).not.toBe(true);
-    expect(closed.retro).toBe("retro: 3 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run lane_open slug: \"retro\" label: \"🔁 retro\" goal: \"Review finished lanes\" kind: \"retro\"; run references/retro.md");
+    expect(closed.retro).toBe("retro: 3 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run lane_open slug: \"retro-2026-09-29\" label: \"🔁 retro\" goal: \"Review finished lanes\" kind: \"retro\"; run references/retro.md");
     await open("another-parked", true);
     expect(await runWith(h, laneClose(dir, "another-parked", { discard: true }))).not.toHaveProperty("retro");
     // Reopening a discarded lane makes it real work; its next close counts normally.

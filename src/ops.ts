@@ -1098,6 +1098,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     }
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
+    if (params.kind === "retro" && existing && existing.kind !== "retro") return yield* input(`lane ${slug} is kind ${existing.kind}, not retro; choose a fresh slug for the retro lane`);
     const wantOpen = params.open !== false;
     if (existing?.state === "open" && existing.root) {
       const live = yield* locatePane(existing.root);
@@ -1153,6 +1154,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     // Reserve WIP under the catalog lock before opening any pane. Other callers see it immediately.
     yield* mutate(dir, current => Effect.gen(function* () {
       const latest = current.lanes.find(lane => lane.slug === slug) ?? base;
+      if (params.kind === "retro" && latest.kind !== "retro") return yield* input(`lane ${slug} is kind ${latest.kind}, not retro; choose a fresh slug for the retro lane`);
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
       if (refusal && (latest.kind === "retro" || !params.override?.trim())) return yield* input(refusal);
       const next: Lane = { ...latest, ...deployPatch, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
@@ -1318,8 +1320,16 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
     const latest = yield* load(dir);
     const count = latest.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
       (!latest.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(latest.lastRetroAt))).length;
+    const retroBase = `retro-${iso(env).slice(0, 10)}`;
+    const taken = new Set(latest.lanes.map(lane => lane.slug));
+    let retroSlug = retroBase;
+    for (let index = 2; taken.has(retroSlug); index++) {
+      let suffix = "";
+      for (let n = index; n > 0; n = Math.floor((n - 1) / 26)) suffix = String.fromCharCode(97 + (n - 1) % 26) + suffix;
+      retroSlug = `${retroBase}-${suffix}`;
+    }
     return { lane: closed, closed: true, pending: [] as string[], paneNote,
-      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run lane_open slug: "retro" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"; run references/retro.md` } : {}) };
+      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run lane_open slug: "${retroSlug}" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"; run references/retro.md` } : {}) };
   });
 
 // ---------- agents ----------
