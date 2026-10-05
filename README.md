@@ -63,9 +63,19 @@ Role and alternate `skills` name standing skills (names or absolute paths); laun
 
 ## Tools
 
-Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`, `desk_report`, `desk_rulings`, `thinking_set` (a session lowers or raises its own thinking level, as a standing Hawk does when the line stops).
+Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane_deliver`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`, `desk_report`, `desk_rulings`, `thinking_set` (a session lowers or raises its own thinking level, as a standing Hawk does when the line stops).
 
-`project_update` sets the sidebar headline and the project's policy: silence limits and per-role model, thinking, compaction, and skills, merged over Muster's defaults.
+`project_update` sets the sidebar headline and the project's policy: WIP and flow limits, silence limits and per-role model, thinking, compaction, and skills, merged over Muster's defaults.
+
+## Delivery and flow
+
+A lane is done when its work is live and proven, not merely merged. See [the definition of done and brief template](skills/muster/references/done.md). `packet_report` accepts `deploy`, `proof`, and `signals: { working, failing, where }` and includes them in its `.svx` report.
+
+Committed `packet_land` outcomes start delivery at `landed`, with a timestamp. `lane_deliver({ slug, stage: "deployed" | "proven" | "waived", evidence })` records the next stage and its plain-word evidence. Delivery only moves forward within a cycle; another committed packet starts a new cycle. Docs or probes with nothing to deploy can be waived. Rejected and `no_changes` packets need no delivery. Old catalogs decode committed lanes as `proven` with evidence `before done-live`; new landed work is never backfilled.
+
+Feature WIP includes open and draining work lanes, plus closed lanes still at `landed` or `deployed`, even if archived. Role tabs and proposed (`open: false`) ideas do not count. `policy.wipLimit` defaults to 3; `null` disables it. At the limit, `lane_open` refuses and lists in-flight lanes with stage and age. Park ideas with `open: false`, or pass `override` containing Joel's words; the lane records them.
+
+The board header and turn feeds show one flow line: `WIP 2/3 · landed, not live: lexicon-pin 40m · oldest in flight 2h · last proven 35m ago`. `⚠ not flowing` marks WIP with no recent proof or stage movement for `policy.flowStallMin` (default 120), or a reported packet waiting longer than `policy.landWaitMin` (default 30). These limits are minutes and can be changed with `project_update`. No extra sounds or toasts.
 
 Worker side, when `MUSTER_AGENT` is set: `owner_note`, `owner_reply`, `owner_inbox`, `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets its own queue tools but no project-management or operator tools.
 
@@ -155,6 +165,7 @@ XState machines, persisted as the state value on each row:
 
 - Agent: `planned → launching → running → reported → verified → landed → closed`; `running → silent → nudged → restarted`; `* → interrupted → restoring → running`; `failed`.
 - Lane: `proposed → open → draining → closed`.
+- Lane delivery: `none → landed → deployed → proven`; `landed → proven` permits a combined live deploy check; `none | landed | deployed → waived` records nothing to deploy.
 - Project: `setup → active → reviewing → active | archived`.
 
 An illegal transition is a typed `IllegalTransition` error. Sidebar tokens (`now`, `progress`, `agents`, `needs`, source `user:muster.v1`) are derived from these states, the headline, and the desk queue. In a space it owns, Muster keeps the space label a plain name.

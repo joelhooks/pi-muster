@@ -36,7 +36,7 @@ Use a side desk when Joel wants to explore an evolving design alongside the main
 - An unready dependency gets a placeholder packet, not a blocked lane.
 - A release that spans code and live config splits at the start: code, config, and early review as disjoint lanes, one writer per checkout, one combined release packet. The final integrated gate still runs. drovr split at hour five; it could have split at hour zero.
 - The judge reviews the SOP on a slow clock and never sets priorities.
-- Briefs live in the project's Brain, never `/tmp`. A brief states the outcome, write scope, checks, and the report rule: commit once, then `packet_report`.
+- Briefs live in the project's Brain, never `/tmp`. Use the [done and brief template](references/done.md#brief-template): outcome, write scope, checks, deploy, live proof, signals, and the report rule.
 
 ## Shape it to the job
 
@@ -59,6 +59,8 @@ When an instruction is overruled, use `agent_rewind name=<worker> to=<label or e
 - Joel reads `needs` as the oldest open desk item's title. Title each `desk_post` as his action: "merge #1152", not "PR question".
 
 ## What counts as verified
+
+Read [done means live and proven](references/done.md) when cutting a brief or finishing delivery. Merged is not live.
 
 - The owner-queue packet report is a claim. `packet_verify` plus the worker's check receipts are the evidence. Screen state, `DONE`, age, or a commit alone are not.
 - Record exactly one outcome per packet: committed, rejected, or no_changes.

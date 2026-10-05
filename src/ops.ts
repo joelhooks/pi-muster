@@ -42,7 +42,7 @@ import {
 } from "./herdr.ts";
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
-import { PROCESS_STATES, stepAgent, stepLane, stepProject } from "./machines.ts";
+import { PROCESS_STATES, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from "./packet.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
@@ -59,7 +59,7 @@ import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
 import { relayEvent, watchFallback } from "./relay-events.ts";
-import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, openDeskItems } from "./tokens.ts";
+import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import type { LiveCounts } from "./tokens.ts";
 
@@ -238,7 +238,7 @@ const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
   const root = join(params.cwd, ".pi/muster/packets", id);
   const report = join(root, "report.svx");
   const packet: Packet = { id, kind: params.commit ? "commit" : "artifact", artifact, lane: row.lane, agent: row.name, report, checks: [...params.checks], state: "reported", verification: null, landedAs: null, gate: null, supersedes: null, reportedAt: iso(env), updatedAt: iso(env) };
-  const sidecar = yield* decodeWith(decodeRemotePacket, { project: process.env.MUSTER_PROJECT_SLUG, machine: row.machine, packet, reportText: reportMarkdown(row, packet, params.summary, params.body) });
+  const sidecar = yield* decodeWith(decodeRemotePacket, { project: process.env.MUSTER_PROJECT_SLUG, machine: row.machine, packet, reportText: reportMarkdown(row, packet, params.summary, params.body, params) });
   mkdirSync(root, { recursive: true });
   writeFileSync(report, sidecar.reportText);
   // Publishing the sidecar last makes an interrupted report invisible to ingestion.
@@ -917,6 +917,7 @@ export interface LaneOpenInput {
   readonly generated?: readonly string[] | undefined;
   /** False records the lane as proposed without a tab. */
   readonly open?: boolean | undefined;
+  readonly override?: string | undefined;
 }
 
 export const laneOpen = (dir: string, params: LaneOpenInput) =>
@@ -943,6 +944,9 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
     }
     if (wantOpen && !project.spaceId) return yield* input("the project has no space; run project_open with space or createSpace first");
 
+    const refusal = wantOpen ? wipRefusal(project, slug, existing?.kind ?? params.kind ?? "work", env.now().getTime()) : null;
+    if (params.override !== undefined && !params.override.trim()) return yield* input("override must contain Joel's words");
+    if (refusal && !params.override?.trim()) return yield* input(refusal);
     const base: Lane = existing ?? {
       slug,
       kind: params.kind ?? "work",
@@ -955,6 +959,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       tabId: null,
       root: null,
       state: "proposed",
+      delivery: "none",
       archived: false,
       createdAt: iso(env),
       updatedAt: iso(env),
@@ -973,13 +978,26 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       return { lane, created: !existing, note: null, outcome: project.outcome };
     }
     const event = base.state === "open" ? null : base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
-    if (event) yield* stepLane(slug, base.state, event);
+    // Reserve WIP under the catalog lock before opening any pane. Other callers see it immediately.
+    yield* mutate(dir, current => Effect.gen(function* () {
+      const latest = current.lanes.find(lane => lane.slug === slug) ?? base;
+      const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
+      if (refusal && !params.override?.trim()) return yield* input(refusal);
+      const next: Lane = { ...latest, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
+        ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) };
+      return [withLane(current, next), next] as const;
+    }));
     let tabId = base.tabId;
     let root = base.root;
     const liveRoot = root ? yield* locatePane(root) : null;
     let note: string | null = null;
     if (!liveRoot) {
-      const tab = yield* tabCreate(project.spaceId as string, base.repo ?? project.dir, base.label);
+      const tab = yield* tabCreate(project.spaceId as string, base.repo ?? project.dir, base.label).pipe(Effect.tapError(() =>
+        mutate(dir, current => Effect.gen(function* () {
+          const latest = yield* findLane(current, slug);
+          const state = base.state === "open" ? latest.state : yield* stepLane(slug, latest.state, { type: "OPEN_FAILED", prior: base.state });
+          return [withLane(current, { ...latest, state, updatedAt: iso(env) }), null] as const;
+        }))));
       tabId = tab.tab.tab_id;
       root = { paneId: tab.root_pane.pane_id, terminalId: tab.root_pane.terminal_id, tabId, openedByMuster: true };
       if (base.root) note = `root pane was gone; opened tab ${tabId} pane ${root.paneId}`;
@@ -990,7 +1008,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
     const lane = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
-        const state = event ? yield* stepLane(slug, latest.state, event) : latest.state;
+        const state = latest.state;
         const next: Lane = {
           ...latest,
           label: params.label || latest.label,
@@ -1011,6 +1029,24 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
     );
     yield* publishTokens(yield* load(dir));
     return { lane, created: !existing, note, outcome: project.outcome };
+  });
+
+export const laneDeliver = (dir: string, params: { slug: string; stage: "deployed" | "proven" | "waived"; evidence: string }) =>
+  Effect.gen(function* () {
+    const env = yield* MusterEnv;
+    if (!params.evidence.trim()) return yield* input("lane_deliver needs evidence in plain words");
+    const lane = yield* mutate(dir, current => Effect.gen(function* () {
+      yield* guardSideDesk(current, env.sessionId, "lane_deliver");
+      const latest = yield* findLane(current, params.slug);
+      const stage = yield* stepDelivery(latest.slug, latest.delivery ?? "none", params.stage);
+      const at = iso(env);
+      const evidence = params.evidence.trim();
+      const next: Lane = { ...latest, delivery: stage, deliveryAt: at, deliveryEvidence: evidence,
+        deliveryHistory: [...(latest.deliveryHistory ?? []), { stage, at, evidence }], updatedAt: at };
+      return [withLane(current, next), next] as const;
+    }));
+    yield* publishTokens(yield* load(dir));
+    return lane;
   });
 
 const laneCounts = (project: Project, slug: string) => ({
@@ -1687,6 +1723,9 @@ export interface PacketReportInput {
   readonly artifact?: string | undefined;
   readonly summary: string;
   readonly checks: readonly CheckOutcome[];
+  readonly deploy?: string | undefined;
+  readonly proof?: string | undefined;
+  readonly signals?: { working: string; failing: string; where: string } | undefined;
   readonly body?: string | undefined;
 }
 
@@ -1699,7 +1738,7 @@ const reportCell = (text: string): string => {
   return `${fence} ${cell} ${fence}`;
 };
 
-export function reportMarkdown(row: AgentRow, packet: Pick<Packet, "id" | "kind" | "artifact" | "checks">, summary: string, body: string | undefined): string {
+export function reportMarkdown(row: AgentRow, packet: Pick<Packet, "id" | "kind" | "artifact" | "checks">, summary: string, body: string | undefined, delivery: Pick<PacketReportInput, "deploy" | "proof" | "signals"> = {}): string {
   const title = `Packet ${packet.id.slice(0, 12)} from ${row.name}`;
   return [
     "---",
@@ -1724,6 +1763,9 @@ export function reportMarkdown(row: AgentRow, packet: Pick<Packet, "id" | "kind"
     "| --- | --- | --- |",
     ...packet.checks.map((check) => `| ${reportCell(check.name)} | ${check.outcome} | ${reportCell(check.detail ?? "")} |`),
     "",
+    ...(delivery.deploy ? ["## Deploy", "", reportText(delivery.deploy), ""] : []),
+    ...(delivery.proof ? ["## Live proof", "", reportText(delivery.proof), ""] : []),
+    ...(delivery.signals ? ["## Signals", "", `- Working: ${reportCell(delivery.signals.working)}`, `- Failing: ${reportCell(delivery.signals.failing)}`, `- Where: ${reportCell(delivery.signals.where)}`, ""] : []),
     ...(body?.trim() ? ["## Notes", "", reportText(body.trim()), ""] : []),
   ].join("\n");
 }
@@ -1794,7 +1836,7 @@ export const packetReport = (params: PacketReportInput) =>
         const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!livePane?.agent });
         const next: AgentRow = { ...latest, state, updatedAt: now };
         mkdirSync(dirname(report), { recursive: true });
-        writeFileSync(report, reportMarkdown(latest, draft, params.summary, params.body));
+        writeFileSync(report, reportMarkdown(latest, draft, params.summary, params.body, params));
         return [withPacket(withRow(current, next), packet), { packet, owner: latest.owner }] as const;
       }),
     );
@@ -2017,7 +2059,16 @@ const recordPacketOutcome = (project: Project, packet: Packet, outcome: LandOutc
   Effect.gen(function* () {
     if (TERMINAL_PACKET_STATES.includes(packet.state)) return yield* input(`packet ${packet.id.slice(0, 12)} is already ${packet.state}`);
     const next: Packet = { ...packet, state: outcome, landedAs, ...(evidence ? { evidence } : {}), updatedAt: now };
-    return { project: withPacket(project, next), packet: next };
+    let delivered = project;
+    if (outcome === "committed") {
+      const lane = yield* findLane(project, packet.lane);
+      // A new committed packet starts a new delivery cycle, even on a previously proven lane.
+      const stage = yield* stepDelivery(lane.slug, "none", "landed");
+      const detail = evidence ?? `committed packet ${packet.id}`;
+      delivered = withLane(project, { ...lane, delivery: stage, deliveryAt: now, deliveryEvidence: detail,
+        deliveryHistory: [...(lane.deliveryHistory ?? []), { stage, at: now, evidence: detail }], updatedAt: now });
+    }
+    return { project: withPacket(delivered, next), packet: next };
   });
 
 export const packetLand = (dir: string, params: PacketLandInput) =>
@@ -2460,6 +2511,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
   });
   const out = [
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
+    flowLine(project, nowMs),
     `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state}`).join(", ") || "none"}`,
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,

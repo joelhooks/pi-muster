@@ -1,3 +1,4 @@
+import { projectFlowLine } from "./owner-view.ts";
 import { existsSync, readFileSync } from "node:fs";
 
 import type { DeskItem } from "./domain.ts";
@@ -79,7 +80,7 @@ export interface NoteMessage {
   readonly customType: typeof NOTE;
   readonly content: string;
   readonly display: true;
-  readonly details: { readonly project: string; readonly items: readonly DeskItem[]; readonly inbox: InboxSummary };
+  readonly details: { readonly project: string; readonly items: readonly DeskItem[]; readonly inbox: InboxSummary; readonly flow?: string };
 }
 
 export interface FeedDeps {
@@ -146,7 +147,10 @@ export function deskFeed(deps: FeedDeps) {
       if (cursor === undefined) return undefined;
       const items = take();
       for (const item of items) count("desk_note", item.id);
-      return items.length ? { message: note(items) } : undefined;
+      const flow = projectFlowLine(deps.project, deps.home, now());
+      if (!items.length && !flow) return undefined;
+      const message = note(items);
+      return { message: { ...message, details: { ...message.details, ...(flow ? { flow } : {}) }, content: [flow, items.length ? message.content : undefined].filter(Boolean).join("\n") } };
     },
     turnStarted() {
       busy = true;

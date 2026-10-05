@@ -20,6 +20,7 @@ import {
   deskPost,
   laneClose,
   laneOpen,
+  laneDeliver,
   packetLand,
   packetReport,
   packetVerify,
@@ -191,10 +192,13 @@ export default function muster(host: ExtensionAPI) {
           }),
           { description: "Each check you ran and its outcome" },
         ),
+        deploy: Type.Optional(Type.String({ description: "How this goes live, including flag state and rollback" })),
+        proof: Type.Optional(Type.String({ description: "Live check the owner should run" })),
+        signals: Type.Optional(Type.Object({ working: Type.String(), failing: Type.String(), where: Type.String() })),
         body: Type.Optional(Type.String({ description: "Extra notes: open questions with a recommendation, risks" })),
       }),
       async execute(_id, params, signal, _onUpdate, ctx) {
-        const error = unreadable([params.summary, params.body, ...params.checks.flatMap(check => [check.name, check.detail])]);
+        const error = unreadable([params.summary, params.body, params.deploy, params.proof, params.signals?.working, params.signals?.failing, params.signals?.where, ...params.checks.flatMap(check => [check.name, check.detail])]);
         if (error) return error;
         return run(
           ctx,
@@ -320,12 +324,26 @@ export default function muster(host: ExtensionAPI) {
       base: Type.Optional(Type.String({ description: "Ref or sha worker clones start from; default the repo default branch" })),
       generated: Type.Optional(Type.Array(Type.String({ description: "Path prefix a clone may leave dirty" }))),
       open: Type.Optional(Type.Boolean()),
+      override: Type.Optional(Type.String({ description: "Joel's words authorizing WIP above the limit; saved on the lane" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;
       return run(ctx, signal, laneOpen(projectDir(ctx, project), rest), (result) =>
         `Lane ${result.lane.slug} is ${result.lane.state}${result.lane.tabId ? ` in tab ${result.lane.tabId}, root pane ${result.lane.root?.paneId}` : ""}.${result.note ? ` ${result.note}.` : ""}${result.created ? `\nProject outcome: ${result.outcome}\nIf this lane serves another project's outcome, close it and send the ask to that project's desk.` : ""}`,
       );
+    },
+  });
+
+  pi.registerTool({
+    name: "lane_deliver",
+    label: "Muster lane delivery",
+    description: "Record deployed, proven or waived delivery with plain-word evidence. Stages only move forward; closing a tab does not finish delivery.",
+    parameters: Type.Object({ project: ProjectParam, slug: Type.String(), stage: StringEnum(["deployed", "proven", "waived"] as const), evidence: Type.String() }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const { project, ...rest } = params;
+      const error = unreadable([params.evidence]);
+      if (error) return error;
+      return run(ctx, signal, laneDeliver(projectDir(ctx, project), rest), lane => `Lane ${lane.slug}: ${lane.delivery} at ${lane.deliveryAt}. Evidence: ${lane.deliveryEvidence}`);
     },
   });
 
@@ -526,6 +544,9 @@ export default function muster(host: ExtensionAPI) {
       policy: Type.Optional(
         Type.Object({
           comms: Type.Optional(StringEnum(["intercom", "network"] as const)),
+          wipLimit: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
+          flowStallMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+          landWaitMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
           nudgeAfterMin: Type.Optional(Type.Number()),
           restartAfterMin: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
           roles: Type.Optional(

@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Box, Spacer, Text } from "@earendil-works/pi-tui";
+import { Box, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 
 import { queuePath } from "./desk.ts";
 import { FEED_CLAIM, NOTE, NOTE_GLYPH, deskFeed, summaryText } from "./desk-feed.ts";
@@ -112,9 +112,14 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
   });
 
   pi.registerMessageRenderer(NOTE, (message, options, theme) => {
-    const details = message.details as { project?: string; items?: readonly DeskItem[]; inbox?: InboxSummary } | undefined;
+    const details = message.details as { project?: string; items?: readonly DeskItem[]; inbox?: InboxSummary; flow?: string } | undefined;
     if (!details?.items || !details.inbox) return undefined;
     const box = new Box((options as { outputPad?: number }).outputPad ?? 1, 1, (text: string) => theme.bg("customMessageBg", text));
+    if (details.flow) {
+      const flow = details.flow;
+      box.addChild({ invalidate() {}, render: width => [theme.fg(flow.startsWith("⚠") ? "warning" : "dim", truncateToWidth(flow, width))] });
+      if (!details.items.length) return box;
+    }
     details.items.forEach((item, index) => {
       if (index > 0) box.addChild(new Spacer(1));
       const kind = theme.fg((KIND_COLOR[item.kind] ?? "muted") as never, theme.bold(item.kind));

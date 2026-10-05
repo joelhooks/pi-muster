@@ -1,3 +1,5 @@
+import { flowLine } from "./tokens.ts";
+import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
@@ -19,6 +21,7 @@ export interface OwnerTimelineData {
   authors: Readonly<Record<string, string>>;
   parents: readonly OwnerItem[];
   routing?: ReturnType<typeof decodeOwnerRouting>;
+  flow?: string;
 }
 const GLYPH: Record<OwnerKind, string> = { question: "❓", blocked: "⛔", action: "🐑", progress: "📈", done: "🏁", fyi: "📎" };
 const COLOR: Record<OwnerKind, "warning" | "error" | "accent" | "success" | "dim"> = { question: "warning", blocked: "error", action: "accent", progress: "dim", done: "success", fyi: "dim" };
@@ -32,6 +35,16 @@ export function ownerPostText(item: OwnerItem): string {
   return clean(prefix ? item.text.slice(`@${prefix.did} `.length) : item.text);
 }
 const title = (item: OwnerItem) => ownerPostText(item).split("\n")[0] ?? "";
+/** Fresh catalog snapshot at the turn boundary; never cache the flow line. */
+export function projectFlowLine(project: string | undefined, home: string = homedir(), now: number = Date.now()): string | undefined {
+  if (!project) return undefined;
+  try {
+    const dir = project.startsWith("/") ? project : readRegistry(home).get(project)?.dir;
+    if (!dir) return undefined;
+    return flowLine(decodeProject(JSON.parse(readFileSync(join(dir, ".brain/data/muster/project.json"), "utf8"))), now);
+  } catch { return undefined; }
+}
+
 function age(ts: string, now: number): string {
   const seconds = Math.max(0, Math.floor((now - Date.parse(ts)) / 1000));
   if (!Number.isFinite(seconds)) return "unknown age";
@@ -76,7 +89,7 @@ export function readOwnerTimelineData(value: unknown): OwnerTimelineData | undef
   try {
     const authors: Record<string, string> = {};
     if ("authors" in value && value.authors && typeof value.authors === "object") for (const [key, name] of Object.entries(value.authors)) if (typeof name === "string") authors[key] = name;
-    return { items: value.items.map(item => decodeOwnerItem(item)), reader: value.reader, authors, ...("routing" in value ? { routing: decodeOwnerRouting(value.routing) } : {}), parents: "parents" in value && Array.isArray(value.parents) ? value.parents.map(item => decodeOwnerItem(item)) : [] };
+    return { items: value.items.map(item => decodeOwnerItem(item)), reader: value.reader, authors, ...("flow" in value && typeof value.flow === "string" ? { flow: value.flow } : {}), ...("routing" in value ? { routing: decodeOwnerRouting(value.routing) } : {}), parents: "parents" in value && Array.isArray(value.parents) ? value.parents.map(item => decodeOwnerItem(item)) : [] };
   } catch { return undefined; }
 }
 
@@ -92,6 +105,11 @@ export class OwnerTimelineView implements Component {
     const shown = (s: string) => this.options.expanded ? s : hideUris(s);
     const now = this.options.now ?? Date.now();
     const root = new Container();
+    if (this.data.flow) {
+      const flow = this.data.flow;
+      root.addChild({ invalidate() {}, render: innerWidth => [fg(flow.startsWith("⚠") ? "warning" : "dim", truncateToWidth(oneLine(flow), innerWidth))] });
+      if (!this.data.items.length) return root.render(width);
+    }
     const isMentioned = (item: OwnerItem) => mentions(item, this.data.reader) || (this.data.routing?.mentioned.includes(item.uri) ?? false);
     const via = (item: OwnerItem) => this.data.routing?.via[item.uri] ? ` · via ${this.data.routing.via[item.uri]!.slice(0, 8)}` : "";
     const mentioned = this.data.items.filter(isMentioned);

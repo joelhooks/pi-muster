@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import { setup, transition } from "xstate";
 import type { AnyStateMachine, EventObject } from "xstate";
 
-import type { AgentState, LaneState, ProjectState } from "./domain.ts";
+import type { AgentState, LaneState, LaneDelivery, ProjectState } from "./domain.ts";
 import { IllegalTransition } from "./errors.ts";
 
 /**
@@ -73,6 +73,7 @@ export type LaneEvent =
   | { type: "OPEN" }
   | { type: "DRAIN" }
   | { type: "REOPEN" }
+  | { type: "OPEN_FAILED"; readonly prior: "proposed" | "draining" | "closed" }
   | { type: "CLOSE"; readonly liveAgents: number; readonly openPackets: number };
 
 const nothingLive = ({ event }: { event: LaneEvent }) =>
@@ -80,17 +81,41 @@ const nothingLive = ({ event }: { event: LaneEvent }) =>
 
 export const laneMachine = setup({
   types: { events: {} as LaneEvent },
-  guards: { nothingLive },
+  guards: {
+    nothingLive,
+    wasProposed: ({ event }) => event.type === "OPEN_FAILED" && event.prior === "proposed",
+    wasDraining: ({ event }) => event.type === "OPEN_FAILED" && event.prior === "draining",
+    wasClosed: ({ event }) => event.type === "OPEN_FAILED" && event.prior === "closed",
+  },
 }).createMachine({
   id: "lane",
   initial: "proposed",
   states: {
     proposed: { on: { OPEN: "open", CLOSE: { target: "closed", guard: "nothingLive" } } },
-    open: { on: { DRAIN: "draining", CLOSE: { target: "closed", guard: "nothingLive" } } },
+    open: { on: {
+      DRAIN: "draining", CLOSE: { target: "closed", guard: "nothingLive" },
+      OPEN_FAILED: [{ target: "proposed", guard: "wasProposed" }, { target: "draining", guard: "wasDraining" }, { target: "closed", guard: "wasClosed" }],
+    } },
     draining: { on: { REOPEN: "open", CLOSE: { target: "closed", guard: "nothingLive" } } },
     closed: { on: { REOPEN: "open" } },
   },
 });
+
+/** Delivery is separate from tab lifecycle: closing a tab never proves a deploy. */
+export const deliveryMachine = setup({
+  types: { events: {} as { type: "landed" | "deployed" | "proven" | "waived" } },
+}).createMachine({
+  initial: "none",
+  states: {
+    none: { on: { landed: "landed", waived: "waived" } },
+    landed: { on: { deployed: "deployed", proven: "proven", waived: "waived" } },
+    deployed: { on: { proven: "proven", waived: "waived" } },
+    proven: {},
+    waived: {},
+  },
+});
+export const stepDelivery = (id: string, from: LaneDelivery, stage: "landed" | "deployed" | "proven" | "waived") =>
+  step(deliveryMachine, "lane", id, from, { type: stage });
 
 export type ProjectEvent =
   | { type: "ACTIVATE" }

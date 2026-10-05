@@ -13,6 +13,7 @@ import {
   agentLaunch,
   deskPost,
   laneClose,
+  laneDeliver,
   laneOpen,
   packetLand,
   packetReport,
@@ -1182,6 +1183,8 @@ describe("a lane from launch to close", () => {
     expect(done.closed).toBe(true);
     expect(done.paneNote).toContain("herdr_watch action=cancel before agent_close or lane_close");
     expect(h.herdr.panes.size).toBe(0);
+    expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 0/1 lanes");
+    await runWith(h, laneDeliver(dir, { slug: "probe", stage: "proven", evidence: "live check passed" }));
     expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 1/1 lanes");
   });
 
