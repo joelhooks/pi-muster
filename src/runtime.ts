@@ -4,7 +4,12 @@ import { Context, Effect } from "effect";
 import type { HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
 
 import { ProcError } from "./errors.ts";
-import type { AckInput, AckOutput, KnownDeliveryState, Lease, LeaseFence, ListInput, ListOutput, SendInput, SendOutput } from "./ratking-lexicon.ts";
+import type { InputValue as AckInput, OutputValue as AckOutput } from "./vendor/rat-king-lexicon/mailbox.ack.ts";
+import type { InputValue as SendInput, OutputValue as SendOutput } from "./vendor/rat-king-lexicon/mailbox.send.ts";
+import type { ParamsValue as ListInput, OutputValue as ListOutput } from "./vendor/rat-king-lexicon/mailbox.list.ts";
+import type { DeliveryStateKnown as KnownDeliveryState } from "./vendor/rat-king-lexicon/defs.ts";
+import type { MainValue as Lease } from "./vendor/rat-king-lexicon/runtime.lease.ts";
+type LeaseFence = Pick<Lease, "did" | "leaseId" | "generation">;
 
 /** Bellwether's Herdr socket client. Tests provide a stub with the same shape. */
 export class Herdr extends Context.Service<Herdr, HerdrClient>()("muster/Herdr") {}

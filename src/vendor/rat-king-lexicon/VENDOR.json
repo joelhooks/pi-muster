@@ -1,0 +1,35 @@
+{
+  "repo": "https://github.com/joelhooks/rat-king",
+  "commit": "0e895a3",
+  "sourcePath": "packages/lexicon/src",
+  "files": {
+    "agent.profile.ts": "6318c82a3415acf8b0fbe8e749bd141838c56839c3d907f4d4d60356127f28eb",
+    "defs.ts": "0fd2d6769984dedbf7a53d30d465cfe79e9ae42f8edf7d3a86f5246c4c31d521",
+    "desk.theme.ts": "22944dbd108e833fbf0f1a507828750a424cda6b92862a84ab98faa9be5baefb",
+    "mailbox-client.ts": "4aebeeec2eeec55b360249cbe97cfdd053d8fc55458e6e78ef14ba3bdfcec5a1",
+    "mailbox-handlers.ts": "80075b6250352bf83f75aeddf08e2759408a4d261da8bd7a0eed77f171f11244",
+    "mailbox-server.ts": "206609a8c8055f53dacfb104aea7e5ab187589219d29738fb5e4cadda8c47a8c",
+    "mailbox.ack.ts": "578a0c65f1756ce1978adb672ba1d654254e623fb990f73f72e57afa1d375298",
+    "mailbox.list.ts": "65be9fb2cede9d1a1bdaf800211cd7ab7bc677135711f38c0bf7747b421c676b",
+    "mailbox.send.ts": "8c12d0381e2139c47fa3730cb7b5641f4d137f028b7f81674198600146dcd464",
+    "query.ts": "8fe43c834ea0060faf285c8dfa82686f73ddeb9e0aab300a1032cf52266ead17",
+    "runtime.lease.ts": "ad6955408dc253e7853765f16208a33bad8929ddc1f37a1829a35efc4e51998b",
+    "runtime.ts": "1452823d8da89d90abdfffbda143dc37f58e736841d46093d6e01e9a7cb1e2f4",
+    "transport-failure.ts": "b61dd3c8572e97621943639ba8b3ed6757ee5c33d7f023b13a45af47c10084d2",
+    "transport.ts": "23303111da38c99960a21cc0550dbfbe44523fb840af686f4861354a6168f92c",
+    "xrpc-failure.ts": "ef28481e83c102e8a61a7941bfd65ea8280067c0d383411768b1ee6cc411a661"
+  },
+  "fixtures": {
+    "ack.input.json": "5ae3c6912e14f90a8fe64c331133ce7d75c2925c1b4c2cacbe2c46bf9f26b1b6",
+    "ack.output.json": "d92f3c839ac585dfb6729e81f4f2ae283bb50c8a4187dff5b86ceac013747b31",
+    "lease.object.json": "316646b06ffe0cbe4a694b704c0a616606d6fe967aad8603de69adfc0fbc73db",
+    "list.output.json": "0a9d87da780445a8b9926bbd2ce5ae44451500cab2cb4e40707d6d23be003a61",
+    "list.params.json": "b5f928471a0852599db6eeb21b23d8f02797aacb3c019e8751178a20f635e9de",
+    "profile.record.json": "c3eb2252b5f64a6c61692f5dd069ca4ed0ef5221dc9391ff06d4fe0ad9019cdc",
+    "send.input.json": "6920c3ad59e6c0fb49a8d3d18dffeeddb80609e7314a5d2fd6ebdbef798f678b",
+    "send.output.json": "4e5ce9dde39a60317cd3653d887a752cb699628886e7fd3236490fa7daed62c1",
+    "signed-message.object.json": "b26017b44e5b0db42d530afe3e9d4717232f96a4b1b10dc873a399bf19920915",
+    "signing-payload.object.json": "c535b1ffbc3a1c327e862ff9dd0c193d0ae266e38d537106d11377f0e21beb4d",
+    "theme.record.json": "86c23ed981414bb971464a8c995c5c4abe8843a30de2eb54ebc0799b5064ecab"
+  }
+}

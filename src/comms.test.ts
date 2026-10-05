@@ -4,7 +4,10 @@ import { dirname } from "node:path";
 import { Effect, Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { commsAddress, createComms, IntercomComms, NetworkComms, selectComms, LeaseAuthority, NetworkMailbox, leaseToComms, resolveNetworkAddress } from "./comms.ts";
-import { AckInput, Lease, ListInput, SendInput } from "./ratking-lexicon.ts";
+import { Input as AckInput } from "./vendor/rat-king-lexicon/mailbox.ack.ts";
+import { Main as Lease, type MainValue as LeaseValue } from "./vendor/rat-king-lexicon/runtime.lease.ts";
+import { Params as ListInput } from "./vendor/rat-king-lexicon/mailbox.list.ts";
+import { Input as SendInput } from "./vendor/rat-king-lexicon/mailbox.send.ts";
 import { CommsError, Unsupported, type IntercomTransport } from "./runtime.ts";
 import { Policy, decodeOwnerItem, decodePolicy, mergePolicy } from "./domain.ts";
 import { OUTBOX_REQUEST_EVENT, OUTBOX_RESULT_EVENT } from "./intercom.ts";
@@ -38,7 +41,7 @@ const wireFixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`
 describe("private network seams", () => {
   const lease = Schema.decodeUnknownSync(Lease)(wireFixture("lease.object"));
   const piTag = "sh.mschf.ratking.runtime.lease#pi";
-  const piSession = (binding: Lease) => typeof binding.harness.sessionId === "string" && binding.harness.sessionId.length > 0
+  const piSession = (binding: LeaseValue) => typeof binding.harness.sessionId === "string" && binding.harness.sessionId.length > 0
     ? Effect.succeed(binding.harness.sessionId) : Effect.fail(new Unsupported("pi session unresolved"));
   it("refuses acquire, resolve, release and every typed mailbox call by default", async () => {
     const refusals = [
@@ -73,7 +76,7 @@ describe("private network seams", () => {
     const options = { localDid: () => Effect.succeed(lease.did), authority: LeaseAuthority, adapters: { [piTag]: piSession } };
     await expect(Effect.runPromise(resolveNetworkAddress("p/desk", options))).rejects.toBeInstanceOf(Unsupported);
     await expect(Effect.runPromise(resolveNetworkAddress("p/desk", { ...options, localDid: () => Effect.fail(new CommsError("unknown local alias")) }))).rejects.toThrow("unknown local alias");
-    await expect(Effect.runPromise(resolveNetworkAddress(lease.did, { ...options, authority: { ...LeaseAuthority, resolve: () => Effect.succeed({ ...lease, did: "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa" }) } }))).rejects.toThrow("another DID");
+    await expect(Effect.runPromise(resolveNetworkAddress(lease.did, { ...options, authority: { ...LeaseAuthority, resolve: () => Effect.succeed(Schema.decodeUnknownSync(Lease)({ ...lease, did: "did:plc:aaaaaaaaaaaaaaaaaaaaaaaa" })) } }))).rejects.toThrow("another DID");
   });
 });
 
