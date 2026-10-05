@@ -13,7 +13,7 @@ import { relayEvent } from "./relay-events.ts";
 import type { CommsDelivery } from "./runtime.ts";
 import { writeRemoteOwnerItem } from "./remote.ts";
 
-export interface OwnerNoteInput { author: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string; signed?: unknown }
+export interface OwnerNoteInput { author: string; project?: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string; signed?: unknown }
 export const mentions = (item: OwnerItem, reader: string) => item.facets?.some(f => Number.isInteger(f.index.byteStart) && Number.isInteger(f.index.byteEnd) && f.index.byteStart >= 0 && f.index.byteEnd > f.index.byteStart && f.index.byteEnd <= Buffer.byteLength(item.text) && f.features.some(feature => feature.$type === MENTION_NSID && feature.did === reader)) ?? false;
 export const wakeKind = (kind: OwnerKind) => kind === "question" || kind === "blocked" || kind === "action";
 export const ownerPath = (session: string, home = homedir()) => join(home, ".local/state/muster/owner-queue", `${decodeOwnerSession(session)}.jsonl`);
@@ -29,20 +29,31 @@ export function canonicalJson(value: unknown): string {
   if (typeof value === "object" && value !== null) return `{${Object.entries(value).filter(([, v]) => v !== undefined).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
   return JSON.stringify(value);
 }
-const forwardPath = (session: string, home: string) => ownerPath(session, home).replace(/jsonl$/, "forward");
-function readForward(session: string, home: string) {
-  try { return decodeOwnerForward(JSON.parse(readFileSync(forwardPath(session, home), "utf8"))); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+const forwardPath = (session: string, home: string, project?: string) => ownerPath(session, home).replace(/jsonl$/, project === undefined ? "forward" : `${createHash("sha256").update(project).digest("hex")}.forward`);
+function readForward(session: string, home: string, project: string) {
+  for (const scoped of [true, false]) {
+    // Old session-wide records are only usable for a dead reader and their recorded project.
+    try {
+      const record = decodeOwnerForward(JSON.parse(readFileSync(forwardPath(session, home, scoped ? project : undefined), "utf8")));
+      if (!scoped && readerFresh(session, home)) return undefined;
+      if (record.project !== project) {
+        if (scoped) throw new Error("owner forward project mismatch");
+        return undefined;
+      }
+      return record;
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
+  return undefined;
 }
 /** Four hops at most; corrupt records and cycles fail closed. */
-export function ownerRoute(owner: string, home = homedir()) {
+export function ownerRoute(owner: string, home = homedir(), project?: string) {
   const sources: Array<{ owner: string; forward: ReturnType<typeof decodeOwnerForward> }> = [];
   const seen = new Set<string>();
   for (;;) {
     decodeOwnerSession(owner);
     if (seen.has(owner)) throw new Error("owner forward cycle");
     seen.add(owner);
-    const forward = readForward(owner, home);
+    const forward = project === undefined ? undefined : readForward(owner, home, project);
     if (!forward) return { owner, sources };
     if (sources.length === 4) throw new Error("owner forward depth exceeds 4");
     sources.push({ owner, forward }); owner = forward.to;
@@ -50,39 +61,53 @@ export function ownerRoute(owner: string, home = homedir()) {
 }
 export function forwardOwner(params: { from: string; to: string; project: string; home: string; at?: string }) {
   if (params.from === params.to) return;
-  const route = ownerRoute(params.to, params.home);
+  const route = ownerRoute(params.to, params.home, params.project);
   if (route.owner === params.from || route.sources.some(s => s.owner === params.from)) throw new Error("owner forward cycle");
   if (route.sources.length >= 4) throw new Error("owner forward depth exceeds 4");
-  const existing = readForward(params.from, params.home);
+  const existing = readForward(params.from, params.home, params.project);
   if (existing?.to === params.to) return; // Never move the history boundary on a repeated takeover.
   let heartbeatAt: string | undefined;
   try { heartbeatAt = decodeOwnerReader(JSON.parse(readFileSync(readerPath(params.from, params.home), "utf8"))).heartbeatAt; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   if (heartbeatAt && !Number.isFinite(Date.parse(heartbeatAt))) throw new Error("invalid owner reader heartbeat");
   const record = decodeOwnerForward({ to: params.to, at: params.at ?? new Date().toISOString(), project: params.project, cursor: readOwnerQueue(params.from, params.home).cursor, ...(heartbeatAt ? { heartbeatAt } : {}) });
-  const path = forwardPath(params.from, params.home);
+  const path = forwardPath(params.from, params.home, params.project);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, JSON.stringify(record), { mode: 0o600 }); renameSync(temp, path);
 }
 /** The original records stay intact; source aliases carry routing and display context. */
 export function readOwnerSources(owner: string, home = homedir()) {
-  const names = [owner];
+  const names = new Set([owner]);
   try {
     for (const name of readdirSync(dirname(ownerPath(owner, home)))) {
       if (!name.endsWith(".forward")) continue;
-      const source = name.slice(0, -8);
-      if (source !== owner && ownerRoute(source, home).owner === owner) names.push(source);
+      names.add(name.slice(0, -8).replace(/\.[a-f0-9]{64}$/, ""));
     }
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  return names.map(source => {
+  return [...names].map(source => {
     const read = readOwnerQueue(source, home);
-    const route = source === owner ? undefined : ownerRoute(source, home);
-    const boundary = route?.sources[0]?.forward;
-    return { source, cursor: read.cursor, items: read.items.filter(({ item, line }) =>
-      !boundary || line > boundary.cursor || !boundary.heartbeatAt || Date.parse(item.createdAt) > Date.parse(boundary.heartbeatAt)),
-      aliases: route?.sources.map(s => s.owner) ?? [] };
-  });
+    const aliases = new Set<string>();
+    const routes = new Map<string | undefined, ReturnType<typeof ownerRoute>>();
+    const items = read.items.filter(({ item, line }) => {
+      let route = routes.get(item.project);
+      if (!route) { route = ownerRoute(source, home, item.project); routes.set(item.project, route); }
+      if (route.owner !== owner) return false;
+      const boundary = source === owner ? undefined : route.sources[0]?.forward;
+      if (boundary && line <= boundary.cursor && boundary.heartbeatAt && Date.parse(item.createdAt) <= Date.parse(boundary.heartbeatAt)) return false;
+      for (const hop of route.sources) aliases.add(hop.owner);
+      return true;
+    });
+    return { source, cursor: read.cursor, items, aliases: [...aliases] };
+  }).filter(source => source.source === owner || source.items.length > 0);
+}
+/** Launches carry a directory; forwards and packet notices carry the catalog slug. */
+function ownerProject(project: string): string {
+  try { return decodeProject(JSON.parse(readFileSync(projectPath(project), "utf8"))).slug; }
+  catch {
+    // A remote worker cannot read the owner's catalog; only use its own launch identity.
+    return project === process.env.MUSTER_PROJECT ? process.env.MUSTER_PROJECT_SLUG ?? project : project;
+  }
 }
 export function resolveOwner(params: { owner: string; project: string; agent?: string; home: string }) {
   if (!params.agent) return { owner: params.owner, resolution: "explicit recipient" };
@@ -100,7 +125,7 @@ export function findOwnerPost(session: string, uri: string, home = homedir()) {
 }
 export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = homedir()): OwnerItem {
   const originalOwner = owner;
-  owner = ownerRoute(owner, home).owner;
+  owner = ownerRoute(owner, home, input.project).owner;
   const author = decodeOwnerSession(input.author);
   const parent = input.replyTo ? findOwnerPost(author, input.replyTo, home) : undefined;
   const mention = input.mention === originalOwner ? owner : input.mention ?? (wakeKind(input.kind) ? owner : undefined);
@@ -110,6 +135,7 @@ export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = hom
   const record = {
     $type: POST_NSID, uri: `muster://${author}/${POST_NSID}/${Date.now().toString(16).padStart(12, "0")}${randomBytes(6).toString("hex")}`,
     author, createdAt: new Date().toISOString(), text: `${prefix}${input.text === undefined ? `${title}${input.body === undefined ? "" : `\n${capBody(input.body)}`}` : capBody(input.text)}`, kind: input.kind,
+    ...(input.project === undefined ? {} : { project: input.project }),
     ...(input.lane ? { lane: input.lane } : {}), ...(input.refs ? { refs: input.refs } : {}),
     ...(parent ? { reply: { root: parent.reply?.root ?? { uri: parent.uri, cid: parent.cid }, parent: { uri: parent.uri, cid: parent.cid } } } : {}),
     ...(mention ? { facets: [{ index: { byteStart: 0, byteEnd: Buffer.byteLength(prefix.trimEnd()) }, features: [{ $type: MENTION_NSID, did: mention }] }] } : {}),
@@ -121,9 +147,11 @@ export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = hom
   return item;
 }
 /** Pull preserves the full post and CID. Forwarded source queues also count for dedupe. */
-export function ingestOwnerItem(owner: string, value: OwnerItem, home = homedir()): boolean {
+export function ingestOwnerItem(owner: string, value: OwnerItem, home = homedir(), project?: string): boolean {
   const item = decodeOwnerItem(value);
-  const routedOwner = ownerRoute(owner, home).owner;
+  if (project !== undefined && item.project !== undefined && item.project !== project) throw new Error("owner item project mismatch");
+  const routedOwner = ownerRoute(owner, home, item.project).owner;
+  if (readOwnerQueue(owner, home).items.some(record => record.item.cid === item.cid)) return false;
   if (readOwnerSources(routedOwner, home).some(source => readOwnerQueue(source.source, home).items.some(record => record.item.cid === item.cid))) return false;
   // Keep the original recipient's mention valid through the feed's forwarding aliases.
   const path = ownerPath(owner, home);
@@ -167,12 +195,13 @@ export function retireReader(owner: string, home: string, startedAt: string) {
 /** Queue first. Missing readers and any queue/telemetry failure keep the old outbox path. */
 export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; home: string; session: string; project: string; item: OwnerNoteInput; send: (to: string, message: string) => Effect.Effect<CommsDelivery, never, R>; message?: string }) => Effect.gen(function* () {
   const resolved = resolveOwner(params);
-  const route = yield* Effect.try({ try: () => ownerRoute(resolved.owner, params.home), catch: error => new StoreError({ path: ownerPath(resolved.owner, params.home), message: String(error) }) });
+  const project = ownerProject(params.project);
+  const route = yield* Effect.try({ try: () => ownerRoute(resolved.owner, params.home, project), catch: error => new StoreError({ path: ownerPath(resolved.owner, params.home), message: String(error) }) });
   const owner = route.owner;
   const note = params.item.mention === params.owner ? { ...params.item, mention: owner } : params.item;
   let item: OwnerItem | undefined;
   let queueError: unknown;
-  try { item = appendOwnerItem(owner, note, params.home); } catch (error) { queueError = error; }
+  try { item = appendOwnerItem(owner, { ...note, project }, params.home); } catch (error) { queueError = error; }
   const woke = item ? mentions(item, owner) : note.mention === owner || wakeKind(params.item.kind);
   if (!item && !woke) return yield* new StoreError({ path: ownerPath(params.owner, params.home), message: `silent owner note not queued: ${String(queueError)}` });
   const remote = !!process.env.MUSTER_MACHINE && process.env.MUSTER_MACHINE !== "local";

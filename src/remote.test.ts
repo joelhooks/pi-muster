@@ -154,7 +154,7 @@ describe("remote owner operations", () => {
     const parent = appendOwnerItem(launched.row.sessionId, { author: launched.row.owner, kind: "fyi", title: "Owner answer" }, remoteHome);
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     await s.run(deliverOwnerItem({ owner: parent.author, home: remoteHome, session: launched.row.sessionId, project: "probe", item: { author: launched.row.sessionId, lane: launched.row.lane, kind: "fyi", title: "Follow-up", replyTo: parent.uri, mention: parent.author }, send: () => Effect.succeed({ status: "failed" }) }));
-    const old = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, kind: "progress", title: "Old queue" }, s.h.home);
+    const old = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, project: "probe", kind: "progress", title: "Old queue" }, s.h.home);
     const before = readFileSync(ownerPath(launched.row.owner, s.h.home), "utf8");
     forwardOwner({ from: launched.row.owner, to: "replacement-owner", project: "probe", home: s.h.home });
     await s.run(ingestRemotePackets(s.dir)); await s.run(ingestRemotePackets(s.dir));

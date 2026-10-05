@@ -882,7 +882,7 @@ describe("field-use regressions", () => {
       pane: null, owner: "owner-session", brief: null, state: "planned", delivery: "none", restarts: 0, restore: null,
       createdAt: h.now.toISOString(), updatedAt: h.now.toISOString() };
     await runWith(h, mutate(dir, current => Effect.succeed([{ ...current, agents: [row] }, undefined] as const)));
-    const old = appendOwnerItem("owner-session", { author: "probe", kind: "question", title: "unread" }, h.home);
+    const old = appendOwnerItem("owner-session", { author: "probe", project: "probe", kind: "question", title: "unread" }, h.home);
     h.sessionId = "new-owner";
     await runWith(h, projectStatus(dir, { takeover: true, act: false }));
     vi.stubEnv("HOME", h.home);
