@@ -44,13 +44,13 @@ import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from "./packet.ts";
-import { cloneUrl, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
+import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
-import { deliverOwnerItem, forwardOwner } from "./owner-queue.ts";
+import { deliverOwnerItem, forwardOwner, ingestOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts";
@@ -260,8 +260,9 @@ export const ingestRemotePackets = (dir: string) => Effect.gen(function* () {
     if (failedMachines.has(row.machine)) { skipped("machine unavailable earlier in this pass"); continue; }
     const fetched = yield* Effect.gen(function* () {
       const machine = yield* machineConfig(row.machine);
-      const output = yield* remoteNode(row.machine, machine, `import {existsSync,readdirSync,readFileSync} from 'node:fs'; const root=process.argv[1]; const files=existsSync(root)?readdirSync(root).filter(n=>/^[a-f0-9]{40,64}$/.test(n)).slice(0,100):[]; console.log(JSON.stringify(files.flatMap(id=>{const p=root+'/'+id+'/packet.json';if(!existsSync(p))return [];try{return [{id,value:JSON.parse(readFileSync(p,'utf8')),error:null}]}catch(error){return [{id,value:null,error:String(error)}]}})));`, [join(row.cwd, ".pi/muster/packets")]);
-      const values = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ id: Schema.String, value: Schema.Unknown, error: Schema.NullOr(Schema.String) }))), output);
+      // One bounded call per row reads both kinds; transport failure skips all remaining machine rows.
+      const output = yield* remoteNode(row.machine, machine, `import {existsSync,readdirSync,readFileSync} from 'node:fs'; const root=process.argv[1]; const values=[]; for(const kind of ['packet','note']) { const dir=root+'/'+(kind==='packet'?'packets':'notes'); const files=existsSync(dir)?readdirSync(dir).filter(n=>kind==='packet'?/^[a-f0-9]{40,64}$/.test(n):/^[a-f0-9]{64}\\.json$/.test(n)):[]; for(const id of files){const p=dir+'/'+id+(kind==='packet'?'/packet.json':'');if(!existsSync(p))continue;try{values.push({kind,id,value:JSON.parse(readFileSync(p,'utf8')),error:null})}catch(error){values.push({kind,id,value:null,error:String(error)})}} } console.log(JSON.stringify(values));`, [join(row.cwd, ".pi/muster")]);
+      const values = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ kind: Schema.Literals(["packet", "note"]), id: Schema.String, value: Schema.Unknown, error: Schema.NullOr(Schema.String) }))), output);
       return { machine, values };
     }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(row.machine); skipped(error.message); return null; })));
     if (!fetched) continue;
@@ -270,6 +271,13 @@ export const ingestRemotePackets = (dir: string) => Effect.gen(function* () {
       if (failedMachines.has(row.machine)) break;
       if (entry.error) { skipped(`sidecar ${entry.id}: ${entry.error}`); continue; }
       yield* Effect.gen(function* () {
+        if (entry.kind === "note") {
+          const sidecar = yield* decodeWith(decodeRemoteNote, entry.value);
+          if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
+          yield* Effect.try({ try: () => ingestOwnerItem(sidecar.owner, sidecar.item, env.home), catch: error => new StoreError({ path: `remote note ${entry.id}`, message: String(error) }) });
+          // The existing owner feed reads this queue and wakes on the post's mention facets.
+          return;
+        }
         const sidecar = yield* decodeWith(decodeRemotePacket, entry.value);
         const packet = sidecar.packet;
         if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
