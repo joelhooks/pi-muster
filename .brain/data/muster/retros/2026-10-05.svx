@@ -1,0 +1,79 @@
+---
+title: "Finished-lane retro: 2026-10-05"
+type: "resource"
+privacy: "private"
+status: "proposed"
+---
+
+# Finished-lane retro: 2026-10-05
+
+Reviewed sibling-branch, reload-stale, and sibling-remote with bounded session-tool slices, four packet reports, three closed pane tails, owner rework, and named gate logs. These are backlog proposals, not created lanes or posted decisions. The owner checks existing work before dispatch. This retrospective exercise changed no steering files or implementation code inline.
+
+## Ranked candidates
+
+### 1. High: launch delivery still needs desk repair
+
+**Category:** Muster tool gaps. **Confidence:** high on failure, medium on cause. **Route:** parked lane `launch-delivery-proof`.
+
+Desk session `desk-20260930T185931`, L3915–L3919, shows sibling-remote launching with unproven delivery, an empty startup pane read, a resent prompt, and working proof. Earlier launch fixes exist. This may be stale loaded code rather than a new readiness race; compare loaded and installed versions first.
+
+**Brief stub:** Reproduce the failure with a fresh owner and compare it with the long-lived desk. Scope launch delivery/version evidence and tests; leave worker content and other panes alone. Preserve single delivery: an ambiguous result must not duplicate work. Prove the first prompt arrives once, or return a specific failed-delivery receipt distinguishing stale code from readiness. Check launch-ready and reload-stale before creating this lane.
+
+### 2. High: the branch brief omitted the remote-only field case
+
+**Category:** brief quality; automated checks. **Confidence:** high. **Route:** parked lane `verify-case-matrix`.
+
+Session `sibling-remote-20261005T145646`, L12 and L33–L41, records a second lane because the packet existed only under a remote-tracking ref. Sibling-branch handled local branches and HEAD, not the complete field case. Report `.brain/data/muster/reports/sibling-remote/sibling-remote-5309d86adf73.svx` now proves local preference, remote fallback, diagnostics, SSH landing, and squash matching. The implementation is fixed; do not repeat it.
+
+**Brief stub:** Add a small case checklist to the owning brief/reference process, grounded in existing verification tests: recorded local branch, sibling local branch, detached HEAD, remote-only ref, missing ref, and squash landing. Scope brief preparation/reviewer evidence, not Git implementation unless the matrix finds a new gap. Require field receipts to identify the actual ref shape. Prove the next branch brief selects relevant tests and names untested cases before dispatch.
+
+### 3. Medium: output acceptance stopped below the renderer
+
+**Category:** brief quality; navigation; automated checks. **Confidence:** high. **Route:** parked lane `tool-output-acceptance`.
+
+Report `.brain/data/muster/reports/sibling-branch/sibling-branch-0897896f6746.svx` claimed the output named the update. Owner rework appears in `sibling-branch-20261005T143531`, L83–L84. Follow-up `.brain/data/muster/reports/sibling-branch/sibling-branch-7eb174383f26.svx` added the passing check the renderer prints. Closed tail `.brain/data/muster/closed/sibling-branch-1791211996283.txt` confirms that follow-up was the final packet. The renderer belonged to another lane, but an extension edit was ultimately unnecessary.
+
+**Brief stub:** Test the registered tool's final text, not only operation metadata. Scope a narrow renderer test and a conditional brief pointer to its owner. Coordinate write scope before dispatch. Prove a missing branch-update sentence fails acceptance and the rendered update passes. Keep the shipped sibling fix; avoid another global instruction. This retro packet includes a similar narrow test for its own reminder and review output.
+
+### 4. Medium: async-entry callers were found by the full gate
+
+**Category:** brief quality; navigation. **Confidence:** high. **Route:** parked lane `entry-caller-map`.
+
+Report `.brain/data/muster/reports/reload-stale/reload-stale-f08d6f65ef39.svx` names two extra synchronous callers approved by the owner. Session `reload-stale-20261005T144330`, L97–L98, records the scope request. `/tmp/muster-reload-gate.log`, L16–L44, identifies `src/ops.test.ts` and `src/owner-renderers.test.ts`; `/tmp/muster-reload-integrated-gate.log`, L30–L31, proves the corrected gate passed. This was compatibility failure, not timeout.
+
+**Brief stub:** Before changing an entry's call contract, enumerate imports and direct invocations, including fixtures. Scope brief-time caller discovery or an existing deterministic check, not another AGENTS rule. Preserve entry ownership and obtain scope approval for external callers. Prove a sync-to-async change finds both known callers before the full gate. The current callers are already fixed.
+
+### 5. Medium: busy-test flakes consumed another gate run
+
+**Category:** automated checks; tool economy. **Confidence:** high on timeouts. **Route:** parked lane stub `gate-flakes-follow-through`, deduplicate against active `gate-flakes`.
+
+`/tmp/muster-sibling-gate.log`, L30–L51, shows two fleet-compute busy tests in `src/ops.test.ts` timing out at 5000 ms. The first sibling report records that failed gate. `/tmp/muster-sibling-gate-2.log`, L30–L31, shows 704 passing tests on retry. An unchanged green rerun does not prove the waiting mechanism repaired. The active gate-flakes lane owns this work.
+
+**Brief stub:** Have gate-flakes report the waiting mechanism and a deterministic regression, then retain its repair receipt. Scope busy tests and the controllable clock/process boundary. Do not raise global timeouts or rerun until green as proof. Prove busy and busy-drained paths complete without depending on machine load; run the integrated gate after targeted proof. Route this to the existing lane rather than making a duplicate.
+
+### 6. Medium: clone initialization failed during desk landing
+
+**Category:** Muster tool gaps; information access. **Confidence:** high on failure, limited on cause. **Route:** parked lane `clone-init-preflight`.
+
+Desk session `desk-20260930T185931`, L3980–L3982, contains `rift init failed` during launch. The supplied retro brief says main held a staged merge. The bounded evidence confirms the failure but does not independently establish that merge as its cause. Obtain index and rift diagnostic evidence before implementation.
+
+**Brief stub:** Reproduce clone creation from a staged-merge source using disposable fixtures. Scope the owning clone script's preflight/diagnostics and Muster's launch error boundary. Never unstage or discard operator work. Prove clean-source launch succeeds and staged-source failure returns an actionable receipt without orphan workers; if rift supports it, prove safe launch instead. Do not assume the repair from the brief alone.
+
+### 7. Low: shared Effect source metadata is stale
+
+**Category:** information access; tool economy. **Confidence:** high. **Route:** parked lane `effect-mirror-refresh`.
+
+The reports and sessions repeatedly note project Effect 4.0.1 against mirror beta.99, with hydration refusing replacement. Sibling-branch session L20–L26 shows failed hydration and installed-source fallback. The retro worker observed the same mismatch. This is repeated discovery cost, not evidence of a runtime defect.
+
+**Brief stub:** Have the mirror owner inspect and explicitly refresh the canonical source to the exact project pin, preserving shared local work. Scope source and metadata only; do not change dependencies. Prove effect_source status and search agree with 4.0.1 in a fresh worker. Keep installed-source fallback until the canonical receipt passes.
+
+## Evidence coverage and limits
+
+- Worker sessions: `sibling-branch-20261005T143531` (L12, L20–L26, L83–L84), `reload-stale-20261005T144330` (L12, L97–L98), `sibling-remote-20261005T145646` (L12, L33–L41), plus the named desk windows. No whole transcripts were loaded or copied.
+- Reports: the two sibling-branch packets and one packet each for reload-stale and sibling-remote, linked above.
+- Closed tails: `.brain/data/muster/closed/sibling-branch-1791211996283.txt`, `.brain/data/muster/closed/reload-stale-1791212508693.txt`, `.brain/data/muster/closed/sibling-remote-1791213111256.txt`. Reload's tail also shows already-handled watch wakes; recurrence evidence is insufficient for a separate candidate.
+- Gates: sibling first/retry logs, reload first/integrated logs, and `/tmp/sibling-remote-gate.log` (709 pass at L52–L53).
+- All requested examples appear. Staged-merge causality remains unverified. Renderer and remote-ref symptoms are fixed; those proposals improve brief coverage and acceptance evidence.
+- No coding-standard, AGENTS-bloat, or no-op-rule candidate had enough evidence. Category coverage is not a reason to invent findings.
+
+The owner routes the top candidates to parked lanes, reuses gate-flakes, and records this artifact before marking the retro complete. These bounded proposals do not yet require a Joel decision.

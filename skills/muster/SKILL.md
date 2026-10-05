@@ -46,6 +46,8 @@ The desk keeps the backlog shaped: ranked proposed work lanes with briefs. Lower
 
 Use median cycle time over the last ten proven lanes and throughput over the last seven days to judge flow. Lanes are continuous work, not sprints.
 
+After three closed work lanes and at every `project_review`, dispatch a short-lived judge using [finished-lane retro](references/retro.md). Record its artifact, route its findings into ranked backlog lanes, then mark the retro done with `project_review` `retro: true`.
+
 ## Shape it to the job
 
 Say `opus` or `sol` for a model, never a provider prefix. Fable is off fleet-wide; Sonnet only where Joel named it (front-desk).
