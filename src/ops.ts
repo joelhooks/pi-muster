@@ -1929,6 +1929,7 @@ export interface PacketLandInput {
   readonly outcome: LandOutcome;
   readonly gate?: string | undefined;
   readonly landedAs?: string | undefined;
+  readonly attested?: boolean | undefined;
   readonly evidence?: string | undefined;
   readonly message?: string | undefined;
 }
@@ -2121,8 +2122,34 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     let gate: PacketGate | null = null;
     const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
     let evidence = params.evidence?.trim();
-    if (recording && !evidence) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
-    if (params.outcome === "committed") {
+    if (params.attested && params.outcome !== "committed") return yield* input("attested is only supported for committed packets");
+    if (recording && !evidence && !params.attested) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
+    if (params.outcome === "committed" && params.attested) {
+      const targetRef = params.landedAs;
+      if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
+      const source = sourceOf(project, lane, row);
+      const resolve = () => proc.run("git", ["rev-parse", "--verify", "--end-of-options", `${targetRef}^{commit}`], { cwd: source });
+      let target = yield* resolve();
+      if (target.code !== 0) {
+        yield* proc.run("git", ["fetch", "-q", "--", "origin", targetRef], { cwd: source });
+        target = yield* resolve();
+      }
+      if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from origin did not resolve it)` });
+      landedAs = target.stdout.trim();
+      const symbolic = yield* proc.run("git", ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: source });
+      const base = lane?.base?.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "") ??
+        (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
+      if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
+      const hasOrigin = (yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source })).code === 0;
+      if (hasOrigin) {
+        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`], { cwd: source });
+        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch origin/${base} failed; cannot attest against stale base refs` });
+      }
+      const baseRef = hasOrigin ? `refs/remotes/origin/${base}` : `refs/heads/${base}`;
+      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasOrigin ? "origin/" : ""}${base}` });
+      evidence = `owner-attested: landed inside ${landedAs}; ${evidence}`;
+      note = "recorded an owner-attested landing";
+    } else if (params.outcome === "committed") {
       if (packet.kind === "commit" && !params.landedAs) {
         const cloneExists = row.machine === "local" ? existsSync(row.cwd) && statSync(row.cwd).isDirectory() : yield* Effect.gen(function* () {
           const machine = yield* machineConfig(row.machine);
@@ -2180,10 +2207,11 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     const saved = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
-        const recorded = yield* recordPacketOutcome(current, { ...latest, gate: gate ?? latest.gate }, params.outcome, landedAs, gate ? [evidence, note].filter(Boolean).join("\n") : evidence, iso(env));
+        const recorded = yield* recordPacketOutcome(current, { ...latest, gate: gate ?? latest.gate, ...(params.attested ? { attested: true } : {}) }, params.outcome, landedAs, gate ? [evidence, note].filter(Boolean).join("\n") : evidence, iso(env));
         const agent = yield* findRow(current, packet.agent);
         const moves = agent.state === "reported" || agent.state === "verified" || (agent.state === "landed" && event.type === "REWORK");
         let updated = moves ? withRow(recorded.project, { ...agent, state: yield* stepAgent(agent.name, agent.state, event), updatedAt: iso(env) }) : recorded.project;
+        if (params.attested && !moves) note += `; agent ${agent.name} left in ${agent.state} (no LAND transition)`;
         if (params.outcome === "committed") {
           let supersedes = latest.supersedes;
           const seen = new Set([latest.id]);
@@ -2192,7 +2220,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
             seen.add(supersedes);
             const earlier = yield* findPacket(updated, supersedes);
             if (!TERMINAL_PACKET_STATES.includes(earlier.state)) {
-              updated = (yield* recordPacketOutcome(updated, earlier, "committed", landedAs, `landed with ${latest.id}`, iso(env))).project;
+              updated = (yield* recordPacketOutcome(updated, { ...earlier, ...(params.attested ? { attested: true } : {}) }, "committed", landedAs, params.attested ? `${evidence}; landed with ${latest.id}` : `landed with ${latest.id}`, iso(env))).project;
             }
             supersedes = earlier.supersedes;
           }

@@ -227,6 +227,8 @@ export const Packet = Schema.Struct({
   state: PacketState,
   verification: Schema.NullOr(Schema.Struct({ at: Iso, checks: Schema.Array(CheckOutcome) })),
   landedAs: Schema.NullOr(Schema.String),
+  /** Owner vouched for this landing instead of proving packet equivalence. Absent in old catalogs. */
+  attested: Schema.optionalKey(Schema.Boolean),
   /** Missing in old files means never checked. */
   autolandCheckedAt: Schema.optionalKey(Iso),
   gate: Schema.NullOr(PacketGate).pipe(Schema.withDecodingDefaultKey(Effect.succeed(null))),
