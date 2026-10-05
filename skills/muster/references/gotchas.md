@@ -15,6 +15,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Talking to lanes
 
+- To park a lane, use `lane_open open: false`; `lane_close discard: true` drops proposed work from the backlog without counting it as finished work.
+
 - Intercom delivers when the recipient's turn ends. To steer a running turn in a pane you own, type into it.
 - Address sessions by the exact id in the catalog, never by cwd.
 - Chatty intercom drowns owners: in one pilot, 34 of about 985 messages were results. FYI, progress and done go to `owner_note`, not intercom. Questions go to `owner_note kind=question`; answers thread through `owner_reply`.
