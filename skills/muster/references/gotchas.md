@@ -65,6 +65,7 @@ A manually restarted desk does not need a second Pi process. The owner's `projec
 
 - Owner queues are per session, separate from Joel's desk queue. `/new` changes the address. A takeover forwards old owner queues, including posts from workers still on old code. Reload the new owner to load forwarding-aware readers. `owner_inbox` labels forwarded records `via <old owner short id>`. History since the old reader's last heartbeat may replay because its exact consumption point is unknown. Replies still target the parent's author, not an agent name. Stale or absent readers fall back to intercom for mentions.
 
+- `IllegalTransition … expected verified` from `agent_close` can mean the desk still has the pre-`3332978` CLOSE caller loaded; restart the desk before judging the landed fix, and do not treat a retry on old code as live proof.
 - `agent_close` removes a worker's clone. Its restore command still names that cwd, so restore into a fresh clone (`cwd`) or fork from the row.
 - A pane that comes back after `/new` may be on the pane's default model. Restore from the catalog when the context is worth keeping.
 - A desk restored with a plain `pi --session` loses its queue digest. Its row carries `HERDR_DESK_PROJECT` and the desk extension.
