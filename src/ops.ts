@@ -1760,10 +1760,13 @@ export interface PacketReportInput {
 // A longer delimiter prevents worker-written backticks from closing our code.
 const reportFence = (text: string): string => "`".repeat(Math.max(2, ...[...text.matchAll(/`+/g)].map(([run]) => run.length)) + 1);
 const reportText = (text: string): string => `${reportFence(text)}\n${text}\n${reportFence(text)}`;
+// GFM code spans leave entities literal and normalize newlines. Inline HTML code
+// decodes entities instead: encode pipes before table splitting, braces before
+// Svelte compilation, and Markdown punctuation before inline parsing. <br />
+// keeps a multiline check in one source row while rendering its line breaks.
 const reportCell = (text: string): string => {
-  const cell = text.replace(/\r\n|[\r\n]/g, " ").replace(/&/g, "&amp;").replace(/\|/g, "&#124;");
-  const fence = reportFence(cell);
-  return `${fence} ${cell} ${fence}`;
+  const cell = text.replace(/[&<>{}|`\\*_\[\]~\r]/g, (char) => `&#${char.charCodeAt(0)};`).replace(/\n/g, "<br />");
+  return `<code>${cell}</code>`;
 };
 
 export function reportMarkdown(row: AgentRow, packet: Pick<Packet, "id" | "kind" | "artifact" | "checks">, summary: string, body: string | undefined, delivery: Pick<PacketReportInput, "deploy" | "proof" | "signals"> = {}): string {
@@ -1783,18 +1786,18 @@ export function reportMarkdown(row: AgentRow, packet: Pick<Packet, "id" | "kind"
     "",
     "## Summary",
     "",
-    reportText(summary.trim()),
+    reportText(summary),
     "",
     "## Checks",
     "",
     "| Check | Outcome | Detail |",
     "| --- | --- | --- |",
-    ...packet.checks.map((check) => `| ${reportCell(check.name)} | ${check.outcome} | ${reportCell(check.detail ?? "")} |`),
+    ...packet.checks.map((check) => `| ${reportCell(check.name)} | ${reportCell(check.outcome)} | ${reportCell(check.detail ?? "")} |`),
     "",
     ...(delivery.deploy ? ["## Deploy", "", reportText(delivery.deploy), ""] : []),
     ...(delivery.proof ? ["## Live proof", "", reportText(delivery.proof), ""] : []),
     ...(delivery.signals ? ["## Signals", "", `- Working: ${reportCell(delivery.signals.working)}`, `- Failing: ${reportCell(delivery.signals.failing)}`, `- Where: ${reportCell(delivery.signals.where)}`, ""] : []),
-    ...(body?.trim() ? ["## Notes", "", reportText(body.trim()), ""] : []),
+    ...(body?.trim() ? ["## Notes", "", reportText(body), ""] : []),
   ].join("\n");
 }
 
