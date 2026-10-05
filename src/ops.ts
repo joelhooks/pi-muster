@@ -1877,11 +1877,12 @@ export const packetVerify = (dir: string, id: string) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
         if (TERMINAL_PACKET_STATES.includes(latest.state)) return yield* input(`packet ${packet.id.slice(0, 12)} is already ${latest.state}`);
-        const next: Packet = { ...latest, state: "verified", verification: { at: iso(env), checks }, updatedAt: iso(env) };
         const agent = yield* findRow(current, packet.agent);
         if (branch && agent.clone && (agent.cwd !== row.cwd || agent.clone.branch !== row.clone?.branch)) {
           return yield* input(`agent ${agent.name} clone changed during verification; retry packet_verify`);
         }
+        if (branch && agent.clone) checks.push({ name: "clone branch", outcome: "pass", detail: `updated to ${branch} (was ${agent.clone.branch})` });
+        const next: Packet = { ...latest, state: "verified", verification: { at: iso(env), checks }, updatedAt: iso(env) };
         const state = agent.state === "reported" ? yield* stepAgent(agent.name, agent.state, { type: "VERIFY" }) : agent.state;
         const withAgent = withRow(current, {
           ...agent, state,

@@ -228,6 +228,7 @@ describe("remote owner operations", () => {
     const verified = await s.run(packetVerify(s.dir, commit));
     expect(verified.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: `on sibling branch worker/remote-next (row branch ${launched.row.clone!.branch})` });
     expect(verified.note).toContain("updated clone.branch to worker/remote-next");
+    expect(verified.checks).toContainEqual({ name: "clone branch", outcome: "pass", detail: `updated to worker/remote-next (was ${launched.row.clone!.branch})` });
     expect((await s.run(load(s.dir))).agents[0]?.clone?.branch).toBe("worker/remote-next");
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("for-each-ref"))).toBe(true);
   });

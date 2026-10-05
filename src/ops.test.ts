@@ -1604,6 +1604,7 @@ describe("packet_verify against fixtures", () => {
     const verified = await runWith(h, packetVerify(dir, commit));
     expect(verified.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: "on sibling branch worker/next-slice (row branch worker/probe-w)" });
     expect(verified.note).toContain("updated clone.branch to worker/next-slice");
+    expect(verified.checks).toContainEqual({ name: "clone branch", outcome: "pass", detail: "updated to worker/next-slice (was worker/probe-w)" });
     expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("worker/next-slice");
   });
 
