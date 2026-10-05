@@ -1,21 +1,24 @@
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
+import { isCid } from "@atproto/lex-data";
 import { Effect, Schema } from "effect";
 import { describe, expect, expectTypeOf, it } from "vitest";
 import { receiptDelivery } from "./comms.ts";
 import type { CommsDelivery } from "./runtime.ts";
 import { Unsupported } from "./runtime.ts";
-import { AckInput, AckOutput, Aad, AtUri, Bytes, Cid, Datetime, Lease, ListInput, ListOutput, MessageRef, Receipt, SendInput, SendOutput, Suite, deliveryStateKnownValues, integer, object, Uri } from "./ratking-lexicon.ts";
+import { Input as AckInput, Output as AckOutput } from "./vendor/rat-king-lexicon/mailbox.ack.ts";
+import { Input as SendInput, Output as SendOutput } from "./vendor/rat-king-lexicon/mailbox.send.ts";
+import { Params as ListInput, Output as ListOutput } from "./vendor/rat-king-lexicon/mailbox.list.ts";
+import { Main as Lease } from "./vendor/rat-king-lexicon/runtime.lease.ts";
+import { Main as Profile } from "./vendor/rat-king-lexicon/agent.profile.ts";
+import { Main as Theme } from "./vendor/rat-king-lexicon/desk.theme.ts";
+import { SignedMessage, SigningPayload, Receipt, DeliveryStateKnownValues as deliveryStateKnownValues } from "./vendor/rat-king-lexicon/defs.ts";
 
-// Fixture-only auxiliary shapes. NetworkComms has no signing/profile/theme API.
-const SignedMessage = object({ canonicalSigningBytes: Bytes, appSignature: object({ algorithm: Schema.String, keyId: Uri, signature: Bytes, publicKeyMultibase: Schema.optionalKey(Schema.String) }) });
-const SigningPayload = object({ version: integer(1), suite: Suite, aad: Aad, body: Bytes, createdAt: Schema.optionalKey(Datetime), replyTo: Schema.optionalKey(MessageRef) });
-const Profile = object({
-  $type: Schema.Literal("sh.mschf.ratking.agent.profile"),
-  birthContext: object({ operator: Schema.String, project: Schema.String, createdAt: Schema.optionalKey(Datetime) }),
-  genesisCid: Cid, callSign: Schema.optionalKey(Schema.String), emoji: Schema.optionalKey(Schema.String), themeRef: Schema.optionalKey(AtUri), updatedAt: Schema.optionalKey(Datetime),
-  icon: Schema.optionalKey(object({ $type: Schema.Literal("blob"), ref: object({ $link: Cid }), mimeType: Schema.Literals(["image/png", "image/jpeg", "image/webp"]), size: integer(1, 1_000_000) })),
-});
-const Theme = object({ $type: Schema.Literal("sh.mschf.ratking.desk.theme"), universe: Schema.String, tone: Schema.optionalKey(Schema.String), namePool: Schema.optionalKey(Schema.Array(Schema.String)), updatedAt: Schema.optionalKey(Datetime) });
+const vendor = new URL("./vendor/rat-king-lexicon/", import.meta.url);
+const Hashes = Schema.Record(Schema.String, Schema.String);
+const VendorManifest = Schema.Struct({ repo: Schema.String, commit: Schema.String, sourcePath: Schema.String, files: Hashes, fixtures: Hashes });
+const manifest = Schema.decodeUnknownSync(VendorManifest)(JSON.parse(readFileSync(new URL("VENDOR.json", vendor), "utf8")));
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const fixtures = new URL("./__fixtures__/ratking-v0/", import.meta.url);
 const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(name, fixtures), "utf8"));
 const cases = [
@@ -27,15 +30,38 @@ const cases = [
   ["signing-payload.object.json", SigningPayload, "body"],
 ] as const;
 
-describe("Rat King v0 fixture contract (80bf0c0)", () => {
+describe("Rat King v0 generated fixture contract (0e895a3)", () => {
+  it("pins every generated file to the upstream commit without drift", () => {
+    expect(manifest.repo).toBe("https://github.com/joelhooks/rat-king");
+    expect(manifest.commit).toBe("0e895a3");
+    expect(manifest.sourcePath).toBe("packages/lexicon/src");
+    // VENDOR.json is the hash inventory, not a self-hashing payload.
+    expect(readdirSync(vendor).sort()).toEqual([...Object.keys(manifest.files), "VENDOR.json"].sort());
+    for (const [name, hash] of Object.entries(manifest.files)) {
+      expect(sha256(readFileSync(new URL(name, vendor))), name).toBe(hash);
+    }
+  });
+  it("keeps fixture bytes identical to the source pinned in VENDOR.json", () => {
+    expect(Object.keys(manifest.fixtures).sort()).toEqual(readdirSync(fixtures).sort());
+    for (const [name, hash] of Object.entries(manifest.fixtures)) {
+      expect(sha256(readFileSync(new URL(name, fixtures))), name).toBe(hash);
+    }
+  });
+  it("decodes bytes and links to the approved native atproto values", () => {
+    const input = Schema.decodeUnknownSync(SendInput)(fixture("send.input.json"));
+    expect(input.envelope.enc).toBeInstanceOf(Uint8Array);
+    const profile = Schema.decodeUnknownSync(Profile)(fixture("profile.record.json"));
+    expect(isCid(profile.icon?.ref)).toBe(true);
+  });
   it("covers every vendored fixture", () => {
     expect(readdirSync(fixtures).sort()).toEqual(cases.map(([name]) => name).sort());
   });
   for (const [name, schema, required] of cases) {
-    it(`decodes ${name} losslessly and refuses a broken copy`, () => {
+    it(`roundtrips ${name} losslessly and refuses a broken copy`, () => {
       const original = fixture(name);
       const decode = Schema.decodeUnknownSync(schema);
-      expect(decode(original)).toEqual(original);
+      // Generated codecs decode native bytes/CIDs; losslessness is the JSON roundtrip.
+      expect(Schema.encodeUnknownSync(schema)(decode(original))).toEqual(original);
       const broken = JSON.parse(JSON.stringify(original));
       delete broken[required];
       expect(() => decode(broken)).toThrow();
@@ -61,9 +87,9 @@ describe("Rat King v0 fixture contract (80bf0c0)", () => {
     expect(Schema.decodeUnknownSync(ListOutput)(futureLog)).toEqual(futureLog);
   });
   it("preserves unknown nested fields without accepting floats", () => {
-    const input = Schema.decodeUnknownSync(SendInput)(fixture("send.input.json"));
+    const input = Schema.encodeSync(SendInput)(Schema.decodeUnknownSync(SendInput)(fixture("send.input.json")));
     const extended = { ...input, envelope: { ...input.envelope, aad: { ...input.envelope.aad, future: { flag: true } } } };
-    expect(Schema.decodeUnknownSync(SendInput)(extended)).toEqual(extended);
+    expect(Schema.encodeSync(SendInput)(Schema.decodeUnknownSync(SendInput)(extended))).toEqual(extended);
     expect(() => Schema.decodeUnknownSync(SendInput)({ ...extended, future: 1.5 })).toThrow();
     expect(() => Schema.decodeUnknownSync(SendInput)({ ...input, envelope: { ...input.envelope, enc: { $bytes: "" } } })).toThrow();
     expect(() => Schema.decodeUnknownSync(ListInput)({ recipientDid: input.envelope.aad.recipientDid, limit: 101 })).toThrow();

@@ -1,10 +1,11 @@
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Schema } from "effect";
 import { decodeAgentName, decodeSlug, type Policy } from "./domain.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
 import { exists, load } from "./store.ts";
 import { Comms, CommsError, Unsupported, type CommsAddress, type CommsDelivery, type CommsLease, type CommsShape, type CommsTarget, type IntercomTransport, type LeaseAuthorityShape, type NetworkMailboxShape } from "./runtime.ts";
-import type { Lease, Receipt } from "./ratking-lexicon.ts";
+import type { MainValue as Lease } from "./vendor/rat-king-lexicon/runtime.lease.ts";
+import type { ReceiptValue as Receipt } from "./vendor/rat-king-lexicon/defs.ts";
 
 export type CommsAdapter = "intercom" | "network";
 export function selectComms(env: string | undefined, policy?: Pick<Policy, "comms">): CommsAdapter {
@@ -78,7 +79,7 @@ export function leaseToComms(lease: Lease, adapters: Readonly<Record<string, Har
   if (!adapter) return Effect.fail(new Unsupported(`unsupported Rat King harness: ${lease.harness.$type}`));
   return adapter(lease).pipe(Effect.flatMap(session => session.length === 0
     ? Effect.fail(new Unsupported("Rat King adapter did not resolve a session"))
-    : Effect.succeed({ address: { kind: "did" as const, did: lease.did }, session, expiresAt: lease.expiresAt })));
+    : Effect.succeed({ address: { kind: "did" as const, did: `did:${lease.did.slice(4)}` }, session, expiresAt: lease.expiresAt })));
 }
 /** Private seam for future network wiring. The live NetworkComms never invokes it yet. */
 export function resolveNetworkAddress(identity: CommsTarget, options: {
@@ -88,7 +89,15 @@ export function resolveNetworkAddress(identity: CommsTarget, options: {
 }): Effect.Effect<CommsLease, CommsError> {
   return Effect.gen(function* () {
     const address = yield* Effect.try({ try: () => commsAddress(identity), catch: error => new CommsError(String(error)) });
-    const did = address.kind === "did" ? address.did : yield* options.localDid(address);
+    // A local address is not a branded Lexicon DID. Decode at this network-only
+    // boundary; loading the generated validators must never affect startup.
+    const did = address.kind === "did" ? yield* Effect.tryPromise({
+      try: async () => {
+        const { Main } = await import("./vendor/rat-king-lexicon/runtime.lease.ts");
+        return Schema.decodeUnknownSync(Main.schema.fields.did)(address.did);
+      },
+      catch: error => new CommsError(`invalid Rat King DID: ${String(error)}`),
+    }) : yield* options.localDid(address);
     const lease = yield* options.authority.resolve(did);
     if (lease.did !== did) return yield* Effect.fail(new CommsError("Rat King authority returned a lease for another DID"));
     return yield* leaseToComms(lease, options.adapters);
