@@ -592,7 +592,7 @@ export default function muster(host: ExtensionAPI) {
         [
           `Reviewed ${result.project.slug}: proposal ${result.proposal}, decision ${result.decision}, now ${result.project.state}.`,
           result.archivedLanes.length ? `archived lanes: ${result.archivedLanes.join(", ")}` : "no lanes archived",
-          ...result.retroLanes.map(lane => `retro lane: ${lane.slug}; worker sessions: ${lane.sessionFiles.join(", ") || "none recorded"}`),
+          ...result.retroLanes.map(lane => `retro lane: ${lane.slug}; worker sessions: ${lane.sessionFiles.join(", ") || "none recorded"}; closed tails: ${lane.closedTails.join(", ") || "none recorded"}; reports: ${lane.reports.join(", ") || "none recorded"}`),
           ...result.notes,
         ].join("\n"),
       );
