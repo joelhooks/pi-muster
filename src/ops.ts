@@ -43,7 +43,7 @@ import {
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
-import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyPacket } from "./packet.ts";
+import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
@@ -385,6 +385,13 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
     const raw = yield* remoteNode(row.machine, machine, `import {readFileSync} from 'node:fs';import {createHash} from 'node:crypto';console.log(createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));`, [packet.artifact ?? ""]);
     checks.push({ name: "artifact hash", outcome: raw.trim() === packet.id ? "pass" : "fail", detail: `sha256 is ${raw.trim()}` });
     return { checks, branch: null };
+  }
+  const cloneExists = (yield* remote.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 30_000 })).code === 0;
+  if (!cloneExists) {
+    const source = mapPath(sourceOf(project, lane, row), machine);
+    const sourceExists = (yield* remote.run("test", ["-d", source], { cwd: "/", timeoutMs: 30_000 })).code === 0;
+    const fallback = yield* verifyGoneClone(remote, source, lane, row, packet.id, sourceExists);
+    return { checks: [...checks, ...fallback.checks], branch: null };
   }
   checks.push(yield* probe("commit exists", ["cat-file", "-e", `${packet.id}^{commit}`]));
   const branchEvidence = yield* verifyCommitBranch(remote, row.cwd, packet.id, row.clone?.branch ?? "HEAD");
@@ -2116,6 +2123,13 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     let evidence = params.evidence?.trim();
     if (recording && !evidence) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
     if (params.outcome === "committed") {
+      if (packet.kind === "commit" && !params.landedAs) {
+        const cloneExists = row.machine === "local" ? existsSync(row.cwd) && statSync(row.cwd).isDirectory() : yield* Effect.gen(function* () {
+          const machine = yield* machineConfig(row.machine);
+          return (yield* sshProc(row.machine, machine, proc, env.home).run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 30_000 })).code === 0;
+        });
+        if (!cloneExists) return yield* input(`clone gone; pass landedAs with the landing commit for ${packet.id.slice(0, 12)} (clone ${row.cwd})`);
+      }
       if (packet.state !== "verified") return yield* new GuardFailed({ guard: "verified", message: `run packet_verify on ${packet.id.slice(0, 12)} before landing it` });
       if (recording) {
         note = "recorded without a merge";
