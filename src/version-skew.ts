@@ -35,14 +35,14 @@ function gitVersion(root: string): Version | undefined {
   }
 }
 
-/** Local static imports identify the package files loaded by the extension. */
+/** Local static and dynamic imports identify the package files loaded by the extension. */
 function loadedFiles(root: string): string[] {
   const files = new Set<string>();
   const visit = (file: string) => {
     if (files.has(file)) return;
     files.add(file);
     const source = readFileSync(file, "utf8");
-    for (const match of source.matchAll(/(?:from\s*|import\s*)["'](\.[^"']+\.ts)["']/g)) {
+    for (const match of source.matchAll(/(?:from\s*|import\s*(?:\(\s*)?)["'](\.[^"']+\.ts)["']/g)) {
       if (match[1]) visit(resolve(dirname(file), match[1]));
     }
   };

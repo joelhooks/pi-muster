@@ -891,7 +891,7 @@ describe("field-use regressions", () => {
     const host = { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => tools.set(t.name, t),
       on: () => {}, registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {},
       getFlag: () => undefined, registerMessageRenderer: () => {}, events: { emit: () => {}, on: () => () => {} } };
-    muster(host as never);
+    await muster(host as never);
     writeReader("new-owner", h.home);
     writeReader("owner-session", h.home); // A is still alive; routing must choose B, not merely a live reader.
     const ctx = { cwd: dir, sessionManager: { getSessionId: () => "probe", getBranch: () => [] } };

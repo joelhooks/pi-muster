@@ -66,7 +66,7 @@ describe("version skew", () => {
     mkdirSync(join(root, "src"));
     const extension = join(root, "extensions", "pi-muster.ts");
     const source = join(root, "src", "loaded.ts");
-    writeFileSync(extension, 'import "../src/loaded.ts";');
+    writeFileSync(extension, 'export default async () => import("../src/loaded.ts");');
     writeFileSync(source, "export const value = 1;");
     writeFileSync(join(root, "package.json"), JSON.stringify({ version: "1.0.0" }));
     utimesSync(extension, 1, 1);
