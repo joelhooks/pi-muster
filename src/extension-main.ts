@@ -327,6 +327,8 @@ export default function muster(host: ExtensionAPI) {
       generated: Type.Optional(Type.Array(Type.String({ description: "Path prefix a clone may leave dirty" }))),
       rank: Type.Optional(Type.Integer({ description: "Backlog order, lower first; open: false with rank re-ranks proposed work without other changes" })),
       open: Type.Optional(Type.Boolean()),
+      deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Lower the project's deploy level on the 0 locked to 3 jfdi scale." })),
+      deployRule: Type.Optional(StringEnum(["customer-facing", "money", "outbound-sends", "irreversible", "shared-infra", "slow-rollback"] as const, { description: "Name the rubric rule lowering permission on the 0 locked to 3 jfdi scale." })),
       override: Type.Optional(Type.String({ description: "Joel's words authorizing WIP above the limit; saved on the lane" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
@@ -551,6 +553,7 @@ export default function muster(host: ExtensionAPI) {
       label: Type.Optional(Type.String()),
       policy: Type.Optional(
         Type.Object({
+          deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Set fallback deploy permission on the 0 locked to 3 jfdi scale." })),
           comms: Type.Optional(StringEnum(["intercom", "network"] as const)),
           wipLimit: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
           flowStallMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),

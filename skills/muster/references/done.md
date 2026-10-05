@@ -1,11 +1,11 @@
 # Done means live and proven
 
-A merged packet is not a finished lane. The owner carries delivery through five checks:
+A merged packet is not a finished lane. The project's VISION.md declares deploy posture; policy is the fallback and level 1 is the default. Levels 0 and 1 hold WIP until live proof. Levels 2 and 3 free WIP at deploy. The owner carries delivery through these checks:
 
 1. **Built:** committed, with tests that fail without the change, and the gate passes.
 2. **Landed:** merged to main, pushed with `shitrat`, then the same branch mirrored to walgit with the `walgit-sync` skill (`ls-remote` SHA must match). A walgit failure doesn't undo the landing; report its exact error.
 3. **Deployed:** live where it runs. For pi-muster, pull on the hosts and reload the sessions using it; check the version-skew warning. For a project repo, ship behind a flag when behaviour changes.
-4. **Proven:** record a check against the live system, not the test suite.
+4. **Proven:** at levels 0 and 1, record a check against the live system before freeing WIP. At level 2, check deployed-not-proven lanes at the finished-lane retro. Level 3 needs no proof step.
 5. **Observable:** name one working signal, one failing signal, and where each appears. Record the flag state and rollback.
 
 For docs-only work or a probe with nothing to deploy, record why delivery is waived. Rejected and `no_changes` packets need no delivery. Closing a tab does not prove its work live.
@@ -25,7 +25,8 @@ After proving or closing a lane, pull the top ranked lane when its WIP slot open
 - **Acceptance:** check the rendered output and name the renderer's file. For launch changes, the rendered output is the exact line typed into the pane.
 - **Consistency:** the owner rereads acceptance lines for contradictions, such as "messages byte-identical" plus "add a hint to the messages".
 - **Checks:** regression tests, a red proof, and the full gate.
-- **Deploy:** how it goes live, the flag state, and the rollback.
+- **Deploy level:** effective level (0 locked, 1 prove, 2 ship-and-watch, 3 jfdi), its source, and any rubric rule lowering it.
+- **Deploy:** how it goes live, the flag state, and the rollback. Level 0 cites a resolved approval desk item. Levels 2 and 3 include `Rollback: ...`; level 2 also includes `Watch: ...` in delivery evidence.
 - **Proof:** the live check the owner should run and where its evidence will be recorded.
 - **Signals:** `{ working, failing, where }` in plain words.
 - **Report:** commit as ShitRat, then call `packet_report` once with the commit, checks, `deploy`, `proof`, and `signals`. Do not push unless the brief authorizes it.
