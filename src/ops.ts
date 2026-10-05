@@ -1692,14 +1692,32 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
             if (attempt < SHELL_RETRY_BUDGET_MS / SHELL_RETRY_STEP_MS) {
               return env.sleep(SHELL_RETRY_STEP_MS).pipe(Effect.flatMap(() => start(attempt + 1)));
             }
-            return Effect.fail(new HerdrFailure({
-              operation: error.operation,
-              code: error.code,
-              message: `agent-start available-shell wait exhausted after ${SHELL_RETRY_BUDGET_MS} ms of retries for pane ${binding.paneId}: ${error.message}`,
-            }));
+            return Effect.gen(function* () {
+              // One observation, then at most one extra rejected-start retry. The
+              // server remains the authority on whether its foreground job is a shell.
+              const tail = yield* paneRead(binding.paneId, 20).pipe(Effect.orElseSucceed(() => ""));
+              const pane = yield* paneGet(binding.paneId);
+              if (pane && !pane.agent && pane.cwd === row.cwd && (pane.foreground_cwd ?? pane.cwd) === row.cwd && /(?:^|\n)[^\n]*[%$#>❯]\s*$/.test(tail)) {
+                const retried = yield* agentStart(row.name, binding.paneId, argv).pipe(Effect.result);
+                if (retried._tag === "Success") return retried.success;
+                if (retried.failure.code !== "agent_pane_busy") return yield* retried.failure;
+              }
+              return yield* new HerdrFailure({
+                operation: error.operation, code: error.code,
+                message: `agent-start available-shell wait exhausted after ${SHELL_RETRY_BUDGET_MS} ms of retries for pane ${binding.paneId}: ${error.message}`,
+              });
+            });
           }),
         );
-      const agent = yield* start(0);
+      const agent = yield* start(0).pipe(Effect.catch(error => Effect.gen(function* () {
+        const repair = { tool: "herdr_agent", args: { action: "start", pane: binding.paneId, name: row.name, kind: "pi", agentArgs: argv } };
+        const detail = `${error.message}. Read the pane before running this single repair call: ${JSON.stringify(repair)}`;
+        yield* patchRow(dir, row.name, row.state, [], {
+          restore: { cwd: row.cwd, argv, env: agentEnvironment },
+          events: [...(row.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail }],
+        });
+        return yield* new HerdrFailure({ operation: error.operation, code: error.code, message: detail });
+      })));
       const wait = yield* waitForSession(binding.paneId, null, () => findSessionFile(row.cwd, row.sessionId, env.home));
       const sessionFile = wait.state === "ready" ? wait.sessionFile : null;
       if (wait.state === "ready" && wait.slow) skillNotes.push(slowStartNote(wait));
@@ -1748,7 +1766,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     if (text && !launched.pending) {
       proof = yield* promptWithProof(launched.binding.paneId, text).pipe(
         Effect.catch((error) =>
-          Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: `${error.operation}: ${error.message}. Read the pane before resending.` }),
+          Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: `${error.operation}: ${error.message}. Submission is uncertain; inspect before using the repair call.` }),
         ),
       );
       if (proof.state === "unproven" && !proof.modelError) {
@@ -1763,6 +1781,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         yield* publishTokens(yield* load(dir));
         return yield* new GuardFailed({ guard: "model-proof", message: `pane ${launched.binding.paneId}: delivery: unproven (model error: ${proof.modelError})` });
       }
+      if (proof.state === "unproven") skillNotes.push(`Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: text } })}`);
       if (proof.warning) skillNotes.push(`model warning: ${proof.warning}`);
       running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven" });
     }
@@ -1772,6 +1791,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       argv,
       readiness: launched.agent.interactive_ready === true ? "proven" : "unknown",
       proof,
+      ...(proof?.state === "unproven" ? { repair: { tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: text } } } : {}),
       sessionIdMatched: actualId === null ? null : actualId === row.sessionId,
       notes: [...skillNotes, tokens],
     };
