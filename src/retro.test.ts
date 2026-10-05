@@ -28,8 +28,8 @@ describe("finished lane retros", () => {
     expect(await s.close("judge", "role")).not.toHaveProperty("retro");
     expect(await s.close("one")).not.toHaveProperty("retro");
     expect(await s.close("two")).not.toHaveProperty("retro");
-    expect(await s.close("three")).toHaveProperty("retro", "retro: 3 lanes closed since the last retro; run references/retro.md");
-    expect(await s.close("four")).toHaveProperty("retro", "retro: 4 lanes closed since the last retro; run references/retro.md");
+    expect(await s.close("three")).toHaveProperty("retro", "retro: 3 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run references/retro.md");
+    expect(await s.close("four")).toHaveProperty("retro", "retro: 4 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run references/retro.md");
     await runWith(s.h, projectReview(s.dir, { note: "done", retro: true }));
     expect(await s.close("five")).not.toHaveProperty("retro");
   });
@@ -43,14 +43,14 @@ describe("finished lane retros", () => {
       state: "closed", delivery: "none", restarts: 0, restore: null, createdAt: at, updatedAt: at })] }, null] as const)));
     s.h.now = new Date(s.h.now.getTime() + 1000);
     const review = await runWith(s.h, projectReview(s.dir, { note: "review" }));
-    expect(review).toHaveProperty("retroLanes", [{ slug: "one", sessionFiles: ["/sessions/worker.jsonl"] }]);
+    expect(review).toHaveProperty("retroLanes", [{ slug: "one", sessionFiles: ["/sessions/worker.jsonl"], closedTails: [], reports: [] }]);
     expect(review.project.lastRetroAt).toBeUndefined();
     const completed = await runWith(s.h, projectReview(s.dir, { note: "artifact recorded", retro: true }));
     expect(completed.project.lastRetroAt).toBe(s.h.now.toISOString());
     s.h.now = new Date(s.h.now.getTime() + 1000);
     expect(await runWith(s.h, projectReview(s.dir, { note: "again" }))).toHaveProperty("retroLanes", []);
     expect(await s.close("two")).not.toHaveProperty("retro");
-    expect(await runWith(s.h, projectReview(s.dir, { note: "next" }))).toHaveProperty("retroLanes", [{ slug: "two", sessionFiles: [] }]);
+    expect(await runWith(s.h, projectReview(s.dir, { note: "next" }))).toHaveProperty("retroLanes", [{ slug: "two", sessionFiles: [], closedTails: [], reports: [] }]);
   });
   it("renders the cadence reminder and review session paths in tool output", async () => {
     const s = await setup();
@@ -70,14 +70,17 @@ describe("finished lane retros", () => {
     try {
       vi.spyOn(versionSkew, "createVersionSkew").mockReturnValue({ check: async () => undefined });
       vi.spyOn(ops, "laneClose").mockReturnValue(Effect.succeed(closed));
-      vi.spyOn(ops, "projectReview").mockReturnValue(Effect.succeed({ ...reviewed, retroLanes: [{ slug: "one", sessionFiles: ["/sessions/worker.jsonl"] }] }));
+      vi.spyOn(ops, "projectReview").mockReturnValue(Effect.succeed({ ...reviewed, retroLanes: [
+        { slug: "one", sessionFiles: ["/sessions/worker.jsonl"], closedTails: ["/closed/worker-100.txt", "/closed/worker-restart-200.txt"], reports: ["/reports/worker.svx"] },
+        { slug: "two", sessionFiles: [], closedTails: [], reports: [] },
+      ] }));
       muster(pi);
       // SAFETY: these mocked operations need only the session identity, not live UI.
       const ctx = { cwd: s.dir, sessionManager: { getSessionId: () => "test", getBranch: () => [] } } as unknown as Parameters<ToolDefinition["execute"]>[4];
       const closeResult = await tools.get("lane_close")!.execute("id", { slug: "three" }, undefined, undefined, ctx);
-      expect(closeResult.content).toContainEqual({ type: "text", text: expect.stringContaining("retro: 3 lanes closed") });
+      expect(closeResult.content).toContainEqual({ type: "text", text: expect.stringContaining('run project_review note: "retro evidence"') });
       const reviewResult = await tools.get("project_review")!.execute("id", { note: "complete", retro: true }, undefined, undefined, ctx);
-      expect(reviewResult.content).toContainEqual({ type: "text", text: expect.stringContaining("retro lane: one; worker sessions: /sessions/worker.jsonl") });
+      expect(reviewResult.content).toContainEqual({ type: "text", text: expect.stringContaining("retro lane: one; worker sessions: /sessions/worker.jsonl; closed tails: /closed/worker-100.txt, /closed/worker-restart-200.txt; reports: /reports/worker.svx\nretro lane: two; worker sessions: none recorded; closed tails: none recorded; reports: none recorded") });
       expect(ops.projectReview).toHaveBeenLastCalledWith(s.dir, { note: "complete", retro: true });
     } finally {
       vi.restoreAllMocks();

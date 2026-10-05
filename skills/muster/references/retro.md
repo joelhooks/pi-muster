@@ -10,6 +10,8 @@ The judge returns an artifact packet containing ranked findings in a `.svx`. It 
 
 ## Evidence per lane
 
+`project_review` lists each pending lane's worker sessions from agent rows, closed and restart tails from exact agent-name filenames in `closed/`, and reports from packet rows; the `lane_close` reminder names that call.
+
 - Worker's session file: the row's `sessionFile`, or `agent_close`'s `restore:` line.
 - Every packet report under `.brain/data/muster/reports/<lane>/`, including rejected and follow-up packets.
 - Closed pane tail under `.brain/data/muster/closed/`.

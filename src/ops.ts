@@ -1229,7 +1229,7 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
     const count = latest.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
       (!latest.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(latest.lastRetroAt))).length;
     return { lane: closed, closed: true, pending: [] as string[], paneNote,
-      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run references/retro.md` } : {}) };
+      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run references/retro.md` } : {}) };
   });
 
 // ---------- agents ----------
@@ -2776,10 +2776,23 @@ export const projectReview = (dir: string, params: ReviewInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const before = yield* load(dir);
+    const tailDir = closedDir(dir);
+    const tailFiles = yield* Effect.try({
+      try: () => existsSync(tailDir) ? readdirSync(tailDir).sort() : [],
+      catch: error => new StoreError({ path: tailDir, message: String(error) }),
+    });
     const retroLanes = before.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
       (!before.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(before.lastRetroAt)))
-      .map(lane => ({ slug: lane.slug, sessionFiles: before.agents.filter(agent => agent.lane === lane.slug && agent.role === "worker")
-        .flatMap(agent => agent.sessionFile ? [agent.sessionFile] : []) }));
+      .map(lane => {
+        const agents = before.agents.filter(agent => agent.lane === lane.slug);
+        return {
+          slug: lane.slug,
+          sessionFiles: agents.filter(agent => agent.role === "worker").flatMap(agent => agent.sessionFile ? [agent.sessionFile] : []),
+          closedTails: tailFiles.filter(file => agents.some(agent => file.startsWith(`${agent.name}-`) &&
+            /^(?:restart-)?\d+\.txt$/.test(file.slice(agent.name.length + 1)))).map(file => join(tailDir, file)),
+          reports: before.packets.filter(packet => packet.lane === lane.slug).map(packet => packet.report),
+        };
+      });
     const proposal = proposeReview(before);
     const decision = params.decision ?? "continue";
     const reviewed = yield* mutate(dir, (current) =>
