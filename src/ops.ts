@@ -182,10 +182,10 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       const wait = yield* waitForSession(binding.paneId, null);
       if (wait.state !== "ready") {
         const logTail = yield* must("tail", ["-n", "12", launchLog], { cwd, timeoutMs: 10_000 }).pipe(Effect.orElseSucceed(() => ""));
-        // A pane can echo its launch prelude. Never include environment-bearing lines.
+        // Omit echoed exports and custom env values, not ordinary catalog words such as worker.
         const tail = stripVTControlCharacters(logTail.trim() ? logTail : wait.tail)
           .split(/\r?\n/).filter(line => !/\bexport\s|MUSTER_REMOTE_ROW/.test(line) &&
-            !Object.values(agentEnvironment).some(value => value.length > 0 && line.includes(value)))
+            !Object.values(remoteProfile.env).some(value => value.length > 0 && line.includes(value)))
           .slice(-12).join("\n").trim().slice(-1500) || "(launch tail unavailable)";
         const issue = modelOutputIssue(tail);
         const detail = `machine ${nameOfMachine}: Pi session not ready in ${binding.paneId}; inspect it before retrying (${wait.state}). Launch tail (UNTRUSTED):\n${tail}`;

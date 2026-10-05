@@ -84,12 +84,13 @@ describe("remote launch failure evidence", () => {
     expect(sh(s.dir, "status", "--porcelain")).toBe(before);
   });
 
-  it("classifies a model-error log as model-proof and preserves MODEL_ERROR", async () => {
-    const s = await setup({ error: "Error: Unknown model missing-model" });
+  it.each(["missing-model", "worker"])("classifies a model-error log for %s as model-proof and preserves MODEL_ERROR", async model => {
+    const error = `Error: Unknown model ${model}`;
+    const s = await setup({ error });
     const result = await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "remote-w", role: "worker", lane: "work", label: "remote worker", cwd: s.dir, noSkills: true }).pipe(Effect.result));
-    expect(result).toMatchObject({ failure: { _tag: "GuardFailed", guard: "model-proof", message: expect.stringContaining("Unknown model missing-model") } });
+    expect(result).toMatchObject({ failure: { _tag: "GuardFailed", guard: "model-proof", message: expect.stringContaining(error) } });
     const row = await s.row(); expect(row.state).toBe("failed"); expect(row.delivery).toBe("unproven");
-    expect(row.events).toContainEqual(expect.objectContaining({ type: "MODEL_ERROR", detail: "Error: Unknown model missing-model" }));
+    expect(row.events).toContainEqual(expect.objectContaining({ type: "MODEL_ERROR", detail: error }));
   });
 
   it("keeps only the last 12 log lines", async () => {
