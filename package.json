@@ -84,6 +84,7 @@
     "src/roster.ts",
     "src/runtime.ts",
     "src/session-file.ts",
+    "src/session-model.ts",
     "src/session-tree.ts",
     "src/rewind.ts",
     "src/remote.ts",
