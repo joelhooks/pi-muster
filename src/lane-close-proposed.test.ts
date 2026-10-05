@@ -31,7 +31,7 @@ describe("closing proposed lanes", () => {
     const closed = await runWith(h, laneClose(dir, "started", { discard: true }));
     expect(closed).toMatchObject({ closed: true, lane: { state: "closed", root: null, discarded: false } });
     expect(h.herdr.panes.has(opened.lane.root!.paneId)).toBe(false);
-    expect((await runWith(h, projectReview(dir, { note: "real work" }))).retroLanes).toEqual([{ slug: "started", sessionFiles: [] }]);
+    expect((await runWith(h, projectReview(dir, { note: "real work" }))).retroLanes).toEqual([{ slug: "started", sessionFiles: [], closedTails: [], reports: [] }]);
   });
   it("discards only with explicit permission and excludes discarded lanes from retros", async () => {
     const { h, dir } = await setup();
@@ -51,7 +51,7 @@ describe("closing proposed lanes", () => {
     const closed = await runWith(h, laneClose(dir, "three", { discard: true }));
     expect(closed.lane.state).toBe("closed");
     expect(closed.lane.discarded).not.toBe(true);
-    expect(closed.retro).toBe("retro: 3 lanes closed since the last retro; run references/retro.md");
+    expect(closed.retro).toBe("retro: 3 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run references/retro.md");
     await open("another-parked", true);
     expect(await runWith(h, laneClose(dir, "another-parked", { discard: true }))).not.toHaveProperty("retro");
     // Reopening a discarded lane makes it real work; its next close counts normally.
