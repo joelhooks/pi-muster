@@ -2,6 +2,8 @@
 
 Traps from the first pilot projects (2026-09) that stay judgment. Anything that became code is gone from this list: cwd checks, launch order, session ids from Herdr, proof of delivery, the silence check, tool allowlists, pane ownership, temp-dir state, the heavy-job lock, and landing as the bot.
 
+- An unproven launch includes a single repair call. Read the pane first; a prompt already working must not be sent again. A current-code desk must restart after an update to use the new launch behavior.
+
 ## Bridge lanes (`pi-claude-bridge`)
 
 - Prompt capture fails closed on wakes. An intercom, pi-until, or `sendMessage` wake skips `before_agent_start`, so the bridge must match Pi's live prompt to one it recorded on a user turn. After a `/reload` or restart that changed tools, rules, skills, or custom sections, nothing matches, and every wake ends with `stopReason: error` and 0 tokens until an ordinary user message refreshes the capture. A lane woken only by timers never gets that message. `project_status` types that message into its own stuck lanes and shows others' as `⚠️ stuck`; `agent_launch action=restore` sends it with the work prompt.

@@ -1,4 +1,4 @@
-import { Effect, Schedule } from "effect";
+import { Effect } from "effect";
 import {
   HERDR_TRANSPORT_GRACE_MS,
   type HerdrError,
@@ -19,7 +19,6 @@ import { modelOutputIssue } from "./models.ts";
 
 export const PROOF_OF_LIFE_MS = 30_000;
 const NAME_READY_STEP_MS = 500;
-const NAME_READY_TRIES = 20;
 const START_TIMEOUT_MS = 60_000;
 
 type PaneInfo = HerdrResultFor<"pane.get">["pane"];
@@ -139,24 +138,42 @@ const checkProof = (paneId: string, via: "prompt" | "enter") => Effect.gen(funct
 
 export const promptWithProof = (paneId: string, text: string): Effect.Effect<Proof, HerdrFailure, Herdr | MusterEnv> =>
   Effect.gen(function* () {
-    const started = Date.now();
-    const remaining = () => Math.max(1_000, PROOF_OF_LIFE_MS - (Date.now() - started));
-    const prompt = call({
-      method: "agent.prompt",
-      params: { target: paneId, text, wait: { until: ["working"], timeout_ms: PROOF_OF_LIFE_MS } },
-      timeoutMs: PROOF_OF_LIFE_MS + HERDR_TRANSPORT_GRACE_MS,
-    });
-    // A fresh pane can be idle before Herdr registers its agent name. agent_not_ready
-    // rejects before any text is typed, so retrying cannot deliver twice.
-    const submitted = yield* prompt.pipe(
-      Effect.retry({ while: (error) => isCode(error, "agent_not_ready"), schedule: Schedule.spaced(NAME_READY_STEP_MS), times: NAME_READY_TRIES }),
-      Effect.map((result) => result.agent.agent_status === "working"),
-      Effect.catchIf(
-        (error) => isCode(error, "agent_prompt_stalled"),
-        () => waitWorking(paneId, remaining()).pipe(Effect.orElseSucceed(() => false)),
-      ),
-    );
-    if (submitted) return yield* checkProof(paneId, "prompt");
+    const env = yield* MusterEnv;
+    const started = env.now().getTime();
+    let slept = 0;
+    const remaining = () => Math.max(0, PROOF_OF_LIFE_MS - Math.max(slept, env.now().getTime() - started));
+    // pending -> idle | working; only the latter two may send the recovery Enter.
+    let submission: "pending" | "idle" | "working" = "pending";
+    while (remaining() > 0) {
+      const agent = yield* agentGet(paneId).pipe(Effect.catchIf(
+        error => isCode(error, "agent_not_ready", "agent_not_found", "not_found"),
+        () => Effect.succeed(null),
+      ));
+      if (remaining() > 0 && agent?.name && agent.agent === "pi" && agent.agent_status === "idle" && !agent.launch_pending) {
+        // Herdr checks foreground identity again before typing. Only this rejection
+        // is safe to retry: a successful or uncertain submission never repeats text.
+        const outcome = yield* call({
+          method: "agent.prompt",
+          params: { target: paneId, text, wait: { until: ["working"], timeout_ms: remaining() } },
+          timeoutMs: remaining() + HERDR_TRANSPORT_GRACE_MS,
+        }).pipe(
+          Effect.map(result => ({ ready: true, working: result.agent.agent_status === "working" })),
+          Effect.catchIf(error => isCode(error, "agent_not_ready"), () => Effect.succeed({ ready: false, working: false })),
+          Effect.catchIf(error => isCode(error, "agent_prompt_stalled"), () => waitWorking(paneId, Math.max(1, remaining())).pipe(
+            Effect.orElseSucceed(() => false), Effect.map(working => ({ ready: true, working })),
+          )),
+        );
+        if (outcome.ready) { submission = outcome.working ? "working" : "idle"; break; }
+      }
+      const delay = Math.min(NAME_READY_STEP_MS, remaining());
+      yield* env.sleep(delay);
+      slept += delay;
+    }
+    if (submission === "pending") return {
+      state: "unproven", submission: "uncertain",
+      detail: `Herdr did not accept the prompt within ${PROOF_OF_LIFE_MS} ms; no text was typed.`,
+    } satisfies Proof;
+    if (submission === "working") return yield* checkProof(paneId, "prompt");
     const recovered = yield* paneSendKeys(paneId, ["Enter"]).pipe(
       Effect.andThen(waitWorking(paneId, 15_000)),
       Effect.orElseSucceed(() => false),
