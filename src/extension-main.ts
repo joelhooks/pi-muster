@@ -356,7 +356,7 @@ export default function muster(host: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       return run(ctx, signal, laneClose(projectDir(ctx, params.project), params.slug), (result) =>
         result.closed
-          ? `Lane ${result.lane.slug} closed. ${result.paneNote ?? ""}`
+          ? `Lane ${result.lane.slug} closed. ${result.paneNote ?? ""}${result.retro ? `\n${result.retro}` : ""}`
           : `Lane ${result.lane.slug} is ${result.lane.state}; pending:\n${result.pending.map((line) => `- ${line}`).join("\n")}`,
       );
     },
@@ -571,6 +571,7 @@ export default function muster(host: ExtensionAPI) {
     parameters: Type.Object({
       project: ProjectParam,
       note: Type.String({ description: "What the review found, in a sentence or two" }),
+      retro: Type.Optional(Type.Boolean({ description: "Mark the retro complete after its artifact is recorded" })),
       outcome: Type.Optional(Type.String()),
       reviewTrigger: Type.Optional(Type.String()),
       criticalPath: Type.Optional(Type.Array(Type.String())),
@@ -583,6 +584,7 @@ export default function muster(host: ExtensionAPI) {
         [
           `Reviewed ${result.project.slug}: proposal ${result.proposal}, decision ${result.decision}, now ${result.project.state}.`,
           result.archivedLanes.length ? `archived lanes: ${result.archivedLanes.join(", ")}` : "no lanes archived",
+          ...result.retroLanes.map(lane => `retro lane: ${lane.slug}; worker sessions: ${lane.sessionFiles.join(", ") || "none recorded"}`),
           ...result.notes,
         ].join("\n"),
       );

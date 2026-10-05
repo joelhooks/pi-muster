@@ -260,6 +260,8 @@ export const Lane = Schema.Struct({
   tabId: Schema.NullOr(Schema.String),
   root: Schema.NullOr(PaneBinding),
   state: LaneState,
+  /** Stable retro cursor; older catalogs fall back to updatedAt. */
+  closedAt: Schema.optionalKey(Iso),
   delivery: Schema.optionalKey(LaneDelivery),
   deliveryAt: Schema.optionalKey(Iso),
   deliveryEvidence: Schema.optionalKey(Schema.String),
@@ -349,6 +351,7 @@ const ProjectFields = Schema.Struct({
   agents: Schema.Array(AgentRow),
   packets: Schema.Array(Packet),
   reviews: Schema.Array(Review),
+  lastRetroAt: Schema.optionalKey(Iso),
   createdAt: Iso,
   updatedAt: Iso,
 });
