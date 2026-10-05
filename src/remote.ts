@@ -70,7 +70,8 @@ export function sshProc(name: string, machine: MachineConfig, runner: ProcShape,
   } };
 }
 
-/** SSH owns the forward's lifecycle. Check the control master before reuse, never unlink someone else's socket. */
+/** SSH owns the forward's lifecycle. Reuse a live control master; without one, the hashed local socket is a leftover
+ * from a master that outlived ControlPersist, so StreamLocalBindUnlink replaces it. */
 export const remoteClient = (name: string, machine: MachineConfig) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   if (env.remoteHerdr) return yield* env.remoteHerdr(name, machine);
@@ -82,7 +83,7 @@ export const remoteClient = (name: string, machine: MachineConfig) => Effect.gen
   yield* Effect.try({ try: () => mkdirSync(root, { recursive: true, mode: 0o700 }), catch: error => new InputError({ message: `machine ${name}: forward directory: ${String(error)}` }) });
   const check = yield* proc.run("ssh", ["-S", control, "-O", "check", machine.ssh], { cwd: env.home, timeoutMs: 10_000 });
   if (check.code !== 0) {
-    const result = yield* proc.run("ssh", ["-f", "-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ExitOnForwardFailure=yes", "-o", "ControlMaster=yes", "-o", "ControlPersist=600", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-S", control, "-L", `${socket}:${machine.socket}`, machine.ssh], { cwd: env.home, timeoutMs: 15_000 });
+    const result = yield* proc.run("ssh", ["-f", "-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes", "-o", "ControlMaster=yes", "-o", "ControlPersist=600", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-S", control, "-L", `${socket}:${machine.socket}`, machine.ssh], { cwd: env.home, timeoutMs: 15_000 });
     if (result.code !== 0) return yield* new ProcError({ command: `ssh forward ${name}`, code: result.code, stderr: result.stderr, message: `machine ${name}: socket forward failed: ${result.stderr.slice(-500)}` });
   }
   return createHerdrClient({ socketPath: socket });

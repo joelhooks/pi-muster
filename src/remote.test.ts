@@ -94,6 +94,8 @@ describe("machine boundary", () => {
     expect(client.socketPath()).toContain(".config/muster/fwd");
     expect(capture[1]).toContain("ExitOnForwardFailure=yes");
     expect(capture[1]).toContain("-L");
+    // A master that idled out leaves its forwarded socket behind; the next bind must replace it.
+    expect(capture[1]).toContain("StreamLocalBindUnlink=yes");
   });
 });
 
