@@ -117,8 +117,8 @@
     "vitest": "4.1.11"
   },
   "dependencies": {
-    "@joelhooks/pi-bellwether": "github:joelhooks/pi-bellwether#b98cbed0a22450cc3ffbe5ff4f9178f65cb2e242",
-    "effect": "4.0.0-beta.99",
+    "@joelhooks/pi-bellwether": "github:joelhooks/pi-bellwether#af41815ae849fab4c41bb72c0289af9bb23b7d0e",
+    "effect": "4.0.1",
     "xstate": "5.32.5"
   }
 }
