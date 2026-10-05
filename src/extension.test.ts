@@ -11,7 +11,8 @@ import { Packet, decodeOwnerItem } from "./domain.ts";
 import { deskRecord } from "./desk.ts";
 import { POST_NSID } from "./owner-lexicon.ts";
 
-import muster from "../extensions/pi-muster.ts";
+import muster from "./extension-main.ts";
+import { musterToolNames } from "./reload-stale.ts";
 
 function fakePi() {
   const tools: string[] = [];
@@ -90,6 +91,7 @@ describe("extension modes", () => {
     const fake = fakePi();
     muster(fake.pi as never);
     expect(fake.tools).toEqual(["owner_inbox", "owner_reply", "skill_find", ...OWNER_TOOLS]);
+    expect(fake.tools).toEqual(musterToolNames(process.env));
     expect(fake.defs.get("project_status")).toMatchObject({ parameters: { properties: { takeover: { type: "boolean" } } } });
     expect(fake.flags).toEqual(["compact-at", "switchboard"]);
     expect(fake.commands).toEqual(["compact-at", "muster-rewind", "switchboard"]);
@@ -102,6 +104,7 @@ describe("extension modes", () => {
     const fake = fakePi();
     muster(fake.pi as never);
     expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "packet_report", "skill_find", "context_mark"]);
+    expect(fake.tools).toEqual(musterToolNames(process.env));
   });
 
   it("gives a boss both sides: it reports up and owns its workers", () => {
@@ -109,6 +112,7 @@ describe("extension modes", () => {
     const fake = fakePi();
     muster(fake.pi as never);
     expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "packet_report", "skill_find", ...OWNER_TOOLS]);
+    expect(fake.tools).toEqual(musterToolNames(process.env));
   });
 });
 

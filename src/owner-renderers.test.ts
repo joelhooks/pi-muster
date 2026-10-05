@@ -10,12 +10,12 @@ import { appendOwnerItem } from "./owner-queue.ts";
 
 const theme = { fg: (_: string, text: string) => text, bold: (text: string) => text };
 describe("owner renderer registration", () => {
-  it("registers compact note/reply call and result renderers, with expandable ids", () => {
+  it("registers compact note/reply call and result renderers, with expandable ids", async () => {
     vi.stubEnv("MUSTER_ROLE", "worker"); vi.stubEnv("MUSTER_OWNER", "reader");
     const tools = new Map<string, Parameters<ExtensionAPI["registerTool"]>[0]>();
     const pi = { on() {}, registerFlag() {}, registerCommand() {}, getFlag() {}, registerMessageRenderer() {}, registerTool: (tool: Parameters<ExtensionAPI["registerTool"]>[0]) => tools.set(tool.name, tool), events: { on: () => () => {}, emit() {} } };
     try {
-      muster(pi as never);
+      await muster(pi as never);
       for (const name of ["owner_note", "owner_reply"]) {
         const tool = tools.get(name)!;
         expect(tool.renderCall).toBeTypeOf("function");

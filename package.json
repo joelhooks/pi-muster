@@ -39,6 +39,8 @@
     "src/digest.ts",
     "src/digest-ext.ts",
     "extensions/pi-muster.ts",
+    "src/extension-main.ts",
+    "src/reload-stale.ts",
     "README.md",
     "skills/muster/references/gotchas.md",
     "skills/muster/references/done.md",

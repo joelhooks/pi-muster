@@ -48,6 +48,8 @@ Roster skills are a role's standing set; name extras at launch; workers pull the
 
 ## Warm forks and rewind
 
+After a dependency upgrade, restart Pi with `pi --session <session file>`, not `/reload`; the running process keeps the old dependency modules cached.
+
 Workers mark `ctx:ready` with `context_mark` once the code they need is read, before editing. Fork related work with `agent_launch action=fork from=<row> at=ctx:ready`, a fresh name and its own brief; use `clone: true` for an independent checkout. Omitting `at` keeps the full-session fork.
 
 When an instruction is overruled, use `agent_rewind name=<worker> to=<label or entry id> note=<correction>` rather than stacking an “ignore that” message. Wait for verified branch evidence, then send the corrected instruction as usual. Rewind changes conversation context, not files or commits.
