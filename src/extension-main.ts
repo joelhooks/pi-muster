@@ -44,6 +44,8 @@ import { squashed } from "./readable.ts";
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_WORKER_WORKTREE = join(homedir(), "Code", "joelhooks", "dark-wizard", "scripts", "worker-worktree.sh");
+const MUSTER_BIN = join(MUSTER_ROOT, "bin");
+process.env.PATH = [MUSTER_BIN, ...(process.env.PATH === undefined ? [] : process.env.PATH.split(":").filter(path => path !== MUSTER_BIN))].join(":");
 
 type Services = Herdr | Proc | MusterEnv | Comms;
 

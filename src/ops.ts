@@ -152,7 +152,10 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       restore: null, createdAt: existing?.createdAt ?? now, updatedAt: now };
     const launchProfile = extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row);
     const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension });
-    const agentEnvironment = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, MUSTER_COMMS: "intercom", MUSTER_REMOTE_ROW: JSON.stringify(row) };
+    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, MUSTER_COMMS: "intercom", MUSTER_REMOTE_ROW: JSON.stringify(row) };
+    // Read the remote environment, never transplant the owner's machine-specific PATH.
+    const remotePath = agentEnvironment.PATH ?? (yield* must("printenv", ["PATH"], { cwd, timeoutMs: 10_000 })).trim();
+    agentEnvironment.PATH = [join(machine.musterExtension, "bin"), remotePath].filter(Boolean).join(":");
     yield* mutate(dir, current => Effect.succeed([withRow(current, row), row] as const));
     const launch = Effect.gen(function* () {
       const spaces = yield* workspaceList();
@@ -1654,6 +1657,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       musterExtension: project.musterExtension,
     });
     const agentEnvironment = agentEnv(project, row);
+    agentEnvironment.PATH = [join(env.musterRoot, "bin"), agentEnvironment.PATH ?? process.env.PATH].filter(Boolean).join(":");
     yield* mutate(dir, (current) => Effect.gen(function* () {
       const previous = current.agents.find(agent => agent.name === row.name);
       if (previous) yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
