@@ -89,7 +89,7 @@ export function deployPostureLine(project: Project): string {
   return [`Deploy posture: Level: ${posture.level} (${DEPLOY_NAMES[posture.level]}), source: ${posture.source}`, ...posture.notes].join("\n");
 }
 
-/** Role tabs are infrastructure, not feature WIP. Archived undelivered work still counts. */
+/** Role and retro tabs are not feature WIP. Archived undelivered work still counts. */
 export function inFlight(project: Project): Lane[] {
   const { level } = deployPosture(project);
   return project.lanes.filter(lane => lane.kind === "work" &&
@@ -107,9 +107,13 @@ export function openSlots(project: Project): number | null {
   return limit === null ? null : Math.max(0, limit - inFlight(project).length);
 }
 export function wipRefusal(project: Project, slug: string, kind: Lane["kind"], now: number): string | null {
+  if (kind === "retro") {
+    const running = project.lanes.find(lane => lane.kind === "retro" && lane.slug !== slug && (lane.state === "open" || lane.state === "draining"));
+    return running ? `retro: ${running.slug} is ${running.state}; finish it before opening another retro lane.` : null;
+  }
   const lanes = inFlight(project);
   const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
-  if (kind === "role" || limit === null || lanes.some(lane => lane.slug === slug) || lanes.length < limit) return null;
+  if (kind !== "work" || limit === null || lanes.some(lane => lane.slug === slug) || lanes.length < limit) return null;
   return `WIP ${lanes.length}/${limit}: ${lanes.map(lane => `${lane.slug} (${lane.delivery ?? "none"}, ${formatAge(Math.max(0, now - Date.parse(lane.createdAt)))})`).join(", ")}. Park it in the backlog with lane_open open: false; rank it with rank, or supply override with Joel's words.`;
 }
 export function flowLine(project: Project, now: number = Date.now()): string {
@@ -138,10 +142,14 @@ export function flowLine(project: Project, now: number = Date.now()): string {
   const landed = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
   const slots = openSlots(project);
   const next = backlog(project)[0];
+  const retro = project.lanes.find(lane => lane.kind === "retro" && (lane.state === "open" || lane.state === "draining"));
+  const closedSinceRetro = project.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
+    (!project.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(project.lastRetroAt))).length;
   const ago = (at: number) => { const age = formatAge(Math.max(0, now - at)); return age === "now" ? "just now" : `${age} ago`; };
   return [
     `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"}`,
     ...(slots ? [`${slots} open`, next ? `next: ${next.slug}` : "backlog empty"] : []),
+    ...(retro ? [`retro: running ${retro.slug}`] : closedSinceRetro >= 3 ? [`retro: due (${closedSinceRetro} closed)`] : []),
     `landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"}`,
     ...(watching.length ? [`watching: ${watching.map(lane => lane.slug).join(", ")}`] : []),
     ...(lanes.length ? [`oldest in flight ${formatAge(Math.max(0, now - oldest))}`] : []),

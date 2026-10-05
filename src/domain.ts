@@ -289,7 +289,7 @@ export function decodeDeploySection(text: unknown): { level?: DeployLevel; issue
 
 export const Lane = Schema.Struct({
   slug: Slug,
-  kind: Schema.Literals(["work", "role"]),
+  kind: Schema.Literals(["work", "role", "retro"]),
   label: Schema.String,
   goal: Schema.String,
   writeScope: Schema.Array(Schema.String),

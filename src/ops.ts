@@ -1057,7 +1057,7 @@ export interface LaneOpenInput {
   readonly slug: string;
   readonly label: string;
   readonly goal: string;
-  readonly kind?: "work" | "role" | undefined;
+  readonly kind?: Lane["kind"] | undefined;
   readonly writeScope?: readonly string[] | undefined;
   readonly repo?: string | undefined;
   readonly base?: string | undefined;
@@ -1116,7 +1116,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
 
     const refusal = wantOpen ? wipRefusal(project, slug, existing?.kind ?? params.kind ?? "work", env.now().getTime()) : null;
     if (params.override !== undefined && !params.override.trim()) return yield* input("override must contain Joel's words");
-    if (refusal && !params.override?.trim()) return yield* input(refusal);
+    if (refusal && ((existing?.kind ?? params.kind) === "retro" || !params.override?.trim())) return yield* input(refusal);
     const base: Lane = existing ?? {
       slug,
       kind: params.kind ?? "work",
@@ -1154,7 +1154,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     yield* mutate(dir, current => Effect.gen(function* () {
       const latest = current.lanes.find(lane => lane.slug === slug) ?? base;
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
-      if (refusal && !params.override?.trim()) return yield* input(refusal);
+      if (refusal && (latest.kind === "retro" || !params.override?.trim())) return yield* input(refusal);
       const next: Lane = { ...latest, ...deployPatch, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
         ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) };
       return [withLane(current, next), next] as const;
@@ -1319,7 +1319,7 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
     const count = latest.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
       (!latest.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(latest.lastRetroAt))).length;
     return { lane: closed, closed: true, pending: [] as string[], paneNote,
-      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run references/retro.md` } : {}) };
+      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run lane_open slug: "retro" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"; run references/retro.md` } : {}) };
   });
 
 // ---------- agents ----------

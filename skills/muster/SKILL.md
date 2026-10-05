@@ -40,7 +40,7 @@ Use a side desk when Joel wants to explore an evolving design alongside the main
 
 ## Keep work flowing
 
-The WIP limit is the owner's target, not just a ceiling. Keep ready work at the limit. When a lane is proven or closed and a slot opens, pull the top of the backlog. Use the project's deploy posture to decide how much proof the work needs.
+The WIP limit is the owner's target, not just a ceiling. Keep ready work at the limit; use `kind: "retro"` for the judge's standing slot outside work WIP. When a lane is proven or closed and a slot opens, pull the top of the backlog. Use the project's deploy posture to decide how much proof the work needs.
 
 The desk keeps the backlog shaped: ranked proposed work lanes with briefs. Lower ranks go first; creation time breaks ties, and unranked lanes follow ranked ones. Park work with `lane_open open: false`. Re-rank proposed work with `rank`; Joel orders the backlog when he wants to.
 
