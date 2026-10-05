@@ -47,7 +47,7 @@ const exitOf = (cwd: string, args: string[]) =>
     return (yield* proc.run("git", args, { cwd })).code;
   });
 
-/** Shared local/remote branch evidence; HEAD also covers detached worker checkouts. */
+/** Prefer local branches, then HEAD, then remote-tracking refs in either checkout. */
 export const verifyCommitBranch = (proc: ProcShape, cwd: string, commit: string, rowBranch: string) =>
   Effect.gen(function* () {
     const run = (...args: string[]) => proc.run("git", args, { cwd, timeoutMs: 30_000 });
@@ -60,9 +60,14 @@ export const verifyCommitBranch = (proc: ProcShape, cwd: string, commit: string,
     const headBranch = current.code === 0 ? current.stdout.trim() : "HEAD";
     const branch = head.code === 0 && headBranch !== "HEAD" ? headBranch : branches[0] ?? (head.code === 0 ? "HEAD" : undefined);
     if (branch) return { check: pass("on lane branch", `on sibling branch ${branch} (row branch ${rowBranch})`), branch };
+    const remoteContaining = yield* run("for-each-ref", "--format=%(refname:short)", "--contains", commit, "refs/remotes");
+    const remoteBranch = remoteContaining.code === 0 ? remoteContaining.stdout.trim().split("\n").filter(Boolean)[0] : undefined;
+    if (remoteBranch) return { check: pass("on lane branch", `on remote-tracking branch ${remoteBranch} (row branch ${rowBranch})`), branch: remoteBranch };
     const all = yield* run("for-each-ref", "--format=%(refname:short)", "refs/heads");
     const checked = all.code === 0 ? all.stdout.trim().split("\n").filter(Boolean) : [rowBranch];
-    return { check: fail("on lane branch", `${commit} is not an ancestor of ${rowBranch}; checked branches: ${[...new Set([...checked, rowBranch, "HEAD"])].join(", ")}`), branch: null };
+    const allRemote = yield* run("for-each-ref", "--format=%(refname:short)", "refs/remotes");
+    const checkedRemote = allRemote.code === 0 ? allRemote.stdout.trim().split("\n").filter(Boolean) : [];
+    return { check: fail("on lane branch", `${commit} is not an ancestor of ${rowBranch}; checked branches: ${[...new Set([...checked, rowBranch, "HEAD"])].join(", ")}; checked remote-tracking refs: ${checkedRemote.join(", ") || "(none)"}`), branch: null };
   });
 
 export const sourceOf = (project: Project, lane: Lane | undefined, row: AgentRow) => row.clone?.source ?? lane?.repo ?? project.dir;
