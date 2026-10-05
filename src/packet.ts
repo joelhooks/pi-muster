@@ -72,6 +72,63 @@ export const verifyCommitBranch = (proc: ProcShape, cwd: string, commit: string,
 
 export const sourceOf = (project: Project, lane: Lane | undefined, row: AgentRow) => row.clone?.source ?? lane?.repo ?? project.dir;
 
+/** The same cumulative patch comparison used to prove an explicit squash landing. */
+export const squashPatchMatches = (proc: ProcShape, source: string, packetBase: string, commit: string, parent: string, landing: string) =>
+  Effect.gen(function* () {
+    const patchId = (from: string, to: string) => proc.run("bash", ["-c", 'set -o pipefail; git diff --no-ext-diff --no-textconv --binary "$1" "$2" -- | git patch-id --stable', "muster-squash", from, to], { cwd: source, timeoutMs: 30_000 });
+    const packetPatch = yield* patchId(packetBase, commit);
+    const landingPatch = yield* patchId(parent, landing);
+    const id = packetPatch.stdout.trim().split(/\s+/)[0];
+    return packetPatch.code === 0 && landingPatch.code === 0 && !!id && id === landingPatch.stdout.trim().split(/\s+/)[0];
+  });
+
+/** Shared by local and SSH verification. Callers prove the source directory exists first. */
+export const verifyGoneClone = (proc: ProcShape, source: string, lane: Lane | undefined, row: AgentRow, commit: string, sourceExists: boolean) =>
+  Effect.gen(function* () {
+    const missing = `clone ${row.cwd} is gone and ${commit} is not in ${source}; land with outcome rejected or no_changes and evidence`;
+    const checks: CheckOutcome[] = [pass("dirty paths", "clone gone; nothing to compare")];
+    const run = (...args: string[]) => proc.run("git", args, { cwd: source, timeoutMs: 30_000 });
+    if (!sourceExists || (yield* run("cat-file", "-e", `${commit}^{commit}`)).code !== 0) {
+      checks.push(fail("commit exists", missing));
+      return { checks, branch: null };
+    }
+    checks.push(pass("commit exists", `clone gone; found ${commit} in source`));
+    if (row.clone?.base) {
+      const base = row.clone.base;
+      checks.push((yield* run("merge-base", "--is-ancestor", base.sha, commit)).code === 0
+        ? pass("clone base", `clone gone; ${base.ref} ${base.sha} in source`)
+        : fail("clone base", `clone gone; ${commit} does not descend from ${base.ref} ${base.sha}`));
+    }
+    const symbolic = yield* run("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD");
+    const base = lane?.base?.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "") ??
+      (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
+    const refs = yield* run("for-each-ref", "--format=%(refname:short)", "--contains", commit, "refs/heads", "refs/remotes");
+    const containing = refs.code === 0 ? refs.stdout.trim().split("\n").filter(Boolean) : [];
+    const onBase = (yield* run("merge-base", "--is-ancestor", commit, base)).code === 0;
+    if (onBase || containing.length) {
+      checks.push(pass("on lane branch", `clone gone; found on ${onBase ? base : containing[0]} in source`));
+      return { checks, branch: null };
+    }
+    // A squash has the packet's cumulative patch, not necessarily its final commit's patch.
+    for (const baseRef of [base, `refs/remotes/origin/${base}`]) {
+      const fork = yield* run("merge-base", commit, baseRef);
+      if (fork.code !== 0) continue;
+      const history = yield* run("rev-list", "--first-parent", `${fork.stdout.trim()}..${baseRef}`);
+      for (const sha of history.code === 0 ? history.stdout.trim().split("\n").filter(Boolean) : []) {
+        const parent = yield* run("rev-parse", "--verify", `${sha}^`);
+        if (parent.code !== 0) continue;
+        const mergeBase = yield* run("merge-base", commit, parent.stdout.trim());
+        if (mergeBase.code !== 0) continue;
+        if (yield* squashPatchMatches(proc, source, mergeBase.stdout.trim(), commit, parent.stdout.trim(), sha)) {
+          checks.push(pass("on lane branch", `clone gone; landed by squash as ${sha}`));
+          return { checks, branch: null };
+        }
+      }
+    }
+    checks.push(fail("on lane branch", missing));
+    return { checks, branch: null };
+  });
+
 /**
  * Evidence for one packet. The intercom report is a claim; these checks are
  * what the owner records. A hash identifies bytes; it does not prove quality.
@@ -82,7 +139,13 @@ export const verifyPacket = (project: Project, lane: Lane | undefined, row: Agen
     const reportOk = existsSync(packet.report) && statSync(packet.report).size > 0;
     checks.push(reportOk ? pass("report exists", packet.report) : fail("report exists", `missing or empty: ${packet.report}`));
 
-    if (row.clone) {
+    const cloneExists = existsSync(row.cwd) && statSync(row.cwd).isDirectory();
+    if (!cloneExists && packet.kind === "commit") {
+      const source = sourceOf(project, lane, row);
+      const fallback = yield* verifyGoneClone(yield* Proc, source, lane, row, packet.id, existsSync(source) && statSync(source).isDirectory());
+      return { checks: [...checks, ...fallback.checks], branch: null };
+    }
+    if (row.clone && cloneExists) {
       const base = row.clone.base;
       if (!base) {
         checks.push(skip("clone base", `lane ${row.lane} has no recorded clone base (launched before bases were recorded)`));
