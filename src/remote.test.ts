@@ -218,6 +218,24 @@ describe("remote owner operations", () => {
     expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(true);
     expect(s.calls.filter(call => call.command === "ssh" && call.args.at(-1)?.includes("mtimeMs"))).toHaveLength(1);
   });
+  it("verifies and lands a remote-only packet over SSH", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    sh(cwd, "checkout", "--detach", "main");
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote-only");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    sh(cwd, "update-ref", "refs/remotes/origin/worker/remote-only", commit);
+    sh(cwd, "checkout", launched.row.clone!.branch);
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "remote-only", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    const verified = await s.run(packetVerify(s.dir, commit));
+    expect(verified.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: `on remote-tracking branch origin/worker/remote-only (row branch ${launched.row.clone!.branch})` });
+    expect((await s.run(load(s.dir))).agents.find(row => row.name === launched.row.name)?.clone?.branch).toBe("origin/worker/remote-only");
+    expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("refs/remotes"))).toBe(true);
+    const landed = await s.run(packetLand(s.dir, { id: commit, outcome: "committed" }));
+    expect(landed.packet.state).toBe("committed");
+    expect(readFileSync(join(s.dir, "work.txt"), "utf8")).toBe("packet\n");
+  });
+
   it("verifies and records a remote sibling branch", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
     sh(cwd, "checkout", "-qb", "worker/remote-next", "main");

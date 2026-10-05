@@ -1481,6 +1481,24 @@ describe("packet_land external squash landings", () => {
     return sh(dir, "rev-parse", "HEAD").trim();
   }
 
+  it("verifies and records a remote-only packet squash-merged through patch-id", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
+    sh(clone, "checkout", "--detach", "main");
+    const commit = commitInClone(clone);
+    sh(clone, "update-ref", "refs/remotes/origin/worker/remote-only", commit);
+    sh(clone, "checkout", "worker/probe-w");
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "remote-only squash", checks: [] }));
+    sh(dir, "fetch", "-q", clone, commit);
+    const landedAs = squash(dir, commit);
+    await runWith(h, packetVerify(dir, commit));
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("origin/worker/remote-only");
+    const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(landed.note).toBe("recorded a squash landing (patch-id match)");
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs });
+  });
+
   it("verifies and records a sibling packet squash-merged onto main", async () => {
     const h = harness();
     const { dir, clone } = await launchedWorker(h);
@@ -1603,6 +1621,53 @@ describe("packet_land external squash landings", () => {
 });
 
 describe("packet_verify against fixtures", () => {
+  it("verifies a remote-only packet, records its ref, and rift-merges it", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    sh(clone, "checkout", "--detach", "main");
+    const commit = commitInClone(clone);
+    sh(clone, "update-ref", "refs/remotes/origin/worker/remote-only", commit);
+    sh(clone, "checkout", "worker/probe-w");
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "remote-only", checks: [] }));
+    const verified = await runWith(h, packetVerify(dir, commit));
+    expect(verified.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: "on remote-tracking branch origin/worker/remote-only (row branch worker/probe-w)" });
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("origin/worker/remote-only");
+    const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed" }));
+    expect(landed.packet.state).toBe("committed");
+    expect(sh(dir, "merge-base", "--is-ancestor", commit, "HEAD")).toBe("");
+    expect(readFileSync(join(dir, "work.txt"), "utf8")).toBe("packet\n");
+  });
+
+  it("prefers a local branch over a remote ref and falls back after its removal", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    sh(clone, "checkout", "-qb", "worker/local", "main");
+    const commit = commitInClone(clone);
+    sh(clone, "update-ref", "refs/remotes/origin/worker/remote-only", commit);
+    sh(clone, "checkout", "worker/probe-w");
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "local wins", checks: [] }));
+    const local = await runWith(h, packetVerify(dir, commit));
+    expect(local.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: "on sibling branch worker/local (row branch worker/probe-w)" });
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("worker/local");
+    sh(clone, "branch", "-D", "worker/local");
+    const remote = await runWith(h, packetVerify(dir, commit));
+    expect(remote.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: "on remote-tracking branch origin/worker/remote-only (row branch worker/local)" });
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("origin/worker/remote-only");
+  });
+
+  it("lists checked remote refs when no ref contains the packet", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    sh(clone, "update-ref", "refs/remotes/origin/worker/old", "main");
+    sh(clone, "checkout", "--detach", "main");
+    const commit = commitInClone(clone);
+    sh(clone, "checkout", "worker/probe-w");
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "unreachable", checks: [] }));
+    const error = await failWith(h, packetVerify(dir, commit));
+    expect(JSON.stringify(error.failures)).toContain("checked remote-tracking refs:");
+    expect(JSON.stringify(error.failures)).toContain("origin/worker/old");
+  });
+
   it.each(["sibling", "row", "detached"])("verifies a sibling branch with %s HEAD and records it on the row", async (head) => {
     const h = harness();
     const { dir, clone } = await launchedWorker(h);
