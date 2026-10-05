@@ -1179,12 +1179,13 @@ const locatePane = (binding: PaneBinding) =>
     return all.find((pane) => pane.terminal_id === binding.terminalId) ?? null;
   });
 
-export const laneClose = (dir: string, slug: string) =>
+export const laneClose = (dir: string, slug: string, params: { discard?: boolean } = {}) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const project = yield* load(dir);
     const lane = yield* findLane(project, slug);
     const { liveAgents, openPackets } = laneCounts(project, slug);
+    if (lane.state === "proposed" && !params.discard) return yield* input(`lane ${slug} was never opened; lane_open starts it (open: false keeps it parked). Pass discard: true to drop it from the backlog.`);
     if (liveAgents.length > 0 || openPackets.length > 0) {
       const drained =
         lane.state === "open"
@@ -1206,27 +1207,29 @@ export const laneClose = (dir: string, slug: string) =>
       };
       return pendingResult;
     }
-    yield* stepLane(slug, lane.state, { type: "CLOSE", liveAgents: 0, openPackets: 0 });
+    yield* stepLane(slug, lane.state, { type: "CLOSE", liveAgents: 0, openPackets: 0, discard: params.discard === true });
     const paneNote = lane.root ? yield* closeOwnedPane(lane.root, dir, `lane_close ${slug}`) : "no root pane";
     const closed = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findLane(current, slug);
+        if (latest.state === "proposed" && !params.discard) return yield* input(`lane ${slug} was never opened; lane_open starts it (open: false keeps it parked). Pass discard: true to drop it from the backlog.`);
         const counts = laneCounts(current, slug);
         const state = yield* stepLane(slug, latest.state, {
           type: "CLOSE",
           liveAgents: counts.liveAgents.length,
           openPackets: counts.openPackets.length,
+          discard: params.discard === true,
         });
-        const next: Lane = { ...latest, state, root: null, closedAt: latest.closedAt ?? iso(env), updatedAt: iso(env) };
+        const next: Lane = { ...latest, state, root: null, discarded: latest.state === "proposed", closedAt: latest.closedAt ?? iso(env), updatedAt: iso(env) };
         return [withLane(current, next), next] as const;
       }),
     );
     yield* publishTokens(yield* load(dir));
     const latest = yield* load(dir);
-    const count = latest.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" &&
+    const count = latest.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
       (!latest.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(latest.lastRetroAt))).length;
     return { lane: closed, closed: true, pending: [] as string[], paneNote,
-      ...(closed.kind === "work" && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run references/retro.md` } : {}) };
+      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run references/retro.md` } : {}) };
   });
 
 // ---------- agents ----------
@@ -2753,7 +2756,7 @@ export const projectReview = (dir: string, params: ReviewInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const before = yield* load(dir);
-    const retroLanes = before.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" &&
+    const retroLanes = before.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
       (!before.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(before.lastRetroAt)))
       .map(lane => ({ slug: lane.slug, sessionFiles: before.agents.filter(agent => agent.lane === lane.slug && agent.role === "worker")
         .flatMap(agent => agent.sessionFile ? [agent.sessionFile] : []) }));

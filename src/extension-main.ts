@@ -332,7 +332,7 @@ export default function muster(host: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;
       return run(ctx, signal, laneOpen(projectDir(ctx, project), rest), (result) =>
-        `Lane ${result.lane.slug} is ${result.lane.state}${result.lane.tabId ? ` in tab ${result.lane.tabId}, root pane ${result.lane.root?.paneId}` : ""}.${result.note ? ` ${result.note}.` : ""}${result.created ? `\nProject outcome: ${result.outcome}\nIf this lane serves another project's outcome, close it and send the ask to that project's desk.` : ""}`,
+        `Lane ${result.lane.slug} is ${result.lane.state}${result.lane.root ? ` in tab ${result.lane.tabId}, root pane ${result.lane.root.paneId}` : ""}.${result.note ? ` ${result.note}.` : ""}${result.created ? `\nProject outcome: ${result.outcome}\nIf this lane serves another project's outcome, close it and send the ask to that project's desk.` : ""}`,
       );
     },
   });
@@ -354,10 +354,10 @@ export default function muster(host: ExtensionAPI) {
     name: "lane_close",
     label: "Muster lane close",
     description:
-      "Close a lane when every agent row is closed and every packet is terminal. Otherwise the lane drains (no new launches) and the result lists what is pending. Closes only the tab's root pane that Muster opened.",
-    parameters: Type.Object({ project: ProjectParam, slug: Type.String() }),
+      "Close a lane when every agent row is closed and every packet is terminal. Otherwise the lane drains (no new launches) and the result lists what is pending. Closes only the tab's root pane that Muster opened. A proposed lane requires discard: true to drop it from the backlog; discard is ignored for open or draining lanes.",
+    parameters: Type.Object({ project: ProjectParam, slug: Type.String(), discard: Type.Optional(Type.Boolean()) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      return run(ctx, signal, laneClose(projectDir(ctx, params.project), params.slug), (result) =>
+      return run(ctx, signal, laneClose(projectDir(ctx, params.project), params.slug, { discard: params.discard }), (result) =>
         result.closed
           ? `Lane ${result.lane.slug} closed. ${result.paneNote ?? ""}${result.retro ? `\n${result.retro}` : ""}`
           : `Lane ${result.lane.slug} is ${result.lane.state}; pending:\n${result.pending.map((line) => `- ${line}`).join("\n")}`,
