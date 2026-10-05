@@ -1127,13 +1127,13 @@ describe("a lane from launch to close", () => {
     const content = report.split("---\n")[2];
     expect(content).toBeDefined();
     // Portable safety assertion; compilation can also use pi-notes' MDsveX.
-    const outsideCode = content?.replace(/^(`{3,})\n[\s\S]*?^\1$/gm, "").replace(/(`{3,})[^\n]*?\1/g, "");
+    const outsideCode = content?.replace(/^(`{3,})\n[\s\S]*?^\1$/gm, "").replace(/<code>[\s\S]*?<\/code>/g, "");
     expect(outsideCode).not.toMatch(/[{}<]/);
     expect(content).toContain(`## Summary\n\n\`\`\`\`\n${text}\n\`\`\`\``);
     expect(content).toContain(`## Notes\n\n\`\`\`\`\n${text}\n\`\`\`\``);
     expect(content).toContain("| Check | Outcome | Detail |");
-    expect(content).toContain('| ``` `check` &#124; <script> {"a":1} ``` | pass |');
-    expect(content).toContain("&#124; detail ```` |");
+    expect(content).toContain('| <code>&#96;check&#96; &#124; &#60;script&#62;<br />&#123;"a":1&#125;</code> | <code>pass</code> |');
+    expect(content).toContain("&#124; detail</code> |");
 
     let reportPath = reported.packet.report;
     if (extension === "md") {
