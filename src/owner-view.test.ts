@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { appendOwnerItem } from "./owner-queue.ts";
-import { ownerTimelineData, OwnerTimelineView, ownerDisplayName, ownerReceipt, ownerToolResult, ownerLine } from "./owner-view.ts";
+import { ownerTimelineData, OwnerTimelineView, readOwnerTimelineData, ownerDisplayName, ownerReceipt, ownerToolResult, ownerLine } from "./owner-view.ts";
 
 const theme = { fg: (_: string, s: string) => `\x1b[36m${s}\x1b[0m`, bold: (s: string) => `\x1b[1m${s}\x1b[0m` };
 function fixture() {
@@ -16,6 +16,22 @@ function fixture() {
   return { data, mention };
 }
 describe("owner timeline", () => {
+  it("renders the same bytes as the wall clock moves, so a card in scrollback never forces Pi to redraw", () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(Date.parse("2026-10-05T19:00:00Z"));
+      const { data } = fixture();
+      const render = () => new OwnerTimelineView(readOwnerTimelineData(JSON.parse(JSON.stringify(data)))!, { expanded: false, noColor: true }, theme).render(100);
+      const first = render();
+      vi.setSystemTime(Date.parse("2026-10-05T20:30:00Z"));
+      expect(render()).toEqual(first);
+      const legacy = { ...JSON.parse(JSON.stringify(data)), at: undefined };
+      const old = () => new OwnerTimelineView(readOwnerTimelineData(legacy)!, { expanded: false, noColor: true }, theme).render(100);
+      const before = old();
+      vi.setSystemTime(Date.parse("2026-10-06T09:00:00Z"));
+      expect(old()).toEqual(before);
+    } finally { vi.useRealTimers(); }
+  });
   it.each([100, 40, 10, 1, 0])("keeps mention cards first and every line within %i columns", width => {
     const { data } = fixture();
     const lines = new OwnerTimelineView(data, { expanded: false, now: Date.now() }, theme).render(width);

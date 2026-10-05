@@ -22,6 +22,8 @@ export interface OwnerTimelineData {
   parents: readonly OwnerItem[];
   routing?: ReturnType<typeof decodeOwnerRouting>;
   flow?: string;
+  /** Delivery time. Ages render against it, so a card in scrollback never changes and never forces Pi to redraw the screen. */
+  at?: number;
 }
 const GLYPH: Record<OwnerKind, string> = { question: "❓", blocked: "⛔", action: "🐑", progress: "📈", done: "🏁", fyi: "📎" };
 const COLOR: Record<OwnerKind, "warning" | "error" | "accent" | "success" | "dim"> = { question: "warning", blocked: "error", action: "accent", progress: "dim", done: "success", fyi: "dim" };
@@ -54,8 +56,9 @@ function age(ts: string, now: number): string {
   return `${Math.floor(seconds / 86400)}d ago`;
 }
 /** Snapshot names and thread context at delivery, never perform file IO in render(). */
-export function ownerTimelineData(input: { items: readonly OwnerItem[]; reader: string; home: string; project?: string }): OwnerTimelineData {
-  if (!input.items.length) return { items: input.items, reader: input.reader, authors: {}, parents: [] };
+export function ownerTimelineData(input: { items: readonly OwnerItem[]; reader: string; home: string; project?: string; now?: number }): OwnerTimelineData {
+  const at = input.now ?? Date.now();
+  if (!input.items.length) return { items: input.items, reader: input.reader, authors: {}, parents: [], at };
   const authors: Record<string, string> = {};
   let dirs: string[] = input.project ? [input.project] : [];
   try { dirs = [...dirs, ...[...readRegistry(input.home).values()].map(entry => entry.dir)]; } catch { /* names are optional */ }
@@ -81,7 +84,7 @@ export function ownerTimelineData(input: { items: readonly OwnerItem[]; reader: 
     }
   }
   const visibleAuthors = new Set([...input.items, ...parents].map(item => item.author));
-  return { items: input.items, reader: input.reader, authors: Object.fromEntries(Object.entries(authors).filter(([session]) => visibleAuthors.has(session))), parents };
+  return { items: input.items, reader: input.reader, authors: Object.fromEntries(Object.entries(authors).filter(([session]) => visibleAuthors.has(session))), parents, at };
 }
 /** Decode persisted renderer details too: old sessions need a safe plain-text fallback. */
 export function readOwnerTimelineData(value: unknown): OwnerTimelineData | undefined {
@@ -89,7 +92,7 @@ export function readOwnerTimelineData(value: unknown): OwnerTimelineData | undef
   try {
     const authors: Record<string, string> = {};
     if ("authors" in value && value.authors && typeof value.authors === "object") for (const [key, name] of Object.entries(value.authors)) if (typeof name === "string") authors[key] = name;
-    return { items: value.items.map(item => decodeOwnerItem(item)), reader: value.reader, authors, ...("flow" in value && typeof value.flow === "string" ? { flow: value.flow } : {}), ...("routing" in value ? { routing: decodeOwnerRouting(value.routing) } : {}), parents: "parents" in value && Array.isArray(value.parents) ? value.parents.map(item => decodeOwnerItem(item)) : [] };
+    return { items: value.items.map(item => decodeOwnerItem(item)), reader: value.reader, authors, ...("flow" in value && typeof value.flow === "string" ? { flow: value.flow } : {}), ...("routing" in value ? { routing: decodeOwnerRouting(value.routing) } : {}), ...("at" in value && typeof value.at === "number" && Number.isFinite(value.at) ? { at: value.at } : {}), parents: "parents" in value && Array.isArray(value.parents) ? value.parents.map(item => decodeOwnerItem(item)) : [] };
   } catch { return undefined; }
 }
 
@@ -103,7 +106,9 @@ export class OwnerTimelineView implements Component {
     const fg = (color: Parameters<OwnerTheme["fg"]>[0], s: string) => plain ? clean(s) : this.theme.fg(color, clean(s));
     const name = (author: string) => oneLine(ownerDisplayName(author, this.data.authors));
     const shown = (s: string) => this.options.expanded ? s : hideUris(s);
-    const now = this.options.now ?? Date.now();
+    // Never the wall clock: a line that changes once rendered into scrollback makes Pi wipe and redraw the whole screen.
+    // Older persisted cards lack `at`; their newest item time keeps them stable too.
+    const now = this.options.now ?? this.data.at ?? Math.max(0, ...this.data.items.map(item => Date.parse(item.createdAt)).filter(Number.isFinite));
     const root = new Container();
     if (this.data.flow) {
       const flow = this.data.flow;
