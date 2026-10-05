@@ -31,7 +31,7 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Workers and the fence
 
-- Set `base` on `lane_open` when a lane builds on anything other than the repo's default branch.
+- In `rift-merge`, clones follow the source's local branch, even behind origin; check the launch base note, and set `lane_open base` to override it (detached sources retain the script default).
 
 - If the repo's Brain check rejects the board's frontmatter type, set `boardType` through `project_open` or `project_update` to a type its rules allow.
 

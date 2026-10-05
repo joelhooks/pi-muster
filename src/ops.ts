@@ -125,16 +125,13 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
     for (const path of requiredPaths) yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 });
     let cwd = params.cwd ? mapPath(yield* requireAbsolute("cwd", params.cwd), machine) : existing?.cwd ?? parent?.cwd ?? remoteSource;
     let clone = existing?.clone ?? null;
+    const cloneNotes: string[] = [];
     if (params.clone && params.action !== "restore") {
-      const out = yield* must(machine.workerWorktree, ["create", remoteSource, name.replace(/_/g, "-"), ...(lane.base ? ["--base", lane.base] : [])], { cwd: remoteSource, timeoutMs: 300_000 });
-      const path = /^worktree:\s+(.+)$/m.exec(out)?.[1]?.trim();
-      const branch = /^branch:\s+(.+)$/m.exec(out)?.[1]?.trim();
-      const base = /^base:[ \t]+(.+)[ \t]+([0-9a-f]{40}|[0-9a-f]{64})[ \t]*$/m.exec(out);
-      if (!path || !branch || !base) return yield* input(`machine ${nameOfMachine}: worker-worktree.sh omitted worktree, branch or base`);
-      cwd = yield* requireAbsolute("remote clone", path);
-      const sha = base[2]!;
-      if ((yield* git(cwd, "rev-parse", "HEAD")).trim() !== sha) return yield* input(`machine ${nameOfMachine}: clone HEAD differs from base`);
-      clone = { source, branch, base: { ref: base[1]!.trim(), sha } };
+      // onRemote supplies the remote Proc, so branch selection reads the remote source.
+      const allocated = yield* cloneFor(remoteSource, name, lane, project.mode, machine.workerWorktree);
+      cwd = yield* requireAbsolute("remote clone", allocated.path);
+      clone = { source, branch: allocated.branch, base: allocated.base };
+      cloneNotes.push(...allocated.notes);
     }
     yield* must("test", ["-d", cwd], { cwd: "/", timeoutMs: 10_000 });
     yield* guardDurable(project, "remote cwd", cwd);
@@ -184,7 +181,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
         return yield* input(`machine ${nameOfMachine}: model error: ${proof.modelError}`);
       }
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven" });
-      return { row, argv, readiness: "proven", proof, sessionIdMatched: actual === requestedId, notes: resolved.notes };
+      return { row, argv, readiness: "proven", proof, sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes] };
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   }));
@@ -1195,23 +1192,48 @@ const warmForkSource = (dir: string, parent: AgentRow | null, at: string | undef
     catch: error => input(String(error instanceof Error ? error.message : error)),
   });
 
-const cloneFor = (source: string, name: string, lane: Lane) =>
+const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
+    const proc = yield* Proc;
+    const workerWorktree = script ?? env.workerWorktree;
     const slug = name.replace(/_/g, "-");
-    const out = yield* must(env.workerWorktree, ["create", source, slug, ...(lane.base !== null ? ["--base", lane.base] : [])], { cwd: source, timeoutMs: 300_000 });
+    const notes: string[] = [];
+    let requestedBase = lane.base;
+    let localBase = false;
+    if (requestedBase === null && mode === "rift-merge") {
+      const branch = yield* proc.run("git", ["symbolic-ref", "--quiet", "--short", "HEAD"], { cwd: source });
+      if (branch.code === 0 && branch.stdout.trim()) {
+        requestedBase = branch.stdout.trim();
+        localBase = true;
+      } else if (branch.code === 1) {
+        notes.push("source HEAD is detached; using worker-worktree.sh default base");
+      } else {
+        return yield* input(`cannot resolve source local branch in ${source}: ${branch.stderr.trim()}`);
+      }
+    }
+    const out = yield* must(workerWorktree, ["create", source, slug, ...(requestedBase !== null ? ["--base", requestedBase] : [])], { cwd: source, timeoutMs: 300_000 });
     const path = /^worktree:\s+(.+)$/m.exec(out)?.[1]?.trim();
     const branch = /^branch:\s+(.+)$/m.exec(out)?.[1]?.trim();
     if (!path || !branch) return yield* input(`worker-worktree.sh create printed no worktree/branch:\n${out}`);
     const reported = /^base:[ \t]+(.+)[ \t]+([0-9a-f]{40}|[0-9a-f]{64})[ \t]*$/m.exec(out);
-    if (!reported) return yield* input(`${env.workerWorktree} create printed no valid base: line; cannot prove clone base for lane ${lane.slug}. Update the script.`);
+    if (!reported) return yield* input(`${workerWorktree} create printed no valid base: line; cannot prove clone base for lane ${lane.slug}. Update the script.`);
     const base = { ref: (reported[1] as string).trim(), sha: reported[2] as string };
     const head = (yield* git(path, "rev-parse", "HEAD")).trim();
     if (head !== base.sha) return yield* new GuardFailed({
       guard: "clone-base",
       message: `lane ${lane.slug} clone HEAD ${head} differs from base ${base.ref} ${base.sha}`,
     });
-    return { path, branch, base };
+    notes.push(`base: ${base.ref} ${base.sha.slice(0, 7)} (${localBase ? "local, rift-merge" : lane.base !== null ? "explicit" : "script default"})`);
+    if (localBase) {
+      // create fetches origin first; compare its fresh default ref with the proven clone base.
+      const origin = (yield* git(source, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD").pipe(Effect.orElseSucceed(() => ""))).trim();
+      if (origin) {
+        const behind = (yield* git(source, "rev-list", "--count", `${base.sha}..${origin}`).pipe(Effect.orElseSucceed(() => ""))).trim();
+        if (/^\d+$/.test(behind) && Number(behind) > 0) notes.push(`source ${base.ref} is ${behind} behind ${origin}`);
+      }
+    }
+    return { path, branch, base, notes };
   });
 
 const waitForCwd = (paneId: string, cwd: string) =>
@@ -1458,7 +1480,8 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         cwd = existing?.cwd ?? cwd;
       } else if (params.clone) {
         const source = lane.repo ?? project.dir;
-        const allocated = yield* cloneFor(source, name, lane);
+        const allocated = yield* cloneFor(source, name, lane, project.mode);
+        skillNotes.push(...allocated.notes);
         cwd = allocated.path;
         clone = { source, branch: allocated.branch, base: allocated.base };
       }
