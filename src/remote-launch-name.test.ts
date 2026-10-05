@@ -140,6 +140,39 @@ describe("remote launch argv delivery", () => {
     expect(explicit.row.delivery).toBe("proven");
   });
 
+  it("does not prove a launch retry from an old matching user and assistant pair", async () => {
+    const s = await setup();
+    const parent = await s.launch();
+    await runWith(s.h, mutate(s.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "failed" as const })) }, null] as const)));
+    s.remote.autoLaunch = false;
+    s.h.sleep = ms => { s.h.now = new Date(s.h.now.getTime() + ms * 90); };
+    const handle = s.remote.handle.bind(s.remote);
+    s.remote.handle = (method, params) => {
+      const result = handle(method, params);
+      if (method === "pane.send_input") {
+        const pane = s.remote.panes.get(String(params.pane_id))!;
+        pane.agent = "pi";
+        pane.agent_session = { agent: "pi", source: "pi", kind: "path", value: parent.row.sessionFile! };
+      }
+      return result;
+    };
+    const retry = await s.launch();
+    expect(retry.row.sessionId).toBe(parent.row.sessionId);
+    expect(retry.row.delivery).toBe("unproven");
+    expect(retry.proof).toMatchObject({ state: "unproven", firstTurn: true, detail: "no matching user entry within 90 s" });
+    expect(s.remote.initialPrompts).toHaveLength(1);
+    expect(s.remote.typedPrompts).toEqual([]);
+  });
+
+  it.each(["pi", "claude"])("refuses a local start into a pane still hosting %s without typing", async agent => {
+    const s = await setup();
+    const pane = s.h.herdr.addPane("w1", "external", s.dir);
+    pane.agent = agent;
+    pane.name = "outsider";
+    await expect(runWith(s.h, agentLaunch(s.dir, { action: "launch", name: "blocked", role: "worker", lane: "work", label: "blocked", cwd: s.dir, pane: pane.pane_id, prompt: "Do the work." }))).rejects.toThrow(`launch pane ${pane.pane_id} still hosts agent ${agent}`);
+    expect(s.h.herdr.calls.some(call => call.method === "pane.send_input")).toBe(false);
+  });
+
   it("does not prove a fork from its parent's identical old work message", async () => {
     const s = await setup();
     await s.launch();

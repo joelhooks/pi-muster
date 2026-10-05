@@ -1093,6 +1093,7 @@ describe("a lane from launch to close", () => {
     expect(failed?.state).toBe("failed");
     const panesBefore = h.herdr.panes.size;
     h.herdr.startSessions = true;
+    delete h.herdr.panes.get(failed!.pane!.paneId)!.agent; // The failed Pi process exited.
     h.herdr.promptFails = true;
     const relaunched = await runWith(h, launch);
     expect(relaunched.row.state).toBe("running");
@@ -1942,7 +1943,7 @@ describe("project_status", () => {
     const exited = await runWith(h, projectStatus(dir));
     expect(exited.agents[0]?.state).toBe("interrupted");
     expect(exited.agents[0]?.action).toBe("agent exited to its shell: interrupted");
-    if (pane) pane.agent = "probe_w";
+    // The process stays exited until the restore's launcher starts the new Pi.
     await runWith(h, agentLaunch(dir, { action: "restore", name: "probe_w" }));
     h.herdr.panes.delete(launched.row.pane?.paneId as string);
     const gone = await runWith(h, projectStatus(dir));

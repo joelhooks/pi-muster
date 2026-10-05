@@ -103,6 +103,12 @@ const sessionRestore = (profile: LaunchProfile, file: string | null, project: Pr
   return { ...selected, live, notes: [...notes, selected.note] };
 });
 
+const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
+  const pane = yield* paneGet(paneId);
+  if (!pane) return yield* input(`launch pane ${paneId} is gone`);
+  if (pane.agent) return yield* input(`launch pane ${paneId} still hosts agent ${pane.agent}; close or adopt it before starting another Pi`);
+});
+
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
 const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, nameOfMachine: string) => withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
@@ -196,7 +202,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
     const promptDir = (yield* git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")
       .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
     const message = params.action === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, promptDir);
-    const inheritedEntries = message.expected ? yield* inheritedStartEntries(params.action === "fork" ? parentSessionFile : params.action === "restore" ? sessionFile : null) : 1;
+    const inheritedEntries = message.expected ? yield* inheritedStartEntries(params.action === "fork" ? parentSessionFile : params.action === "restore" ? sessionFile : existing?.cwd === cwd ? existing.sessionFile : null) : 1;
     const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...message });
     const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, MUSTER_COMMS: "intercom", MUSTER_REMOTE_ROW: JSON.stringify(row) };
     // Read the remote environment, never transplant the owner's machine-specific PATH.
@@ -221,6 +227,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       yield* must("mkdir", ["-p", logDir], { cwd, timeoutMs: 10_000 });
       const launchLog = (yield* must("mktemp", [join(logDir, `launch-${name}-XXXXXXXX`)], { cwd, timeoutMs: 10_000 })).trim();
       const piReceiptId = env.createId();
+      yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(logDir, `#!/bin/sh\nset -e\n${shellPrelude(cwd, agentEnvironment)}${piReceiptSuffix(piReceiptId)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
       const wait = yield* waitForSession(binding.paneId, null);
@@ -1753,7 +1760,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const kind: LaunchKind = params.action;
     const launchProfile = extensionsFor(project, row);
     const message = kind === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, join(env.home, ".pi/agent"));
-    const inheritedEntries = message.expected ? yield* inheritedStartEntries(kind === "fork" ? row.parentSessionFile : kind === "restore" ? row.sessionFile : null) : 1;
+    const inheritedEntries = message.expected ? yield* inheritedStartEntries(kind === "fork" ? row.parentSessionFile : kind === "restore" ? row.sessionFile : existing?.cwd === row.cwd ? existing.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home) : null) : 1;
     const argv = buildArgv({
       kind,
       sessionId: row.sessionId,
@@ -1792,6 +1799,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       return [{ ...current, agents }, binding] as const;
     })).pipe(Effect.tapError(failLaunch));
     const launched = yield* Effect.gen(function* () {
+      yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(join(env.home, ".pi/agent"), `#!/bin/sh\nset -e\n${shellPrelude(row.cwd, agentEnvironment, pathPrepend)}${piReceiptSuffix(piReceiptId)}\nexec ${["pi", ...argv].map(shellQuote).join(" ")}`);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
       const wait = yield* waitForSession(binding.paneId, null, () => findSessionFile(row.cwd, row.sessionId, env.home));

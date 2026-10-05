@@ -99,7 +99,7 @@ export class FakeHerdr {
   private startSession(pane: FakePane, sessionId: string, file?: string, parent?: string) {
     const path = file ?? join(sessionDirFor(pane.cwd, this.home), `2026-09-29T00-00-00-000Z_${sessionId}.jsonl`);
     mkdirSync(join(path, ".."), { recursive: true });
-    if (!file || !existsSync(file)) {
+    if (!existsSync(path)) {
       const inherited = parent ? readFileSync(parent, "utf8").split("\n").slice(1).join("\n") : "";
       writeFileSync(path, `${JSON.stringify({ type: "session", id: sessionId, cwd: pane.cwd })}\n${inherited}`);
     }

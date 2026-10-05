@@ -26,7 +26,10 @@ describe("Muster CLI launch PATH", () => {
     const h = harness();
     const dir = await open(h);
     const parent = await runWith(h, agentLaunch(dir, { action: "launch", name: "first", role: "worker", lane: "work", label: "first", cwd: dir, env: { PATH: "/profile/bin:/usr/bin" } }));
-    if (action === "restore") await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "failed" as const })) }, null] as const)));
+    if (action === "restore") {
+      await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "failed" as const })) }, null] as const)));
+      delete h.herdr.panes.get(parent.row.pane!.paneId)!.agent; // The failed process exited to its shell.
+    }
     const result = action === "launch" ? parent : await runWith(h, agentLaunch(dir, action === "fork"
       ? { action, name: "second", from: "first", label: "second" }
       : { action, name: "first" }));
