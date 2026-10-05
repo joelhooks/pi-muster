@@ -1,0 +1,53 @@
+{
+  "repo": "https://github.com/joelhooks/rat-king",
+  "commit": "c49a733",
+  "sourcePath": "packages/envelope/src",
+  "review": "unreviewed",
+  "files": {
+    "canonical.ts": "18462b6f43f8efab73f9d758179a29f994cd10d51c788496889a044a0c6decb0",
+    "envelope.ts": "7b72c6722247c9c896e4cafc2e80e9cc26056e6c1c26527aa3d81a85db462008",
+    "es256.ts": "0af0579c1db6cd003e617ef944e0d042bb4ef21e61d2fd3fb521231b20d09186",
+    "failure.ts": "5fd259296c19dc00cf0882fb841d4b7d3be49474a65bf1cc3853f0466085dc10",
+    "hpke-p256.ts": "f5865f18f40db12b3bbf5f8d78a38979a99c01641f6a20fe838171d856be8bfe",
+    "webcrypto.ts": "7482bfa59aa4154b736d06706d3520fd4e67dc64aa2d9e0a8258cded0a7830f7"
+  },
+  "upstreamFiles": {
+    "canonical.ts": "b0ba9da21426127ffa9cc5c0783716c064cb9c9f420c23c9e8f5a8bbdd6ef0bf",
+    "envelope.ts": "de70a74295295e3901561737af714f70b123c6e8453262275c4eb6a7be79272c",
+    "es256.ts": "0af0579c1db6cd003e617ef944e0d042bb4ef21e61d2fd3fb521231b20d09186",
+    "failure.ts": "5fd259296c19dc00cf0882fb841d4b7d3be49474a65bf1cc3853f0466085dc10",
+    "hpke-p256.ts": "f5865f18f40db12b3bbf5f8d78a38979a99c01641f6a20fe838171d856be8bfe",
+    "webcrypto.ts": "7482bfa59aa4154b736d06706d3520fd4e67dc64aa2d9e0a8258cded0a7830f7"
+  },
+  "fixturePath": "../rat-king-fixtures/",
+  "fixtures": {
+    "ack.input.json": "5ae3c6912e14f90a8fe64c331133ce7d75c2925c1b4c2cacbe2c46bf9f26b1b6",
+    "ack.output.json": "d92f3c839ac585dfb6729e81f4f2ae283bb50c8a4187dff5b86ceac013747b31",
+    "acquire-lease.input.json": "ef92c352e367eba26ddb2670483922a6e4d0d5f721762263d4bb7fc5c6b6d6c0",
+    "acquire-lease.output.json": "7a513988f8babe9e0f2809a31241a3b758d43866e53196617493d3c5259a498b",
+    "deliver.input.json": "d1ea060361aaa06fccf72d7bbf9c5fca6283281e840dd5eb9d8c1fedfa481944",
+    "deliver.output.json": "b3332be30ec8ef1a6ea9368ae2b8b6d294c4db2f7386002c98c8765cb2284aae",
+    "did-document.object.json": "263665c07241ad61fc2e0f1e1f5890b0d24e5bc7897ed01f44faa7cacf385ad0",
+    "fenced-send.input.json": "6726e64ec693c2822681399099d67df7768d7a63a68c35f291694a5d64141802",
+    "lease.object.json": "316646b06ffe0cbe4a694b704c0a616606d6fe967aad8603de69adfc0fbc73db",
+    "list.output.json": "0a9d87da780445a8b9926bbd2ce5ae44451500cab2cb4e40707d6d23be003a61",
+    "list.params.json": "b5f928471a0852599db6eeb21b23d8f02797aacb3c019e8751178a20f635e9de",
+    "profile.record.json": "c3eb2252b5f64a6c61692f5dd069ca4ed0ef5221dc9391ff06d4fe0ad9019cdc",
+    "put-did-document.input.json": "c4a07d3050d7201358c6723baa412929f071c85919e773e909bdb1f35267f924",
+    "put-did-document.output.json": "1541c22f2261c9fec171bdcb2a2b050c597ab00ebf811df613e2ed63ea05e3bb",
+    "release-lease.input.json": "038c24ee69028d1d9a0a6011c239ed3dcf4ec82adb34d0743e6af14e823496b7",
+    "renew-lease.input.json": "d194b7a94ef0ab7c8eef3e73b09b0182270b63de6c15619d50af0ab4f465aa9c",
+    "renew-lease.output.json": "7a513988f8babe9e0f2809a31241a3b758d43866e53196617493d3c5259a498b",
+    "resolve-lease.output.json": "7a513988f8babe9e0f2809a31241a3b758d43866e53196617493d3c5259a498b",
+    "resolve-lease.params.json": "1541c22f2261c9fec171bdcb2a2b050c597ab00ebf811df613e2ed63ea05e3bb",
+    "send.input.json": "6920c3ad59e6c0fb49a8d3d18dffeeddb80609e7314a5d2fd6ebdbef798f678b",
+    "send.output.json": "4e5ce9dde39a60317cd3653d887a752cb699628886e7fd3236490fa7daed62c1",
+    "signed-message.object.json": "b26017b44e5b0db42d530afe3e9d4717232f96a4b1b10dc873a399bf19920915",
+    "signing-payload.object.json": "c535b1ffbc3a1c327e862ff9dd0c193d0ae266e38d537106d11377f0e21beb4d",
+    "subscribe-auth.object.json": "ded1368b8049ddd909d5d493d9f1d3973d78a999cd86ca004bdc16e4db69b6ba",
+    "subscribe-notice.object.json": "635fc79d4c0fc135870aaf1c3d5459e9616399d26cd4295fa533a62aa7823a3f",
+    "subscribe.params.json": "50a81f4120c8ab6783cd7c61843661f415db3189009ec613cc59b3e72226d3bc",
+    "theme.record.json": "86c23ed981414bb971464a8c995c5c4abe8843a30de2eb54ebc0799b5064ecab",
+    "urgent-signing-payload.object.json": "0319a4bbeed633ae2317653c02fef56d5dc20637dec93a553b2ac3405b730f2a"
+  }
+}
