@@ -367,8 +367,8 @@ export default function muster(host: ExtensionAPI) {
     name: "agent_launch",
     label: "Muster agent launch",
     description:
-      "Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with side: true, from and lane re-points a running desk already moved into the parent's tab without touching the pane.",
-    promptSnippet: "agent_launch: launch, fork, or restore a lane agent with its full profile",
+      "Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with name and pane re-binds an existing owned row to its live Pi session or direct fork without starting a process or sending input. adopt with side: true, from and lane keeps the side-desk path: re-point a running desk already moved into the parent's tab.",
+    promptSnippet: "agent_launch: launch, fork, restore, or adopt a live lane agent",
     parameters: Type.Object({
       project: ProjectParam,
       action: StringEnum(["launch", "fork", "restore", "adopt"] as const),
@@ -379,7 +379,7 @@ export default function muster(host: ExtensionAPI) {
       label: Type.Optional(Type.String({ description: "Pane and session name: an emoji plus the role" })),
       cwd: Type.Optional(Type.String()),
       clone: Type.Optional(Type.Boolean({ description: "Allocate a rift clone of the lane repo as cwd" })),
-      from: Type.Optional(Type.String({ description: "fork/adopt: the parent row" })),
+      from: Type.Optional(Type.String({ description: "fork or side-desk adopt: the parent row" })),
       side: Type.Optional(Type.Boolean({ description: "fork: split a design-only side desk from its desk parent in the same tab. adopt: re-point an existing running desk to its side parent and lane after checking the live pane tab; never touches the pane." })),
       at: Type.Optional(Type.String({ description: "fork: context label or entry id in the parent session; omitted forks the full session" })),
       model: Type.Optional(Type.String({ description: "an alias (opus, sol) or provider/model" })),
@@ -392,7 +392,7 @@ export default function muster(host: ExtensionAPI) {
       compactAt: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
       brief: Type.Optional(Type.String({ description: "Absolute brief path; the default work prompt points at it" })),
       prompt: Type.Optional(Type.String({ description: "Work prompt to deliver after start" })),
-      pane: Type.Optional(Type.String({ description: "Use this existing pane; Muster will not close a pane it did not open" })),
+      pane: Type.Optional(Type.String({ description: "adopt without side: required live Pi pane, matching the row session or a direct fork parent. Other actions: use this existing pane. Muster will not close a pane it did not open." })),
       slot: Type.Optional(StringEnum(["root", "split"] as const)),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
