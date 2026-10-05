@@ -320,7 +320,7 @@ export default function muster(host: ExtensionAPI) {
       slug: Type.String({ description: "kebab-case lane id" }),
       label: Type.String({ description: "Tab label: an emoji plus the lane in plain words" }),
       goal: Type.String(),
-      kind: Type.Optional(StringEnum(["work", "role"] as const)),
+      kind: Type.Optional(StringEnum(["work", "role", "retro"] as const, { description: "Work counts toward WIP; role does not; retro has one standing slot outside WIP." })),
       writeScope: Type.Optional(Type.Array(Type.String())),
       repo: Type.Optional(Type.String({ description: "Source repo for this lane's clones and landings; default the project dir" })),
       base: Type.Optional(Type.String({ description: "Ref or sha worker clones start from; default the repo default branch" })),

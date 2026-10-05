@@ -4,7 +4,7 @@ Improve the agent's environment from finished work, not from guesses about the c
 
 ## Dispatch
 
-The owner launches a short-lived judge-role agent with the selected lanes, read scope, and one absolute artifact path under `.brain/data/muster/retros/`. Use `project_review`'s `retroLanes` and worker session files to form the batch. A `lane_close` reminder means at least three lanes are awaiting review, not that another judge should launch while one is already running.
+Open the standing slot with the slug from the `lane_close` note and `kind: "retro"` even at full work WIP; only one retro lane may be open or draining. The owner launches a short-lived judge-role agent with the selected lanes, read scope, and one absolute artifact path under `.brain/data/muster/retros/`. Use `project_review`'s `retroLanes` and worker session files to form the batch. A `lane_close` reminder means at least three lanes are awaiting review, not that another judge should launch while one is already running.
 
 The judge returns an artifact packet containing ranked findings in a `.svx`. It never edits steering files, skills, or code inline. The owner verifies and records the artifact, routes candidates, then calls `project_review` with `retro: true` to set `lastRetroAt`. Ordinary project reviews do not consume the batch. Finish a pending batch before closing more lanes: this marker records completion time, not a selective per-lane cursor.
 

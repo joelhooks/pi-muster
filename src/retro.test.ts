@@ -28,8 +28,8 @@ describe("finished lane retros", () => {
     expect(await s.close("judge", "role")).not.toHaveProperty("retro");
     expect(await s.close("one")).not.toHaveProperty("retro");
     expect(await s.close("two")).not.toHaveProperty("retro");
-    expect(await s.close("three")).toHaveProperty("retro", "retro: 3 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run references/retro.md");
-    expect(await s.close("four")).toHaveProperty("retro", "retro: 4 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run references/retro.md");
+    expect(await s.close("three")).toHaveProperty("retro", "retro: 3 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run lane_open slug: \"retro-2026-09-29\" label: \"🔁 retro\" goal: \"Review finished lanes\" kind: \"retro\"; run references/retro.md");
+    expect(await s.close("four")).toHaveProperty("retro", "retro: 4 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run lane_open slug: \"retro-2026-09-29\" label: \"🔁 retro\" goal: \"Review finished lanes\" kind: \"retro\"; run references/retro.md");
     await runWith(s.h, projectReview(s.dir, { note: "done", retro: true }));
     expect(await s.close("five")).not.toHaveProperty("retro");
   });
