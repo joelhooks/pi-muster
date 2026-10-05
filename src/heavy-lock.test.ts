@@ -44,6 +44,20 @@ function cli(options: HeavyOptions, args: string[], sampleCode = "({ cores: 16, 
   });
 }
 
+// A real process group is needed to prove descendant cleanup. Trigger the cap
+// only after both processes exist and the descendant installed its handler;
+// 300ms of wall time was not proof of readiness on a loaded machine.
+function cappedGroup(options: HeavyOptions, exclusive: boolean) {
+  const pidFile = join(options.home, "descendant.pid");
+  const readyFile = join(options.home, "descendant.ready");
+  const descendant = `process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(${JSON.stringify(readyFile)}, 'ready'); setInterval(() => {}, 1000);`;
+  const command = `const {spawn} = require('node:child_process'); const fs = require('node:fs'); const c = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], {stdio:'ignore'}); fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); setInterval(() => {}, 1000);`;
+  const source = `import {existsSync} from 'node:fs'; import {runHeavy} from ${JSON.stringify(pathToFileURL(resolve("bin/muster-heavy.ts")).href)}; await runHeavy(${JSON.stringify([...(exclusive ? ["--exclusive"] : []), "--", process.execPath, "-e", command])}, {home:${JSON.stringify(options.home)}, window:'cap-test', slots:'2', minFreeGB:'16', now:()=>0, adapter:{performanceCores:()=>12,sample:()=>({cores:16,load:${exclusive ? 20 : 45},freeGB:64})}, testOnlyCapMs:300}, {setTimeout:(fn, ms)=> { if (ms !== 300) return setTimeout(fn, ms === 15000 ? 50 : ms); const ready = () => existsSync(${JSON.stringify(pidFile)}) && existsSync(${JSON.stringify(readyFile)}) ? setTimeout(fn, 0) : setTimeout(ready, 1); return ready(); }, clearTimeout});`;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 10000, env: { ...process.env, HOME: options.home } });
+  expect(existsSync(readyFile), result.stderr).toBe(true);
+  return { result, pid: Number(readFileSync(pidFile, "utf8")) };
+}
+
 describe("desk heavy grants", () => {
   const audit = (options: HeavyOptions) => readFileSync(join(options.home, ".local/state/muster/heavy-exclusive.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
   function desk() { return { ...setup(), window: undefined, now: () => Date.now() }; }
@@ -530,14 +544,9 @@ describe("priority deploy windows", () => {
 
   it("caps the detached child group, frees its slot and exits 124", () => {
     const options = setup();
-    const pidFile = join(options.home, "descendant.pid");
-    const descendant = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
-    const command = `const {spawn} = require('node:child_process'); const fs = require('node:fs'); const c = spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], {stdio:'ignore'}); fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); setInterval(() => {}, 1000);`;
-    const source = `import {runHeavy} from ${JSON.stringify(pathToFileURL(resolve("bin/muster-heavy.ts")).href)}; await runHeavy(${JSON.stringify(["--", process.execPath, "-e", command])}, {home:${JSON.stringify(options.home)}, window:'cap-test', slots:'2', minFreeGB:'16', adapter:{performanceCores:()=>12,sample:()=>({cores:16,load:45,freeGB:64})}, testOnlyCapMs:300}, {setTimeout:(fn, ms)=>setTimeout(fn, ms === 15000 ? 50 : ms), clearTimeout});`;
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 10000, env: { ...process.env, HOME: options.home } });
+    const { result, pid } = cappedGroup(options, false);
     expect(result.status, result.stderr).toBe(124);
     expect(result.stderr).toContain("CAPPED priority window cap-test");
-    const pid = Number(readFileSync(pidFile, "utf8"));
     let alive = false;
     try { process.kill(pid, 0); alive = true; } catch { /* Our child has been reaped. */ }
     expect(alive).toBe(false);
@@ -654,12 +663,7 @@ describe("exclusive deploy policy", () => {
 
   it("CLI caps and kills the whole group even after its leader exits", () => {
     const options = setup();
-    const pidFile = join(options.home, "descendant.pid");
-    const descendantCode = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)";
-    const command = `const {spawn} = require('node:child_process'); const fs = require('node:fs'); const c = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], {stdio:'ignore'}); fs.writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); setInterval(() => {}, 1000);`;
-    const source = `import {runHeavy} from ${JSON.stringify(pathToFileURL(resolve("bin/muster-heavy.ts")).href)}; await runHeavy(${JSON.stringify(["--exclusive", "--", process.execPath, "-e", command])}, {home:${JSON.stringify(options.home)}, window:'cap-test', slots:'2', minFreeGB:'16', adapter:{performanceCores:()=>12,sample:()=>({cores:16,load:20,freeGB:64})}, testOnlyCapMs:300}, {setTimeout:(fn, ms)=>setTimeout(fn, ms === 15000 ? 50 : ms), clearTimeout});`;
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", source], { encoding: "utf8", timeout: 10000 });
-    const pid = Number(readFileSync(pidFile, "utf8"));
+    const { result, pid } = cappedGroup(options, true);
     // The child is ours. Probe only; no foreign processes are signalled.
     let alive = false;
     try { process.kill(pid, 0); alive = true; } catch { /* Reaped by init. */ }

@@ -1,8 +1,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { Effect } from "effect";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Clock, Effect } from "effect";
+import { TestClock } from "effect/testing";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRow } from "./domain.ts";
 import { FORBIDDEN_FLAGS, profileFor } from "./argv.ts";
@@ -35,7 +36,7 @@ import { watchEntries } from "./relay-events.ts";
 import { ProcError } from "./errors.ts";
 import { parsePorcelainZ } from "./packet.ts";
 import { load, mutate, projectPath } from "./store.ts";
-import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
+import { failWith, forkHarness, harness, makeRepo, runWith, sh } from "./test-support.ts";
 import type { Harness } from "./test-support.ts";
 
 // Gate tests model admission, not the load of the machine running Vitest,
@@ -1089,7 +1090,20 @@ describe("a lane from launch to close", () => {
   it("retries the work prompt while Herdr has not yet registered the agent name", async () => {
     const h = harness();
     h.herdr.promptNotReady = 2;
-    const { launched } = await launchedWorker(h);
+    // Prompt registration does not depend on allocating a worker clone.
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    const launched = await runWith(h, Effect.gen(function* () {
+      const clock = yield* TestClock.make();
+      // Schedule.spaced uses Effect's Clock, not the harness's env.sleep.
+      // Advance each scheduled wait without waiting for real registration.
+      const result = yield* agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", cwd: dir, prompt: "do it" }).pipe(
+        Effect.provideService(Clock.Clock, { ...clock, sleep: clock.adjust }),
+      );
+      expect(clock.currentTimeMillisUnsafe()).toBe(1_000);
+      return result;
+    }).pipe(Effect.scoped));
     expect(h.herdr.promptNotReady).toBe(0);
     expect(launched.row.delivery).toBe("proven");
   });
@@ -1326,108 +1340,143 @@ describe("a lane from launch to close", () => {
     }
   });
 
-  it.each([
-    { name: "pass", exit: 0, code: 2, receipt: true, guard: null },
-    { name: "PATH pass", exit: 0, code: 0, receipt: true, guard: null },
-    { name: "gate exit 1", exit: 1, code: 1, receipt: true, guard: "gate" },
-    { name: "gate exit 2", exit: 2, code: 2, receipt: true, guard: "gate" },
-    { name: "gate exit 75", exit: 75, code: 75, receipt: true, guard: "gate" },
-    { name: "busy", exit: 0, code: 75, receipt: false, guard: "busy" },
-    { name: "busy drained", exit: 0, code: 75, receipt: false, guard: "busy" },
-    { name: "busy status broken", exit: 0, code: 75, receipt: false, guard: "busy" },
-    { name: "runner error", exit: 0, code: 2, receipt: false, guard: "gate-runner" },
-    { name: "wrong tree", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
-    { name: "lost run", exit: null, code: 2, receipt: true, guard: "gate-runner" },
-    { name: "changed private index", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
-    { name: "changed commit tree", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
-    { name: "malformed receipt", exit: 0, code: 0, receipt: true, guard: "gate-runner" },
-  ])("fleet-compute: $name", async (scenario) => {
-    const h = harness();
-    const { dir, clone } = await launchedWorker(h);
-    const commit = commitInClone(clone);
-    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
-    await runWith(h, packetVerify(dir, commit));
-    const before = sh(dir, "rev-parse", "HEAD");
-    if (scenario.name === "changed commit tree") {
-      // A hostile post-commit hook advances HEAD to a new commit with the old
-      // tree. The assertion must report it, not reset or rewrite either commit.
-      const hook = join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "hooks", "post-commit");
-      writeFileSync(hook, `#!/bin/sh\ntree=$(git rev-parse HEAD^1^{tree})\ncommit=$(printf 'hook commit' | git commit-tree "$tree" -p HEAD)\ngit update-ref HEAD "$commit"\n`);
-      chmodSync(hook, 0o755);
-    }
-    const stub = join(h.root, "fleet-compute.ts");
-    const argvPath = join(h.root, "gate-argv.json");
-    writeFileSync(stub, `
-      const fs = require('node:fs');
-      const cp = require('node:child_process');
-      const path = require('node:path');
-      const args = process.argv.slice(2);
-      if (args[0] === 'status') {
-        if (${JSON.stringify(scenario.name)} === 'busy status broken') { console.log('{'); process.exit(0); }
-        console.log(JSON.stringify({machines: [], queue: ${JSON.stringify(scenario.name)} === 'busy drained' ? [] : [
-          {id: 'a', project: 'other', repo: 'repo', eligibleHosts: ['flagg'], enqueuedAt: '2026-09-29T05:57:00Z'},
-          {id: 'b', project: 'probe', repo: 'repo', eligibleHosts: ['flagg'], enqueuedAt: '2026-09-29T05:58:00Z'}
-        ]}));
-        process.exit(0);
-      }
-      const value = key => args[args.indexOf(key) + 1];
-      const receiptPath = value('--receipt');
-      fs.writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(args));
-      const receipt = {runId: 'stub-run', host: 'stub-host', tree: value('--tree'), slot: 1, durationMs: 42, exit: ${JSON.stringify(scenario.exit)}, lostReason: 'host vanished'};
-      if (${JSON.stringify(scenario.name)} === 'wrong tree') receipt.tree = 'wrong';
-      if (${scenario.receipt}) fs.writeFileSync(receiptPath, ${JSON.stringify(scenario.name)} === 'malformed receipt' ? '{' : JSON.stringify(receipt));
-      if (${JSON.stringify(scenario.name)} === 'changed private index') cp.execFileSync('git', ['read-tree', 'HEAD'], {cwd: value('--source'), env: {...process.env, GIT_INDEX_FILE: path.join(path.dirname(receiptPath), 'index')}});
-      console.error('stub output tail');
-      process.exit(${scenario.code});
-    `);
-    if (scenario.name === "PATH pass") {
-      const launcher = join(h.root, "fleet-compute");
-      writeFileSync(launcher, `#!/bin/sh\nexec '${process.execPath}' '${stub}' "$@"\n`);
-      chmodSync(launcher, 0o755);
-      vi.stubEnv("MUSTER_FLEET_COMPUTE", "/missing/fleet-compute.ts");
-      vi.stubEnv("PATH", `${h.root}:${process.env.PATH}`);
-    } else {
-      vi.stubEnv("MUSTER_FLEET_COMPUTE", stub);
-    }
-    // Discovery happens during landing, and the runner bypasses local admission.
-    vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 1, load: 100, freeGB: 1 });
-    if (scenario.guard === null) {
-      const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
-      expect(result.packet.gate).toMatchObject({ runId: "stub-run", host: "stub-host", slot: 1, durationMs: 42, tree: sh(dir, "rev-parse", "HEAD^{tree}").trim() });
-      expect(result.note).toContain(`gate ran on stub-host at tree ${result.packet.gate?.tree.slice(0, 12)} (run stub-run)`);
-      expect(result.packet.evidence).toContain(result.note);
-      const saved = result.packet.gate?.receipt;
-      expect(saved).toBe(`${result.packet.report}.gate-receipt.json`);
-      if (!saved) throw new Error("missing saved receipt");
-      expect(JSON.parse(readFileSync(saved, "utf8")).tree).toBe(result.packet.gate?.tree);
-      expect((await runWith(h, load(dir))).packets[0]?.gate).toEqual(result.packet.gate);
-    } else {
-      const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
-      expect(error._tag).toBe(scenario.guard === "busy" ? "HeavyJobBusy" : "GuardFailed");
-      if ("guard" in error) expect(error.guard).toBe(scenario.guard);
-      if (scenario.name === "busy") expect(error.message).toContain("queue position: flagg 2; oldest waiter 3m");
-      if (scenario.name === "busy drained") expect(error.message).toContain("queue length: 0; oldest waiter 0m");
-      if (scenario.name === "busy status broken") expect(error.message).toBe("fleet-compute gate admission busy (wait 1200 expired)");
-      if (scenario.name === "lost run") expect(error.message).toContain("host vanished");
-      if (scenario.name === "runner error") expect(error.message).toContain("stub output tail");
+  describe("fleet-compute admission", () => {
+    let template: { h: Harness; dir: string; commit: string };
+    beforeAll(async () => {
+      const h = harness();
+      const { dir, clone } = await launchedWorker(h);
+      const commit = commitInClone(clone);
+      await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+      await runWith(h, packetVerify(dir, commit));
+      template = { h, dir, commit };
+    });
+
+    it.each([
+      { name: "pass", exit: 0, code: 2, receipt: true, guard: null },
+      { name: "PATH pass", exit: 0, code: 0, receipt: true, guard: null },
+      { name: "gate exit 1", exit: 1, code: 1, receipt: true, guard: "gate" },
+      { name: "gate exit 2", exit: 2, code: 2, receipt: true, guard: "gate" },
+      { name: "gate exit 75", exit: 75, code: 75, receipt: true, guard: "gate" },
+      { name: "busy", exit: 0, code: 75, receipt: false, guard: "busy" },
+      { name: "busy drained", exit: 0, code: 75, receipt: false, guard: "busy" },
+      { name: "busy status broken", exit: 0, code: 75, receipt: false, guard: "busy" },
+      { name: "runner error", exit: 0, code: 2, receipt: false, guard: "gate-runner" },
+      { name: "wrong tree", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
+      { name: "lost run", exit: null, code: 2, receipt: true, guard: "gate-runner" },
+      { name: "changed private index", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
+      { name: "changed commit tree", exit: 0, code: 0, receipt: true, guard: "gate-tree" },
+      { name: "malformed receipt", exit: 0, code: 0, receipt: true, guard: "gate-runner" },
+    ])("fleet-compute: $name", async (scenario) => {
+      const { h, dir } = forkHarness(template.h, template.dir);
+      const commit = template.commit;
+      const runnerCalls: string[] = [];
+      if (scenario.guard === "busy") h.sleep = () => { throw new Error("busy admission must not sleep or poll in Muster"); };
+      const before = sh(dir, "rev-parse", "HEAD");
       if (scenario.name === "changed commit tree") {
-        expect(sh(dir, "rev-parse", "HEAD")).not.toBe(before);
-        expect(sh(dir, "merge-base", "--is-ancestor", commit, "HEAD")).toBe("");
-        expect(error.message).toContain("commit left intact for owner");
-        const packet = (await runWith(h, load(dir))).packets[0];
-        expect(existsSync(`${packet?.report}.gate-receipt.json`)).toBe(true);
-      } else {
-        expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
-        expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
-        expect(existsSync(join(dir, "work.txt"))).toBe(false);
+        // A hostile post-commit hook advances HEAD to a new commit with the old
+        // tree. The assertion must report it, not reset or rewrite either commit.
+        const hook = join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "hooks", "post-commit");
+        writeFileSync(hook, `#!/bin/sh\ntree=$(git rev-parse HEAD^1^{tree})\ncommit=$(printf 'hook commit' | git commit-tree "$tree" -p HEAD)\ngit update-ref HEAD "$commit"\n`);
+        chmodSync(hook, 0o755);
       }
-      expect((await runWith(h, load(dir))).packets[0]?.state).toBe("verified");
-    }
-    const packet = (await runWith(h, load(dir))).packets[0];
-    expect(existsSync(`${packet?.report}.gate-receipt.json`)).toBe(scenario.receipt);
-    const args = JSON.parse(readFileSync(argvPath, "utf8"));
-    expect(args).toEqual(["gate", "--project", "probe", "--repo", "repo", "--source", dir, "--tree", expect.any(String), "--head", before.trim(), "--branch", (await runWith(h, load(dir))).agents[0]?.clone?.branch, "--wait", "1200", "--receipt", expect.any(String), "--", "sh", "-c", "test -f work.txt"]);
-    expect(existsSync(join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "MERGE_HEAD"))).toBe(false);
+      const stub = join(h.root, "fleet-compute.ts");
+      const argvPath = join(h.root, "gate-argv.json");
+      writeFileSync(stub, `
+        const fs = require('node:fs');
+        const cp = require('node:child_process');
+        const path = require('node:path');
+        const args = process.argv.slice(2);
+        if (args[0] === 'status') {
+          if (${JSON.stringify(scenario.name)} === 'busy status broken') { console.log('{'); process.exit(0); }
+          console.log(JSON.stringify({machines: [], queue: ${JSON.stringify(scenario.name)} === 'busy drained' ? [] : [
+            {id: 'a', project: 'other', repo: 'repo', eligibleHosts: ['flagg'], enqueuedAt: '2026-09-29T05:57:00Z'},
+            {id: 'b', project: 'probe', repo: 'repo', eligibleHosts: ['flagg'], enqueuedAt: '2026-09-29T05:58:00Z'}
+          ]}));
+          process.exit(0);
+        }
+        const value = key => args[args.indexOf(key) + 1];
+        const receiptPath = value('--receipt');
+        fs.writeFileSync(${JSON.stringify(argvPath)}, JSON.stringify(args));
+        const receipt = {runId: 'stub-run', host: 'stub-host', tree: value('--tree'), slot: 1, durationMs: 42, exit: ${JSON.stringify(scenario.exit)}, lostReason: 'host vanished'};
+        if (${JSON.stringify(scenario.name)} === 'wrong tree') receipt.tree = 'wrong';
+        if (${scenario.receipt}) fs.writeFileSync(receiptPath, ${JSON.stringify(scenario.name)} === 'malformed receipt' ? '{' : JSON.stringify(receipt));
+        if (${JSON.stringify(scenario.name)} === 'changed private index') cp.execFileSync('git', ['read-tree', 'HEAD'], {cwd: value('--source'), env: {...process.env, GIT_INDEX_FILE: path.join(path.dirname(receiptPath), 'index')}});
+        console.error('stub output tail');
+        process.exit(${scenario.code});
+      `);
+      if (scenario.name === "PATH pass") {
+        const launcher = join(h.root, "fleet-compute");
+        writeFileSync(launcher, `#!/bin/sh\nexec '${process.execPath}' '${stub}' "$@"\n`);
+        chmodSync(launcher, 0o755);
+        vi.stubEnv("MUSTER_FLEET_COMPUTE", "/missing/fleet-compute.ts");
+        vi.stubEnv("PATH", `${h.root}:${process.env.PATH}`);
+      } else {
+        vi.stubEnv("MUSTER_FLEET_COMPUTE", stub);
+        // These cases test admission and exit handling, not Node startup. Keep
+        // real Git merges/aborts, but inject the already-fake runner at Proc.
+        // PATH pass above still exercises a real discovered executable.
+        if (scenario.guard === "busy" || scenario.guard === "gate") {
+          const proc = h.proc;
+          h.proc = { run: (command, args, options) => command === "node" && args[0] === stub
+            ? Effect.sync(() => {
+                const argv = args.slice(1);
+                runnerCalls.push(argv[0]!);
+                if (argv[0] === "status") return { code: 0, stderr: "", stdout: scenario.name === "busy status broken" ? "{" : JSON.stringify({ machines: [], queue: scenario.name === "busy drained" ? [] : [
+                  { id: "a", project: "other", repo: "repo", eligibleHosts: ["flagg"], enqueuedAt: "2026-09-29T05:57:00Z" },
+                  { id: "b", project: "probe", repo: "repo", eligibleHosts: ["flagg"], enqueuedAt: "2026-09-29T05:58:00Z" },
+                ] }) };
+                writeFileSync(argvPath, JSON.stringify(argv));
+                if (scenario.receipt) writeFileSync(argv[argv.indexOf("--receipt") + 1]!, JSON.stringify({ runId: "stub-run", host: "stub-host", tree: argv[argv.indexOf("--tree") + 1], slot: 1, durationMs: 42, exit: scenario.exit }));
+                return { code: scenario.code, stdout: "", stderr: "stub output tail" };
+              })
+            : proc.run(command, args, options) };
+        }
+      }
+      // Discovery happens during landing, and the runner bypasses local admission.
+      vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 1, load: 100, freeGB: 1 });
+      if (scenario.guard === null) {
+        const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+        expect(result.packet.gate).toMatchObject({ runId: "stub-run", host: "stub-host", slot: 1, durationMs: 42, tree: sh(dir, "rev-parse", "HEAD^{tree}").trim() });
+        expect(result.note).toContain(`gate ran on stub-host at tree ${result.packet.gate?.tree.slice(0, 12)} (run stub-run)`);
+        expect(result.packet.evidence).toContain(result.note);
+        const saved = result.packet.gate?.receipt;
+        expect(saved).toBe(`${result.packet.report}.gate-receipt.json`);
+        if (!saved) throw new Error("missing saved receipt");
+        expect(JSON.parse(readFileSync(saved, "utf8")).tree).toBe(result.packet.gate?.tree);
+        expect((await runWith(h, load(dir))).packets[0]?.gate).toEqual(result.packet.gate);
+      } else {
+        const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+        expect(error._tag).toBe(scenario.guard === "busy" ? "HeavyJobBusy" : "GuardFailed");
+        if ("guard" in error) expect(error.guard).toBe(scenario.guard);
+        if (scenario.name === "busy") expect(error.message).toContain("queue position: flagg 2; oldest waiter 3m");
+        if (scenario.name === "busy drained") expect(error.message).toContain("queue length: 0; oldest waiter 0m");
+        if (scenario.name === "busy status broken") expect(error.message).toBe("fleet-compute gate admission busy (wait 1200 expired)");
+        if (scenario.name === "lost run") expect(error.message).toContain("host vanished");
+        if (scenario.name === "runner error") expect(error.message).toContain("stub output tail");
+        if (scenario.name === "changed commit tree") {
+          expect(sh(dir, "rev-parse", "HEAD")).not.toBe(before);
+          expect(sh(dir, "merge-base", "--is-ancestor", commit, "HEAD")).toBe("");
+          expect(error.message).toContain("commit left intact for owner");
+          const packet = (await runWith(h, load(dir))).packets[0];
+          expect(existsSync(`${packet?.report}.gate-receipt.json`)).toBe(true);
+        } else {
+          expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
+          expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+          expect(existsSync(join(dir, "work.txt"))).toBe(false);
+        }
+        expect((await runWith(h, load(dir))).packets[0]?.state).toBe("verified");
+      }
+      const packet = (await runWith(h, load(dir))).packets[0];
+      expect(existsSync(`${packet?.report}.gate-receipt.json`)).toBe(scenario.receipt);
+      const args = JSON.parse(readFileSync(argvPath, "utf8"));
+      expect(args).toEqual(["gate", "--project", "probe", "--repo", "repo", "--source", dir, "--tree", expect.any(String), "--head", before.trim(), "--branch", (await runWith(h, load(dir))).agents[0]?.clone?.branch, "--wait", "1200", "--receipt", expect.any(String), "--", "sh", "-c", "test -f work.txt"]);
+      expect(existsSync(join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "MERGE_HEAD"))).toBe(false);
+      if (scenario.guard === "busy") {
+        expect(runnerCalls).toEqual(["gate", "status"]);
+        expect(machineAdapter.sample).not.toHaveBeenCalled();
+      }
+    });
+
   });
 
   it("fails a gate by aborting the merge and leaves the source untouched", async () => {
@@ -2097,7 +2146,8 @@ describe("desk and review", () => {
 
 
 describe("project_status autoland", () => {
-  async function candidate() {
+  let template: { h: Harness; dir: string; clone: string; origin: string; id: string };
+  beforeAll(async () => {
     const h = harness();
     const { dir, clone } = await launchedWorker(h);
     const origin = join(h.root, "upstream");
@@ -2105,7 +2155,11 @@ describe("project_status autoland", () => {
     sh(dir, "remote", "add", "origin", origin);
     const id = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: h.sessionId, cwd: clone, commit: id, summary: "autoland", checks: [] }));
-    return { h, dir, clone, origin, id };
+    template = { h, dir, clone, origin, id };
+  });
+  function candidate() {
+    const { h, dir, relocate } = forkHarness(template.h, template.dir);
+    return { h, dir, clone: relocate(template.clone), origin: relocate(template.origin), id: template.id };
   }
   it.each(["rift-merge", "pr-merge", "herdr-workflow"] as const)("records external ancestors in %s without touching worktrees or panes", async mode => {
     const f = await candidate();

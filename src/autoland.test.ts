@@ -1,16 +1,16 @@
 import { join } from "node:path";
 import { rmSync, writeFileSync } from "node:fs";
 import { Effect } from "effect";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { findLanding } from "./autoland.ts";
 import { decodeProject } from "./domain.ts";
 import { projectOpen, laneOpen, agentLaunch, packetReport } from "./ops.ts";
 import { load } from "./store.ts";
 import { ProcError } from "./errors.ts";
 import { liveProc } from "./runtime.ts";
-import { harness, makeRepo, runWith, sh } from "./test-support.ts";
+import { forkHarness, harness, makeRepo, runWith, sh } from "./test-support.ts";
 
-async function fixture() {
+async function prepareFixture() {
   const h = harness();
   const origin = makeRepo(join(h.root, "origin"));
   const dir = join(h.root, "repo"); sh(h.root, "clone", "-q", origin, dir);
@@ -22,6 +22,15 @@ async function fixture() {
   const packet = (await runWith(h, packetReport({ dir, agent: row.name, owner: row.owner, cwd: row.cwd, commit: id, summary: "work", checks: [] }))).packet;
   const project = await runWith(h, load(dir));
   return { h, origin, dir, row, packet, project };
+}
+
+let template: Awaited<ReturnType<typeof prepareFixture>>;
+beforeAll(async () => { template = await prepareFixture(); });
+
+async function fixture() {
+  const { h, dir, relocate } = forkHarness(template.h, template.dir);
+  const project = await runWith(h, load(dir));
+  return { h, dir, origin: relocate(template.origin), row: project.agents[0]!, packet: project.packets[0]!, project };
 }
 
 function github(f: Awaited<ReturnType<typeof fixture>>, response: unknown, fail = false) {

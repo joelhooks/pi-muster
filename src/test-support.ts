@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,7 +11,8 @@ import { sessionDirFor } from "./argv.ts";
 import type { ProcShape } from "./runtime.ts";
 import { IntercomComms } from "./comms.ts";
 import { readRegistry } from "./registry.ts";
-import { load } from "./store.ts";
+import { load, projectPath } from "./store.ts";
+import { decodeProject } from "./domain.ts";
 import { CommsError, Herdr, Comms, MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
 import type { EmitPaneClose } from "./runtime.ts";
 
@@ -313,6 +314,33 @@ export function harness(): Harness {
     },
   };
   return h;
+}
+
+/** Copy a real, prepared fixture instead of repeating unrelated launch processes.
+ * Each case owns its files, Git refs, fake panes and process adapter.
+ */
+export function forkHarness(template: Harness, dir: string) {
+  const h = harness();
+  const relocate = (value: string) => value.split(template.root).join(h.root);
+  cpSync(template.root, h.root, { recursive: true });
+  const copiedDir = relocate(dir);
+  const path = projectPath(copiedDir);
+  const project = decodeProject(JSON.parse(relocate(readFileSync(path, "utf8"))));
+  writeFileSync(path, JSON.stringify(project));
+  for (const cwd of new Set([project.dir, ...project.agents.map(row => row.cwd)])) {
+    const config = join(cwd, ".git", "config");
+    writeFileSync(config, relocate(readFileSync(config, "utf8")));
+  }
+  writeFileSync(h.workerWorktree, relocate(readFileSync(h.workerWorktree, "utf8")));
+  for (const [id, pane] of template.herdr.panes) h.herdr.panes.set(id, {
+    ...pane, cwd: relocate(pane.cwd),
+    ...(pane.agent_session ? { agent_session: { ...pane.agent_session, value: relocate(pane.agent_session.value) } } : {}),
+  });
+  for (const [id, tab] of template.herdr.tabs) h.herdr.tabs.set(id, { ...tab });
+  for (const [id, workspace] of template.herdr.workspaces) h.herdr.workspaces.set(id, { ...workspace });
+  h.now = new Date(template.now);
+  h.sessionId = template.sessionId;
+  return { h, dir: copiedDir, relocate };
 }
 
 export const runWith = <A, E>(h: Harness, program: Effect.Effect<A, E, Herdr | Proc | MusterEnv | Comms>) =>
