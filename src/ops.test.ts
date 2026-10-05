@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync
 import { join } from "node:path";
 
 import { Effect } from "effect";
+import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRow } from "./domain.ts";
@@ -106,10 +107,10 @@ describe("side desks", () => {
     expect(h.herdr.tabs.size).toBe(tabs);
     expect(h.herdr.calls.find(call => call.method === "pane.split")?.params.target_pane_id).toBe(parent.row.pane?.paneId);
     expect(result.argv).toContain("--fork");
-    const prompt = String(h.herdr.calls.find(call => call.method === "agent.prompt")?.params.text);
-    expect(readFileSync(/^Read the complete work prompt at (.+)\. Do the work/.exec(prompt)![1]!, "utf8")).toContain("Discuss patterns");
-    expect(readFileSync(/^Read the complete work prompt at (.+)\. Do the work/.exec(prompt)![1]!, "utf8")).toContain("never prompts or launches lanes or workers");
-    expect(readFileSync(/^Read the complete work prompt at (.+)\. Do the work/.exec(prompt)![1]!, "utf8")).toContain("intercom");
+    const prompt = h.herdr.initialPrompts.at(-1)!;
+    expect(prompt).toContain("Discuss patterns");
+    expect(prompt).toContain("never prompts or launches lanes or workers");
+    expect(prompt).toContain("intercom");
     expect(workPrompt(result.row, undefined)).toContain("never acts on prod");
   });
 
@@ -182,6 +183,24 @@ describe("side desks", () => {
     expect(h.herdr.calls.slice(before).some(call => ["pane.split", "pane.send_input", "pane.rename", "agent.start", "agent.prompt", "pane.close"].includes(call.method))).toBe(false);
     expect((await runWith(h, laneClose(dir, "patterns"))).closed).toBe(true);
     expect(h.herdr.panes.has(pane.pane_id)).toBe(true);
+  });
+
+  it("adopts Pi with a different watch name only when the live session matches", async () => {
+    const { h, dir, parent } = await setup();
+    await runWith(h, laneOpen(dir, { slug: "patterns", label: "🧭 patterns", goal: "design" }));
+    const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "patterns", role: "desk", lane: "patterns", label: "🧭 patterns", cwd: dir }));
+    const pane = h.herdr.panes.get(launched.row.pane!.paneId)!;
+    pane.tab_id = parent.row.pane!.tabId;
+    pane.agent = "pi";
+    pane.name = "different-watch-name";
+    const session = pane.agent_session!;
+    pane.agent_session = { ...session, value: join(h.root, "2026-10-05T00-00-00Z_wrong-session.jsonl") };
+    const adopt = () => agentLaunch(dir, { action: "adopt", name: "patterns", lane: "desk", side: true, from: "desk" });
+    expect((await failWith(h, adopt())).message).toContain("catalog session");
+    pane.agent_session = session;
+    const result = await runWith(h, adopt());
+    expect(result.row.side).toEqual({ parent: "desk" });
+    expect(pane.name).toBe("different-watch-name");
   });
 
   it("decodes an old catalog with no side field", async () => {
@@ -258,7 +277,7 @@ describe("slow Pi startup", () => {
   it("succeeds at 25 s under high load with a slow-start receipt", async () => {
     const { h, launch, elapsed } = await setup(20, 25_000, "no marker");
     const result = await runWith(h, launch);
-    expect(elapsed()).toBe(28_000); // Startup plus the existing 3 s model-proof observation.
+    expect(elapsed()).toBe(25_000); // Journal proof needs no pane-observation delay.
     expect(result.row.delivery).toBe("proven");
     expect(result.notes.join("\n")).toContain("slow start: Pi session appeared after 25s (load 20)");
   });
@@ -279,7 +298,7 @@ describe("slow Pi startup", () => {
   it("extends low-load startup and records the successful extension", async () => {
     const { h, launch, elapsed } = await setup(0, 25_000);
     const result = await runWith(h, launch);
-    expect(elapsed()).toBe(28_000); // Startup plus the existing 3 s model-proof observation.
+    expect(elapsed()).toBe(25_000); // Journal proof needs no pane-observation delay.
     expect(result.notes.join("\n")).toContain("slow start: Pi session appeared after 25s (load 0)");
   });
 
@@ -292,8 +311,8 @@ describe("slow Pi startup", () => {
     expect(result.proof).toBeNull();
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("launching");
     expect(h.herdr.calls.filter(call => call.method === "agent.prompt")).toHaveLength(0);
-    expect(result.notes.join("\n")).toContain(`slow start, prompt pending: Pi still starting after 120 s in ${result.row.pane?.paneId}`);
-    expect(result.notes.join("\n")).toContain(`herdr_agent ${JSON.stringify({ action: "prompt", target: result.row.pane?.paneId, prompt: "do the work" })}`);
+    expect(result.notes.join("\n")).toContain(`slow start: Pi still starting after 120 s in ${result.row.pane?.paneId}`);
+    expect(result.notes.join("\n")).toContain("start argv already carries any work message");
   });
 
   it.each(["Error: No API key found for anthropic", "creating a new session…\nError: Unknown model bad"]) ("preserves model-proof failure: %s", async tail => {
@@ -791,31 +810,34 @@ describe("pane binding safety", () => {
 });
 
 describe("field-use regressions", () => {
-  it("retries a busy shell without re-running the prelude", async () => {
+  it("executes the complete launcher once without a separate prelude or agent.start", async () => {
     const h = harness();
-    h.herdr.startErrors = ["agent_pane_busy"];
     const { launched } = await launchedWorker(h);
     expect(launched.row.state).toBe("running");
-    expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(2);
-    expect(h.herdr.calls.filter((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("cd "))).toHaveLength(1);
+    expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(0);
+    expect(h.herdr.calls.filter((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("exec sh "))).toHaveLength(1);
   });
 
-  it("starts when the shell stays busy past the old five-second retry budget", async () => {
+  it("does not depend on Herdr's managed-start busy-shell gate", async () => {
     const h = harness();
     h.herdr.startErrors = Array(30).fill("agent_pane_busy");
     const { launched } = await launchedWorker(h);
     expect(launched.row.state).toBe("running");
-    expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(31);
-    expect(h.herdr.calls.filter((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("cd "))).toHaveLength(1);
+    expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(0);
+    expect(h.herdr.launcherScripts).toHaveLength(1);
   });
 
-  it("bounds busy retries and does not retry other start errors", async () => {
-    for (const code of ["agent_pane_busy", "agent_not_found"]) {
+  it("does not retry a refused launcher submission", async () => {
+    for (const code of ["pane_not_found", "agent_not_found"]) {
       const h = harness();
-      h.herdr.startErrors = Array(70).fill(code);
-      h.herdr.paneTail = "repo % ";
-      await expect(launchedWorker(h)).rejects.toThrow(code === "agent_pane_busy" ? "agent-start available-shell wait exhausted after 15000 ms" : "start rejected");
-      expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(code === "agent_pane_busy" ? 62 : 1);
+      const handle = h.herdr.handle.bind(h.herdr);
+      let submissions = 0;
+      h.herdr.handle = (method, params) => {
+        if (method === "pane.send_input") { submissions += 1; throw new HerdrApiError({ operation: method, code, message: "exec refused" }); }
+        return handle(method, params);
+      };
+      await expect(launchedWorker(h)).rejects.toThrow("exec refused");
+      expect(submissions).toBe(1);
       const project = await runWith(h, load(join(h.root, "repo")));
       expect(project.agents[0]?.state).toBe("failed");
     }
@@ -1037,24 +1059,24 @@ describe("a lane from launch to close", () => {
     expect(launched.row.pane?.openedByMuster).toBe(true);
     expect(launched.argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg))).toEqual([]);
     expect(launched.argv).toEqual(expect.arrayContaining(["-ns", "--compact-at", "200000", "--approve", "-e", "/muster"]));
-    const prelude = h.herdr.calls.find((call) => call.method === "pane.send_input");
-    expect(String(prelude?.params.text)).toContain(`cd '${clone}'`);
-    expect(String(prelude?.params.text)).toContain("export MUSTER_AGENT='probe_w'");
-    expect(String(prelude?.params.text)).toContain("export MUSTER_OWNER='owner-session'");
+    const script = h.herdr.launcherScripts[0]!;
+    expect(script).toContain(`cd '${clone}'`);
+    expect(script).toContain("export MUSTER_AGENT='probe_w'");
+    expect(script).toContain("export MUSTER_OWNER='owner-session'");
     const methods = h.herdr.calls.map((call) => call.method);
-    expect(methods.indexOf("agent.start")).toBeLessThan(methods.indexOf("pane.rename"));
-    expect(methods.indexOf("pane.rename")).toBeLessThan(methods.indexOf("agent.prompt"));
+    expect(methods.indexOf("pane.send_input")).toBeLessThan(methods.indexOf("pane.rename"));
+    expect(methods).not.toContain("agent.prompt");
     const split = h.herdr.calls.find((call) => call.method === "pane.split");
     expect(split?.params.direction).toBe("right");
   });
 
-  it("marks delivery unproven when Herdr never sees working, after exactly one extra Enter", async () => {
+  it("marks delivery unproven when the argv message has no assistant turn, without recovery typing", async () => {
     const h = harness();
-    h.herdr.promptWorking = false;
+    h.herdr.firstTurn = "missing";
     const { launched } = await launchedWorker(h);
     expect(launched.row.delivery).toBe("unproven");
-    expect(h.herdr.calls.filter((call) => call.method === "agent.prompt")).toHaveLength(1);
-    expect(h.herdr.calls.filter((call) => call.method === "pane.send_keys")).toHaveLength(1);
+    expect(h.herdr.calls.filter((call) => call.method === "agent.prompt")).toHaveLength(0);
+    expect(h.herdr.calls.filter((call) => call.method === "pane.send_keys")).toHaveLength(0);
   });
 
   it("fails a launch whose Pi never starts a session, then relaunches in the same pane and clone", async () => {
@@ -1077,7 +1099,8 @@ describe("a lane from launch to close", () => {
     expect(relaunched.row.pane?.paneId).toBe(failed?.pane?.paneId);
     expect(relaunched.row.cwd).toBe(failed?.cwd);
     expect(h.herdr.panes.size).toBe(panesBefore);
-    expect(relaunched.row.delivery).toBe("unproven");
+    expect(relaunched.row.delivery).toBe("proven");
+    expect(h.herdr.typedPrompts).toEqual([]);
   });
 
   it("shows each agent's live session id on the board for intercom addressing", async () => {
@@ -1087,7 +1110,7 @@ describe("a lane from launch to close", () => {
     expect(board).toMatch(new RegExp(`intercom=\\w+@${launched.row.sessionId.slice(0, 8)}`));
   });
 
-  it("retries the work prompt while Herdr has not yet registered the agent name", async () => {
+  it("delivers the argv message without waiting for Herdr prompt registration", async () => {
     const h = harness();
     h.herdr.promptNotReady = 2;
     // Prompt registration does not depend on allocating a worker clone.
@@ -1097,9 +1120,9 @@ describe("a lane from launch to close", () => {
     let slept = 0;
     h.sleep = ms => { slept += ms; };
     const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", cwd: dir, prompt: "do it" }));
-    // Registration waits use the harness clock; model proof adds its existing 3 s.
-    expect(slept).toBe(4_000);
-    expect(h.herdr.promptNotReady).toBe(0);
+    expect(slept).toBe(0);
+    expect(h.herdr.promptNotReady).toBe(2);
+    expect(h.herdr.typedPrompts).toEqual([]);
     expect(launched.row.delivery).toBe("proven");
   });
 
@@ -1308,9 +1331,10 @@ describe("a lane from launch to close", () => {
   it("fails fast with every slot holder, aborts the merge, then lands after a slot drains", async () => {
     vi.stubEnv("MUSTER_HEAVY_SLOTS", "2");
     vi.stubEnv("MUSTER_FLEET_COMPUTE", "/missing/fleet-compute.ts");
-    vi.stubEnv("PATH", "/usr/bin:/bin");
     const h = harness();
     const { dir, clone } = await launchedWorker(h);
+    // This test removes the runner from PATH, not the Node needed to copy launch files.
+    vi.stubEnv("PATH", "/usr/bin:/bin");
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, packetVerify(dir, commit));

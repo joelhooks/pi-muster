@@ -2,6 +2,7 @@
 
 Traps from the first pilot projects (2026-09) that stay judgment. Anything that became code is gone from this list: cwd checks, launch order, session ids from Herdr, proof of delivery, the silence check, tool allowlists, pane ownership, temp-dir state, the heavy-job lock, and landing as the bot.
 
+- Launch and fork start Pi with the work message in argv (long text uses a private `@file`); only `exec sh <private launcher>` is typed. Restore sends a message only for an explicit `prompt` or `brief`; saved restore argv never carries it. Names are set after detection for watches, never delivery; a refused rename reports the holder without stealing.
 - Remote startup failures retain a private per-launch stderr log under the worker's Git metadata (`muster-launch/launch-*`, or `.pi/muster/launch-*` for a non-Git cwd); inspect the error and row events before retrying, even when the pane has disappeared.
 - An unproven launch includes a single repair call; first-turn proof waits up to 90 s and rejects paste markers and assistant errors. Read the pane and session first; a prompt already working must not be sent again. A current-code desk must restart after an update to use the new launch behavior.
 

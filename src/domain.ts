@@ -257,6 +257,7 @@ export const decodeFirstTurnEntry = Schema.decodeUnknownSync(Schema.Struct({
   })),
 }));
 export const decodeSessionSlice = Schema.decodeUnknownSync(Schema.Struct({ size: Schema.Number, text: Schema.String }));
+export const decodeSessionEntryCount = Schema.decodeUnknownSync(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)));
 
 export const LaneDelivery = Schema.Literals(["none", "landed", "deployed", "proven", "waived"]);
 export type LaneDelivery = typeof LaneDelivery.Type;

@@ -31,7 +31,7 @@ describe("Muster CLI launch PATH", () => {
       ? { action, name: "second", from: "first", label: "second" }
       : { action, name: "first" }));
     expect(result.row.restore?.env.PATH).toBe("/muster/bin:/profile/bin:/usr/bin");
-    expect(h.herdr.calls.some(call => call.method === "pane.send_input" && String(call.params.text).includes("export PATH='/muster/bin:/profile/bin:/usr/bin'"))).toBe(true);
+    expect(h.herdr.launcherScripts.some(script => script.includes("export PATH='/muster/bin:/profile/bin:/usr/bin'"))).toBe(true);
   });
 
   it("prepends the bin to the pane's own PATH instead of typing a long owner PATH", async () => {
@@ -41,7 +41,8 @@ describe("Muster CLI launch PATH", () => {
     const dir = await open(h);
     const result = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", cwd: dir }));
     const typed = h.herdr.calls.filter(call => call.method === "pane.send_input").map(call => String(call.params.text)).join("\n");
-    expect(typed).toContain(`export PATH='/muster/bin':"$PATH"`);
+    expect(h.herdr.launcherScripts.join("\n")).toContain(`export PATH='/muster/bin':"$PATH"`);
+    expect(typed).toMatch(/^exec sh '/);
     expect(typed).not.toContain("/owner/tool-0/bin");
     expect(result.row.restore?.env.PATH).toBeUndefined();
   });
@@ -57,18 +58,12 @@ describe("Muster CLI launch PATH", () => {
     const h = harness();
     const dir = await open(h);
     const remote = new FakeHerdr(h.home);
-    const original = remote.handle.bind(remote);
-    remote.handle = (method, params) => {
-      const result = original(method, params);
-      if (method === "pane.send_input" && String(params.text).includes(" && exec ")) {
-        const args = [...String(params.text).matchAll(/'([^']*)'/g)].map(match => match[1]!);
-        original("agent.start", { name: "pi", pane_id: params.pane_id, args: args.slice(args.lastIndexOf("pi") + 1) });
-      }
-      return result;
-    };
-    const proc: ProcShape = { run: (command, args, options) => command === "ssh"
-      ? Effect.succeed({ code: 0, stdout: args.at(-1)?.includes("'printenv' 'PATH'") ? "/remote/node/bin:/usr/bin\n" : "", stderr: "" })
-      : h.proc.run(command, args, options) };
+    const proc: ProcShape = { run: (command, args, options) => {
+      if (command !== "ssh") return h.proc.run(command, args, options);
+      const script = args.at(-1) ?? "";
+      if (["'node' '-e'", "'git'", "'mkdir'", "'mktemp'"].some(part => script.includes(part))) return h.proc.run("sh", ["-c", script.replace("exec env PATH='/configured/bin:/usr/bin'", "exec env")], options);
+      return Effect.succeed({ code: 0, stdout: script.includes("'printenv' 'PATH'") ? "/remote/node/bin:/usr/bin\n" : "", stderr: "" });
+    } };
     const env: EnvShape = {
       home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/owner/muster", workerWorktree: h.workerWorktree,
       createId: () => "remote-id", sleep: () => Effect.void, emitPaneClose: h.emitPaneClose,
@@ -81,7 +76,7 @@ describe("Muster CLI launch PATH", () => {
     }).pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc)));
     const expected = `/remote/muster/bin:${configuredPath ?? "/remote/node/bin:/usr/bin"}`;
     expect(result.row.restore?.env.PATH).toBe(expected);
-    expect(remote.calls.some(call => call.method === "pane.send_input" && String(call.params.text).includes(`export PATH='${expected}'`))).toBe(true);
+    expect(remote.launcherScripts.some(script => script.includes(`export PATH='${expected}'`))).toBe(true);
   });
 
   it("prepends the owner's PATH at extension load", () => {

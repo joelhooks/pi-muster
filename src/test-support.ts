@@ -24,6 +24,7 @@ export interface FakePane {
   cwd: string;
   label?: string;
   agent?: string;
+  name?: string | null;
   agent_session?: { source: string; agent: string; kind: string; value: string };
 }
 
@@ -41,6 +42,10 @@ export class FakeHerdr {
   firstTurn: "clean" | "error" | "paste" | "missing" | "mismatch" = "clean";
   firstTurnError = "broken model route";
   typedPrompts: string[] = [];
+  initialPrompts: string[] = [];
+  launcherScripts: string[] = [];
+  autoLaunch = true;
+  pendingStartPrompts = new Map<string, string>();
   readinessPending = 0;
   paneTail = "last lines";
   /** Reject this many agent.prompt calls with agent_not_ready, as Herdr does before it registers a fresh agent name. */
@@ -68,6 +73,8 @@ export class FakeHerdr {
     if (file && file.startsWith(`${dirname(this.home)}/`) && !existsSync(file)) {
       mkdirSync(join(file, ".."), { recursive: true });
       writeFileSync(file, `${JSON.stringify({ type: "session", id: "injected-session", cwd: pane.cwd })}\n`);
+      const prompt = this.pendingStartPrompts.get(pane.pane_id);
+      if (prompt) { this.initialPrompts.push(prompt); this.appendTurn(pane, prompt); this.pendingStartPrompts.delete(pane.pane_id); }
     }
     return {
       pane_id: pane.pane_id,
@@ -86,13 +93,16 @@ export class FakeHerdr {
   }
 
   private agentInfo(pane: FakePane, status: "idle" | "working") {
-    return { ...this.paneInfo(pane), name: pane.agent ?? "agent", agent_status: status, interactive_ready: true };
+    return { ...this.paneInfo(pane), ...(pane.name === null ? {} : { name: pane.name ?? pane.agent ?? "agent" }), agent_status: status, interactive_ready: true };
   }
 
-  private startSession(pane: FakePane, sessionId: string, file?: string) {
+  private startSession(pane: FakePane, sessionId: string, file?: string, parent?: string) {
     const path = file ?? join(sessionDirFor(pane.cwd, this.home), `2026-09-29T00-00-00-000Z_${sessionId}.jsonl`);
     mkdirSync(join(path, ".."), { recursive: true });
-    writeFileSync(path, `${JSON.stringify({ type: "session", id: sessionId, cwd: pane.cwd })}\n`);
+    if (!file || !existsSync(file)) {
+      const inherited = parent ? readFileSync(parent, "utf8").split("\n").slice(1).join("\n") : "";
+      writeFileSync(path, `${JSON.stringify({ type: "session", id: sessionId, cwd: pane.cwd })}\n${inherited}`);
+    }
     pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: path };
   }
 
@@ -140,8 +150,30 @@ export class FakeHerdr {
       }
       case "pane.send_input": {
         const pane = this.pane(method, params.pane_id);
-        const text = String(params.text);
-        const cd = /^cd '([^']*)'/.exec(text);
+        let text = String(params.text);
+        if (text.startsWith("exec sh ")) {
+          const path = execFileSync("sh", ["-c", `set -- ${text.slice(8)}; printf '%s' "$1"`], { encoding: "utf8" });
+          text = readFileSync(path, "utf8");
+          this.launcherScripts.push(text);
+          if (this.autoLaunch) {
+            const command = text.slice(text.indexOf("\nexec ") + 6).replace(/ 2> '[^']*'$/, "");
+            const words = execFileSync("sh", ["-c", `set -- ${command}; printf '%s\\0' "$@"`], { encoding: "utf8" }).split("\0").slice(0, -1);
+            const args = words.slice(words.indexOf("pi") + 1);
+            const at = (flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
+            pane.agent = "pi";
+            pane.name = null;
+            const cd = /^cd '([^']*)'/m.exec(text);
+            if (cd?.[1]) pane.cwd = cd[1];
+            const positional = args.includes("--") ? args.slice(args.indexOf("--") + 1) : [];
+            const files = positional.filter(arg => arg.startsWith("@")).map(arg => arg.slice(1));
+            const message = files.map(file => `<file name="${file}">\n${readFileSync(file, "utf8")}\n</file>\n`).join("") + (positional.find(arg => !arg.startsWith("@")) ?? "");
+            if (this.startSessions) {
+              this.startSession(pane, at("--session-id") ?? "unknown", at("--session"), at("--fork"));
+              if (message) { this.initialPrompts.push(message); this.appendTurn(pane, message); }
+            } else if (message) this.pendingStartPrompts.set(pane.pane_id, message);
+          }
+        }
+        const cd = /^cd '([^']*)'/m.exec(text);
         if (cd?.[1]) pane.cwd = cd[1];
         const receipt = />~\/\.pi\/agent\/(m-[a-zA-Z0-9-]+\.pi)/.exec(text)?.[1];
         if (receipt) {
@@ -166,13 +198,22 @@ export class FakeHerdr {
         const code = this.startErrors.shift();
         if (code) throw new HerdrApiError({ operation: method, code, message: "start rejected" });
         const pane = this.pane(method, params.pane_id);
-        pane.agent = String(params.name);
+        pane.agent = "pi";
+        pane.name = String(params.name);
         const args = params.args as string[];
         const at = (flag: string) => (args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined);
         const file = at("--session");
         const id = at("--session-id") ?? (file ? /_([^_]+)\.jsonl$/.exec(file)?.[1] : undefined) ?? "unknown";
-        if (this.startSessions) this.startSession(pane, id, file);
+        if (this.startSessions) this.startSession(pane, id, file, at("--fork"));
         return { type: "agent_started", agent: this.agentInfo(pane, "idle"), argv: args };
+      }
+      case "agent.rename": {
+        const pane = this.pane(method, params.target);
+        const name = String(params.name);
+        const holder = [...this.panes.values()].find(other => other !== pane && (other.name === null ? undefined : other.name ?? other.agent) === name);
+        if (holder) throw new HerdrApiError({ operation: method, code: "agent_name_taken", message: `agent name ${name} is already used; candidates: terminal_id=${holder.terminal_id} pane_id=${holder.pane_id} workspace_id=${holder.workspace_id} tab_id=${holder.tab_id}` });
+        pane.name = name;
+        return { type: "agent_info", agent: this.agentInfo(pane, "idle") };
       }
       case "agent.get": {
         const pane = this.pane(method, params.target);
@@ -187,14 +228,7 @@ export class FakeHerdr {
           throw new HerdrApiError({ operation: method, code: "agent_not_ready", message: `agent ${String(params.target)} is not an active named agent` });
         }
         this.typedPrompts.push(String(params.text));
-        {
-          const file = this.pane(method, params.target).agent_session?.value;
-          if (file) {
-            const text = this.firstTurn === "paste" ? "[paste #1 1303 chars]" : this.firstTurn === "mismatch" ? "status only" : String(params.text);
-            appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } })}\n`);
-            if (this.firstTurn !== "missing") appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: this.firstTurn === "error" ? "error" : "stop", ...(this.firstTurn === "error" ? { errorMessage: this.firstTurnError } : {}) } })}\n`);
-          }
-        }
+        this.appendTurn(this.pane(method, params.target), String(params.text));
         return { type: "agent_prompted", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
       case "agent.wait":
         return { type: "agent_info", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
@@ -210,6 +244,14 @@ export class FakeHerdr {
       default:
         throw new HerdrApiError({ operation: method, code: "unsupported", message: `fake herdr does not know ${method}` });
     }
+  }
+
+  private appendTurn(pane: FakePane, prompt: string) {
+    const file = pane.agent_session?.value;
+    if (!file) return;
+    const text = this.firstTurn === "paste" ? "[paste #1 1303 chars]" : this.firstTurn === "mismatch" ? "status only" : prompt;
+    appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } })}\n`);
+    if (this.firstTurn !== "missing") appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: this.firstTurn === "error" ? "error" : "stop", ...(this.firstTurn === "error" ? { errorMessage: this.firstTurnError } : {}) } })}\n`);
   }
 
   client(): HerdrClient {

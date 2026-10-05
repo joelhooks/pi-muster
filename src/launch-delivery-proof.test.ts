@@ -1,5 +1,8 @@
 import { join } from "node:path";
+import { Effect } from "effect";
+import { readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { promptWithProof } from "./herdr.ts";
 import { load } from "./store.ts";
@@ -13,59 +16,57 @@ async function setup() {
   await runWith(h, projectOpen({ dir, slug: "proof", outcome: "prove launch", reviewTrigger: "weekly", nextAction: "launch", criticalPath: ["proof"], space: "w1", ephemeral: true, musterExtension: "/muster", deskExtension: null }));
   await runWith(h, laneOpen(dir, { slug: "proof", label: "📬 proof", goal: "deliver prompt" }));
   const launch = () => runWith(h, agentLaunch(dir, { action: "launch", name: "proof", role: "worker", lane: "proof", cwd: dir, label: "📬 proof", prompt: "do the work" }));
-  return { h, dir, launch, elapsed: () => elapsed };
+  const reprompt = () => {
+    const pane = h.herdr.addPane("w1", "t", dir);
+    h.herdr.handle("agent.start", { name: "proof", pane_id: pane.pane_id, args: [] });
+    return runWith(h, promptWithProof(pane.pane_id, "do the work"));
+  };
+  return { h, dir, launch, reprompt, elapsed: () => elapsed };
 }
 
-describe("launch delivery proof", () => {
+describe("explicit re-prompt delivery proof", () => {
   it("waits through 15 seconds of not-ready rejections and types once", async () => {
-    const { h, launch, elapsed } = await setup();
+    const { h, reprompt, elapsed } = await setup();
     h.herdr.promptNotReady = 30;
-    const result = await launch();
-    expect(result.row.delivery).toBe("proven");
+    expect((await reprompt()).state).toBe("proven");
     expect(elapsed()).toBeGreaterThanOrEqual(15_000);
     expect(h.herdr.typedPrompts).toEqual(["do the work"]);
   });
 
   it("waits for reported readiness before attempting the prompt", async () => {
-    const { h, launch } = await setup();
+    const { h, reprompt } = await setup();
     h.herdr.readinessPending = 30;
-    const result = await launch();
-    expect(result.row.delivery).toBe("proven");
+    expect((await reprompt()).state).toBe("proven");
     expect(h.herdr.calls.filter(call => call.method === "agent.prompt")).toHaveLength(1);
   });
 
-  it("returns an exact repair call when readiness never arrives", async () => {
-    const { h, launch, elapsed } = await setup();
+  it("returns the repair text when readiness never arrives", async () => {
+    const { h, reprompt, elapsed } = await setup();
     h.herdr.promptNotReady = 100;
-    const result = await launch();
-    expect(result.row.delivery).toBe("unproven");
-    expect("repair" in result ? result.repair : null).toEqual({ tool: "herdr_agent", args: { action: "prompt", target: result.row.pane!.paneId, prompt: "do the work" } });
+    expect(await reprompt()).toMatchObject({ state: "unproven", repairPrompt: "do the work" });
     expect(h.herdr.typedPrompts).toEqual([]);
     expect(elapsed()).toBe(30_000);
     expect(h.herdr.calls.some(call => call.method === "pane.send_keys")).toBe(false);
   });
 
   it("does not prompt or send Enter if agent.get consumes the readiness budget", async () => {
-    const { h, launch } = await setup();
+    const { h, reprompt } = await setup();
     const handle = h.herdr.handle.bind(h.herdr);
     h.herdr.handle = (method, params) => {
       if (method === "agent.get") h.now = new Date(h.now.getTime() + 30_000);
       return handle(method, params);
     };
-    const result = await launch();
-    expect(result.row.delivery).toBe("unproven");
+    expect((await reprompt()).state).toBe("unproven");
     expect(h.herdr.typedPrompts).toEqual([]);
     expect(h.herdr.calls.some(call => call.method === "pane.send_keys")).toBe(false);
   });
 
   it("does not try the prompt while launch_pending stays true", async () => {
-    const { h, launch, elapsed } = await setup();
+    const { h, reprompt, elapsed } = await setup();
     h.herdr.readinessPending = 100;
-    const result = await launch();
-    expect(result.row.delivery).toBe("unproven");
+    expect(await reprompt()).toMatchObject({ state: "unproven", repairPrompt: "do the work" });
     expect(h.herdr.calls.some(call => call.method === "agent.prompt")).toBe(false);
     expect(elapsed()).toBe(30_000);
-    expect(result.notes.join("\n")).toContain('"prompt":"do the work"');
   });
 
   it("never retries a typed prompt when proof stays unproven", async () => {
@@ -76,32 +77,51 @@ describe("launch delivery proof", () => {
     expect((await runWith(h, promptWithProof(pane.pane_id, "once"))).state).toBe("unproven");
     expect(h.herdr.typedPrompts).toEqual(["once"]);
   });
+});
 
-  it("retries start once after the budget when the pane shows an idle shell in cwd", async () => {
+describe("private launcher submission", () => {
+  it("submits one short exec line, with a private full script and no agent.start", async () => {
     const { h, launch } = await setup();
-    h.herdr.startErrors = Array(61).fill("agent_pane_busy");
-    h.herdr.paneTail = "land-close-race worker/land-close-race ❯ ";
-    expect((await launch()).row.state).toBe("running");
-    expect(h.herdr.calls.filter(call => call.method === "agent.start")).toHaveLength(62);
-    expect(h.herdr.calls.filter(call => call.method === "pane.send_input")).toHaveLength(1);
+    const result = await launch();
+    const inputs = h.herdr.calls.filter(call => call.method === "pane.send_input");
+    expect(inputs).toHaveLength(1);
+    const text = String(inputs[0]!.params.text);
+    expect(text).toMatch(/^exec sh '/);
+    expect(text.length).toBeLessThan(800);
+    const path = /^exec sh '(.+)'$/.exec(text)![1]!;
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readFileSync(path, "utf8")).toContain("'--' 'do the work'");
+    expect(h.herdr.calls.some(call => call.method === "agent.start" || call.method === "agent.prompt")).toBe(false);
+    expect(result.row.delivery).toBe("proven");
   });
 
-  it("does not retry start without an idle shell tail", async () => {
-    const { h, launch } = await setup();
-    h.herdr.startErrors = Array(70).fill("agent_pane_busy");
-    await expect(launch()).rejects.toThrow("available-shell wait exhausted");
-    expect(h.herdr.calls.filter(call => call.method === "agent.start")).toHaveLength(61);
+  it("fails a rejected submission once instead of blindly repeating exec", async () => {
+    const { h, dir, launch } = await setup();
+    const handle = h.herdr.handle.bind(h.herdr);
+    let submissions = 0;
+    h.herdr.handle = (method, params) => {
+      if (method === "pane.send_input") {
+        submissions += 1;
+        throw new HerdrApiError({ operation: method, code: "pane_not_found", message: "launch rejected" });
+      }
+      return handle(method, params);
+    };
+    await expect(launch()).rejects.toThrow("launch rejected");
+    expect(submissions).toBe(1);
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
   });
 
-  it("stores an exact start repair in the failed row and error", async () => {
-    const { h, dir } = await setup();
-    h.herdr.startErrors = Array(70).fill("agent_pane_busy");
-    h.herdr.paneTail = "repo % ";
-    const error = await failWith(h, agentLaunch(dir, { action: "launch", name: "proof", role: "worker", lane: "proof", cwd: dir, label: "📬 proof" }));
-    const row = (await runWith(h, load(dir))).agents[0]!;
-    expect(row.state).toBe("failed");
-    expect(row.restore?.argv).toContain("--session-id");
-    expect(row.events?.at(-1)?.detail).toContain('"action":"start"');
-    expect(error.message).toContain('"action":"start"');
+  it("fails closed before typing if private script verification fails", async () => {
+    const { h } = await setup();
+    const proc = h.proc;
+    h.proc = { run: (command, args, options) => args.some(arg => arg.includes("fs.statSync(p).mode"))
+      ? Effect.succeed({ code: 1, stdout: "", stderr: "verify refused" })
+      : proc.run(command, args, options) };
+    expect((await failWith(h, launchEffect(h.root))).message).toContain("copied and verified");
+    expect(h.herdr.calls.some(call => call.method === "pane.send_input")).toBe(false);
   });
 });
+
+function launchEffect(root: string) {
+  return agentLaunch(join(root, "repo"), { action: "launch", name: "proof", role: "worker", lane: "proof", cwd: join(root, "repo"), label: "proof", prompt: "do the work" });
+}
