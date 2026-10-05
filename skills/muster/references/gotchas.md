@@ -33,6 +33,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Workers and the fence
 
+- Bump `CATALOG_WRITER_SCHEMA_VERSION` in `src/store.ts` whenever persisted fields are added (including nested fields); the write fence requires every writer to have loaded fence-aware code, so restart pre-fence sessions before relying on it.
+
 - In `rift-merge`, clones follow the source's local branch, even behind origin; check the launch base note, and set `lane_open base` to override it (detached sources retain the script default).
 
 - If the repo's Brain check rejects the board's frontmatter type, set `boardType` through `project_open` or `project_update` to a type its rules allow.
