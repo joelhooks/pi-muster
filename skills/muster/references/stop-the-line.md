@@ -59,8 +59,8 @@ Joel may also ask to close the sessions and panes. That covers everyone except H
    - its restore command.
 
    Muster rows restore with `agent_launch action=restore`. A claude-bridge session needs one typed prompt after a restore before its wakes work.
-2. **Busy agents get one message:** "Finish the current tool call, write a handoff, and end your turn. No commit, no merge, no reply." Wait for the pane's `agent_state` to reach idle, then close it.
-3. **Idle agents** close now.
+2. **Busy agents get one message:** "Finish the current tool call, write a handoff, and end your turn. No commit, no merge, no reply." Wait for the pane's `agent_state` to reach idle or done (a finished Pi reports `done`, so watch `until=[idle, done]`), then close it.
+3. **Idle or done agents** close now.
 4. **Close Muster rows with `agent_close`,** which saves the pane tail and the restore command. Use a raw `herdr_pane close` only for panes outside the catalog, and add those to the roster.
 5. **Leave work in progress uncommitted in its clone.** A commit runs the full hook, and unfinished work may fail it. Never use `--no-verify`. Never remove a clone.
 6. **Record close receipts** on the roster: who acknowledged, and who was idle but unconfirmed.
