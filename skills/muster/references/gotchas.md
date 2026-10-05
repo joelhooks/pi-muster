@@ -21,6 +21,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 ## Heavy gates and deploy windows
 
+`muster-heavy` is on PATH in Muster-launched agents and the loaded owner's shell; otherwise run `node <pi-muster>/bin/muster-heavy.ts`.
+
 - Installed fleet-compute owns landing gates: its receipt decides success (including gate exits 2 or 75); a lost run (`exit: null`) fails closed, and the private index and committed tree must match the receipt.
 
 - Queue age is not priority. Ordinary positive-`--wait` callers retain FIFO tickets, and no-ticket `packet_land` gates defer when capacity is reserved for them. A short deploy uses `MUSTER_DEPLOY_WINDOW=<deploy-id> muster-heavy --wait 1200 -- <cmd>` without `--exclusive`: its priority ticket jumps ordinary tickets, FIFO among windows. It takes the extra reserved `deploy-0` slot first; ordinary gates never use it. If that slot is unavailable without a known priority holder, it takes the next free normal slot ahead of ordinary waiters. It never drains, and only one priority holder runs at once across all slots; a second waits even with normal slots free. Deploys no longer wait on gates, but still wait on another deploy, an exclusive drain or hold, or memory pressure. Unknown reserved-slot holders fail closed and can block a deploy when normal slots are full. It bypasses load pressure, not the memory floor. Reload old CLI sessions: they cannot honor the reserved slot or drain it for exclusive holds. Do not invent a role-env override.

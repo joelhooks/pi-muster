@@ -1,0 +1,13 @@
+#!/bin/sh
+# Resolve npm's bin symlink before locating the adjacent TypeScript entry point.
+script=$0
+while [ -L "$script" ]; do
+  dir=$(CDPATH= cd -- "$(dirname -- "$script")" && pwd) || exit 1
+  target=$(readlink "$script") || exit 1
+  case "$target" in
+    /*) script=$target ;;
+    *) script=$dir/$target ;;
+  esac
+done
+dir=$(CDPATH= cd -P -- "$(dirname -- "$script")" && pwd -P) || exit 1
+exec node "$dir/muster-heavy.ts" "$@"
