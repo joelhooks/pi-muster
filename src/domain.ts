@@ -325,6 +325,8 @@ export type Policy = Partial<Pick<typeof Policy.Type, "comms">> & Omit<typeof Po
 
 const ProjectFields = Schema.Struct({
   version: Schema.Literal(1),
+  /** Writer capability, separate from file format; newer catalogs remain readable. */
+  writerSchemaVersion: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   slug: Slug,
   label: Schema.String,
   dir: Path,

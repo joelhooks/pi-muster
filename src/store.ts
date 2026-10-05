@@ -22,14 +22,16 @@ export const closedDir = (dir: string) => join(dataDir(dir), "closed");
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 20_000;
 
+/** Bump whenever persisted fields are added, including nested structs. Never a git SHA. */
+export const CATALOG_WRITER_SCHEMA_VERSION = 1;
+
 const decode = Schema.decodeUnknownEffect(Project);
 const encode = Schema.encodeSync(Project);
 
 export const exists = (dir: string) => existsSync(projectPath(dir));
 
-export const load = (dir: string): Effect.Effect<Project, StoreError | NotFound> =>
+const readProject = (path: string, dir: string): Effect.Effect<Project, StoreError | NotFound> =>
   Effect.gen(function* () {
-    const path = projectPath(dir);
     if (!existsSync(path)) {
       return yield* new NotFound({ kind: "project", id: dir, message: `no Muster project at ${path}; run project_open first` });
     }
@@ -40,15 +42,25 @@ export const load = (dir: string): Effect.Effect<Project, StoreError | NotFound>
     return yield* decode(raw).pipe(Effect.mapError((error) => new StoreError({ path, message: `invalid project file: ${String(error)}` })));
   });
 
+export const load = (dir: string): Effect.Effect<Project, StoreError | NotFound> => readProject(projectPath(dir), dir);
+
 const writeAtomic = (path: string, project: Project) =>
-  Effect.try({
-    try: () => {
-      mkdirSync(dirname(path), { recursive: true });
-      const tmp = `${path}.${process.pid}.tmp`;
-      writeFileSync(tmp, `${JSON.stringify(encode(project), null, 2)}\n`);
-      renameSync(tmp, path);
-    },
-    catch: (error) => new StoreError({ path, message: `write failed: ${String(error)}` }),
+  Effect.gen(function* () {
+    // Inspect the disk under mutate's lock: a patch cannot remove/downgrade the fence.
+    const disk = existsSync(path) ? yield* readProject(path, project.dir) : undefined;
+    const version = Math.max(disk?.writerSchemaVersion ?? 0, project.writerSchemaVersion ?? 0);
+    if (version > CATALOG_WRITER_SCHEMA_VERSION) {
+      return yield* new StoreError({ path, message: `catalog written by a newer Muster (schema ${version} > ${CATALOG_WRITER_SCHEMA_VERSION}); restart this session on current code` });
+    }
+    yield* Effect.try({
+      try: () => {
+        mkdirSync(dirname(path), { recursive: true });
+        const tmp = `${path}.${process.pid}.tmp`;
+        writeFileSync(tmp, `${JSON.stringify(encode({ ...project, writerSchemaVersion: CATALOG_WRITER_SCHEMA_VERSION }), null, 2)}\n`);
+        renameSync(tmp, path);
+      },
+      catch: (error) => new StoreError({ path, message: `write failed: ${String(error)}` }),
+    });
   });
 
 const acquire = (path: string) =>
