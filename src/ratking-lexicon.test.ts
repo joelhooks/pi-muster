@@ -30,10 +30,10 @@ const cases = [
   ["signing-payload.object.json", SigningPayload, "body"],
 ] as const;
 
-describe("Rat King v0 generated fixture contract (0e895a3)", () => {
+describe("Rat King v0 generated fixture contract (c49a733)", () => {
   it("pins every generated file to the upstream commit without drift", () => {
     expect(manifest.repo).toBe("https://github.com/joelhooks/rat-king");
-    expect(manifest.commit).toBe("0e895a3");
+    expect(manifest.commit).toBe("c49a733");
     expect(manifest.sourcePath).toBe("packages/lexicon/src");
     // VENDOR.json is the hash inventory, not a self-hashing payload.
     expect(readdirSync(vendor).sort()).toEqual([...Object.keys(manifest.files), "VENDOR.json"].sort());
