@@ -22,8 +22,20 @@ export const closedDir = (dir: string) => join(dataDir(dir), "closed");
 const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 20_000;
 
-/** Bump whenever persisted fields are added, including nested structs. Never a git SHA. */
+/** Bump whenever persisted fields are added, including nested structs, and teach requiredWriterSchema what needs it. Never a git SHA. */
 export const CATALOG_WRITER_SCHEMA_VERSION = 4; // 4: Lane.kind includes retro
+
+/**
+ * The oldest writer that can rewrite this content without losing or misreading it.
+ * Files are stamped with this, not the writer's own version, so older sessions are
+ * fenced out only where a newer field or value is actually present.
+ */
+export function requiredWriterSchema(project: Project): number {
+  if (project.lanes.some(lane => lane.kind === "retro")) return 4;
+  if (project.policy?.deployLevel !== undefined || project.lanes.some(lane => lane.deployLevel !== undefined || lane.deployRule !== undefined)) return 3;
+  if (project.lanes.some(lane => lane.discarded === true)) return 2;
+  return 1;
+}
 
 const decode = Schema.decodeUnknownEffect(Project);
 const encode = Schema.encodeSync(Project);
@@ -56,7 +68,7 @@ const writeAtomic = (path: string, project: Project) =>
       try: () => {
         mkdirSync(dirname(path), { recursive: true });
         const tmp = `${path}.${process.pid}.tmp`;
-        writeFileSync(tmp, `${JSON.stringify(encode({ ...project, writerSchemaVersion: CATALOG_WRITER_SCHEMA_VERSION }), null, 2)}\n`);
+        writeFileSync(tmp, `${JSON.stringify(encode({ ...project, writerSchemaVersion: requiredWriterSchema(project) }), null, 2)}\n`);
         renameSync(tmp, path);
       },
       catch: (error) => new StoreError({ path, message: `write failed: ${String(error)}` }),

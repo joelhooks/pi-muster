@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { decodeProject } from "./domain.ts";
-import { CATALOG_WRITER_SCHEMA_VERSION, create, load, mutate, projectPath } from "./store.ts";
+import { CATALOG_WRITER_SCHEMA_VERSION, create, load, mutate, projectPath, requiredWriterSchema } from "./store.ts";
 import { failWith, harness, runWith } from "./test-support.ts";
 
 const CURRENT_WRITER = CATALOG_WRITER_SCHEMA_VERSION;
@@ -51,14 +51,33 @@ describe("catalog writer schema fence", () => {
     expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
   });
 
-  it.each([{}, { writerSchemaVersion: 0 }, { writerSchemaVersion: 1 }, { writerSchemaVersion: CURRENT_WRITER }])("writes legacy/current catalogs and stamps the current writer: %j", async extra => {
+  it.each([{}, { writerSchemaVersion: 0 }, { writerSchemaVersion: 1 }, { writerSchemaVersion: CURRENT_WRITER }])("writes legacy/current catalogs and stamps what the content needs: %j", async extra => {
     const s = setup(extra);
     expect((await runWith(s.h, load(s.dir))).slug).toBe("probe");
     await runWith(s.h, mutate(s.dir, unrelatedPatch));
     const saved = await runWith(s.h, load(s.dir));
-    expect(saved).toMatchObject({ writerSchemaVersion: CURRENT_WRITER, lanes: [
+    expect(saved).toMatchObject({ writerSchemaVersion: 1, lanes: [
       { slug: "one", label: "one" }, { slug: "two", label: "changed" },
     ] });
+  });
+
+  it.each([
+    [1, {}],
+    [2, { lanes: [{ ...lane("one"), discarded: true }, lane("two")] }],
+    [3, { policy: { deployLevel: 2 } }],
+    [3, { lanes: [{ ...lane("one"), deployLevel: 1 }, lane("two")] }],
+    [4, { lanes: [{ ...lane("one"), kind: "retro" }, lane("two")] }],
+  ])("stamps schema %i for content that needs it, even over a higher current stamp", async (want, extra) => {
+    const s = setup({ writerSchemaVersion: CURRENT_WRITER, ...extra });
+    await runWith(s.h, mutate(s.dir, unrelatedPatch));
+    expect(requiredWriterSchema(await runWith(s.h, load(s.dir)))).toBe(want);
+    expect(JSON.parse(readFileSync(projectPath(s.dir), "utf8")).writerSchemaVersion).toBe(want);
+  });
+
+  it("lets an older writer back in once current code rewrites content it can hold", async () => {
+    const s = setup({ writerSchemaVersion: 3 });
+    await runWith(s.h, mutate(s.dir, unrelatedPatch));
+    expect(JSON.parse(readFileSync(projectPath(s.dir), "utf8")).writerSchemaVersion).toBe(1);
   });
 
   it("rechecks the disk at write time even when load saw an older stamp", async () => {
@@ -83,7 +102,7 @@ describe("catalog writer schema fence", () => {
     const s = setup();
     const dir = join(s.h.root, "new-catalog");
     await runWith(s.h, create(decodeProject({ ...s.raw, dir })));
-    expect(await runWith(s.h, load(dir))).toMatchObject({ writerSchemaVersion: CURRENT_WRITER });
+    expect(await runWith(s.h, load(dir))).toMatchObject({ writerSchemaVersion: 1 });
   });
 
   it.each([-1, 1.5, "2", null])("rejects malformed version stamps rather than silently dropping them: %j", async writerSchemaVersion => {
