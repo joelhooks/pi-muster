@@ -72,6 +72,8 @@ When an instruction is overruled, use `agent_rewind name=<worker> to=<label or e
 
 ## What counts as verified
 
+`muster-heavy` is on PATH in Muster-launched agents and the loaded owner's shell; otherwise run `node <pi-muster>/bin/muster-heavy.ts`.
+
 Read [done means live and proven](references/done.md) when cutting a brief or finishing delivery. Merged is not live.
 
 - The owner-queue packet report is a claim. `packet_verify` plus the worker's check receipts are the evidence. Screen state, `DONE`, age, or a commit alone are not.
