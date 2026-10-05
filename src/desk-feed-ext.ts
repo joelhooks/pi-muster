@@ -112,14 +112,15 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
   });
 
   pi.registerMessageRenderer(NOTE, (message, options, theme) => {
-    const details = message.details as { project?: string; items?: readonly DeskItem[]; inbox?: InboxSummary; flow?: string } | undefined;
+    const details = message.details as { project?: string; items?: readonly DeskItem[]; inbox?: InboxSummary; flow?: string; pull?: string } | undefined;
     if (!details?.items || !details.inbox) return undefined;
     const box = new Box((options as { outputPad?: number }).outputPad ?? 1, 1, (text: string) => theme.bg("customMessageBg", text));
     if (details.flow) {
       const flow = details.flow;
       box.addChild({ invalidate() {}, render: width => [theme.fg(flow.startsWith("⚠") ? "warning" : "dim", truncateToWidth(flow, width))] });
-      if (!details.items.length) return box;
     }
+    if (details.pull) box.addChild(new Text(theme.fg("accent", details.pull), 0, 0));
+    if (!details.items.length && (details.flow || details.pull)) return box;
     details.items.forEach((item, index) => {
       if (index > 0) box.addChild(new Spacer(1));
       const kind = theme.fg((KIND_COLOR[item.kind] ?? "muted") as never, theme.bold(item.kind));

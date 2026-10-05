@@ -10,6 +10,10 @@ A merged packet is not a finished lane. The owner carries delivery through five 
 
 For docs-only work or a probe with nothing to deploy, record why delivery is waived. Rejected and `no_changes` packets need no delivery. Closing a tab does not prove its work live.
 
+## Keep the next lane ready
+
+After proving or closing a lane, pull the top ranked lane when its WIP slot opens. The desk keeps proposed lanes briefed and ranked so the owner can refill without another planning pass. Joel can change the order. See [Keep work flowing](../SKILL.md#keep-work-flowing) for the pull policy and its cycle-time and throughput measures.
+
 ## Brief template
 
 - **Outcome:** what changes for the user.

@@ -323,6 +323,7 @@ export default function muster(host: ExtensionAPI) {
       repo: Type.Optional(Type.String({ description: "Source repo for this lane's clones and landings; default the project dir" })),
       base: Type.Optional(Type.String({ description: "Ref or sha worker clones start from; default the repo default branch" })),
       generated: Type.Optional(Type.Array(Type.String({ description: "Path prefix a clone may leave dirty" }))),
+      rank: Type.Optional(Type.Integer({ description: "Backlog order, lower first; open: false with rank re-ranks proposed work without other changes" })),
       open: Type.Optional(Type.Boolean()),
       override: Type.Optional(Type.String({ description: "Joel's words authorizing WIP above the limit; saved on the lane" })),
     }),
