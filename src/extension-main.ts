@@ -470,14 +470,19 @@ export default function muster(host: ExtensionAPI) {
       outcome: StringEnum(["committed", "rejected", "no_changes"] as const),
       gate: Type.Optional(Type.String({ description: "Shell command run in the source checkout before the merge commit" })),
       landedAs: Type.Optional(Type.String()),
+      attested: Type.Optional(Type.Boolean({ description: "Owner vouches for work landed inside a larger commit; requires landedAs on the base branch and non-empty evidence. Does not inspect or merge the clone." })),
       evidence: Type.Optional(Type.String({ description: "Required for artifact or clone-less packets: what the owner checked and where" })),
       message: Type.Optional(Type.String()),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;
-      return run(ctx, signal, packetLand(projectDir(ctx, project), rest), (result) =>
-        [`Packet ${result.packet.id.slice(0, 12)} ${result.packet.state}${result.packet.landedAs ? ` as ${result.packet.landedAs}` : ""}. ${result.note}`, ...result.notes].join("\n"),
+      const rendered = await run(ctx, signal, packetLand(projectDir(ctx, project), rest), (result) =>
+        [`Packet ${result.packet.id.slice(0, 12)} ${result.packet.state}${result.packet.landedAs ? ` as ${result.packet.landedAs}` : ""}${result.packet.attested ? " (attested)" : ""}. ${result.note}`, ...result.notes].join("\n"),
       );
+      if ("isError" in rendered && rendered.content.some(item => /^GuardFailed: (?:run packet_verify |.* does not match packet )/.test(item.text))) {
+        return { ...rendered, content: rendered.content.map(item => ({ ...item, text: `${item.text}\nif the work landed inside a larger commit, pass attested: true with evidence` })) };
+      }
+      return rendered;
     },
   });
 
