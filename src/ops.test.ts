@@ -107,9 +107,9 @@ describe("side desks", () => {
     expect(h.herdr.calls.find(call => call.method === "pane.split")?.params.target_pane_id).toBe(parent.row.pane?.paneId);
     expect(result.argv).toContain("--fork");
     const prompt = String(h.herdr.calls.find(call => call.method === "agent.prompt")?.params.text);
-    expect(prompt).toContain("Discuss patterns");
-    expect(prompt).toContain("never prompts or launches lanes or workers");
-    expect(prompt).toContain("intercom");
+    expect(readFileSync(/^Read the complete work prompt at (.+)\. Do the work/.exec(prompt)![1]!, "utf8")).toContain("Discuss patterns");
+    expect(readFileSync(/^Read the complete work prompt at (.+)\. Do the work/.exec(prompt)![1]!, "utf8")).toContain("never prompts or launches lanes or workers");
+    expect(readFileSync(/^Read the complete work prompt at (.+)\. Do the work/.exec(prompt)![1]!, "utf8")).toContain("intercom");
     expect(workPrompt(result.row, undefined)).toContain("never acts on prod");
   });
 

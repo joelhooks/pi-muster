@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
 import { Effect } from "effect";
+import { decodeFirstTurnEntry, decodeSessionSlice } from "./domain.ts";
 import {
   HERDR_TRANSPORT_GRACE_MS,
   type HerdrError,
@@ -8,7 +11,7 @@ import {
 } from "@joelhooks/pi-bellwether/herdr-client";
 
 import { HerdrFailure } from "./errors.ts";
-import { Herdr, MusterEnv } from "./runtime.ts";
+import { Herdr, MusterEnv, Proc } from "./runtime.ts";
 import { modelOutputIssue } from "./models.ts";
 
 /**
@@ -109,7 +112,66 @@ export const reportTokens = (workspaceId: string, source: string, tokens: Readon
     params: { workspace_id: workspaceId, source, tokens, seq, ttl_ms: ttlMs },
   }).pipe(Effect.asVoid);
 
-export type Proof = { readonly state: "proven"; readonly via: "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly warning?: string };
+export type Proof = { readonly state: "proven"; readonly via: "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly repairPrompt?: string; readonly warning?: string };
+
+export const FIRST_TURN_MS = 90_000;
+
+/** Short shell probe runs in the pane's actual PATH; it never changes launch argv. */
+export const piReceiptSuffix = (id: string) => ` && { (umask 077; { command -v pi; pi --version; } >~/.pi/agent/m-${id}.pi) & }`;
+export const readPiReceipt = (home: string, id: string) => sessionSlice(`${home}/.pi/agent/m-${id}.pi`, 0).pipe(
+  Effect.map(slice => `Pi binary: ${slice.text.trim().split("\n")[0] || "unknown"}; pi version: ${slice.text.trim().split("\n").slice(1).join(" ") || "unknown"}`),
+  Effect.catch(() => Effect.succeed("Pi binary: unknown; pi version: unknown")),
+);
+// Below Pi's paste-collapse threshold. A file pointer avoids terminal paste semantics.
+const INLINE_PROMPT_MAX = 800;
+const sessionSlice = (path: string, offset: number) => Effect.gen(function* () {
+  const proc = yield* Proc;
+  const result = yield* proc.run("node", ["-e", `const fs=require('node:fs');const p=process.argv[1],offset=Number(process.argv[2]);const fd=fs.openSync(p,'r');try{const size=fs.fstatSync(fd).size;if(offset===-1){process.stdout.write(JSON.stringify({size,text:''}));process.exit(0)}if(size-offset>2097152)throw Error('first-turn journal exceeds 2 MiB');const b=Buffer.alloc(Math.max(0,size-offset));fs.readSync(fd,b,0,b.length,offset);process.stdout.write(JSON.stringify({size,text:b.toString('utf8')}))}finally{fs.closeSync(fd)}`, path, String(offset)], { cwd: "/", timeoutMs: 10_000 });
+  if (result.code !== 0) return yield* new HerdrFailure({ operation: "first-turn", code: null, message: "session file unreadable" });
+  return yield* Effect.try({ try: () => decodeSessionSlice(JSON.parse(result.stdout)), catch: () => new HerdrFailure({ operation: "first-turn", code: null, message: "invalid session slice" }) });
+});
+
+/** Only the newly appended user and its first assistant can prove this submission. */
+export function firstTurnDetail(journal: string, prompt: string): { state: "waiting" | "proven" | "unproven"; detail: string } {
+  const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+  let matched = false;
+  for (const line of journal.split("\n").slice(0, -1)) {
+    if (!line.trim()) continue;
+    let entry;
+    try { entry = decodeFirstTurnEntry(JSON.parse(line)); }
+    catch { return { state: "unproven", detail: "invalid first-turn session entry" }; }
+    const message = entry.message;
+    if (entry.type !== "message" || !message) continue;
+    if (message.role === "user") {
+      if (matched) return { state: "unproven", detail: "another user entry before the first assistant" };
+      const text = typeof message.content === "string" ? message.content : (message.content ?? []).filter(block => block.type === "text").map(block => block.text ?? "").join(" ");
+      if (/^\[paste #\d+(?: (?:\+\d+ lines|\d+ chars))?\]$/.test(text.trim())) return { state: "unproven", detail: "user entry is only a paste marker" };
+      if (!normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", detail: "user entry does not match the work prompt" };
+      matched = true;
+    } else if (message.role === "assistant" && matched) {
+      if (message.stopReason === "error" || message.errorMessage !== undefined) return { state: "unproven", detail: `first assistant error: ${message.errorMessage || message.stopReason}`.replace(/\s+/g, " ").slice(0, 1000) };
+      return { state: "proven", detail: "matching user entry and clean first assistant" };
+    }
+  }
+  return { state: "waiting", detail: matched ? "no first turn within 90 s" : "no matching user entry within 90 s" };
+}
+
+const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof) => Effect.gen(function* () {
+  if (proof.state !== "proven") return proof;
+  const env = yield* MusterEnv;
+  const started = env.now().getTime();
+  let slept = 0;
+  while (true) {
+    const slice = yield* sessionSlice(path, offset).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (!slice || slice.size < offset) return { state: "unproven", submission: "submitted", firstTurn: true, detail: "first turn not checked: session file unreadable or replaced" } satisfies Proof;
+    const result = firstTurnDetail(slice.text, prompt);
+    if (result.state === "proven") return proof;
+    if (result.state === "unproven" || Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, detail: result.detail } satisfies Proof;
+    const delay = Math.min(1000, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started));
+    yield* env.sleep(delay);
+    slept += delay;
+  }
+});
 
 const waitWorking = (paneId: string, timeoutMs: number) =>
   call({
@@ -136,9 +198,24 @@ const checkProof = (paneId: string, via: "prompt" | "enter") => Effect.gen(funct
   return { state: "proven", via, ...(warning ? { warning } : {}) } satisfies Proof;
 });
 
-export const promptWithProof = (paneId: string, text: string): Effect.Effect<Proof, HerdrFailure, Herdr | MusterEnv> =>
+export const promptWithProof = (paneId: string, text: string): Effect.Effect<Proof, HerdrFailure, Herdr | MusterEnv | Proc> =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
+    const initial = yield* agentGet(paneId);
+    const path = initial.agent_session?.kind === "path" ? initial.agent_session.value : null;
+    const snapshot = path ? yield* sessionSlice(path, -1).pipe(Effect.catch(() => Effect.succeed(null))) : null;
+    if (text.length > INLINE_PROMPT_MAX || text.includes("\n")) {
+      if (!path || !snapshot) return { state: "unproven", submission: "uncertain", detail: "long work prompt cannot be saved without session state; no text typed" } satisfies Proof;
+      const sessionsAt = path.indexOf("/.pi/agent/sessions/");
+      const stateDir = sessionsAt >= 0 ? `${path.slice(0, sessionsAt)}/.pi/agent` : dirname(path);
+      const file = `${stateDir}/m-${randomUUID()}.prompt.txt`;
+      const proc = yield* Proc;
+      const saved = yield* proc.run("node", ["-e", `const fs=require('node:fs');fs.writeFileSync(process.argv[1],process.argv[2],{mode:0o600,flag:'wx'});if(fs.readFileSync(process.argv[1],'utf8')!==process.argv[2])process.exit(1)`, file, text], { cwd: dirname(path), timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed(null)));
+      if (!saved || saved.code !== 0) return { state: "unproven", submission: "uncertain", detail: "long work prompt file could not be copied and verified; no text typed" } satisfies Proof;
+      text = `Read the complete work prompt at ${file}. Do the work it describes.`;
+      if (text.length > INLINE_PROMPT_MAX) return { state: "unproven", submission: "uncertain", detail: "work prompt pointer exceeds safe inline length; no text typed" } satisfies Proof;
+    }
+    const finish = (proof: Proof) => (path && snapshot ? proveFirstTurn(path, snapshot.size, text, proof) : Effect.succeed<Proof>(proof.state === "proven" ? { state: "unproven", submission: "submitted", firstTurn: true, detail: "first turn not checked: session file unavailable" } : proof)).pipe(Effect.map(result => result.state === "unproven" ? { ...result, repairPrompt: text } : result));
     const started = env.now().getTime();
     let slept = 0;
     const remaining = () => Math.max(0, PROOF_OF_LIFE_MS - Math.max(slept, env.now().getTime() - started));
@@ -169,19 +246,19 @@ export const promptWithProof = (paneId: string, text: string): Effect.Effect<Pro
       yield* env.sleep(delay);
       slept += delay;
     }
-    if (submission === "pending") return {
+    if (submission === "pending") return yield* finish({
       state: "unproven", submission: "uncertain",
       detail: `Herdr did not accept the prompt within ${PROOF_OF_LIFE_MS} ms; no text was typed.`,
-    } satisfies Proof;
-    if (submission === "working") return yield* checkProof(paneId, "prompt");
+    });
+    if (submission === "working") return yield* finish(yield* checkProof(paneId, "prompt"));
     const recovered = yield* paneSendKeys(paneId, ["Enter"]).pipe(
       Effect.andThen(waitWorking(paneId, 15_000)),
       Effect.orElseSucceed(() => false),
     );
-    if (recovered) return yield* checkProof(paneId, "enter");
-    return {
+    if (recovered) return yield* finish(yield* checkProof(paneId, "enter"));
+    return yield* finish({
       state: "unproven",
       submission: "submitted",
       detail: "Herdr never observed working after submit plus one Enter. Do not resend blindly; read the pane.",
-    } satisfies Proof;
+    });
   });

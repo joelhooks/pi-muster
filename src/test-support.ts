@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { Effect, Layer } from "effect";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
@@ -38,6 +38,8 @@ export class FakeHerdr {
   startSessions = true;
   startErrors: string[] = [];
   promptFails = false;
+  firstTurn: "clean" | "error" | "paste" | "missing" | "mismatch" = "clean";
+  firstTurnError = "broken model route";
   typedPrompts: string[] = [];
   readinessPending = 0;
   paneTail = "last lines";
@@ -61,6 +63,12 @@ export class FakeHerdr {
   }
 
   private paneInfo(pane: FakePane) {
+    // Tests can inject late session evidence; an observed Pi journal exists on disk.
+    const file = pane.agent_session?.kind === "path" ? pane.agent_session.value : null;
+    if (file && file.startsWith(`${dirname(this.home)}/`) && !existsSync(file)) {
+      mkdirSync(join(file, ".."), { recursive: true });
+      writeFileSync(file, `${JSON.stringify({ type: "session", id: "injected-session", cwd: pane.cwd })}\n`);
+    }
     return {
       pane_id: pane.pane_id,
       terminal_id: pane.terminal_id,
@@ -135,6 +143,11 @@ export class FakeHerdr {
         const text = String(params.text);
         const cd = /^cd '([^']*)'/.exec(text);
         if (cd?.[1]) pane.cwd = cd[1];
+        const receipt = />~\/\.pi\/agent\/(m-[a-zA-Z0-9-]+\.pi)/.exec(text)?.[1];
+        if (receipt) {
+          mkdirSync(join(this.home, ".pi/agent"), { recursive: true });
+          writeFileSync(join(this.home, ".pi/agent", receipt), "/fake/bin/pi\n1.0.3\n", { mode: 0o600 });
+        }
         if (text === "/new" && pane.agent) this.startSession(pane, `fresh-${this.next("s")}`);
         return { type: "ok" };
       }
@@ -174,6 +187,14 @@ export class FakeHerdr {
           throw new HerdrApiError({ operation: method, code: "agent_not_ready", message: `agent ${String(params.target)} is not an active named agent` });
         }
         this.typedPrompts.push(String(params.text));
+        {
+          const file = this.pane(method, params.target).agent_session?.value;
+          if (file) {
+            const text = this.firstTurn === "paste" ? "[paste #1 1303 chars]" : this.firstTurn === "mismatch" ? "status only" : String(params.text);
+            appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } })}\n`);
+            if (this.firstTurn !== "missing") appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: this.firstTurn === "error" ? "error" : "stop", ...(this.firstTurn === "error" ? { errorMessage: this.firstTurnError } : {}) } })}\n`);
+          }
+        }
         return { type: "agent_prompted", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
       case "agent.wait":
         return { type: "agent_info", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
