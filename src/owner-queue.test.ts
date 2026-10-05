@@ -17,12 +17,12 @@ const fixture = () => {
   return { home, entries, sent, feed, post: (kind: OwnerItem["kind"], title: string = kind) => appendOwnerItem("owner", { author: "probe", lane: "lane", kind, title }, home) };
 };
 describe("owner queue", () => {
-  it("forwards old-code appends and unread history once across reload", () => {
+  it("forwards project-tagged direct appends and unread history once across reload", () => {
     const f = fixture();
-    const old = appendOwnerItem("old", { author: "probe", kind: "question", title: "history" }, f.home);
+    const old = appendOwnerItem("old", { author: "probe", project: "p", kind: "question", title: "history" }, f.home);
     forwardOwner({ from: "old", to: "owner", project: "p", home: f.home });
-    // Simulate a still-running old version: bypass the forwarding-aware writer.
-    const late = appendOwnerItem("scratch", { author: "probe", kind: "question", title: "late", mention: "old" }, f.home);
+    // Bypass the forwarding-aware writer, retaining the post's project.
+    const late = appendOwnerItem("scratch", { author: "probe", project: "p", kind: "question", title: "late", mention: "old" }, f.home);
     writeFileSync(ownerPath("old", f.home), JSON.stringify(old) + "\n" + JSON.stringify(late) + "\n");
     const inbox = f.feed.inbox();
     expect(inbox.via).toEqual({ [old.uri]: "old", [late.uri]: "old" });
@@ -40,10 +40,10 @@ describe("owner queue", () => {
   });
   it("filters pre-forward history by the old reader heartbeat, not future appends", () => {
     const f = fixture();
-    appendOwnerItem("old", { author: "probe", kind: "fyi", title: "consumed" }, f.home);
+    appendOwnerItem("old", { author: "probe", project: "p", kind: "fyi", title: "consumed" }, f.home);
     writeReader("old", f.home, Date.now() + 1000);
     forwardOwner({ from: "old", to: "owner", project: "p", home: f.home });
-    const late = appendOwnerItem("scratch", { author: "probe", kind: "fyi", title: "late" }, f.home);
+    const late = appendOwnerItem("scratch", { author: "probe", project: "p", kind: "fyi", title: "late" }, f.home);
     const path = ownerPath("old", f.home);
     writeFileSync(path, readFileSync(path, "utf8") + JSON.stringify(late) + "\n");
     expect(f.feed.inbox().items.map(i => i.uri)).toEqual([late.uri]);

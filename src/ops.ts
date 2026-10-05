@@ -307,7 +307,7 @@ export const ingestRemotePackets = (dir: string) => Effect.gen(function* () {
           const sidecar = yield* decodeWith(decodeRemoteNote, entry.value);
           if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane || sidecar.item.author !== row.sessionId) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
           // The catalog owns routing; a remote recipient can be stale after a handover.
-          yield* Effect.try({ try: () => ingestOwnerItem(row.owner, sidecar.item, env.home), catch: error => new StoreError({ path: `remote note ${entry.id}`, message: String(error) }) });
+          yield* Effect.try({ try: () => ingestOwnerItem(row.owner, sidecar.item, env.home, project.slug), catch: error => new StoreError({ path: `remote note ${entry.id}`, message: String(error) }) });
           // The existing owner feed reads this queue and wakes on the post's mention facets.
           return;
         }

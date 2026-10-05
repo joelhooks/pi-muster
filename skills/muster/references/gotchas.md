@@ -64,6 +64,8 @@ When a larger squash changes the same paths, a dirty clone fails verification, o
 
 A manually restarted desk does not need a second Pi process. The owner's `project_status act: true` re-adopts an interrupted row when its session is live in the project's workspace; moved silent, nudged, and restarted rows use the same check. A direct fork matches the session header's `parentSession` path and updates the row's session file and id. If two panes carry the same session, choose one with `agent_launch action: adopt name: <row> pane: <pane>` (no `side`). Adoption changes only the catalog, never sends input, and leaves panes bound to other rows alone. A replacement terminal is not marked as opened by Muster, so closing the row leaves that terminal open.
 
+- Takeover forwarding is project-scoped; restart every desk after this update before lifting the takeover ban, and leave legacy posts without a project in their original session's inbox.
+
 - Owner queues are per session, separate from Joel's desk queue. `/new` changes the address. A takeover forwards old owner queues, including posts from workers still on old code. Reload the new owner to load forwarding-aware readers. `owner_inbox` labels forwarded records `via <old owner short id>`. History since the old reader's last heartbeat may replay because its exact consumption point is unknown. Replies still target the parent's author, not an agent name. Stale or absent readers fall back to intercom for mentions.
 
 - `IllegalTransition … expected verified` from `agent_close` can mean the desk still has the pre-`3332978` CLOSE caller loaded; restart the desk before judging the landed fix, and do not treat a retry on old code as live proof.
