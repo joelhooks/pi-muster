@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 
 import type { AgentRow, CheckOutcome, Lane, Packet, Project } from "./domain.ts";
-import { Proc, git } from "./runtime.ts";
+import { Proc, git, type ProcShape } from "./runtime.ts";
 
 /** Paths a clone may leave dirty without matching the source (worker-worktree.sh's allowlist). */
 export const DEFAULT_GENERATED = [".brain/", ".pi/", ".pi-subagents/", ".claude/", ".agents/", ".codex/", "BRAIN.md", "AGENTS.md", "CLAUDE.md", ".rift"];
@@ -47,6 +47,24 @@ const exitOf = (cwd: string, args: string[]) =>
     return (yield* proc.run("git", args, { cwd })).code;
   });
 
+/** Shared local/remote branch evidence; HEAD also covers detached worker checkouts. */
+export const verifyCommitBranch = (proc: ProcShape, cwd: string, commit: string, rowBranch: string) =>
+  Effect.gen(function* () {
+    const run = (...args: string[]) => proc.run("git", args, { cwd, timeoutMs: 30_000 });
+    const ancestor = yield* run("merge-base", "--is-ancestor", commit, rowBranch);
+    if (ancestor.code === 0) return { check: pass("on lane branch", rowBranch), branch: null };
+    const containing = yield* run("for-each-ref", "--format=%(refname:short)", "--contains", commit, "refs/heads");
+    const head = yield* run("merge-base", "--is-ancestor", commit, "HEAD");
+    const branches = containing.code === 0 ? containing.stdout.trim().split("\n").filter(Boolean) : [];
+    const current = yield* run("symbolic-ref", "--quiet", "--short", "HEAD");
+    const headBranch = current.code === 0 ? current.stdout.trim() : "HEAD";
+    const branch = head.code === 0 && headBranch !== "HEAD" ? headBranch : branches[0] ?? (head.code === 0 ? "HEAD" : undefined);
+    if (branch) return { check: pass("on lane branch", `on sibling branch ${branch} (row branch ${rowBranch})`), branch };
+    const all = yield* run("for-each-ref", "--format=%(refname:short)", "refs/heads");
+    const checked = all.code === 0 ? all.stdout.trim().split("\n").filter(Boolean) : [rowBranch];
+    return { check: fail("on lane branch", `${commit} is not an ancestor of ${rowBranch}; checked branches: ${[...new Set([...checked, rowBranch, "HEAD"])].join(", ")}`), branch: null };
+  });
+
 export const sourceOf = (project: Project, lane: Lane | undefined, row: AgentRow) => row.clone?.source ?? lane?.repo ?? project.dir;
 
 /**
@@ -80,23 +98,23 @@ export const verifyPacket = (project: Project, lane: Lane | undefined, row: Agen
         const actual = sha256File(packet.artifact);
         checks.push(actual === packet.id ? pass("artifact hash", actual) : fail("artifact hash", `sha256 is ${actual}, packet names ${packet.id}`));
       }
-      return checks;
+      return { checks, branch: null };
     }
 
     const clone = row.cwd;
     const source = sourceOf(project, lane, row);
     const exists = (yield* exitOf(clone, ["cat-file", "-e", `${packet.id}^{commit}`])) === 0;
     checks.push(exists ? pass("commit exists", packet.id) : fail("commit exists", `${packet.id} is not a commit in ${clone}`));
-    if (!exists) return checks;
+    if (!exists) return { checks, branch: null };
 
     const branch = row.clone?.branch ?? (yield* git(clone, "rev-parse", "--abbrev-ref", "HEAD")).trim();
-    const ancestor = (yield* exitOf(clone, ["merge-base", "--is-ancestor", packet.id, branch])) === 0;
-    checks.push(ancestor ? pass("on lane branch", branch) : fail("on lane branch", `${packet.id} is not an ancestor of ${branch}`));
+    const branchEvidence = yield* verifyCommitBranch(yield* Proc, clone, packet.id, branch);
+    checks.push(branchEvidence.check);
 
     if (clone === source) {
       checks.push(skip("expected repo", "packet built in the source checkout"));
       checks.push(skip("dirty paths", "packet built in the source checkout"));
-      return checks;
+      return { checks, branch: branchEvidence.branch };
     }
     const roots = (ref: string, cwd: string) =>
       git(cwd, "rev-list", "--max-parents=0", ref).pipe(Effect.map((out) => new Set(out.split("\n").filter(Boolean))));
@@ -113,7 +131,7 @@ export const verifyPacket = (project: Project, lane: Lane | undefined, row: Agen
         ? pass("dirty paths", `${dirty.length} dirty, all generated or identical to source`)
         : fail("dirty paths", `differ from source and are not named generated: ${differing.slice(0, 20).join(", ")}`),
     );
-    return checks;
+    return { checks, branch: branchEvidence.branch };
   });
 
 export const failures = (checks: readonly CheckOutcome[]) => checks.filter((check) => check.outcome === "fail");

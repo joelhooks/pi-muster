@@ -43,7 +43,7 @@ import {
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
-import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyPacket } from "./packet.ts";
+import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyPacket } from "./packet.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
@@ -384,10 +384,11 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
   if (packet.kind === "artifact") {
     const raw = yield* remoteNode(row.machine, machine, `import {readFileSync} from 'node:fs';import {createHash} from 'node:crypto';console.log(createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));`, [packet.artifact ?? ""]);
     checks.push({ name: "artifact hash", outcome: raw.trim() === packet.id ? "pass" : "fail", detail: `sha256 is ${raw.trim()}` });
-    return checks;
+    return { checks, branch: null };
   }
   checks.push(yield* probe("commit exists", ["cat-file", "-e", `${packet.id}^{commit}`]));
-  checks.push(yield* probe("on lane branch", ["merge-base", "--is-ancestor", packet.id, row.clone?.branch ?? "HEAD"]));
+  const branchEvidence = yield* verifyCommitBranch(remote, row.cwd, packet.id, row.clone?.branch ?? "HEAD");
+  checks.push(branchEvidence.check);
   if (row.clone?.base) checks.push(yield* probe("clone base", ["merge-base", "--is-ancestor", row.clone.base.sha, packet.id]));
   const roots = yield* remote.run("git", ["rev-list", "--max-parents=0", packet.id], { cwd: row.cwd, timeoutMs: 30_000 });
   const sourceRoots = (yield* git(sourceOf(project, lane, row), "rev-list", "--max-parents=0", "HEAD")).split("\n");
@@ -403,7 +404,7 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
     return remoteHashes[i] === null ? existsSync(local) : !existsSync(local) || statSync(local).isDirectory() || sha256File(local) !== remoteHashes[i];
   });
   checks.push({ name: "dirty paths", outcome: dirty.code === 0 && differing.length === 0 ? "pass" : "fail", detail: differing.join(", ") });
-  return checks;
+  return { checks, branch: branchEvidence.branch };
 });
 
 // ---------- small pure helpers ----------
@@ -1861,7 +1862,7 @@ export const packetVerify = (dir: string, id: string) =>
       ? new NotFound({ ...error, message: `${error.message}; ${ingestNotes.join("; ")}` }) : error));
     const row = yield* findRow(project, packet.agent);
     const lane = project.lanes.find((candidate) => candidate.slug === packet.lane);
-    const checks = row.machine === "local" ? yield* verifyPacket(project, lane, row, packet) : yield* verifyRemotePacket(project, lane, row, packet);
+    const { checks, branch } = row.machine === "local" ? yield* verifyPacket(project, lane, row, packet) : yield* verifyRemotePacket(project, lane, row, packet);
     const failed = failures(checks);
     if (failed.length > 0) {
       const artifactChanged = packet.kind === "artifact" && failed.some(check => check.name === "artifact hash" && check.detail?.startsWith("sha256 is "));
@@ -1876,16 +1877,22 @@ export const packetVerify = (dir: string, id: string) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
         if (TERMINAL_PACKET_STATES.includes(latest.state)) return yield* input(`packet ${packet.id.slice(0, 12)} is already ${latest.state}`);
-        const next: Packet = { ...latest, state: "verified", verification: { at: iso(env), checks }, updatedAt: iso(env) };
         const agent = yield* findRow(current, packet.agent);
-        const withAgent =
-          agent.state === "reported"
-            ? withRow(current, { ...agent, state: yield* stepAgent(agent.name, agent.state, { type: "VERIFY" }), updatedAt: iso(env) })
-            : current;
+        if (branch && agent.clone && (agent.cwd !== row.cwd || agent.clone.branch !== row.clone?.branch)) {
+          return yield* input(`agent ${agent.name} clone changed during verification; retry packet_verify`);
+        }
+        if (branch && agent.clone) checks.push({ name: "clone branch", outcome: "pass", detail: `updated to ${branch} (was ${agent.clone.branch})` });
+        const next: Packet = { ...latest, state: "verified", verification: { at: iso(env), checks }, updatedAt: iso(env) };
+        const state = agent.state === "reported" ? yield* stepAgent(agent.name, agent.state, { type: "VERIFY" }) : agent.state;
+        const withAgent = withRow(current, {
+          ...agent, state,
+          clone: branch && agent.clone ? { ...agent.clone, branch } : agent.clone,
+          updatedAt: iso(env),
+        });
         return [withPacket(withAgent, next), next] as const;
       }),
     );
-    return { packet: verified, checks };
+    return { packet: verified, checks, note: branch && row.clone ? `updated clone.branch to ${branch} (was ${row.clone.branch})` : null };
   });
 
 export type LandOutcome = "committed" | "rejected" | "no_changes";

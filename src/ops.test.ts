@@ -1471,6 +1471,22 @@ describe("packet_land external squash landings", () => {
     return sh(dir, "rev-parse", "HEAD").trim();
   }
 
+  it("verifies and records a sibling packet squash-merged onto main", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
+    sh(clone, "checkout", "-qb", "worker/next-slice", "main");
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "sibling", checks: [] }));
+    sh(dir, "fetch", "-q", clone, commit);
+    const landedAs = squash(dir, commit);
+    await runWith(h, packetVerify(dir, commit));
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    expect(result.note).toBe("recorded a squash landing (patch-id match)");
+    expect(result.packet.state).toBe("committed");
+    expect(result.packet.landedAs).toBe(landedAs);
+  });
+
   it("still records an ancestor landing", async () => {
     const { h, dir, commit } = await verifiedWorker();
     sh(dir, "merge", "--no-ff", "-m", "external merge", commit);
@@ -1577,6 +1593,46 @@ describe("packet_land external squash landings", () => {
 });
 
 describe("packet_verify against fixtures", () => {
+  it.each(["sibling", "row", "detached"])("verifies a sibling branch with %s HEAD and records it on the row", async (head) => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    sh(clone, "checkout", "-qb", "worker/next-slice", "main");
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "sibling", checks: [] }));
+    if (head === "row") sh(clone, "checkout", "worker/probe-w");
+    if (head === "detached") sh(clone, "checkout", "--detach", commit);
+    const verified = await runWith(h, packetVerify(dir, commit));
+    expect(verified.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: "on sibling branch worker/next-slice (row branch worker/probe-w)" });
+    expect(verified.note).toContain("updated clone.branch to worker/next-slice");
+    expect(verified.checks).toContainEqual({ name: "clone branch", outcome: "pass", detail: "updated to worker/next-slice (was worker/probe-w)" });
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("worker/next-slice");
+  });
+
+  it("keeps the row branch when a sibling packet has dirty paths", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    sh(clone, "checkout", "-qb", "worker/next-slice", "main");
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "dirty sibling", checks: [] }));
+    writeFileSync(join(clone, "stray.ts"), "unreported\n");
+    const error = await failWith(h, packetVerify(dir, commit));
+    expect(JSON.stringify(error.failures)).toContain("dirty paths");
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("worker/probe-w");
+  });
+
+  it("fails a packet on no branch and lists the refs checked", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    sh(clone, "checkout", "--detach", "main");
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "unreachable", checks: [] }));
+    sh(clone, "checkout", "worker/probe-w");
+    const error = await failWith(h, packetVerify(dir, commit));
+    expect(JSON.stringify(error.failures)).toContain("on lane branch");
+    expect(JSON.stringify(error.failures)).toContain("checked branches: main, worker/probe-w, HEAD");
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("worker/probe-w");
+  });
+
   it("fails dirty paths that differ from source but allows generated ones", async () => {
     const h = harness();
     const { dir, clone } = await launchedWorker(h);
@@ -1617,11 +1673,12 @@ describe("packet_verify against fixtures", () => {
     sh(other, "add", "foreign.txt");
     sh(other, "commit", "-q", "-m", "foreign root");
     sh(clone, "fetch", "-q", other, "main:foreign");
-    sh(clone, "merge", "-q", "--allow-unrelated-histories", "-m", "mix", "foreign");
+    sh(clone, "checkout", "foreign");
     const foreign = sh(clone, "rev-parse", "foreign").trim();
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: foreign, summary: "s", checks: [] }));
     const error = await failWith(h, packetVerify(dir, foreign));
     expect(JSON.stringify(error.failures)).toContain("shares no root commit");
+    expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("worker/probe-w");
   });
 
   it("parses porcelain -z with renames", () => {
