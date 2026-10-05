@@ -378,12 +378,18 @@ const ProjectFields = Schema.Struct({
   createdAt: Iso,
   updatedAt: Iso,
 });
+// done-live shipped in 81f5baf; earlier committed work predates the live-proof rule.
+const DONE_LIVE_CUTOFF = Date.parse("2026-10-05T04:14:03Z");
+
 export const Project = ProjectFields.pipe(Schema.decode(SchemaTransformation.transform({
   decode: (project): typeof ProjectFields.Type => ({ ...project, lanes: project.lanes.map(lane => {
     if (lane.delivery !== undefined) return lane;
     const committed = project.packets.filter(packet => packet.lane === lane.slug && packet.state === "committed");
-    const at = committed.map(packet => packet.updatedAt).sort().at(-1);
-    return at ? { ...lane, delivery: "proven" as const, deliveryAt: at, deliveryEvidence: "before done-live", deliveryHistory: [{ stage: "proven" as const, at, evidence: "before done-live" }] } : { ...lane, delivery: "none" as const };
+    const at = committed.map(packet => packet.updatedAt).sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1);
+    if (!at) return { ...lane, delivery: "none" as const };
+    const delivery = Date.parse(at) < DONE_LIVE_CUTOFF ? "proven" as const : "landed" as const;
+    const evidence = delivery === "proven" ? "before done-live" : "delivery record missing (written by an older Muster); not proven";
+    return { ...lane, delivery, deliveryAt: at, deliveryEvidence: evidence, deliveryHistory: [{ stage: delivery, at, evidence }] };
   }) }),
   encode: (project) => project,
 })));
