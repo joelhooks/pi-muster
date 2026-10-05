@@ -40,13 +40,15 @@ Use a side desk when Joel wants to explore an evolving design alongside the main
 
 ## Keep work flowing
 
-The WIP limit is the owner's target, not just a ceiling. Keep ready work at the limit. When a lane is proven or closed and a slot opens, pull the top of the backlog. Landed work still waiting for live proof holds its slot.
+The WIP limit is the owner's target, not just a ceiling. Keep ready work at the limit. When a lane is proven or closed and a slot opens, pull the top of the backlog. Use the project's deploy posture to decide how much proof the work needs.
 
 The desk keeps the backlog shaped: ranked proposed work lanes with briefs. Lower ranks go first; creation time breaks ties, and unranked lanes follow ranked ones. Park work with `lane_open open: false`. Re-rank proposed work with `rank`; Joel orders the backlog when he wants to.
 
 Use median cycle time over the last ten proven lanes and throughput over the last seven days to judge flow. Lanes are continuous work, not sprints.
 
 After three closed work lanes and at every `project_review`, dispatch a short-lived judge using [finished-lane retro](references/retro.md). Record its artifact, route its findings into ranked backlog lanes, then mark the retro done with `project_review` `retro: true`.
+
+Deploy posture belongs in the project's VISION.md, in Joel's words. Choose the least permission the work needs: customer-facing work, money, outbound sends and slow rollbacks stay conservative; irreversible work needs approval. A research experiment can ship and watch, or skip proof when its rollback is cheap. Tools enforce the declared level; check watching lanes at retro.
 
 ## Shape it to the job
 
@@ -79,6 +81,7 @@ Read [done means live and proven](references/done.md) when cutting a brief or fi
 - The owner-queue packet report is a claim. `packet_verify` plus the worker's check receipts are the evidence. Screen state, `DONE`, age, or a commit alone are not.
 - Record exactly one outcome per packet: committed, rejected, or no_changes.
 - With Bellwether's pane-close bus support, `agent_close` and `lane_close` retire the owner's matching watches before closing; no manual blocked-watch cancellation is needed. Older Bellwether still needs `herdr_watch action=cancel` first. Inspect named targets as well as pane targets; fallback receipts list only candidates.
+- In `pr-merge` projects, hold a PR with `shitrat convert-to-draft <owner/repo> <n>` (it also leaves the merge queue) or `shitrat label <owner/repo> <n> --add 'NO MERGE'`, and post gate results with `shitrat set-status`. Never use `gh` for these; all three act as shitratgit[bot] and take `--dry-run`.
 - Land through `packet_land` with the repo's full gate (`muster-heavy --wait 1200 -- <cmd>` for workers, window unset). Short deploys use `MUSTER_DEPLOY_WINDOW=<deploy-id> muster-heavy --wait 1200 -- <cmd>` for the extra reserved `deploy-0` slot, capped at five minutes; ordinary gates never use it. Only one priority holder runs at once: deploys wait on another deploy, exclusive holds or memory pressure, not gates. Add `--exclusive` only when the deploy must drain and hold every slot, including `deploy-0` (20-minute cap). Never borrow a deploy window for ordinary gates. For a few named critical-path gates, the desk can issue `muster-heavy grant <label> --ttl 1h`; workers use `MUSTER_HEAVY_GRANT=<id>` and must not grant themselves. Grants are self-issued on a single-user machine, bounded by four live grants, a two-hour maximum TTL and audit. They reorder the queue behind deploys and ahead of ordinary gates, but add no capacity or pressure bypass: shedding load is still the fix for saturation. See [gotchas](references/gotchas.md#heavy-gates-and-deploy-windows) for limits and audit.
 - An artifact packet (remote-machine ops, config, no clone branch) lands by recording: `packet_land` with `evidence`, no merge.
 - A customer-facing check counts only when loaded signed out, as the recipient sees it.

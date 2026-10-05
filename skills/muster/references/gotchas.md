@@ -6,6 +6,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 - Remote startup failures retain a private per-launch stderr log under the worker's Git metadata (`muster-launch/launch-*`, or `.pi/muster/launch-*` for a non-Git cwd); inspect the error and row events before retrying, even when the pane has disappeared.
 - An unproven launch includes a single repair call; first-turn proof waits up to 90 s and rejects paste markers and assistant errors. Read the pane and session first; a prompt already working must not be sent again. A current-code desk must restart after an update to use the new launch behavior.
 
+- Restore reads the session's latest model and thinking changes; explicit overrides win. If context/window evidence is unavailable, the receipt warns and proceeds: verify the target window before sending the next turn.
+
 ## Bridge lanes (`pi-claude-bridge`)
 
 - Prompt capture fails closed on wakes. An intercom, pi-until, or `sendMessage` wake skips `before_agent_start`, so the bridge must match Pi's live prompt to one it recorded on a user turn. After a `/reload` or restart that changed tools, rules, skills, or custom sections, nothing matches, and every wake ends with `stopReason: error` and 0 tokens until an ordinary user message refreshes the capture. A lane woken only by timers never gets that message. `project_status` types that message into its own stuck lanes and shows others' as `⚠️ stuck`; `agent_launch action=restore` sends it with the work prompt.

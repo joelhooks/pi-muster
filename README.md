@@ -65,15 +65,36 @@ Role and alternate `skills` name standing skills (names or absolute paths); laun
 
 Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane_deliver`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`, `desk_report`, `desk_rulings`, `thinking_set` (a session lowers or raises its own thinking level, as a standing Hawk does when the line stops).
 
+### Deploy posture
+
+VISION.md is canonical. Add a section like this; Muster prints this conservative template when it is missing and never edits the file:
+
+```markdown
+## Deploy posture
+Level: 1 (prove)
+Live proof frees the slot.
+```
+
+`project_update policy.deployLevel` is the fallback. No section or policy means level 1. A malformed section is reported and falls back. VISION wins over policy; status names a mismatch and shows each lane's effective level. Reads happen at call time.
+
+| Level | Name | Deploy permission | WIP frees |
+| --- | --- | --- | --- |
+| 0 | locked | Cite a resolved approval desk item in evidence | Live proof |
+| 1 | prove | Green gate | Live proof |
+| 2 | ship-and-watch | Green gate, `Rollback: ...` and `Watch: ...` evidence lines | Deploy; proof checked at retro |
+| 3 | jfdi | Green gate and `Rollback: ...` evidence line | Deploy; no proof step |
+
+`lane_open deployLevel` only lowers permission and requires `deployRule`: `customer-facing`, `money`, `outbound-sends`, `irreversible`, `shared-infra` or `slow-rollback`. The tool refuses an override above that rule's cap. Customer-facing work, money or outbound sends cap permission at 1; irreversible work at 0; shared infrastructure at 2; rollback over five minutes or needing another person at 1. A later project-level decrease also lowers existing lanes.
+
 `project_update` sets the sidebar headline and the project's policy: WIP and flow limits, silence limits and per-role model, thinking, compaction, and skills, merged over Muster's defaults.
 
 ## Delivery and flow
 
 A lane is done when its work is live and proven, not merely merged. See [the definition of done and brief template](skills/muster/references/done.md). `packet_report` accepts `deploy`, `proof`, and `signals: { working, failing, where }` and includes them in its `.svx` report.
 
-Committed `packet_land` outcomes start delivery at `landed`, with a timestamp. `lane_deliver({ slug, stage: "deployed" | "proven" | "waived", evidence })` records the next stage and its plain-word evidence. Delivery only moves forward within a cycle; another committed packet starts a new cycle. Docs or probes with nothing to deploy can be waived. Rejected and `no_changes` packets need no delivery. Old catalogs decode committed lanes as `proven` with evidence `before done-live`; new landed work is never backfilled.
+Committed `packet_land` outcomes start delivery at `landed`, with a timestamp. `lane_deliver({ slug, stage: "deployed" | "proven" | "waived", evidence })` records the next stage and its plain-word evidence. Proof may follow a waiver or deploy at any level. Delivery otherwise only moves forward within a cycle; another committed packet starts a new cycle. Docs or probes with nothing to deploy can be waived. Rejected and `no_changes` packets need no delivery. Old catalogs decode committed lanes as `proven` with evidence `before done-live`; new landed work is never backfilled.
 
-Feature WIP includes open and draining work lanes, plus closed lanes still at `landed` or `deployed`, even if archived. Role tabs and proposed (`open: false`) ideas do not count. `policy.wipLimit` defaults to 3; `null` disables it. At the limit, `lane_open` refuses and lists in-flight lanes with stage and age. Park ideas with `open: false`, or pass `override` containing Joel's words; the lane records them.
+Feature WIP includes open and draining work lanes, plus closed lanes still at `landed` or `deployed`, even if archived. At deploy levels 2 and 3, deployed lanes leave WIP even with an open tab; the flow line keeps them visible as `watching`. Role tabs and proposed (`open: false`) ideas do not count. `policy.wipLimit` defaults to 3; `null` disables it. At the limit, `lane_open` refuses and lists in-flight lanes with stage and age. Park ideas with `open: false`, or pass `override` containing Joel's words; the lane records them.
 
 The board header and turn feeds show one flow line: `WIP 2/3 · landed, not live: lexicon-pin 40m · oldest in flight 2h · last proven 35m ago`. `⚠ not flowing` marks WIP with no recent proof or stage movement for `policy.flowStallMin` (default 120), or a reported packet waiting longer than `policy.landWaitMin` (default 30). These limits are minutes and can be changed with `project_update`. No extra sounds or toasts.
 

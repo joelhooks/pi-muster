@@ -21,7 +21,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
+import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { tryAcquireHeavy } from "./heavy-lock.ts";
 import { FleetStatus, busyQueue, gatesLine } from "./fleet.ts";
@@ -61,13 +61,14 @@ import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem, forwardOwner, ingestOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
-import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts";
+import { checkRunnableModel, checkRestoreContext, resolveModel, modelOutputIssue } from "./models.ts";
+import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./session-model.ts";
 import { resolveSkills, skillIndex } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
 import { relayEvent, watchFallback } from "./relay-events.ts";
-import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
+import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import type { LiveCounts } from "./tokens.ts";
 
@@ -90,6 +91,17 @@ const startPrompt = (row: AgentRow, prompt: string | undefined, dir: string) => 
   return { prompt: text, expected: text };
 });
 
+
+const sessionRestore = (profile: LaunchProfile, file: string | null, project: Project, role: Role, roster?: import("./domain.ts").Roster, params: Pick<AgentLaunchInput, "model" | "thinking"> = {}, remote = false) => Effect.gen(function* () {
+  const notes: string[] = [];
+  const reading: Effect.Effect<string, InputError | ProcError, Proc> = !file ? Effect.succeed("") : remote
+    ? must("node", ["--input-type=module", "-e", SESSION_MODEL_READ_SCRIPT, file], { cwd: "/", timeoutMs: 20_000 })
+    : Effect.try({ try: () => readFileSync(file, "utf8"), catch: error => new InputError({ message: String(error) }) });
+  const text = yield* reading.pipe(Effect.catch(error => Effect.sync(() => { notes.push(`session model unavailable: ${error.message}; warning: using launch profile`); return ""; })));
+  const live = parseSessionModel(text);
+  const selected = yield* decodeWith(() => restoreProfile({ profile, live, roster, project: project.slug, role, ...params }), null);
+  return { ...selected, live, notes: [...notes, selected.note] };
+});
 
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
@@ -131,13 +143,13 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
     ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
   }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model, project.slug), null));
-  const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
+  const selected = params.action === "restore" ? { model: profile.model } : yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
   const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
   const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path)))) };
-  const remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
+  let remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
@@ -165,6 +177,14 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       const script = `import {forkSessionAt} from ${JSON.stringify(`${machine.musterExtension}/src/session-tree.ts`)}; console.log(forkSessionAt(process.argv[1], process.argv[2], process.argv[3]));`;
       // This Proc is already SSH-backed; do not nest SSH.
       parentSessionFile = (yield* must("node", ["--input-type=module", "-e", script, parentSessionFile ?? "", params.at, `${cwd}/.pi/muster/forks`], { cwd, timeoutMs: 30_000 })).trim();
+    }
+    const restoreNotes: string[] = [];
+    if (params.action === "restore") {
+      const selected = yield* sessionRestore(remoteProfile, sessionFile, project, role, roster, params, true);
+      remoteProfile = selected.profile;
+      restoreNotes.push(...selected.notes);
+      const note = yield* checkRestoreContext(remoteProfile.model, cwd, selected.live.contextTokens);
+      if (note) restoreNotes.push(note);
     }
     const now = iso(env);
     let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
@@ -231,7 +251,8 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       if (named._tag === "Failure") cloneNotes.push(`machine ${nameOfMachine}: agent rename refused (${named.failure.code ?? "transport"}): ${named.failure.message}; leaving existing names unchanged.`);
       const requestedId = row.sessionId;
       const actual = sessionIdFromFile(wait.sessionFile) ?? requestedId;
-      const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: launchProfile, musterExtension: machine.musterExtension });
+      const liveRestore = yield* sessionRestore(launchProfile, wait.sessionFile, project, role, roster, params.action === "restore" ? params : {}, true);
+      const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: liveRestore.profile, musterExtension: machine.musterExtension });
       const restore = { cwd, argv: [...wrap, "pi", ...restoreArgv], env: agentEnvironment };
       row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore });
       yield* paneRename(binding.paneId, label);
@@ -240,7 +261,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
-      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, piReceipt, ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
+      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
@@ -251,7 +272,11 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
   const machine = yield* machineConfig(row.machine);
   if (params.force && !project.packets.some(packet => packet.agent === row.name && packet.verification)) return yield* input("force close requires a verified packet");
   const notes: string[] = [];
-  yield* onRemote(row.machine, machine, Effect.gen(function* () {
+  const roster = (yield* loadRoster).roster;
+  const restore = yield* onRemote(row.machine, machine, Effect.gen(function* () {
+    const selected = yield* sessionRestore(extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row), row.sessionFile, project, row.role, roster, {}, true);
+    notes.push(...selected.notes);
+    const restore = { cwd: row.cwd, argv: [...machine.wrap.map(arg => arg.replaceAll("{name}", row.name)), "pi", ...buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile: row.sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: machine.musterExtension })], env: row.restore?.env ?? agentEnv(project, row) };
     if (row.state !== "closed") {
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       const holder = project.agents.find(other => other.machine === row.machine && other.name !== row.name && other.state !== "closed" && row.pane && sharesPane(row.pane, other.pane));
@@ -273,12 +298,13 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
       const present = yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 });
       if (present.code === 0) notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
     }
+    return restore;
   }));
   const closed = yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
     yield* requireOwner(latest, env.sessionId, params.takeover);
     if (latest.sessionId !== row.sessionId || latest.pane?.terminalId !== row.pane?.terminalId) return yield* input("remote row changed during close; re-read it");
-    const next = { ...latest, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
+    const next = { ...latest, restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
     return [withRow(current, next), next] as const;
   }));
   return { row: closed, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: null, notes };
@@ -421,8 +447,9 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
     if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
     const event: AgentEvent[] = latest.state === "running" ? [] : [{ type: READOPT_STATES.includes(latest.state) && latest.state !== "interrupted" ? "ACTIVE" : "ADOPT" }];
     const state = yield* advance(latest, event);
+    const selected = yield* sessionRestore(latest.profile, session.sessionFile, project, latest.role, (yield* loadRoster).roster, {}, latest.machine !== "local");
     const restore = latest.restore ? { ...latest.restore, argv: latest.restore.argv.map((arg, index, argv) =>
-      argv[index - 1] === "--session" ? session.sessionFile : argv[index - 1] === "--session-id" ? session.sessionId : arg) } : null;
+      argv[index - 1] === "--session" ? session.sessionFile : argv[index - 1] === "--session-id" ? session.sessionId : argv[index - 1] === "--model" ? `${selected.profile.model}:${selected.profile.thinking}` : arg) } : null;
     const next: AgentRow = { ...latest, ...session, pane: adoptionBinding(latest, pane), state, restore, updatedAt: iso(env) };
     return [withRow(project, next), next] as const;
   }));
@@ -872,6 +899,7 @@ export const projectOpen = (params: ProjectOpenInput) =>
     yield* registerProject(final);
     notes.push(yield* publishTokens(final));
     notes.push(`brain: ${yield* writeBrain(final)}`);
+    notes.push(deployPostureLine(final));
     return { project: final, adopted, cadence: cadenceCall(final), notes };
   });
 
@@ -1056,6 +1084,8 @@ export interface LaneOpenInput {
   /** False records the lane as proposed without a tab. */
   readonly open?: boolean | undefined;
   readonly override?: string | undefined;
+  readonly deployLevel?: number | undefined;
+  readonly deployRule?: string | undefined;
 }
 
 export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: number | undefined }) =>
@@ -1064,6 +1094,15 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const slug = yield* decodeWith(decodeSlug, params.slug);
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "lane_open");
+    const posture = deployPosture(project);
+    const requestedLevel = params.deployLevel === undefined ? undefined : yield* decodeWith(decodeDeployLevel, params.deployLevel);
+    if (requestedLevel === undefined && params.deployRule !== undefined) return yield* input("deployRule requires deployLevel");
+    const requestedRule = requestedLevel === undefined ? undefined : yield* decodeWith(decodeDeployRule, params.deployRule);
+    if (requestedLevel !== undefined) {
+      if (requestedLevel > posture.level) return yield* input(`deployLevel cannot raise project level ${posture.level}`);
+      if (requestedRule !== undefined && requestedLevel > DEPLOY_RULE_CAPS[requestedRule]) return yield* input(`deployRule ${requestedRule} caps deployLevel at ${DEPLOY_RULE_CAPS[requestedRule]}`);
+    }
+    const deployPatch = requestedLevel !== undefined ? { deployLevel: requestedLevel, deployRule: requestedRule } : {};
     const rank = params.rank;
     if (rank !== undefined && !Number.isSafeInteger(rank)) return yield* input("rank must be a safe integer");
     // Re-ranking parked work is intentionally rank-only, including its timestamps and brief.
@@ -1084,9 +1123,9 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
         const requestedBase = params.base;
         // An open lane is never archived; this also repairs a lane reopened before reopening cleared the flag.
-        const lane = requestedBase === undefined && !existing.archived ? existing : yield* mutate(dir, (current) => {
+        const lane = requestedBase === undefined && params.deployLevel === undefined && !existing.archived ? existing : yield* mutate(dir, (current) => {
           const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
-          const next = { ...latest, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
+          const next = { ...latest, ...deployPatch, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
           return Effect.succeed([withLane(current, next), next] as const);
         });
         return { lane, created: false, note: null, outcome: project.outcome };
@@ -1120,6 +1159,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
         const next = {
           ...latest,
+          ...deployPatch,
           base: params.base ?? latest.base,
           goal: latest.state === "proposed" ? params.goal : latest.goal,
           updatedAt: iso(env),
@@ -1134,7 +1174,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       const latest = current.lanes.find(lane => lane.slug === slug) ?? base;
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
       if (refusal && !params.override?.trim()) return yield* input(refusal);
-      const next: Lane = { ...latest, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
+      const next: Lane = { ...latest, ...deployPatch, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
         ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) };
       return [withLane(current, next), next] as const;
     }));
@@ -1191,6 +1231,17 @@ export const laneDeliver = (dir: string, params: { slug: string; stage: "deploye
     const lane = yield* mutate(dir, current => Effect.gen(function* () {
       yield* guardSideDesk(current, env.sessionId, "lane_deliver");
       const latest = yield* findLane(current, params.slug);
+      const level = laneDeployLevel(latest, deployPosture(current).level);
+      if (params.stage === "deployed") {
+        if (level >= 2 && !/^rollback:[ \t]*\S.+$/im.test(params.evidence)) return yield* input(`deploy level ${level} needs a rollback line (Rollback: ...)`);
+        if (level === 2 && !/^watch(?: signal)?:[ \t]*\S.+$/im.test(params.evidence)) return yield* input("deploy level 2 needs a watch signal (Watch: ...)");
+        if (level === 0) {
+          const items = readDesk(queuePath(current.slug, env.home));
+          const cited = new Set(params.evidence.split(/[^a-zA-Z0-9_-]+/));
+          const approved = items.some(item => item.kind === "approval" && cited.has(item.id) && items.some(resolution => resolution.resolves === item.id));
+          if (!approved) return yield* input("deploy level 0 needs a cited resolved approval desk item");
+        }
+      }
       const stage = yield* stepDelivery(latest.slug, latest.delivery ?? "none", params.stage);
       const at = iso(env);
       const evidence = params.evidence.trim();
@@ -1586,6 +1637,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
 
     const roster = (yield* loadRoster).roster;
     const skillNotes: string[] = [];
+    let restoreTokens: number | null = null;
     let row: AgentRow;
     if (params.action === "restore") {
       if (!existing) return yield* new NotFound({ kind: "agent", id: name, message: `no row ${name} to restore` });
@@ -1595,7 +1647,10 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       }
       const sessionFile = existing.sessionFile ?? findSessionFile(existing.cwd, existing.sessionId, env.home);
       if (!sessionFile) return yield* new GuardFailed({ guard: "session", message: `row ${name} has no session file to restore; use launch` });
-      const restoredProfile = profileFor(existing.role, existing.profile);
+      const selected = yield* sessionRestore(profileFor(existing.role, existing.profile), sessionFile, project, existing.role, roster, params);
+      const restoredProfile = selected.profile;
+      skillNotes.push(...selected.notes);
+      restoreTokens = selected.live.contextTokens;
       const restoredSkills = yield* Effect.try({
         try: () => resolveSkills({ skills: restoredProfile.skills, index: restoredProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
         catch: error => input(`restore skills: ${String(error)}`),
@@ -1692,7 +1747,8 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       catch: (error) => input(String(error instanceof Error ? error.message : error)),
     });
     row = { ...row, profile: { ...row.profile, model: resolvedModel.model, thinking: params.thinking ?? resolvedModel.thinking ?? row.profile.thinking } };
-    const modelNote = yield* checkRunnableModel(row.profile.model, row.cwd);
+    const modelNote = yield* checkRunnableModel(row.profile.model, row.cwd, params.action === "restore"
+      ? { tokens: restoreTokens } : undefined);
     if (modelNote) skillNotes.push(modelNote);
     const kind: LaunchKind = params.action;
     const launchProfile = extensionsFor(project, row);
@@ -1767,6 +1823,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     }).pipe(Effect.tapError(failLaunch));
 
     const actualId = launched.sessionFile ? sessionIdFromFile(launched.sessionFile) : null;
+    const liveRestore = yield* sessionRestore(launchProfile, launched.sessionFile, project, row.role, roster, params.action === "restore" ? params : {});
     const restore = {
       cwd: row.cwd,
       argv: buildArgv({
@@ -1774,7 +1831,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         sessionId: actualId ?? row.sessionId,
         sessionFile: launched.sessionFile,
         parentSessionFile: null,
-        profile: launchProfile,
+        profile: liveRestore.profile,
         musterExtension: project.musterExtension,
       }),
       env: agentEnvironment,
@@ -1836,6 +1893,15 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       return yield* new GuardFailed({ guard: "force-after-verify", message: `--force removes unharvested work; ${row.name} has no packet that passed packet_verify` });
     }
     const notes: string[] = [];
+    const sessionFile = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
+    const selected = yield* sessionRestore(extensionsFor(project, row), sessionFile, project, row.role, (yield* loadRoster).roster);
+    notes.push(...selected.notes);
+    const profile = selected.profile;
+    const restore = {
+      cwd: row.cwd,
+      argv: buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile, parentSessionFile: null, profile, musterExtension: project.musterExtension }),
+      env: agentEnv(project, row),
+    };
     if (row.state !== "closed") {
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       if (row.pane) {
@@ -1856,13 +1922,6 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
         }
       }
     }
-    const sessionFile = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
-    const profile = extensionsFor(project, row);
-    const restore = {
-      cwd: row.cwd,
-      argv: buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile, parentSessionFile: null, profile, musterExtension: project.musterExtension }),
-      env: agentEnv(project, row),
-    };
     // Pane I/O can overlap landing or another close. Transition the locked,
     // current row, not the snapshot read before closing the pane.
     const closed = yield* mutate(dir, (current) => Effect.gen(function* () {
@@ -2532,9 +2591,10 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           if (pane?.agent === "pi" && matches && sessionFile) {
             if (act) {
               const sessionId = sessionIdFromFile(sessionFile) ?? row.sessionId;
+              const selected = yield* sessionRestore(extensionsFor(project, row), sessionFile, project, row.role, (yield* loadRoster).roster);
               const restore = {
                 cwd: row.cwd,
-                argv: buildArgv({ kind: "restore", sessionId, sessionFile, parentSessionFile: null, profile: extensionsFor(project, row), musterExtension: project.musterExtension }),
+                argv: buildArgv({ kind: "restore", sessionId, sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: project.musterExtension }),
                 env: agentEnv(project, row),
               };
               current = yield* patchRow(dir, row.name, row.state, [{ type: "ADOPT" }], {
@@ -2730,6 +2790,7 @@ export function reviewDue(project: Project, nowMs: number): string | null {
 
 export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null): string {
   const lanes = project.lanes.filter((lane) => !lane.archived);
+  const posture = deployPosture(project);
   const due = reviewDue(project, nowMs);
   const pending = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state));
   const rows = new Map(project.agents.map(row => [row.name, row]));
@@ -2741,8 +2802,9 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
   });
   const out = [
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
+    deployPostureLine(project),
     flowLine(project, nowMs),
-    `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state}`).join(", ") || "none"}`,
+    `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state} [deploy ${laneDeployLevel(lane, posture.level)}]`).join(", ") || "none"}`,
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,
     ...(gates ? [gates] : []),
