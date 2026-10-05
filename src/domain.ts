@@ -264,6 +264,8 @@ export const Lane = Schema.Struct({
   state: LaneState,
   /** Stable retro cursor; older catalogs fall back to updatedAt. */
   closedAt: Schema.optionalKey(Iso),
+  /** Explicitly dropped from the proposed backlog, not finished work. */
+  discarded: Schema.optionalKey(Schema.Boolean),
   delivery: Schema.optionalKey(LaneDelivery),
   deliveryAt: Schema.optionalKey(Iso),
   deliveryEvidence: Schema.optionalKey(Schema.String),

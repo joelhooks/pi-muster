@@ -74,7 +74,7 @@ export type LaneEvent =
   | { type: "DRAIN" }
   | { type: "REOPEN" }
   | { type: "OPEN_FAILED"; readonly prior: "proposed" | "draining" | "closed" }
-  | { type: "CLOSE"; readonly liveAgents: number; readonly openPackets: number };
+  | { type: "CLOSE"; readonly liveAgents: number; readonly openPackets: number; readonly discard?: boolean };
 
 const nothingLive = ({ event }: { event: LaneEvent }) =>
   event.type === "CLOSE" && event.liveAgents === 0 && event.openPackets === 0;
@@ -83,6 +83,7 @@ export const laneMachine = setup({
   types: { events: {} as LaneEvent },
   guards: {
     nothingLive,
+    discardProposed: ({ event }) => nothingLive({ event }) && event.type === "CLOSE" && event.discard === true,
     wasProposed: ({ event }) => event.type === "OPEN_FAILED" && event.prior === "proposed",
     wasDraining: ({ event }) => event.type === "OPEN_FAILED" && event.prior === "draining",
     wasClosed: ({ event }) => event.type === "OPEN_FAILED" && event.prior === "closed",
@@ -91,7 +92,7 @@ export const laneMachine = setup({
   id: "lane",
   initial: "proposed",
   states: {
-    proposed: { on: { OPEN: "open", CLOSE: { target: "closed", guard: "nothingLive" } } },
+    proposed: { on: { OPEN: "open", CLOSE: { target: "closed", guard: "discardProposed" } } },
     open: { on: {
       DRAIN: "draining", CLOSE: { target: "closed", guard: "nothingLive" },
       OPEN_FAILED: [{ target: "proposed", guard: "wasProposed" }, { target: "draining", guard: "wasDraining" }, { target: "closed", guard: "wasClosed" }],

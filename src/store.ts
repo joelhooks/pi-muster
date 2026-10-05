@@ -23,7 +23,7 @@ const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 20_000;
 
 /** Bump whenever persisted fields are added, including nested structs. Never a git SHA. */
-export const CATALOG_WRITER_SCHEMA_VERSION = 1;
+export const CATALOG_WRITER_SCHEMA_VERSION = 2; // 2: Lane.discarded
 
 const decode = Schema.decodeUnknownEffect(Project);
 const encode = Schema.encodeSync(Project);
