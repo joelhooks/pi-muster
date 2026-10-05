@@ -123,12 +123,21 @@ describe("remote owner operations", () => {
     expect(feed.flush()).toBe(wakeKind(kind) ? 1 : 0); expect(wake).toHaveBeenCalledTimes(wakeKind(kind) ? 1 : 0);
     expect(feed.flush()).toBe(0); feed.dispose();
   });
-  it.each(["project", "machine", "agent", "lane"])("skips a note with mismatched %s and still pulls valid notes", async field => {
+  it("uses the catalog owner when the sidecar names another owner", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: launched.row.lane, kind: "question", title: "Question" }, join(s.h.root, "remote-home"));
+    const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: launched.row.name, lane: launched.row.lane, owner: "another-owner", item }));
+    expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
+    expect(readOwnerQueue(launched.row.owner, s.h.home).items.map(record => record.item)).toEqual([item]);
+    expect(readOwnerQueue("another-owner", s.h.home).items).toHaveLength(0);
+  });
+  it.each(["project", "machine", "agent", "lane", "author"])("skips a note with mismatched %s and still pulls valid notes", async field => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: launched.row.lane, kind: "question", title: "Question" }, join(s.h.root, "remote-home"));
     const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
     const sidecar = { project: "probe", machine: "remote", agent: launched.row.name, lane: launched.row.lane, owner: launched.row.owner, item };
-    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify({ ...sidecar, [field]: "wrong" }));
+    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify(field === "author" ? { ...sidecar, item: { ...item, author: "wrong-author" } } : { ...sidecar, [field]: "wrong" }));
     writeFileSync(join(root, `${"b".repeat(64)}.json`), JSON.stringify(sidecar));
     writeFileSync(join(root, `${"c".repeat(64)}.json`), "{broken");
     writeFileSync(join(root, "unfinished.tmp"), "{broken");
