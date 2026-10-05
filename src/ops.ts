@@ -57,7 +57,8 @@ import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem, forwardOwner, ingestOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
-import { checkRunnableModel, resolveModel, modelOutputIssue } from "./models.ts";
+import { checkRunnableModel, checkRestoreContext, resolveModel, modelOutputIssue } from "./models.ts";
+import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./session-model.ts";
 import { resolveSkills, skillIndex } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
@@ -73,6 +74,17 @@ const CLOSE_READ_LINES = 40;
 const SHELL_RETRY_STEP_MS = 250;
 const SHELL_RETRY_BUDGET_MS = 15_000;
 
+
+const sessionRestore = (profile: LaunchProfile, file: string | null, project: Project, role: Role, roster?: import("./domain.ts").Roster, params: Pick<AgentLaunchInput, "model" | "thinking"> = {}, remote = false) => Effect.gen(function* () {
+  const notes: string[] = [];
+  const reading: Effect.Effect<string, InputError | ProcError, Proc> = !file ? Effect.succeed("") : remote
+    ? must("node", ["--input-type=module", "-e", SESSION_MODEL_READ_SCRIPT, file], { cwd: "/", timeoutMs: 20_000 })
+    : Effect.try({ try: () => readFileSync(file, "utf8"), catch: error => new InputError({ message: String(error) }) });
+  const text = yield* reading.pipe(Effect.catch(error => Effect.sync(() => { notes.push(`session model unavailable: ${error.message}; warning: using launch profile`); return ""; })));
+  const live = parseSessionModel(text);
+  const selected = yield* decodeWith(() => restoreProfile({ profile, live, roster, project: project.slug, role, ...params }), null);
+  return { ...selected, live, notes: [...notes, selected.note] };
+});
 
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
@@ -114,13 +126,13 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
     ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
   }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model, project.slug), null));
-  const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
+  const selected = params.action === "restore" ? { model: profile.model } : yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
   const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
   const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path)))) };
-  const remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
+  let remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
@@ -148,6 +160,14 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       const script = `import {forkSessionAt} from ${JSON.stringify(`${machine.musterExtension}/src/session-tree.ts`)}; console.log(forkSessionAt(process.argv[1], process.argv[2], process.argv[3]));`;
       // This Proc is already SSH-backed; do not nest SSH.
       parentSessionFile = (yield* must("node", ["--input-type=module", "-e", script, parentSessionFile ?? "", params.at, `${cwd}/.pi/muster/forks`], { cwd, timeoutMs: 30_000 })).trim();
+    }
+    const restoreNotes: string[] = [];
+    if (params.action === "restore") {
+      const selected = yield* sessionRestore(remoteProfile, sessionFile, project, role, roster, params, true);
+      remoteProfile = selected.profile;
+      restoreNotes.push(...selected.notes);
+      const note = yield* checkRestoreContext(remoteProfile.model, cwd, selected.live.contextTokens);
+      if (note) restoreNotes.push(note);
     }
     const now = iso(env);
     let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
@@ -208,7 +228,8 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       }
       const requestedId = row.sessionId;
       const actual = sessionIdFromFile(wait.sessionFile) ?? requestedId;
-      const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: launchProfile, musterExtension: machine.musterExtension });
+      const liveRestore = yield* sessionRestore(launchProfile, wait.sessionFile, project, role, roster, params.action === "restore" ? params : {}, true);
+      const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: liveRestore.profile, musterExtension: machine.musterExtension });
       const restore = { cwd, argv: [...wrap, "pi", ...restoreArgv], env: agentEnvironment };
       row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore });
       yield* paneRename(binding.paneId, label);
@@ -221,7 +242,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
-      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, piReceipt, ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
+      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
@@ -232,7 +253,11 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
   const machine = yield* machineConfig(row.machine);
   if (params.force && !project.packets.some(packet => packet.agent === row.name && packet.verification)) return yield* input("force close requires a verified packet");
   const notes: string[] = [];
-  yield* onRemote(row.machine, machine, Effect.gen(function* () {
+  const roster = (yield* loadRoster).roster;
+  const restore = yield* onRemote(row.machine, machine, Effect.gen(function* () {
+    const selected = yield* sessionRestore(extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row), row.sessionFile, project, row.role, roster, {}, true);
+    notes.push(...selected.notes);
+    const restore = { cwd: row.cwd, argv: [...machine.wrap.map(arg => arg.replaceAll("{name}", row.name)), "pi", ...buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile: row.sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: machine.musterExtension })], env: row.restore?.env ?? agentEnv(project, row) };
     if (row.state !== "closed") {
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       const holder = project.agents.find(other => other.machine === row.machine && other.name !== row.name && other.state !== "closed" && row.pane && sharesPane(row.pane, other.pane));
@@ -254,12 +279,13 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
       const present = yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 });
       if (present.code === 0) notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
     }
+    return restore;
   }));
   const closed = yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
     yield* requireOwner(latest, env.sessionId, params.takeover);
     if (latest.sessionId !== row.sessionId || latest.pane?.terminalId !== row.pane?.terminalId) return yield* input("remote row changed during close; re-read it");
-    const next = { ...latest, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
+    const next = { ...latest, restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
     return [withRow(current, next), next] as const;
   }));
   return { row: closed, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: null, notes };
@@ -402,8 +428,9 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
     if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
     const event: AgentEvent[] = latest.state === "running" ? [] : [{ type: READOPT_STATES.includes(latest.state) && latest.state !== "interrupted" ? "ACTIVE" : "ADOPT" }];
     const state = yield* advance(latest, event);
+    const selected = yield* sessionRestore(latest.profile, session.sessionFile, project, latest.role, (yield* loadRoster).roster, {}, latest.machine !== "local");
     const restore = latest.restore ? { ...latest.restore, argv: latest.restore.argv.map((arg, index, argv) =>
-      argv[index - 1] === "--session" ? session.sessionFile : argv[index - 1] === "--session-id" ? session.sessionId : arg) } : null;
+      argv[index - 1] === "--session" ? session.sessionFile : argv[index - 1] === "--session-id" ? session.sessionId : argv[index - 1] === "--model" ? `${selected.profile.model}:${selected.profile.thinking}` : arg) } : null;
     const next: AgentRow = { ...latest, ...session, pane: adoptionBinding(latest, pane), state, restore, updatedAt: iso(env) };
     return [withRow(project, next), next] as const;
   }));
@@ -1580,6 +1607,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
 
     const roster = (yield* loadRoster).roster;
     const skillNotes: string[] = [];
+    let restoreTokens: number | null = null;
     let row: AgentRow;
     if (params.action === "restore") {
       if (!existing) return yield* new NotFound({ kind: "agent", id: name, message: `no row ${name} to restore` });
@@ -1589,7 +1617,10 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       }
       const sessionFile = existing.sessionFile ?? findSessionFile(existing.cwd, existing.sessionId, env.home);
       if (!sessionFile) return yield* new GuardFailed({ guard: "session", message: `row ${name} has no session file to restore; use launch` });
-      const restoredProfile = profileFor(existing.role, existing.profile);
+      const selected = yield* sessionRestore(profileFor(existing.role, existing.profile), sessionFile, project, existing.role, roster, params);
+      const restoredProfile = selected.profile;
+      skillNotes.push(...selected.notes);
+      restoreTokens = selected.live.contextTokens;
       const restoredSkills = yield* Effect.try({
         try: () => resolveSkills({ skills: restoredProfile.skills, index: restoredProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
         catch: error => input(`restore skills: ${String(error)}`),
@@ -1686,7 +1717,8 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       catch: (error) => input(String(error instanceof Error ? error.message : error)),
     });
     row = { ...row, profile: { ...row.profile, model: resolvedModel.model, thinking: params.thinking ?? resolvedModel.thinking ?? row.profile.thinking } };
-    const modelNote = yield* checkRunnableModel(row.profile.model, row.cwd);
+    const modelNote = yield* checkRunnableModel(row.profile.model, row.cwd, params.action === "restore"
+      ? { tokens: restoreTokens } : undefined);
     if (modelNote) skillNotes.push(modelNote);
     const kind: LaunchKind = params.action;
     const launchProfile = extensionsFor(project, row);
@@ -1787,6 +1819,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     }).pipe(Effect.tapError(failLaunch));
 
     const actualId = launched.sessionFile ? sessionIdFromFile(launched.sessionFile) : null;
+    const liveRestore = yield* sessionRestore(launchProfile, launched.sessionFile, project, row.role, roster, params.action === "restore" ? params : {});
     const restore = {
       cwd: row.cwd,
       argv: buildArgv({
@@ -1794,7 +1827,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         sessionId: actualId ?? row.sessionId,
         sessionFile: launched.sessionFile,
         parentSessionFile: null,
-        profile: launchProfile,
+        profile: liveRestore.profile,
         musterExtension: project.musterExtension,
       }),
       env: agentEnvironment,
@@ -1873,6 +1906,15 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       return yield* new GuardFailed({ guard: "force-after-verify", message: `--force removes unharvested work; ${row.name} has no packet that passed packet_verify` });
     }
     const notes: string[] = [];
+    const sessionFile = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
+    const selected = yield* sessionRestore(extensionsFor(project, row), sessionFile, project, row.role, (yield* loadRoster).roster);
+    notes.push(...selected.notes);
+    const profile = selected.profile;
+    const restore = {
+      cwd: row.cwd,
+      argv: buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile, parentSessionFile: null, profile, musterExtension: project.musterExtension }),
+      env: agentEnv(project, row),
+    };
     if (row.state !== "closed") {
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       if (row.pane) {
@@ -1893,13 +1935,6 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
         }
       }
     }
-    const sessionFile = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
-    const profile = extensionsFor(project, row);
-    const restore = {
-      cwd: row.cwd,
-      argv: buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile, parentSessionFile: null, profile, musterExtension: project.musterExtension }),
-      env: agentEnv(project, row),
-    };
     // Pane I/O can overlap landing or another close. Transition the locked,
     // current row, not the snapshot read before closing the pane.
     const closed = yield* mutate(dir, (current) => Effect.gen(function* () {
@@ -2569,9 +2604,10 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           if (pane?.agent === "pi" && matches && sessionFile) {
             if (act) {
               const sessionId = sessionIdFromFile(sessionFile) ?? row.sessionId;
+              const selected = yield* sessionRestore(extensionsFor(project, row), sessionFile, project, row.role, (yield* loadRoster).roster);
               const restore = {
                 cwd: row.cwd,
-                argv: buildArgv({ kind: "restore", sessionId, sessionFile, parentSessionFile: null, profile: extensionsFor(project, row), musterExtension: project.musterExtension }),
+                argv: buildArgv({ kind: "restore", sessionId, sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: project.musterExtension }),
                 env: agentEnv(project, row),
               };
               current = yield* patchRow(dir, row.name, row.state, [{ type: "ADOPT" }], {

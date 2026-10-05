@@ -64,16 +64,56 @@ export function workingRoutes(model: string, runnable: readonly string[]): strin
   }).slice(0, 3);
 }
 
-export const checkRunnableModel = (model: string, cwd: string) => Effect.gen(function* () {
+export function parseModelWindows(output: string): ReadonlyMap<string, number> {
+  const routes = new Set(parseRunnableModels(output));
+  const windows = new Map<string, number>();
+  for (const line of stripVTControlCharacters(output).split(/\r?\n/)) {
+    const [provider, id, context] = line.trim().split(/\s+/);
+    const route = `${provider}/${id}`;
+    const match = /^(\d+(?:\.\d+)?)([KM]?)$/i.exec(context ?? "");
+    if (!routes.has(route) || !match) continue;
+    const size = Number(match[1]) * (match[2]?.toUpperCase() === "M" ? 1_000_000 : match[2]?.toUpperCase() === "K" ? 1000 : 1);
+    if (size > 0) windows.set(route, size);
+  }
+  return windows;
+}
+
+export function restoreContextNote(model: string, tokens: number | null, windows: ReadonlyMap<string, number>): string | null {
+  const window = windows.get(model);
+  if (!window || tokens === null) return `restore context ${tokens ?? "unknown"} tokens; ${model} window ${window ?? "unknown"}; warning: context check unavailable, proceeding`;
+  const fits = [...windows].filter(([route, size]) => size >= tokens && !/sonnet|fable/i.test(route)).sort((a, b) => a[1] - b[1]);
+  const suggestion = fits[0] ? `use ${fits[0][0]} (${fits[0][1]} window)` : "no authenticated model with a fitting window listed";
+  if (tokens > window) throw new Error(`restore refused: ${tokens} context tokens exceed ${model} window ${window} (${Math.round(tokens / window * 100)}%); ${suggestion}`);
+  return tokens > window * 0.8 ? `restore context ${tokens} tokens / ${model} window ${window} (${Math.round(tokens / window * 100)}%); warning: above 80%; ${suggestion}` : null;
+}
+
+const listRunnableModels = (cwd: string) => Effect.gen(function* () {
   const proc = yield* Proc;
-  const listing = yield* proc.run("pi", ["--list-models"], { cwd, timeoutMs: 20_000 }).pipe(
+  return yield* proc.run("pi", ["--list-models"], { cwd, timeoutMs: 20_000 }).pipe(
     Effect.map((result) => result.code === 0
-      ? { models: parseRunnableModels(result.stdout), reason: "empty or unrecognized model list" }
-      : { models: [] as string[], reason: result.stderr.trim() || `pi --list-models exited ${result.code}` }),
-    Effect.catch((error) => Effect.succeed({ models: [] as string[], reason: error.message })),
+      ? { models: parseRunnableModels(result.stdout), windows: parseModelWindows(result.stdout), reason: "empty or unrecognized model list" }
+      : { models: [] as string[], windows: new Map<string, number>(), reason: result.stderr.trim() || `pi --list-models exited ${result.code}` }),
+    Effect.catch((error) => Effect.succeed({ models: [] as string[], windows: new Map<string, number>(), reason: error.message })),
   );
-  if (listing.models.length === 0) return `model check skipped: ${listing.reason}`;
-  if (listing.models.includes(model)) return null;
+});
+
+/** Remote launches historically prove auth in the pane; restore adds a window check, not a new auth gate. */
+export const checkRestoreContext = (model: string, cwd: string, tokens: number | null) => Effect.gen(function* () {
+  const listing = yield* listRunnableModels(cwd);
+  const note = yield* Effect.try({
+    try: () => restoreContextNote(model, tokens, listing.windows),
+    catch: error => new InputError({ message: error instanceof Error ? error.message : String(error) }),
+  });
+  return listing.models.length === 0 ? `${note}; model listing unavailable: ${listing.reason}` : note;
+});
+
+export const checkRunnableModel = (model: string, cwd: string, context?: { tokens: number | null }) => Effect.gen(function* () {
+  const listing = yield* listRunnableModels(cwd);
+  if (listing.models.length === 0) return `model check skipped: ${listing.reason}${context ? `; ${restoreContextNote(model, context.tokens, listing.windows)}` : ""}`;
+  if (listing.models.includes(model)) return context ? yield* Effect.try({
+    try: () => restoreContextNote(model, context.tokens, listing.windows),
+    catch: error => new InputError({ message: error instanceof Error ? error.message : String(error) }),
+  }) : null;
   const routes = workingRoutes(model, listing.models);
   const alias = Object.entries(DEFAULT_ALIASES).find(([, route]) => route === routes[0])?.[0];
   return yield* new InputError({ message: `${model} has no auth here; ${routes.length ? `use ${routes.join(", ")}${alias ? ` (alias ${alias})` : ""}` : "no working route found in pi --list-models"}` });
