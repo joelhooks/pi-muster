@@ -12,7 +12,7 @@ import { load } from "./store.ts";
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function setup(options: { error?: string; paneTail?: string; readyAfter?: number; logUnreadable?: boolean } = {}) {
+async function setup(options: { error?: string; paneTail?: string; readyAfter?: number; logUnreadable?: boolean; env?: Record<string, string> } = {}) {
   const h = harness();
   const dir = makeRepo(join(h.root, "source"));
   const bin = join(h.root, "bin"); mkdirSync(bin);
@@ -46,7 +46,7 @@ async function setup(options: { error?: string; paneTail?: string; readyAfter?: 
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", emitPaneClose: noEmitPaneClose, startupLoad: () => ({ load: 0, cpus: 1 }),
     machines: decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree,
-      env: { PATH: `${bin}:${process.env.PATH}`, PRIVATE_REMOTE_TOKEN: "private-launch-value" }, wrap: [] } }),
+      env: { PATH: `${bin}:${process.env.PATH}`, PRIVATE_REMOTE_TOKEN: "private-launch-value", ...options.env }, wrap: [] } }),
     remoteHerdr: () => Effect.succeed(remote.client()),
     sleep: ms => Effect.sync(() => {
       h.now = new Date(h.now.getTime() + ms);
@@ -91,6 +91,14 @@ describe("remote launch failure evidence", () => {
     expect(result).toMatchObject({ failure: { _tag: "GuardFailed", guard: "model-proof", message: expect.stringContaining(error) } });
     const row = await s.row(); expect(row.state).toBe("failed"); expect(row.delivery).toBe("unproven");
     expect(row.events).toContainEqual(expect.objectContaining({ type: "MODEL_ERROR", detail: error }));
+  });
+
+  it("classifies auth errors before redacting short custom env values", async () => {
+    const s = await setup({ error: "Error: HTTP 401 Unauthorized private-launch-value", env: { CUDA_VISIBLE_DEVICES: "1" } });
+    const result = await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "remote-w", role: "worker", lane: "work", label: "remote worker", cwd: s.dir, noSkills: true }).pipe(Effect.result));
+    expect(result).toMatchObject({ failure: { _tag: "GuardFailed", guard: "model-proof", message: expect.stringContaining("Error: HTTP") } });
+    const detail = (await s.row()).events?.find(event => event.type === "MODEL_ERROR")?.detail;
+    expect(detail).toContain("Unauthorized"); expect(detail).not.toContain("private-launch-value");
   });
 
   it("keeps only the last 12 log lines", async () => {

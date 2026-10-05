@@ -182,20 +182,23 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       const wait = yield* waitForSession(binding.paneId, null);
       if (wait.state !== "ready") {
         const logTail = yield* must("tail", ["-n", "12", launchLog], { cwd, timeoutMs: 10_000 }).pipe(Effect.orElseSucceed(() => ""));
-        // Omit echoed exports and custom env values, not ordinary catalog words such as worker.
-        const tail = stripVTControlCharacters(logTail.trim() ? logTail : wait.tail)
-          .split(/\r?\n/).filter(line => !/\bexport\s|MUSTER_REMOTE_ROW/.test(line) &&
-            !Object.values(remoteProfile.env).some(value => value.length > 0 && line.includes(value)))
-          .slice(-12).join("\n").trim().slice(-1500) || "(launch tail unavailable)";
-        const issue = modelOutputIssue(tail);
+        // Classify before redacting: a short env value can also occur in a model error code.
+        const evidence = stripVTControlCharacters(logTail.trim() ? logTail : wait.tail)
+          .split(/\r?\n/).filter(line => !/\bexport\s|MUSTER_REMOTE_ROW/.test(line))
+          .slice(-12).join("\n");
+        const redact = (text: string) => Object.values(remoteProfile.env).filter(value => value.length > 0)
+          .reduce((safe, value) => safe.replaceAll(value, "[remote env redacted]"), text);
+        const tail = redact(evidence).trim().slice(-1500) || "(launch tail unavailable)";
+        const issue = modelOutputIssue(evidence);
+        const modelLine = issue ? redact(issue.line) : "";
         const detail = `machine ${nameOfMachine}: Pi session not ready in ${binding.paneId}; inspect it before retrying (${wait.state}). Launch tail (UNTRUSTED):\n${tail}`;
         row = yield* patchRow(dir, name, row.state, [{ type: "LAUNCH_FAILED" }], {
           ...(issue?.severity === "error" ? { delivery: "unproven" as const } : {}),
           events: [...(row.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail },
-            ...(issue?.severity === "error" ? [{ type: "MODEL_ERROR" as const, at: iso(env), detail: issue.line }] : [])],
+            ...(issue?.severity === "error" ? [{ type: "MODEL_ERROR" as const, at: iso(env), detail: modelLine }] : [])],
         });
         if (issue?.severity === "error") {
-          modelFailure = new GuardFailed({ guard: "model-proof", message: `machine ${nameOfMachine}: pane ${binding.paneId}: delivery: unproven (model error: ${issue.line})` });
+          modelFailure = new GuardFailed({ guard: "model-proof", message: `machine ${nameOfMachine}: pane ${binding.paneId}: delivery: unproven (model error: ${modelLine})` });
           return yield* modelFailure;
         }
         return yield* input(detail);
