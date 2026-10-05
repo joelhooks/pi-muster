@@ -267,6 +267,9 @@ export const Lane = Schema.Struct({
   deliveryEvidence: Schema.optionalKey(Schema.String),
   deliveryHistory: Schema.optionalKey(Schema.Array(Schema.Struct({ stage: LaneDelivery, at: Iso, evidence: Schema.String }))),
   override: Schema.optionalKey(Schema.String),
+  rank: Schema.optionalKey(Schema.Number.check(Schema.isInt())),
+  /** Successful opening time, distinct from time spent in the proposed backlog. */
+  openedAt: Schema.optionalKey(Iso),
   archived: Schema.Boolean,
   createdAt: Iso,
   updatedAt: Iso,
