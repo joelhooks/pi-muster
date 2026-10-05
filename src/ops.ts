@@ -274,10 +274,16 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
   })).pipe(Effect.mapError(error => modelFailure ?? error));
 }));
 
+/** Force may trash a clone only when its work is safe elsewhere: verified, or recorded as landed with a sha (e.g. a squash-merged PR whose branch is gone). */
+export function forceCloseAllowed(project: Project, agent: string): boolean {
+  return project.packets.some(packet => packet.agent === agent &&
+    (Boolean(packet.verification) || ((packet.state === "committed" || packet.state === "no_changes") && Boolean(packet.landedAs))));
+}
+
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(row.machine);
-  if (params.force && !project.packets.some(packet => packet.agent === row.name && packet.verification)) return yield* input("force close requires a verified packet");
+  if (params.force && !forceCloseAllowed(project, row.name)) return yield* input("force close requires a verified packet or one recorded as landed");
   const notes: string[] = [];
   const roster = (yield* loadRoster).roster;
   const restore = yield* onRemote(row.machine, machine, Effect.gen(function* () {
@@ -1906,9 +1912,8 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     const row = yield* findRow(project, params.name);
     yield* requireOwner(row, env.sessionId, params.takeover);
     if (row.machine !== "local") return yield* remoteClose(dir, project, row, params);
-    const verified = project.packets.some((packet) => packet.agent === row.name && packet.verification !== null);
-    if (params.force && !verified) {
-      return yield* new GuardFailed({ guard: "force-after-verify", message: `--force removes unharvested work; ${row.name} has no packet that passed packet_verify` });
+    if (params.force && !forceCloseAllowed(project, row.name)) {
+      return yield* new GuardFailed({ guard: "force-after-verify", message: `--force removes unharvested work; ${row.name} has no packet that passed packet_verify or was recorded as landed` });
     }
     const notes: string[] = [];
     const sessionFile = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
