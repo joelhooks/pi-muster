@@ -246,6 +246,18 @@ export const RemotePacket = Schema.Struct({ project: Slug, machine: Schema.Strin
 export const decodeRemotePacket = Schema.decodeUnknownSync(RemotePacket);
 export const decodeAgentRow = Schema.decodeUnknownSync(AgentRow);
 
+/** Read-only projection of Pi's append-only session journal, not a catalog field. */
+export const decodeFirstTurnEntry = Schema.decodeUnknownSync(Schema.Struct({
+  type: Schema.String,
+  message: Schema.optionalKey(Schema.Struct({
+    role: Schema.String,
+    content: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.Struct({ type: Schema.String, text: Schema.optionalKey(Schema.String) }))])),
+    stopReason: Schema.optionalKey(Schema.String),
+    errorMessage: Schema.optionalKey(Schema.String),
+  })),
+}));
+export const decodeSessionSlice = Schema.decodeUnknownSync(Schema.Struct({ size: Schema.Number, text: Schema.String }));
+
 export const LaneDelivery = Schema.Literals(["none", "landed", "deployed", "proven", "waived"]);
 export type LaneDelivery = typeof LaneDelivery.Type;
 

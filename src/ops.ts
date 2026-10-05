@@ -36,6 +36,8 @@ import {
   paneSendKeys,
   paneSplit,
   promptWithProof,
+  piReceiptSuffix,
+  readPiReceipt,
   reportTokens,
   tabCreate,
   workspaceCreate,
@@ -178,7 +180,8 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
         .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
       yield* must("mkdir", ["-p", logDir], { cwd, timeoutMs: 10_000 });
       const launchLog = (yield* must("mktemp", [join(logDir, `launch-${name}-XXXXXXXX`)], { cwd, timeoutMs: 10_000 })).trim();
-      yield* paneRun(binding.paneId, `${shellPrelude(cwd, agentEnvironment)} && exec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
+      const piReceiptId = env.createId();
+      yield* paneRun(binding.paneId, `${shellPrelude(cwd, agentEnvironment)}${piReceiptSuffix(piReceiptId)} && exec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
       const wait = yield* waitForSession(binding.paneId, null);
       if (wait.state !== "ready") {
         const logTail = yield* must("tail", ["-n", "12", launchLog], { cwd, timeoutMs: 10_000 }).pipe(Effect.orElseSucceed(() => ""));
@@ -215,8 +218,10 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
         yield* patchRow(dir, name, row.state, [{ type: "FAIL" }], { delivery: "unproven", events: [...(row.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: proof.modelError }] });
         return yield* input(`machine ${nameOfMachine}: model error: ${proof.modelError}`);
       }
-      if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven" });
-      return { row, argv, readiness: "proven", proof, sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes] };
+      if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
+      const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
+      const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
+      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, piReceipt, ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
@@ -466,7 +471,10 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
             if (wait.state !== "ready") return yield* input(`machine ${row.machine}: restart submitted but no fresh session evidence`);
             current = yield* patchRow(dir, row.name, current.state, decision.events, { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? row.sessionId, restarts: current.restarts + 1 });
             const prompt = workPrompt(current, undefined);
-            if (prompt) yield* promptWithProof(pane.pane_id, prompt);
+            if (prompt) {
+              const proof = yield* promptWithProof(pane.pane_id, prompt);
+              current = yield* patchRow(dir, row.name, current.state, [], { delivery: proof.state, events: [...(current.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.state === "proven" ? "matching user entry and clean first assistant" : `${proof.detail}; inspect before repair: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: pane.pane_id, prompt: proof.repairPrompt ?? prompt } })}` }] });
+            }
           }
           if (decision.action === "nudge") current = yield* patchRow(dir, row.name, current.state, decision.events);
           action = `${decision.action} on ${row.machine}`;
@@ -1698,6 +1706,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       agentEnvironment.PATH = [musterBin, ...agentEnvironment.PATH.split(":").filter(path => path && path !== musterBin)].join(":");
     }
     const pathPrepend = agentEnvironment.PATH === undefined ? musterBin : undefined;
+    const piReceiptId = env.createId();
     yield* mutate(dir, (current) => Effect.gen(function* () {
       const previous = current.agents.find(agent => agent.name === row.name);
       if (previous) yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
@@ -1718,7 +1727,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       return [{ ...current, agents }, binding] as const;
     })).pipe(Effect.tapError(failLaunch));
     const launched = yield* Effect.gen(function* () {
-      yield* paneRun(binding.paneId, shellPrelude(row.cwd, agentEnvironment, pathPrepend));
+      yield* paneRun(binding.paneId, shellPrelude(row.cwd, agentEnvironment, pathPrepend) + piReceiptSuffix(piReceiptId));
       yield* waitForCwd(binding.paneId, row.cwd);
       // Cwd can be right while zsh's prompt hooks still own the foreground job.
       // Retry only the rejected start, not the prelude that caused the race.
@@ -1806,7 +1815,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
           Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: `${error.operation}: ${error.message}. Submission is uncertain; inspect before using the repair call.` }),
         ),
       );
-      if (proof.state === "unproven" && !proof.modelError) {
+      if (proof.state === "unproven" && !proof.modelError && !proof.firstTurn) {
         const issue = modelOutputIssue(yield* paneRead(launched.binding.paneId, 20).pipe(Effect.orElseSucceed(() => "")));
         if (issue?.severity === "error") proof = { ...proof, modelError: issue.line, detail: `model error: ${issue.line}` };
       }
@@ -1818,17 +1827,18 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         yield* publishTokens(yield* load(dir));
         return yield* new GuardFailed({ guard: "model-proof", message: `pane ${launched.binding.paneId}: delivery: unproven (model error: ${proof.modelError})` });
       }
-      if (proof.state === "unproven") skillNotes.push(`Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: text } })}`);
+      if (proof.state === "unproven") skillNotes.push(`delivery: unproven: ${proof.detail}. Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: proof.repairPrompt ?? text } })}`);
       if (proof.warning) skillNotes.push(`model warning: ${proof.warning}`);
-      running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven" });
+      running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(running.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
     }
+    skillNotes.push(yield* readPiReceipt(agentEnvironment.HOME ?? env.home, piReceiptId));
     const tokens = yield* publishTokens(yield* load(dir));
     return {
       row: running,
       argv,
       readiness: launched.agent.interactive_ready === true ? "proven" : "unknown",
       proof,
-      ...(proof?.state === "unproven" ? { repair: { tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: text } } } : {}),
+      ...(proof?.state === "unproven" ? { repair: { tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: proof.repairPrompt ?? text } } } : {}),
       sessionIdMatched: actualId === null ? null : actualId === row.sessionId,
       notes: [...skillNotes, tokens],
     };
@@ -2670,6 +2680,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
               action = `restarted with /new after ${Math.floor(silentFor / 60_000)}m; ${proof ? `re-prompt ${proof.state}` : text ? "re-prompt pending" : "no brief to re-prompt"}; ${receipt}; tail saved to ${saved}`;
               current = yield* patchRow(dir, current.name, current.state, decision.events, {
                 restarts: current.restarts + 1,
+                ...(proof?.state === "unproven" ? { events: [...(current.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: `${proof.detail}; inspect before repair: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: paneId, prompt: proof.repairPrompt ?? text } })}` }] } : {}),
                 ...(wait.state === "ready" ? { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? current.sessionId } : {}),
                 delivery: wait.state === "pending" ? "none" : proof?.state === "proven" ? "proven" : "unproven",
               }).pipe(Effect.catch(() => Effect.succeed(current)));
