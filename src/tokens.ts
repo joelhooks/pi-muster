@@ -1,3 +1,6 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { decodeDeploySection, DEPLOY_NAMES, DEPLOY_SECTION, type DeployLevel } from "./domain.ts";
 import { formatAge } from "./switchboard.ts";
 import type { AgentState, DeskItem, Lane, Project } from "./domain.ts";
 import { TERMINAL_PACKET_STATES } from "./domain.ts";
@@ -67,9 +70,30 @@ function needsToken(open: readonly DeskItem[]): string | null {
   return `🙋 ${title.length <= room ? title.join("") : `${title.slice(0, room - 1).join("")}…`}${more}`;
 }
 
+export function deployPosture(project: Project) {
+  const path = join(project.dir, "VISION.md");
+  let section: ReturnType<typeof decodeDeploySection>;
+  try { section = existsSync(path) ? decodeDeploySection(readFileSync(path, "utf8")) : { missing: true }; }
+  catch (error) { section = { missing: false, issue: `unreadable Deploy posture: ${String(error)}` }; }
+  const level = section.level ?? project.policy?.deployLevel ?? 1;
+  const source = section.level !== undefined ? "VISION.md" : project.policy?.deployLevel !== undefined ? "policy" : "default";
+  const mismatch = section.level !== undefined && project.policy?.deployLevel !== undefined && section.level !== project.policy.deployLevel
+    ? `policy ${project.policy.deployLevel} differs; VISION.md wins` : null;
+  return { level, source, notes: [section.issue, mismatch, section.missing ? `Add to VISION.md:\n${DEPLOY_SECTION}` : null].filter((note): note is string => !!note) };
+}
+export function laneDeployLevel(lane: Lane, level: DeployLevel): DeployLevel {
+  return lane.deployLevel === undefined || lane.deployLevel > level ? level : lane.deployLevel;
+}
+export function deployPostureLine(project: Project): string {
+  const posture = deployPosture(project);
+  return [`Deploy posture: Level: ${posture.level} (${DEPLOY_NAMES[posture.level]}), source: ${posture.source}`, ...posture.notes].join("\n");
+}
+
 /** Role tabs are infrastructure, not feature WIP. Archived undelivered work still counts. */
 export function inFlight(project: Project): Lane[] {
+  const { level } = deployPosture(project);
   return project.lanes.filter(lane => lane.kind === "work" &&
+    !(lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2) &&
     (lane.state === "open" || lane.state === "draining" ||
       (lane.state === "closed" && (lane.delivery === "landed" || lane.delivery === "deployed"))));
 }
@@ -109,6 +133,8 @@ export function flowLine(project: Project, now: number = Date.now()): string {
   const oldest = lanes.length ? Math.min(...lanes.map(lane => Date.parse(lane.createdAt))) : now;
   const stalled = lanes.length > 0 && now - Math.max(lastMove, oldest) > (project.policy?.flowStallMin ?? 120) * 60_000;
   const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
+  const { level } = deployPosture(project);
+  const watching = project.lanes.filter(lane => lane.kind === "work" && lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2);
   const landed = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
   const slots = openSlots(project);
   const next = backlog(project)[0];
@@ -117,6 +143,7 @@ export function flowLine(project: Project, now: number = Date.now()): string {
     `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"}`,
     ...(slots ? [`${slots} open`, next ? `next: ${next.slug}` : "backlog empty"] : []),
     `landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"}`,
+    ...(watching.length ? [`watching: ${watching.map(lane => lane.slug).join(", ")}`] : []),
     ...(lanes.length ? [`oldest in flight ${formatAge(Math.max(0, now - oldest))}`] : []),
     ...(lastProven !== undefined ? [`last proven ${ago(lastProven)}`] : []),
     ...(median !== null ? [`cycle ${formatAge(median)}`] : []),

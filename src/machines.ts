@@ -112,7 +112,7 @@ export const deliveryMachine = setup({
     landed: { on: { deployed: "deployed", proven: "proven", waived: "waived" } },
     deployed: { on: { proven: "proven", waived: "waived" } },
     proven: {},
-    waived: {},
+    waived: { on: { proven: "proven" } },
   },
 });
 export const stepDelivery = (id: string, from: LaneDelivery, stage: "landed" | "deployed" | "proven" | "waived") =>

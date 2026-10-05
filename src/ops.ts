@@ -21,7 +21,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
+import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { tryAcquireHeavy } from "./heavy-lock.ts";
 import { FleetStatus, busyQueue, gatesLine } from "./fleet.ts";
@@ -63,7 +63,7 @@ import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
 import { relayEvent, watchFallback } from "./relay-events.ts";
-import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
+import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import type { LiveCounts } from "./tokens.ts";
 
@@ -853,6 +853,7 @@ export const projectOpen = (params: ProjectOpenInput) =>
     yield* registerProject(final);
     notes.push(yield* publishTokens(final));
     notes.push(`brain: ${yield* writeBrain(final)}`);
+    notes.push(deployPostureLine(final));
     return { project: final, adopted, cadence: cadenceCall(final), notes };
   });
 
@@ -1037,6 +1038,8 @@ export interface LaneOpenInput {
   /** False records the lane as proposed without a tab. */
   readonly open?: boolean | undefined;
   readonly override?: string | undefined;
+  readonly deployLevel?: number | undefined;
+  readonly deployRule?: string | undefined;
 }
 
 export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: number | undefined }) =>
@@ -1045,6 +1048,15 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const slug = yield* decodeWith(decodeSlug, params.slug);
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "lane_open");
+    const posture = deployPosture(project);
+    const requestedLevel = params.deployLevel === undefined ? undefined : yield* decodeWith(decodeDeployLevel, params.deployLevel);
+    if (requestedLevel === undefined && params.deployRule !== undefined) return yield* input("deployRule requires deployLevel");
+    const requestedRule = requestedLevel === undefined ? undefined : yield* decodeWith(decodeDeployRule, params.deployRule);
+    if (requestedLevel !== undefined) {
+      if (requestedLevel > posture.level) return yield* input(`deployLevel cannot raise project level ${posture.level}`);
+      if (requestedRule !== undefined && requestedLevel > DEPLOY_RULE_CAPS[requestedRule]) return yield* input(`deployRule ${requestedRule} caps deployLevel at ${DEPLOY_RULE_CAPS[requestedRule]}`);
+    }
+    const deployPatch = requestedLevel !== undefined ? { deployLevel: requestedLevel, deployRule: requestedRule } : {};
     const rank = params.rank;
     if (rank !== undefined && !Number.isSafeInteger(rank)) return yield* input("rank must be a safe integer");
     // Re-ranking parked work is intentionally rank-only, including its timestamps and brief.
@@ -1065,9 +1077,9 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
         const requestedBase = params.base;
         // An open lane is never archived; this also repairs a lane reopened before reopening cleared the flag.
-        const lane = requestedBase === undefined && !existing.archived ? existing : yield* mutate(dir, (current) => {
+        const lane = requestedBase === undefined && params.deployLevel === undefined && !existing.archived ? existing : yield* mutate(dir, (current) => {
           const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
-          const next = { ...latest, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
+          const next = { ...latest, ...deployPatch, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
           return Effect.succeed([withLane(current, next), next] as const);
         });
         return { lane, created: false, note: null, outcome: project.outcome };
@@ -1101,6 +1113,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
         const next = {
           ...latest,
+          ...deployPatch,
           base: params.base ?? latest.base,
           goal: latest.state === "proposed" ? params.goal : latest.goal,
           updatedAt: iso(env),
@@ -1115,7 +1128,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       const latest = current.lanes.find(lane => lane.slug === slug) ?? base;
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
       if (refusal && !params.override?.trim()) return yield* input(refusal);
-      const next: Lane = { ...latest, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
+      const next: Lane = { ...latest, ...deployPatch, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
         ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) };
       return [withLane(current, next), next] as const;
     }));
@@ -1172,6 +1185,17 @@ export const laneDeliver = (dir: string, params: { slug: string; stage: "deploye
     const lane = yield* mutate(dir, current => Effect.gen(function* () {
       yield* guardSideDesk(current, env.sessionId, "lane_deliver");
       const latest = yield* findLane(current, params.slug);
+      const level = laneDeployLevel(latest, deployPosture(current).level);
+      if (params.stage === "deployed") {
+        if (level >= 2 && !/^rollback:[ \t]*\S.+$/im.test(params.evidence)) return yield* input(`deploy level ${level} needs a rollback line (Rollback: ...)`);
+        if (level === 2 && !/^watch(?: signal)?:[ \t]*\S.+$/im.test(params.evidence)) return yield* input("deploy level 2 needs a watch signal (Watch: ...)");
+        if (level === 0) {
+          const items = readDesk(queuePath(current.slug, env.home));
+          const cited = new Set(params.evidence.split(/[^a-zA-Z0-9_-]+/));
+          const approved = items.some(item => item.kind === "approval" && cited.has(item.id) && items.some(resolution => resolution.resolves === item.id));
+          if (!approved) return yield* input("deploy level 0 needs a cited resolved approval desk item");
+        }
+      }
       const stage = yield* stepDelivery(latest.slug, latest.delivery ?? "none", params.stage);
       const at = iso(env);
       const evidence = params.evidence.trim();
@@ -2767,6 +2791,7 @@ export function reviewDue(project: Project, nowMs: number): string | null {
 
 export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null): string {
   const lanes = project.lanes.filter((lane) => !lane.archived);
+  const posture = deployPosture(project);
   const due = reviewDue(project, nowMs);
   const pending = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state));
   const rows = new Map(project.agents.map(row => [row.name, row]));
@@ -2778,8 +2803,9 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
   });
   const out = [
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
+    deployPostureLine(project),
     flowLine(project, nowMs),
-    `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state}`).join(", ") || "none"}`,
+    `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state} [deploy ${laneDeployLevel(lane, posture.level)}]`).join(", ") || "none"}`,
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,
     ...(gates ? [gates] : []),

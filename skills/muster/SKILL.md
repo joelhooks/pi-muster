@@ -40,13 +40,15 @@ Use a side desk when Joel wants to explore an evolving design alongside the main
 
 ## Keep work flowing
 
-The WIP limit is the owner's target, not just a ceiling. Keep ready work at the limit. When a lane is proven or closed and a slot opens, pull the top of the backlog. Landed work still waiting for live proof holds its slot.
+The WIP limit is the owner's target, not just a ceiling. Keep ready work at the limit. When a lane is proven or closed and a slot opens, pull the top of the backlog. Use the project's deploy posture to decide how much proof the work needs.
 
 The desk keeps the backlog shaped: ranked proposed work lanes with briefs. Lower ranks go first; creation time breaks ties, and unranked lanes follow ranked ones. Park work with `lane_open open: false`. Re-rank proposed work with `rank`; Joel orders the backlog when he wants to.
 
 Use median cycle time over the last ten proven lanes and throughput over the last seven days to judge flow. Lanes are continuous work, not sprints.
 
 After three closed work lanes and at every `project_review`, dispatch a short-lived judge using [finished-lane retro](references/retro.md). Record its artifact, route its findings into ranked backlog lanes, then mark the retro done with `project_review` `retro: true`.
+
+Deploy posture belongs in the project's VISION.md, in Joel's words. Choose the least permission the work needs: customer-facing work, money, outbound sends and slow rollbacks stay conservative; irreversible work needs approval. A research experiment can ship and watch, or skip proof when its rollback is cheap. Tools enforce the declared level; check watching lanes at retro.
 
 ## Shape it to the job
 

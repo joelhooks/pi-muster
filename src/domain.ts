@@ -261,6 +261,32 @@ export const decodeSessionSlice = Schema.decodeUnknownSync(Schema.Struct({ size:
 export const LaneDelivery = Schema.Literals(["none", "landed", "deployed", "proven", "waived"]);
 export type LaneDelivery = typeof LaneDelivery.Type;
 
+export const DeployLevel = Schema.Literals([0, 1, 2, 3]);
+export type DeployLevel = typeof DeployLevel.Type;
+export const decodeDeployLevel = Schema.decodeUnknownSync(DeployLevel);
+export const DEPLOY_RULE_CAPS = {
+  "customer-facing": 1, money: 1, "outbound-sends": 1,
+  irreversible: 0, "shared-infra": 2, "slow-rollback": 1,
+} as const;
+export const DeployRule = Schema.Literals(["customer-facing", "money", "outbound-sends", "irreversible", "shared-infra", "slow-rollback"]);
+export const decodeDeployRule = Schema.decodeUnknownSync(DeployRule);
+export const DEPLOY_NAMES = ["locked", "prove", "ship-and-watch", "jfdi"] as const;
+export const DEPLOY_SECTION = "## Deploy posture\nLevel: 1 (prove)\nLive proof frees the slot.";
+
+/** A malformed section never loosens the policy fallback. */
+export function decodeDeploySection(text: unknown): { level?: DeployLevel; issue?: string; missing: boolean } {
+  const vision = Schema.decodeUnknownSync(Schema.String)(text);
+  const section = /^## Deploy posture[ \t]*\r?\n([\s\S]*?)(?=^## |$(?![\s\S]))/m.exec(vision);
+  if (!section) return /^## Deploy posture[ \t]*$/m.test(vision)
+    ? { missing: false, issue: "malformed Deploy posture: missing Level line" } : { missing: true };
+  const first = section[1]?.trim().split(/\r?\n/)[0] ?? "";
+  const match = /^Level: ([0-3])(?: \((locked|prove|ship-and-watch|jfdi)\))?$/.exec(first);
+  if (!match) return { missing: false, issue: "malformed Deploy posture: expected Level: <0-3> (<name>)" };
+  const level = decodeDeployLevel(Number(match[1]));
+  if (match[2] && match[2] !== DEPLOY_NAMES[level]) return { missing: false, issue: "malformed Deploy posture: level and name differ" };
+  return { level, missing: false };
+}
+
 export const Lane = Schema.Struct({
   slug: Slug,
   kind: Schema.Literals(["work", "role"]),
@@ -280,6 +306,8 @@ export const Lane = Schema.Struct({
   closedAt: Schema.optionalKey(Iso),
   /** Explicitly dropped from the proposed backlog, not finished work. */
   discarded: Schema.optionalKey(Schema.Boolean),
+  deployLevel: Schema.optionalKey(DeployLevel),
+  deployRule: Schema.optionalKey(DeployRule),
   delivery: Schema.optionalKey(LaneDelivery),
   deliveryAt: Schema.optionalKey(Iso),
   deliveryEvidence: Schema.optionalKey(Schema.String),
@@ -318,6 +346,7 @@ export type RolePolicy = typeof RolePolicy.Type;
  * shapes them to the job with `project_update` instead of reading rules.
  */
 export const Policy = Schema.Struct({
+  deployLevel: Schema.optionalKey(DeployLevel),
   wipLimit: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)))),
   flowStallMin: Schema.optionalKey(Minutes),
   landWaitMin: Schema.optionalKey(Minutes),
@@ -510,6 +539,7 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): typeof Pol
   return {
     ...(base ?? {}),
     comms: patch.comms ?? base?.comms ?? "intercom",
+    ...(patch.deployLevel !== undefined ? { deployLevel: patch.deployLevel } : {}),
     ...(patch.wipLimit !== undefined ? { wipLimit: patch.wipLimit } : {}),
     ...(patch.flowStallMin !== undefined ? { flowStallMin: patch.flowStallMin } : {}),
     ...(patch.landWaitMin !== undefined ? { landWaitMin: patch.landWaitMin } : {}),
@@ -528,7 +558,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policy?.comms ?? "intercom", aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policy?.comms ?? "intercom", aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(["intercom", "network"])) }));
