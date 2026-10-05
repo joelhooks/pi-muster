@@ -761,6 +761,7 @@ describe("pane binding safety", () => {
     await runWith(h, mutate(dir, (project) => Effect.succeed([{
       ...project, agents: [{ ...row, state }],
     }, null] as const)));
+    delete h.herdr.panes.get(row.pane!.paneId)!.agent; // The previous process exited; the shell is reusable.
     const result = await runWith(h, agentLaunch(dir, {
       action: "launch", name: "second", role: "worker", lane: "probe", label: "🔨 second", cwd: dir, pane: row.pane!.paneId,
     }));
