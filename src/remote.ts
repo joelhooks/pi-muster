@@ -1,13 +1,32 @@
-import { existsSync, mkdirSync, readFileSync, rmdirSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import { createHerdrClient, type HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
-import { decodeAgentName, decodeMachines, type MachineConfig } from "./domain.ts";
+import { AgentName, Slug, SessionId, decodeAgentRow, decodeOwnerItem, decodeAgentName, decodeMachines, type MachineConfig, type OwnerItem } from "./domain.ts";
 import { ProcError, InputError } from "./errors.ts";
 import { Herdr, MusterEnv, Proc, type ProcShape } from "./runtime.ts";
 import { shellQuote } from "./argv.ts";
+
+const decodeNoteEnvelope = Schema.decodeUnknownSync(Schema.Struct({ project: Slug, machine: AgentName, agent: AgentName, lane: Slug, owner: SessionId, item: Schema.Unknown }));
+export function decodeRemoteNote(value: unknown) {
+  const envelope = decodeNoteEnvelope(value);
+  return { ...envelope, item: decodeOwnerItem(envelope.item) };
+}
+/** Remote workers retain the exact queue record; publish last so interrupted writes stay invisible. */
+export function writeRemoteOwnerItem(owner: string, item: OwnerItem, session: string) {
+  const row = decodeAgentRow(JSON.parse(process.env.MUSTER_REMOTE_ROW ?? "null"));
+  if (row.machine !== process.env.MUSTER_MACHINE || row.sessionId !== session || item.author !== session || item.lane !== row.lane) throw new Error("remote note identity differs from the launch row");
+  const sidecar = decodeRemoteNote({ project: process.env.MUSTER_PROJECT_SLUG, machine: row.machine, agent: row.name, lane: row.lane, owner, item });
+  const root = join(row.cwd, ".pi/muster/notes");
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const path = join(root, `${createHash("sha256").update(item.cid).digest("hex")}.json`);
+  const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
+  writeFileSync(temporary, JSON.stringify(sidecar), { mode: 0o600 });
+  renameSync(temporary, path);
+  return path;
+}
 
 /** Serializes capacity reservations across registered projects on this owner machine. */
 export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.Effect<A, E, R>) => Effect.gen(function* () {

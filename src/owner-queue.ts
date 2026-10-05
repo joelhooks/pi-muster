@@ -11,6 +11,7 @@ import { StoreError } from "./errors.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
 import { relayEvent } from "./relay-events.ts";
 import type { CommsDelivery } from "./runtime.ts";
+import { writeRemoteOwnerItem } from "./remote.ts";
 
 export interface OwnerNoteInput { author: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string; signed?: unknown }
 export const mentions = (item: OwnerItem, reader: string) => item.facets?.some(f => Number.isInteger(f.index.byteStart) && Number.isInteger(f.index.byteEnd) && f.index.byteStart >= 0 && f.index.byteEnd > f.index.byteStart && f.index.byteEnd <= Buffer.byteLength(item.text) && f.features.some(feature => feature.$type === MENTION_NSID && feature.did === reader)) ?? false;
@@ -119,6 +120,17 @@ export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = hom
   appendFileSync(path, `${JSON.stringify(item)}\n`, { mode: 0o600 });
   return item;
 }
+/** Pull preserves the full post and CID. Forwarded source queues also count for dedupe. */
+export function ingestOwnerItem(owner: string, value: OwnerItem, home = homedir()): boolean {
+  const item = decodeOwnerItem(value);
+  const routedOwner = ownerRoute(owner, home).owner;
+  if (readOwnerSources(routedOwner, home).some(source => readOwnerQueue(source.source, home).items.some(record => record.item.cid === item.cid))) return false;
+  // Keep the original recipient's mention valid through the feed's forwarding aliases.
+  const path = ownerPath(owner, home);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  appendFileSync(path, `${JSON.stringify(item)}\n`, { mode: 0o600 });
+  return true;
+}
 /** Ignore only malformed complete lines. An incomplete trailing append is retried. */
 export function readOwnerQueue(owner: string, home = homedir()): { items: Array<{ item: OwnerItem; line: number }>; cursor: number } {
   let raw: string;
@@ -163,9 +175,15 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   try { item = appendOwnerItem(owner, note, params.home); } catch (error) { queueError = error; }
   const woke = item ? mentions(item, owner) : note.mention === owner || wakeKind(params.item.kind);
   if (!item && !woke) return yield* new StoreError({ path: ownerPath(params.owner, params.home), message: `silent owner note not queued: ${String(queueError)}` });
-  let path: "queue" | "intercom" = item && (!woke || readerFresh(owner, params.home)) ? "queue" : "intercom";
+  const remote = !!process.env.MUSTER_MACHINE && process.env.MUSTER_MACHINE !== "local";
+  if (remote) {
+    if (!item) return yield* new StoreError({ path: ownerPath(owner, params.home), message: `remote owner note not queued: ${String(queueError)}` });
+    yield* Effect.try({ try: () => writeRemoteOwnerItem(owner, item, params.session), catch: error => new StoreError({ path: "remote owner note sidecar", message: String(error) }) });
+  }
+  let path: "queue" | "intercom" = item && (!woke || (!remote && readerFresh(owner, params.home))) ? "queue" : "intercom";
   const logged = relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path, ...(item ? { itemId: item.uri } : {}) }, params.home);
   if (!logged && woke) path = "intercom";
   const delivery = path === "intercom" ? yield* params.send(owner, params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`) : { status: "queued" as const, detail: "owner queue" };
-  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke, path, delivery, owner, resolution: resolved.resolution };
+  const pendingPull = remote && delivery.status !== "delivered" && delivery.status !== "acked";
+  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke: pendingPull ? false : woke, path, delivery: pendingPull ? { status: "queued" as const, detail: "Queued for the Flagg owner to pull on the next status pass; not delivered." } : delivery, owner, resolution: resolved.resolution, ...(remote ? { pendingPull } : {}) };
 });
