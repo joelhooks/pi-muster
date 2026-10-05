@@ -43,7 +43,7 @@ import {
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
-import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyPacket } from "./packet.ts";
+import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
@@ -385,6 +385,13 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
     const raw = yield* remoteNode(row.machine, machine, `import {readFileSync} from 'node:fs';import {createHash} from 'node:crypto';console.log(createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'));`, [packet.artifact ?? ""]);
     checks.push({ name: "artifact hash", outcome: raw.trim() === packet.id ? "pass" : "fail", detail: `sha256 is ${raw.trim()}` });
     return { checks, branch: null };
+  }
+  const cloneExists = (yield* remote.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 30_000 })).code === 0;
+  if (!cloneExists) {
+    const source = mapPath(sourceOf(project, lane, row), machine);
+    const sourceExists = (yield* remote.run("test", ["-d", source], { cwd: "/", timeoutMs: 30_000 })).code === 0;
+    const fallback = yield* verifyGoneClone(remote, source, lane, row, packet.id, sourceExists);
+    return { checks: [...checks, ...fallback.checks], branch: null };
   }
   checks.push(yield* probe("commit exists", ["cat-file", "-e", `${packet.id}^{commit}`]));
   const branchEvidence = yield* verifyCommitBranch(remote, row.cwd, packet.id, row.clone?.branch ?? "HEAD");
@@ -921,12 +928,24 @@ export interface LaneOpenInput {
   readonly override?: string | undefined;
 }
 
-export const laneOpen = (dir: string, params: LaneOpenInput) =>
+export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: number | undefined }) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const slug = yield* decodeWith(decodeSlug, params.slug);
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "lane_open");
+    const rank = params.rank;
+    if (rank !== undefined && !Number.isSafeInteger(rank)) return yield* input("rank must be a safe integer");
+    // Re-ranking parked work is intentionally rank-only, including its timestamps and brief.
+    if (params.open === false && rank !== undefined) {
+      const lane = yield* mutate(dir, current => {
+        const latest = current.lanes.find(lane => lane.slug === slug);
+        if (!latest || latest.state !== "proposed") return Effect.succeed([current, null] as const);
+        const next = { ...latest, rank };
+        return Effect.succeed([withLane(current, next), next] as const);
+      });
+      if (lane) return { lane, created: false, note: null, outcome: project.outcome };
+    }
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
     const wantOpen = params.open !== false;
@@ -957,6 +976,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       repo: params.repo ?? null,
       base: params.base ?? null,
       generated: [...(params.generated ?? [])],
+      ...(params.rank !== undefined ? { rank: params.rank } : {}),
       tabId: null,
       root: null,
       state: "proposed",
@@ -1021,6 +1041,8 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
           tabId,
           root,
           state,
+          ...(params.rank !== undefined ? { rank: params.rank } : {}),
+          ...(event ? { openedAt: iso(env) } : {}),
           // A reopened lane is live work again; the weekly review archived it only because it was closed.
           archived: false,
           updatedAt: iso(env),
@@ -1102,7 +1124,7 @@ export const laneClose = (dir: string, slug: string) =>
               }),
             )
           : lane;
-      return {
+      const pendingResult: { lane: Lane; closed: false; pending: string[]; paneNote?: string; retro?: string } = {
         lane: drained,
         closed: false,
         pending: [
@@ -1110,6 +1132,7 @@ export const laneClose = (dir: string, slug: string) =>
           ...openPackets.map((packet) => `packet ${packet.id.slice(0, 12)} is ${packet.state}`),
         ],
       };
+      return pendingResult;
     }
     yield* stepLane(slug, lane.state, { type: "CLOSE", liveAgents: 0, openPackets: 0 });
     const paneNote = lane.root ? yield* closeOwnedPane(lane.root, dir, `lane_close ${slug}`) : "no root pane";
@@ -1122,12 +1145,16 @@ export const laneClose = (dir: string, slug: string) =>
           liveAgents: counts.liveAgents.length,
           openPackets: counts.openPackets.length,
         });
-        const next: Lane = { ...latest, state, root: null, updatedAt: iso(env) };
+        const next: Lane = { ...latest, state, root: null, closedAt: latest.closedAt ?? iso(env), updatedAt: iso(env) };
         return [withLane(current, next), next] as const;
       }),
     );
     yield* publishTokens(yield* load(dir));
-    return { lane: closed, closed: true, pending: [] as string[], paneNote };
+    const latest = yield* load(dir);
+    const count = latest.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" &&
+      (!latest.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(latest.lastRetroAt))).length;
+    return { lane: closed, closed: true, pending: [] as string[], paneNote,
+      ...(closed.kind === "work" && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run references/retro.md` } : {}) };
   });
 
 // ---------- agents ----------
@@ -2096,6 +2123,13 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     let evidence = params.evidence?.trim();
     if (recording && !evidence) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
     if (params.outcome === "committed") {
+      if (packet.kind === "commit" && !params.landedAs) {
+        const cloneExists = row.machine === "local" ? existsSync(row.cwd) && statSync(row.cwd).isDirectory() : yield* Effect.gen(function* () {
+          const machine = yield* machineConfig(row.machine);
+          return (yield* sshProc(row.machine, machine, proc, env.home).run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 30_000 })).code === 0;
+        });
+        if (!cloneExists) return yield* input(`clone gone; pass landedAs with the landing commit for ${packet.id.slice(0, 12)} (clone ${row.cwd})`);
+      }
       if (packet.state !== "verified") return yield* new GuardFailed({ guard: "verified", message: `run packet_verify on ${packet.id.slice(0, 12)} before landing it` });
       if (recording) {
         note = "recorded without a merge";
@@ -2539,6 +2573,8 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
 // ---------- project_review ----------
 
 export interface ReviewInput {
+  /** Mark the reported retro complete only after its artifact is recorded. */
+  readonly retro?: boolean | undefined;
   readonly note: string;
   readonly outcome?: string | undefined;
   readonly reviewTrigger?: string | undefined;
@@ -2562,12 +2598,16 @@ export const projectReview = (dir: string, params: ReviewInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const before = yield* load(dir);
+    const retroLanes = before.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" &&
+      (!before.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(before.lastRetroAt)))
+      .map(lane => ({ slug: lane.slug, sessionFiles: before.agents.filter(agent => agent.lane === lane.slug && agent.role === "worker")
+        .flatMap(agent => agent.sessionFile ? [agent.sessionFile] : []) }));
     const proposal = proposeReview(before);
     const decision = params.decision ?? "continue";
     const reviewed = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         let state = yield* stepProject(current.slug, current.state, { type: "REVIEW" });
-        const lanes = current.lanes.map((lane) => (lane.state === "closed" && !lane.archived ? { ...lane, archived: true, updatedAt: iso(env) } : lane));
+        const lanes = current.lanes.map((lane) => (lane.state === "closed" && !lane.archived ? { ...lane, archived: true, closedAt: lane.closedAt ?? lane.updatedAt, updatedAt: iso(env) } : lane));
         const openLanes = lanes.filter((lane) => lane.state !== "closed").length;
         state =
           decision === "archive"
@@ -2581,6 +2621,7 @@ export const projectReview = (dir: string, params: ReviewInput) =>
           nextAction: params.nextAction?.trim() || current.nextAction,
           lanes,
           state,
+          ...(params.retro ? { lastRetroAt: iso(env) } : {}),
           reviews: [...current.reviews, { at: iso(env), note: params.note, proposal, decision }],
         };
         return [next, next] as const;
@@ -2589,7 +2630,7 @@ export const projectReview = (dir: string, params: ReviewInput) =>
     const archivedLanes = reviewed.lanes.filter((lane) => lane.archived && !before.lanes.find((prior) => prior.slug === lane.slug)?.archived).map((lane) => lane.slug);
     const tokens = yield* publishTokens(reviewed);
     const brain = yield* writeBrain(reviewed);
-    return { project: reviewed, proposal, decision, archivedLanes, notes: [tokens, `brain: ${brain}`] };
+    return { project: reviewed, proposal, decision, archivedLanes, retroLanes, notes: [tokens, `brain: ${brain}`, "retro: run references/retro.md; record its artifact before project_review retro: true"] };
   });
 
 // ---------- project_update ----------

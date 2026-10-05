@@ -73,29 +73,54 @@ export function inFlight(project: Project): Lane[] {
     (lane.state === "open" || lane.state === "draining" ||
       (lane.state === "closed" && (lane.delivery === "landed" || lane.delivery === "deployed"))));
 }
+/** Unranked work follows ranked work; creation order breaks ties. */
+export function backlog(project: Project): Lane[] {
+  return project.lanes.filter(lane => lane.kind === "work" && lane.state === "proposed" && !lane.archived)
+    .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || Date.parse(a.createdAt) - Date.parse(b.createdAt));
+}
+export function openSlots(project: Project): number | null {
+  const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
+  return limit === null ? null : Math.max(0, limit - inFlight(project).length);
+}
 export function wipRefusal(project: Project, slug: string, kind: Lane["kind"], now: number): string | null {
   const lanes = inFlight(project);
   const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
   if (kind === "role" || limit === null || lanes.some(lane => lane.slug === slug) || lanes.length < limit) return null;
-  return `WIP ${lanes.length}/${limit}: ${lanes.map(lane => `${lane.slug} (${lane.delivery ?? "none"}, ${formatAge(Math.max(0, now - Date.parse(lane.createdAt)))})`).join(", ")}. Park the idea with lane_open open: false, or supply override with Joel's words.`;
+  return `WIP ${lanes.length}/${limit}: ${lanes.map(lane => `${lane.slug} (${lane.delivery ?? "none"}, ${formatAge(Math.max(0, now - Date.parse(lane.createdAt)))})`).join(", ")}. Park it in the backlog with lane_open open: false; rank it with rank, or supply override with Joel's words.`;
 }
 export function flowLine(project: Project, now: number = Date.now()): string {
   const lanes = inFlight(project);
   const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
   const history = project.lanes.filter(lane => lane.kind === "work").flatMap(lane => lane.deliveryHistory ??
     (lane.deliveryAt ? [{ stage: lane.delivery ?? "none", at: lane.deliveryAt, evidence: lane.deliveryEvidence ?? "" }] : []));
-  const lastProven = Math.max(0, ...history.filter(entry => entry.stage === "proven").map(entry => Date.parse(entry.at)));
-  const lastMove = Math.max(lastProven, ...history.map(entry => Date.parse(entry.at)));
+  // Count lanes, not repeated proof entries. First proof ends that lane's cycle.
+  const proven = project.lanes.filter(lane => lane.kind === "work").flatMap(lane => {
+    const times = (lane.deliveryHistory ?? []).filter(entry => entry.stage === "proven").map(entry => Date.parse(entry.at));
+    if (!times.length && lane.delivery === "proven" && lane.deliveryAt) times.push(Date.parse(lane.deliveryAt));
+    if (!times.length) return [];
+    const at = Math.min(...times);
+    return at <= now ? [{ at, cycle: at - Date.parse(lane.openedAt ?? lane.createdAt) }] : [];
+  }).sort((a, b) => b.at - a.at);
+  const cycles = proven.slice(0, 10).map(entry => entry.cycle).filter(ms => ms >= 0).sort((a, b) => a - b);
+  const middle = Math.floor(cycles.length / 2);
+  const median = cycles.length ? (cycles[middle]! + cycles[Math.floor((cycles.length - 1) / 2)]!) / 2 : null;
+  const lastProven = proven[0]?.at;
+  const lastMove = Math.max(lastProven ?? 0, ...history.map(entry => Date.parse(entry.at)));
   const oldest = lanes.length ? Math.min(...lanes.map(lane => Date.parse(lane.createdAt))) : now;
   const stalled = lanes.length > 0 && now - Math.max(lastMove, oldest) > (project.policy?.flowStallMin ?? 120) * 60_000;
   const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
   const landed = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
+  const slots = openSlots(project);
+  const next = backlog(project)[0];
   const ago = (at: number) => { const age = formatAge(Math.max(0, now - at)); return age === "now" ? "just now" : `${age} ago`; };
   return [
     `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"}`,
+    ...(slots ? [`${slots} open`, next ? `next: ${next.slug}` : "backlog empty"] : []),
     `landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"}`,
     ...(lanes.length ? [`oldest in flight ${formatAge(Math.max(0, now - oldest))}`] : []),
-    `last proven ${lastProven ? ago(lastProven) : "never"}`,
+    ...(lastProven !== undefined ? [`last proven ${ago(lastProven)}`] : []),
+    ...(median !== null ? [`cycle ${formatAge(median)}`] : []),
+    ...(proven.length ? [`${proven.filter(entry => now - entry.at <= 7 * 86_400_000).length}/wk`] : []),
   ].join(" · ").replace(/[\r\n]+/g, " ");
 }
 

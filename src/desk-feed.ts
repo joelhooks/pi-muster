@@ -1,10 +1,13 @@
-import { projectFlowLine } from "./owner-view.ts";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { decodeProject } from "./domain.ts";
+import { readRegistry } from "./registry.ts";
 
 import type { DeskItem } from "./domain.ts";
 import { relayEvent, selfPosts } from "./relay-events.ts";
 import { formatAge } from "./switchboard.ts";
-import { openDeskItems } from "./tokens.ts";
+import { backlog, flowLine, openDeskItems, openSlots } from "./tokens.ts";
 
 /**
  * The desk feed: each new line in a project's desk queue becomes a note card
@@ -20,6 +23,7 @@ import { openDeskItems } from "./tokens.ts";
 
 export const NOTE = "desk-note";
 export const CURSOR_ENTRY = "desk-queue-cursor";
+export const PULL_ENTRY = "muster-pull-slots";
 /** One feed per process, whichever implementation starts first. */
 export const FEED_CLAIM = Symbol.for("herdr-desk-feed");
 
@@ -80,7 +84,7 @@ export interface NoteMessage {
   readonly customType: typeof NOTE;
   readonly content: string;
   readonly display: true;
-  readonly details: { readonly project: string; readonly items: readonly DeskItem[]; readonly inbox: InboxSummary; readonly flow?: string };
+  readonly details: { readonly project: string; readonly items: readonly DeskItem[]; readonly inbox: InboxSummary; readonly flow?: string; readonly pull?: string };
 }
 
 export interface FeedDeps {
@@ -97,6 +101,13 @@ export function deskFeed(deps: FeedDeps) {
   const now = deps.now ?? Date.now;
   let cursor: number | undefined;
   let busy = false;
+  let lastSlots: number | null | undefined;
+  const snapshot = () => {
+    try {
+      const dir = deps.project.startsWith("/") ? deps.project : readRegistry(deps.home ?? homedir()).get(deps.project)?.dir;
+      return dir ? decodeProject(JSON.parse(readFileSync(join(dir, ".brain/data/muster/project.json"), "utf8"))) : undefined;
+    } catch { return undefined; }
+  };
   const posted = selfPosts(deps.session ?? "");
   const count = (kind: "desk_note" | "desk_note_skipped_self", itemId: string) => {
     if (deps.session === undefined) return;
@@ -124,10 +135,15 @@ export function deskFeed(deps: FeedDeps) {
     /** The newest cursor entry on the branch wins. A fresh desk starts at the end: no replay of history Joel never asked for. */
     restore(entries: ReadonlyArray<{ type?: string; customType?: string; data?: unknown }>) {
       cursor = undefined;
+      lastSlots = undefined;
       posted.restore(entries);
       for (const entry of entries) {
         const saved = (entry.data as { cursor?: unknown } | undefined)?.cursor;
         if (entry.type === "custom" && entry.customType === CURSOR_ENTRY && Number.isInteger(saved)) cursor = saved as number;
+        if (entry.type === "custom" && entry.customType === PULL_ENTRY) {
+          const slots = (entry.data as { slots?: unknown } | undefined)?.slots;
+          if (slots === null || (typeof slots === "number" && Number.isSafeInteger(slots) && slots >= 0)) lastSlots = slots;
+        }
       }
       if (cursor === undefined) cursor = readSince(deps.path, 0).cursor;
     },
@@ -147,10 +163,24 @@ export function deskFeed(deps: FeedDeps) {
       if (cursor === undefined) return undefined;
       const items = take();
       for (const item of items) count("desk_note", item.id);
-      const flow = projectFlowLine(deps.project, deps.home, now());
+      const project = snapshot();
+      const flow = project ? flowLine(project, now()) : undefined;
+      let pull: string | undefined;
+      if (project) {
+        const slots = openSlots(project);
+        if (slots !== lastSlots) {
+          lastSlots = slots;
+          deps.appendEntry(PULL_ENTRY, { slots });
+          if (slots !== null && slots > 0) {
+            const next = backlog(project).slice(0, slots).map(lane => lane.slug);
+            pull = next.length ? `pull: ${slots} slot${slots === 1 ? "" : "s"} open; next up ${next.join(", ")}`
+              : "backlog empty: shape the next lanes with lane_open open: false";
+          }
+        }
+      }
       if (!items.length && !flow) return undefined;
       const message = note(items);
-      return { message: { ...message, details: { ...message.details, ...(flow ? { flow } : {}) }, content: [flow, items.length ? message.content : undefined].filter(Boolean).join("\n") } };
+      return { message: { ...message, details: { ...message.details, ...(flow ? { flow } : {}), ...(pull ? { pull } : {}) }, content: [flow, pull, items.length ? message.content : undefined].filter(Boolean).join("\n") } };
     },
     turnStarted() {
       busy = true;

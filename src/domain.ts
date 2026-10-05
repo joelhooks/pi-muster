@@ -260,11 +260,16 @@ export const Lane = Schema.Struct({
   tabId: Schema.NullOr(Schema.String),
   root: Schema.NullOr(PaneBinding),
   state: LaneState,
+  /** Stable retro cursor; older catalogs fall back to updatedAt. */
+  closedAt: Schema.optionalKey(Iso),
   delivery: Schema.optionalKey(LaneDelivery),
   deliveryAt: Schema.optionalKey(Iso),
   deliveryEvidence: Schema.optionalKey(Schema.String),
   deliveryHistory: Schema.optionalKey(Schema.Array(Schema.Struct({ stage: LaneDelivery, at: Iso, evidence: Schema.String }))),
   override: Schema.optionalKey(Schema.String),
+  rank: Schema.optionalKey(Schema.Number.check(Schema.isInt())),
+  /** Successful opening time, distinct from time spent in the proposed backlog. */
+  openedAt: Schema.optionalKey(Iso),
   archived: Schema.Boolean,
   createdAt: Iso,
   updatedAt: Iso,
@@ -349,6 +354,7 @@ const ProjectFields = Schema.Struct({
   agents: Schema.Array(AgentRow),
   packets: Schema.Array(Packet),
   reviews: Schema.Array(Review),
+  lastRetroAt: Schema.optionalKey(Iso),
   createdAt: Iso,
   updatedAt: Iso,
 });

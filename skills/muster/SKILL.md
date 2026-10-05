@@ -38,6 +38,16 @@ Use a side desk when Joel wants to explore an evolving design alongside the main
 - The judge reviews the SOP on a slow clock and never sets priorities.
 - Briefs live in the project's Brain, never `/tmp`. Use the [done and brief template](references/done.md#brief-template): outcome, write scope, checks, deploy, live proof, signals, and the report rule.
 
+## Keep work flowing
+
+The WIP limit is the owner's target, not just a ceiling. Keep ready work at the limit. When a lane is proven or closed and a slot opens, pull the top of the backlog. Landed work still waiting for live proof holds its slot.
+
+The desk keeps the backlog shaped: ranked proposed work lanes with briefs. Lower ranks go first; creation time breaks ties, and unranked lanes follow ranked ones. Park work with `lane_open open: false`. Re-rank proposed work with `rank`; Joel orders the backlog when he wants to.
+
+Use median cycle time over the last ten proven lanes and throughput over the last seven days to judge flow. Lanes are continuous work, not sprints.
+
+After three closed work lanes and at every `project_review`, dispatch a short-lived judge using [finished-lane retro](references/retro.md). Record its artifact, route its findings into ranked backlog lanes, then mark the retro done with `project_review` `retro: true`.
+
 ## Shape it to the job
 
 Say `opus` or `sol` for a model, never a provider prefix. Fable is off fleet-wide; Sonnet only where Joel named it (front-desk).
