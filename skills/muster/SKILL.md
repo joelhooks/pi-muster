@@ -22,7 +22,7 @@ No project, no Muster. Before any lane, launch, or `desk_post`, call `project_st
 - A short fan-out inside an existing space is one lane with the caller as its boss.
 - A read-only, headless probe can be a native subagent. Anything that writes, runs long, or needs a restore command is a lane agent.
 - A space that serves two outcomes is two projects. Split at the weekly review, not mid-pass.
-- Work goes to the project whose outcome it serves. Send a request for another project's outcome to that project's desk. If no project owns it, `project_open` one instead of cutting a lane in your own space. A shared platform's desk keeps main and the deploy gate; tenant desks own their asks and cut lanes with `repo` pointing at the platform. drovr lost 30 hours on its own outcome running another tenant's deploys.
+- Work goes to the project whose outcome it serves. Send a request for another project's outcome to that project's desk. A request that smells like a new project, or belongs to a different PARA area, goes up to the Switchboard over intercom with Joel's words and your read of where it belongs. Don't divert your own desk to it, and don't open the project yourself. A shared platform's desk keeps main and the deploy gate; tenant desks own their asks and cut lanes with `repo` pointing at the platform. drovr lost 30 hours on its own outcome running another tenant's deploys.
 
 ## Side desks
 
