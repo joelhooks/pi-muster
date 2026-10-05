@@ -117,6 +117,8 @@
     "vitest": "4.1.11"
   },
   "dependencies": {
+    "@atproto/lex-data": "0.1.8",
+    "@atproto/lexicon": "0.7.16",
     "@joelhooks/pi-bellwether": "github:joelhooks/pi-bellwether#af41815ae849fab4c41bb72c0289af9bb23b7d0e",
     "effect": "4.0.1",
     "xstate": "5.32.5"
