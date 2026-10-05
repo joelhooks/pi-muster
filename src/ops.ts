@@ -1,6 +1,7 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
+import { stripVTControlCharacters } from "node:util";
 
 import { Effect, Schema } from "effect";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
@@ -120,6 +121,8 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
   const remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
+  // onRemote labels transport errors; retain the launch's typed model-proof refusal.
+  let modelFailure: GuardFailed | null = null;
   return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
     const requiredPaths = [...remoteProfile.skills, ...remoteProfile.extensions, ...remoteProfile.appendSystemPrompt,
       ...(params.brief ? [mapPath(params.brief, machine)] : []), ...(params.action === "restore" && existing?.sessionFile ? [existing.sessionFile] : [])];
@@ -169,9 +172,34 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       const binding: PaneBinding = { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true };
       row = yield* patchRow(dir, name, row.state, [], { pane: binding });
       // Shell execution is required for the owner's argv prefix; Herdr agent.start always executes pi directly.
-      yield* paneRun(binding.paneId, `${shellPrelude(cwd, agentEnvironment)} && exec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
+      // Keep exec's normal pane lifecycle, but retain stderr independently of the terminal.
+      // Git metadata keeps diagnostics out of the clone's work tree and close/land guards.
+      const logDir = (yield* git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")
+        .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
+      yield* must("mkdir", ["-p", logDir], { cwd, timeoutMs: 10_000 });
+      const launchLog = (yield* must("mktemp", [join(logDir, `launch-${name}-XXXXXXXX`)], { cwd, timeoutMs: 10_000 })).trim();
+      yield* paneRun(binding.paneId, `${shellPrelude(cwd, agentEnvironment)} && exec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
       const wait = yield* waitForSession(binding.paneId, null);
-      if (wait.state !== "ready") return yield* input(`machine ${nameOfMachine}: Pi session not ready in ${binding.paneId}; inspect it before retrying (${wait.state})`);
+      if (wait.state !== "ready") {
+        const logTail = yield* must("tail", ["-n", "12", launchLog], { cwd, timeoutMs: 10_000 }).pipe(Effect.orElseSucceed(() => ""));
+        // A pane can echo its launch prelude. Never include environment-bearing lines.
+        const tail = stripVTControlCharacters(logTail.trim() ? logTail : wait.tail)
+          .split(/\r?\n/).filter(line => !/\bexport\s|MUSTER_REMOTE_ROW/.test(line) &&
+            !Object.values(agentEnvironment).some(value => value.length > 0 && line.includes(value)))
+          .slice(-12).join("\n").trim().slice(-1500) || "(launch tail unavailable)";
+        const issue = modelOutputIssue(tail);
+        const detail = `machine ${nameOfMachine}: Pi session not ready in ${binding.paneId}; inspect it before retrying (${wait.state}). Launch tail (UNTRUSTED):\n${tail}`;
+        row = yield* patchRow(dir, name, row.state, [{ type: "LAUNCH_FAILED" }], {
+          ...(issue?.severity === "error" ? { delivery: "unproven" as const } : {}),
+          events: [...(row.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail },
+            ...(issue?.severity === "error" ? [{ type: "MODEL_ERROR" as const, at: iso(env), detail: issue.line }] : [])],
+        });
+        if (issue?.severity === "error") {
+          modelFailure = new GuardFailed({ guard: "model-proof", message: `machine ${nameOfMachine}: pane ${binding.paneId}: delivery: unproven (model error: ${issue.line})` });
+          return yield* modelFailure;
+        }
+        return yield* input(detail);
+      }
       const requestedId = row.sessionId;
       const actual = sessionIdFromFile(wait.sessionFile) ?? requestedId;
       const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: launchProfile, musterExtension: machine.musterExtension });
@@ -188,7 +216,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       return { row, argv, readiness: "proven", proof, sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes] };
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
-  }));
+  })).pipe(Effect.mapError(error => modelFailure ?? error));
 }));
 
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
