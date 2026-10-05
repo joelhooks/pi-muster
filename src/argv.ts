@@ -107,13 +107,17 @@ export function extensionsFor(project: Project, row: AgentRow): LaunchProfile {
 
 export const shellQuote = (text: string) => `'${text.replace(/'/g, `'\\''`)}'`;
 
-/** One line that sets the cwd and the environment in a fresh shell. */
-export function shellPrelude(cwd: string, env: Readonly<Record<string, string>>): string {
+/**
+ * One line that sets the cwd and the environment in a fresh shell. `pathPrepend`
+ * extends the shell's own PATH, so a long owner PATH is never typed into a pane.
+ */
+export function shellPrelude(cwd: string, env: Readonly<Record<string, string>>, pathPrepend?: string): string {
   const exports = Object.entries(env).map(([key, val]) => {
     if (!/^[A-Z_][A-Z0-9_]*$/.test(key)) throw new Error(`invalid env name ${key}`);
     return `export ${key}=${shellQuote(val)}`;
   });
-  return [`cd ${shellQuote(cwd)}`, ...exports].join(" && ");
+  const path = pathPrepend ? [`export PATH=${shellQuote(pathPrepend)}:"$PATH"`] : [];
+  return [`cd ${shellQuote(cwd)}`, ...exports, ...path].join(" && ");
 }
 
 /** Pi names a session file `<timestamp>_<session id>.jsonl`. */

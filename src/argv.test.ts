@@ -76,6 +76,7 @@ describe("helpers", () => {
   it("quotes the shell prelude and rejects bad env names", () => {
     expect(shellPrelude("/w/it's", { MUSTER_AGENT: "w1" })).toBe("cd '/w/it'\\''s' && export MUSTER_AGENT='w1'");
     expect(() => shellPrelude("/w", { "bad-name": "x" })).toThrow(/invalid env/);
+    expect(shellPrelude("/w", { MUSTER_AGENT: "w1" }, "/m/bin")).toBe(`cd '/w' && export MUSTER_AGENT='w1' && export PATH='/m/bin':"$PATH"`);
   });
 
   it("reads session ids from Pi file names", () => {

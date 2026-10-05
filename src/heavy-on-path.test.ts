@@ -34,12 +34,23 @@ describe("Muster CLI launch PATH", () => {
     expect(h.herdr.calls.some(call => call.method === "pane.send_input" && String(call.params.text).includes("export PATH='/muster/bin:/profile/bin:/usr/bin'"))).toBe(true);
   });
 
-  it("preserves the owner PATH when a local profile does not set one", async () => {
+  it("prepends the bin to the pane's own PATH instead of typing a long owner PATH", async () => {
+    const long = ["/muster/bin", ...Array.from({ length: 60 }, (_, i) => `/owner/tool-${i}/bin`), process.env.PATH ?? "", "/muster/bin"].join(delimiter);
+    vi.stubEnv("PATH", long);
     const h = harness();
     const dir = await open(h);
-    const inherited = process.env.PATH;
     const result = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", cwd: dir }));
-    expect(result.row.restore?.env.PATH).toBe(`/muster/bin${inherited ? delimiter + inherited : ""}`);
+    const typed = h.herdr.calls.filter(call => call.method === "pane.send_input").map(call => String(call.params.text)).join("\n");
+    expect(typed).toContain(`export PATH='/muster/bin':"$PATH"`);
+    expect(typed).not.toContain("/owner/tool-0/bin");
+    expect(result.row.restore?.env.PATH).toBeUndefined();
+  });
+
+  it("drops duplicate bin entries from a profile PATH", async () => {
+    const h = harness();
+    const dir = await open(h);
+    const result = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", cwd: dir, env: { PATH: "/muster/bin:/profile/bin:/muster/bin:/usr/bin" } }));
+    expect(result.row.restore?.env.PATH).toBe("/muster/bin:/profile/bin:/usr/bin");
   });
 
   it.each([undefined, "/profile/bin:/usr/bin", "/configured/bin:/usr/bin"])("uses the remote install and remote PATH (%s)", async configuredPath => {

@@ -1660,7 +1660,13 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       musterExtension: project.musterExtension,
     });
     const agentEnvironment = agentEnv(project, row);
-    agentEnvironment.PATH = [join(env.musterRoot, "bin"), agentEnvironment.PATH ?? process.env.PATH].filter(Boolean).join(":");
+    const musterBin = join(env.musterRoot, "bin");
+    // A profile PATH is typed literally. Otherwise only the prepend is typed: a ~1 KB
+    // owner PATH overflows the pane's input line and leaves the quote open.
+    if (agentEnvironment.PATH !== undefined) {
+      agentEnvironment.PATH = [musterBin, ...agentEnvironment.PATH.split(":").filter(path => path && path !== musterBin)].join(":");
+    }
+    const pathPrepend = agentEnvironment.PATH === undefined ? musterBin : undefined;
     yield* mutate(dir, (current) => Effect.gen(function* () {
       const previous = current.agents.find(agent => agent.name === row.name);
       if (previous) yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
@@ -1681,7 +1687,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       return [{ ...current, agents }, binding] as const;
     })).pipe(Effect.tapError(failLaunch));
     const launched = yield* Effect.gen(function* () {
-      yield* paneRun(binding.paneId, shellPrelude(row.cwd, agentEnvironment));
+      yield* paneRun(binding.paneId, shellPrelude(row.cwd, agentEnvironment, pathPrepend));
       yield* waitForCwd(binding.paneId, row.cwd);
       // Cwd can be right while zsh's prompt hooks still own the foreground job.
       // Retry only the rejected start, not the prelude that caused the race.
