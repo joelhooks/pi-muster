@@ -20,13 +20,14 @@ async function setup(options: { error?: string; paneTail?: string; readyAfter?: 
   writeFileSync(pi, `#!/bin/sh\nprintf '%s\\n' '${(options.error ?? "Error: unknown option --bogus").replaceAll("'", "'\\''")}' >&2\nexit 1\n`);
   chmodSync(pi, 0o700);
   const remote = new FakeHerdr(h.home);
+  remote.autoLaunch = false;
   const original = remote.handle.bind(remote);
   let command = "";
   let launchedPane: string | undefined;
   remote.paneTail = options.paneTail ?? "(pane unreadable)";
   remote.handle = (method, params) => {
     const result = original(method, params);
-    if (method === "pane.send_input" && String(params.text).includes(" && exec ")) {
+    if (method === "pane.send_input" && String(params.text).startsWith("exec sh ")) {
       command = String(params.text); launchedPane = String(params.pane_id);
       if (options.readyAfter === undefined && options.paneTail === undefined) {
         // A real failing executable and real redirection; the terminal vanishes after exec.
@@ -46,13 +47,14 @@ async function setup(options: { error?: string; paneTail?: string; readyAfter?: 
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", emitPaneClose: noEmitPaneClose, startupLoad: () => ({ load: 0, cpus: 1 }),
     machines: decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree,
-      env: { PATH: `${bin}:${process.env.PATH}`, PRIVATE_REMOTE_TOKEN: "private-launch-value", ...options.env }, wrap: [] } }),
+      env: { HOME: h.home, PATH: `${bin}:${process.env.PATH}`, PRIVATE_REMOTE_TOKEN: "private-launch-value", ...options.env }, wrap: [] } }),
     remoteHerdr: () => Effect.succeed(remote.client()),
     sleep: ms => Effect.sync(() => {
       h.now = new Date(h.now.getTime() + ms);
       if (options.readyAfter !== undefined && launchedPane && h.now.getTime() - started >= options.readyAfter) {
-        const args = [...command.matchAll(/'([^']*)'/g)].map(match => match[1]!);
-        original("agent.start", { name: "pi", pane_id: launchedPane, args: args.slice(args.lastIndexOf("pi") + 1) });
+        remote.autoLaunch = true;
+        original("pane.send_input", { pane_id: launchedPane, text: command });
+        launchedPane = undefined;
       }
     }),
   };
@@ -111,7 +113,7 @@ describe("remote launch failure evidence", () => {
     const s = await setup({ readyAfter: 15_000, paneTail: "Creating a new session..." });
     const launched = await s.launch(); expect(launched.row.state).toBe("running");
     expect(launched.row.events?.some(event => event.type === "LAUNCH_FAILED")).not.toBe(true);
-    expect(s.command()).toContain(" && exec ");
+    expect(s.command()).toMatch(/^exec sh '/);
     s.remote.panes.delete(launched.row.pane!.paneId);
     await s.run(projectStatus(s.dir, { act: false })); expect((await s.row()).state).toBe("interrupted");
   });

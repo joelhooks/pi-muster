@@ -4,6 +4,7 @@ import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { agentClose, agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { liveProc } from "./runtime.ts";
+import { promptWithProof } from "./herdr.ts";
 import { load, mutate } from "./store.ts";
 import { stepAgent } from "./machines.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
@@ -77,9 +78,12 @@ it("lets a worker opt into Sonnet 5.5 by explicit choice only, in any project", 
 });
 it.each(["nonzero", "empty", "timeout"])("allows a %s model listing with a skip note", async (kind) => {
   const { h, launch } = await setup();
-  vi.mocked(liveProc.run).mockReturnValue(kind === "timeout"
-    ? Effect.fail(new ProcError({ command: "pi --list-models", code: null, stderr: "", message: "timed out after 20000ms" }))
-    : Effect.succeed({ code: kind === "nonzero" ? 1 : 0, stdout: "", stderr: kind === "nonzero" ? "offline" : "" }));
+  const run = vi.mocked(liveProc.run).getMockImplementation()!;
+  vi.mocked(liveProc.run).mockImplementation((command, args, options) => command === "pi"
+    ? kind === "timeout"
+      ? Effect.fail(new ProcError({ command: "pi --list-models", code: null, stderr: "", message: "timed out after 20000ms" }))
+      : Effect.succeed({ code: kind === "nonzero" ? 1 : 0, stdout: "", stderr: kind === "nonzero" ? "offline" : "" })
+    : run(command, args, options));
   const result = await runWith(h, launch("sol"));
   expect(result.notes.join("\n")).toContain(`model check skipped: ${kind === "nonzero" ? "offline" : kind === "empty" ? "empty" : "timed out"}`);
 });
@@ -99,14 +103,16 @@ it.each(["fork", "restore"] as const)("refuses an unauthenticated %s before crea
   expect([...h.herdr.panes.keys()]).toEqual(panes);
   expect(await runWith(h, load(dir))).toEqual(before);
 });
-it("keeps clean proof proven, and rate limits only warn", async () => {
+it("keeps clean argv proof proven; explicit re-prompts retain rate-limit warnings", async () => {
   const { h, launch } = await setup();
   const handle = h.herdr.handle.bind(h.herdr);
   vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => method === "pane.read"
     ? { type: "pane_read", read: { text: "Error: rate limit exceeded" } } : handle(method, params));
   const result = await runWith(h, launch("sol"));
   expect(result.row.delivery).toBe("proven");
-  expect(result.notes.join("\n")).toContain("model warning: Error: rate limit exceeded");
+  expect(result.proof).toMatchObject({ state: "proven", via: "argv" });
+  const proof = await runWith(h, promptWithProof(result.row.pane!.paneId, "follow-up"));
+  expect(proof).toMatchObject({ state: "proven", warning: "Error: rate limit exceeded" });
 });
 it("rejects forbidden policy before writing it", async () => {
   const { h, dir } = await setup();
@@ -115,20 +121,17 @@ it("rejects forbidden policy before writing it", async () => {
   expect(error.message).toContain("Sonnet is not used");
   expect(await runWith(h, load(dir))).toEqual(before);
 });
-it("fails a working flash followed by a model error, preserving the pane", async () => {
+it("rejects a first assistant error after argv submission, preserving the pane", async () => {
   const { h, dir, launch } = await setup();
-  const handle = h.herdr.handle.bind(h.herdr);
-  let reads = 0;
-  vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => method === "pane.read"
-    ? { type: "pane_read", read: { text: ++reads === 1 ? "clean" : "Error: No API key found for anthropic" } }
-    : handle(method, params));
-  const error = await failWith(h, launch("sol"));
-  expect(error.message).toContain("delivery: unproven (model error: Error: No API key found for anthropic)");
+  h.herdr.firstTurn = "error";
+  h.herdr.firstTurnError = "Error: No API key found for anthropic";
+  const result = await runWith(h, launch("sol"));
+  expect(result.proof).toMatchObject({ state: "unproven", firstTurn: true, detail: expect.stringContaining("No API key found") });
   const row = (await runWith(h, load(dir))).agents[0];
-  expect(row?.state).toBe("failed");
+  expect(row?.state).toBe("running");
   expect(row?.delivery).toBe("unproven");
   expect(h.herdr.panes.has(row?.pane?.paneId ?? "")).toBe(true);
-  expect(JSON.stringify(row)).toContain("No API key found");
+  expect(row?.events?.at(-1)).toMatchObject({ type: "FIRST_TURN", detail: expect.stringContaining("No API key found") });
 });
 it.each(["idle", "startup"])("records model failures even with %s instead of a model turn", async (phase) => {
   const { h, dir, launch } = await setup();
@@ -137,11 +140,21 @@ it.each(["idle", "startup"])("records model failures even with %s instead of a m
   const handle = h.herdr.handle.bind(h.herdr);
   vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => method === "pane.read"
     ? { type: "pane_read", read: { text: "Error: Unknown model bad" } } : handle(method, params));
-  const error = await failWith(h, launch("sol"));
-  expect(error.message).toContain("delivery: unproven (model error: Error: Unknown model bad)");
-  const row = (await runWith(h, load(dir))).agents[0];
-  expect(row?.state).toBe("failed");
-  expect(row?.events?.at(-1)?.detail).toBe("Error: Unknown model bad");
+  if (phase === "idle") {
+    h.herdr.firstTurn = "error";
+    h.herdr.firstTurnError = "Error: Unknown model bad";
+    const result = await runWith(h, launch("sol"));
+    expect(result.proof).toMatchObject({ state: "unproven", firstTurn: true, detail: expect.stringContaining("Unknown model bad") });
+    const row = (await runWith(h, load(dir))).agents[0];
+    expect(row?.delivery).toBe("unproven");
+    expect(row?.events?.at(-1)).toMatchObject({ type: "FIRST_TURN", detail: expect.stringContaining("Unknown model bad") });
+  } else {
+    const error = await failWith(h, launch("sol"));
+    expect(error.message).toContain("delivery: unproven (model error: Error: Unknown model bad)");
+    const row = (await runWith(h, load(dir))).agents[0];
+    expect(row?.state).toBe("failed");
+    expect(row?.events?.at(-1)?.detail).toBe("Error: Unknown model bad");
+  }
 });
 it.each(["running"] as const)("status flags model errors on %s without adoption or nudging, then fails on act", async (state) => {
   const { h, dir, launch } = await setup();

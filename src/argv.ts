@@ -14,6 +14,8 @@ export interface ArgvInput {
   readonly parentSessionFile: string | null;
   readonly profile: LaunchProfile;
   readonly musterExtension: string | null;
+  readonly prompt?: string;
+  readonly promptFile?: string;
 }
 
 function value(flag: string, text: string): readonly [string, string] {
@@ -51,6 +53,11 @@ export function buildArgv(input: ArgvInput): string[] {
   argv.push("--approve");
   const forbidden = argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg));
   if (forbidden.length > 0) throw new Error(`argv contains tool-registry flags: ${forbidden.join(", ")}`);
+  if (input.prompt || input.promptFile) {
+    argv.push("--");
+    if (input.promptFile) argv.push(`@${input.promptFile}`);
+    if (input.prompt) argv.push(input.prompt);
+  }
   return argv;
 }
 

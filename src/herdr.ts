@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { Effect } from "effect";
-import { decodeFirstTurnEntry, decodeSessionSlice } from "./domain.ts";
+import { decodeFirstTurnEntry, decodeSessionSlice, decodeSessionEntryCount } from "./domain.ts";
 import {
   HERDR_TRANSPORT_GRACE_MS,
   type HerdrError,
@@ -22,7 +22,6 @@ import { modelOutputIssue } from "./models.ts";
 
 export const PROOF_OF_LIFE_MS = 30_000;
 const NAME_READY_STEP_MS = 500;
-const START_TIMEOUT_MS = 60_000;
 
 type PaneInfo = HerdrResultFor<"pane.get">["pane"];
 type AgentInfo = HerdrResultFor<"agent.get">["agent"];
@@ -96,12 +95,8 @@ export const paneRead = (paneId: string, lines: number) =>
 
 export const paneClose = (paneId: string) => call({ method: "pane.close", params: { pane_id: paneId } }).pipe(Effect.asVoid);
 
-export const agentStart = (name: string, paneId: string, args: readonly string[]) =>
-  call({
-    method: "agent.start",
-    params: { name, kind: "pi", pane_id: paneId, args, timeout_ms: START_TIMEOUT_MS },
-    timeoutMs: START_TIMEOUT_MS + HERDR_TRANSPORT_GRACE_MS,
-  }).pipe(Effect.map((result) => result.agent));
+export const agentRename = (target: string, name: string) =>
+  call({ method: "agent.rename", params: { target, name } }).pipe(Effect.map((result) => result.agent));
 
 export const agentGet = (target: string) =>
   call({ method: "agent.get", params: { target } }).pipe(Effect.map((result) => result.agent));
@@ -112,7 +107,7 @@ export const reportTokens = (workspaceId: string, source: string, tokens: Readon
     params: { workspace_id: workspaceId, source, tokens, seq, ttl_ms: ttlMs },
   }).pipe(Effect.asVoid);
 
-export type Proof = { readonly state: "proven"; readonly via: "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly repairPrompt?: string; readonly warning?: string };
+export type Proof = { readonly state: "proven"; readonly via: "argv" | "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly repairPrompt?: string; readonly warning?: string };
 
 export const FIRST_TURN_MS = 90_000;
 
@@ -124,9 +119,9 @@ export const readPiReceipt = (home: string, id: string) => sessionSlice(`${home}
 );
 // Below Pi's paste-collapse threshold. A file pointer avoids terminal paste semantics.
 const INLINE_PROMPT_MAX = 800;
-const sessionSlice = (path: string, offset: number) => Effect.gen(function* () {
+const sessionSlice = (path: string, offset: number, skipEntries = 0) => Effect.gen(function* () {
   const proc = yield* Proc;
-  const result = yield* proc.run("node", ["-e", `const fs=require('node:fs');const p=process.argv[1],offset=Number(process.argv[2]);const fd=fs.openSync(p,'r');try{const size=fs.fstatSync(fd).size;if(offset===-1){process.stdout.write(JSON.stringify({size,text:''}));process.exit(0)}if(size-offset>2097152)throw Error('first-turn journal exceeds 2 MiB');const b=Buffer.alloc(Math.max(0,size-offset));fs.readSync(fd,b,0,b.length,offset);process.stdout.write(JSON.stringify({size,text:b.toString('utf8')}))}finally{fs.closeSync(fd)}`, path, String(offset)], { cwd: "/", timeoutMs: 10_000 });
+  const result = yield* proc.run("node", ["-e", `const fs=require('node:fs');const p=process.argv[1];let offset=Number(process.argv[2]);const skip=Number(process.argv[3]);const fd=fs.openSync(p,'r');try{const size=fs.fstatSync(fd).size;if(offset===-1){process.stdout.write(JSON.stringify({size,text:''}));process.exit(0)}if(skip){const chunk=Buffer.alloc(65536);let pos=0,count=0,nonempty=false;while(count<skip){const n=fs.readSync(fd,chunk,0,chunk.length,pos);if(!n)throw Error('inherited journal entries missing');for(let i=0;i<n;i++){const c=chunk[i];if(c===10){if(nonempty)count++;nonempty=false;if(count===skip){offset=pos+i+1;break}}else if(c!==9&&c!==13&&c!==32)nonempty=true}pos+=n}}if(size-offset>2097152)throw Error('first-turn journal exceeds 2 MiB');const b=Buffer.alloc(Math.max(0,size-offset));fs.readSync(fd,b,0,b.length,offset);process.stdout.write(JSON.stringify({size,text:b.toString('utf8')}))}finally{fs.closeSync(fd)}`, path, String(offset), String(skipEntries)], { cwd: "/", timeoutMs: 10_000 });
   if (result.code !== 0) return yield* new HerdrFailure({ operation: "first-turn", code: null, message: "session file unreadable" });
   return yield* Effect.try({ try: () => decodeSessionSlice(JSON.parse(result.stdout)), catch: () => new HerdrFailure({ operation: "first-turn", code: null, message: "invalid session slice" }) });
 });
@@ -171,6 +166,31 @@ const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Pro
     yield* env.sleep(delay);
     slept += delay;
   }
+});
+
+/** Fork and restore copy/retain the old journal. Count it before starting, never after. */
+export const inheritedStartEntries = (path: string | null) => path ? Effect.gen(function* () {
+  const proc = yield* Proc;
+  const result = yield* proc.run("node", ["-e", `const fs=require('node:fs');const fd=fs.openSync(process.argv[1],'r');try{const b=Buffer.alloc(65536);let n,count=0,nonempty=false;while((n=fs.readSync(fd,b,0,b.length,null))>0){for(let i=0;i<n;i++){const c=b[i];if(c===10){if(nonempty)count++;nonempty=false}else if(c!==9&&c!==13&&c!==32)nonempty=true}}process.stdout.write(JSON.stringify(count))}finally{fs.closeSync(fd)}`, path], { cwd: "/", timeoutMs: 10_000 });
+  if (result.code !== 0) return yield* new HerdrFailure({ operation: "first-turn", code: null, message: "inherited session journal unreadable" });
+  return yield* Effect.try({ try: () => decodeSessionEntryCount(JSON.parse(result.stdout)), catch: () => new HerdrFailure({ operation: "first-turn", code: null, message: "invalid inherited session entry count" }) });
+}) : Effect.succeed(1);
+
+/** The start argv is already submitted. Only new journal entries can prove it. */
+export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt) =>
+  sessionSlice(path, 0, inheritedEntries).pipe(
+    Effect.flatMap(slice => proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, { state: "proven", via: "argv" })),
+    Effect.catch(() => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, detail: "first turn not checked: inherited journal boundary unavailable" })),
+    Effect.map(proof => proof.state === "unproven" ? { ...proof, repairPrompt } : proof),
+  );
+
+/** Save privately on the provided Proc (SSH-backed remotely), then verify exact bytes and mode. */
+export const writeLaunchFile = (dir: string, script: string, suffix: "launch.sh" | "prompt.txt" = "launch.sh") => Effect.gen(function* () {
+  const path = `${dir}/m-${randomUUID()}.${suffix}`;
+  const proc = yield* Proc;
+  const saved = yield* proc.run("node", ["-e", `const fs=require('node:fs');fs.mkdirSync(process.argv[1],{recursive:true});const p=process.argv[2];fs.writeFileSync(p,process.argv[3],{mode:0o600,flag:'wx'});if(fs.readFileSync(p,'utf8')!==process.argv[3]||(fs.statSync(p).mode&0o777)!==0o600)process.exit(1)`, dir, path, script], { cwd: "/", timeoutMs: 10_000 });
+  if (saved.code !== 0) return yield* new HerdrFailure({ operation: "launch-script", code: null, message: "private launcher could not be copied and verified; no launch typed" });
+  return path;
 });
 
 const waitWorking = (paneId: string, timeoutMs: number) =>

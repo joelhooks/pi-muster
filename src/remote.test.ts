@@ -23,17 +23,6 @@ function setup() {
   const calls: Array<{ command: string; args: readonly string[]; timeoutMs?: number }> = [];
   const remote = new FakeHerdr(h.home);
   let missing = false;
-  const original = remote.handle.bind(remote);
-  remote.handle = (method, params) => {
-    const result = original(method, params);
-    if (method === "pane.send_input" && String(params.text).includes(" && exec ")) {
-      const text = String(params.text);
-      const args = [...text.matchAll(/'([^']*)'/g)].map(match => match[1]!);
-      const index = args.lastIndexOf("pi");
-      original("agent.start", { name: "pi", pane_id: params.pane_id, args: args.slice(index + 1) });
-    }
-    return result;
-  };
   const base = h.proc;
   const proc: ProcShape = { run: (command, args, options) => {
     calls.push({ command, args, timeoutMs: options.timeoutMs });
@@ -170,7 +159,9 @@ describe("remote owner operations", () => {
     const first = await s.launch();
     expect(first.row.machine).toBe("remote");
     expect(first.row.intercomAddress).toBe("remote-w@remote");
-    const shell = s.remote.calls.find(call => call.method === "pane.send_input")!.params.text;
+    const typed = s.remote.calls.find(call => call.method === "pane.send_input")!.params.text;
+    expect(typed).toMatch(/^exec sh '/);
+    const shell = s.remote.launcherScripts[0]!;
     expect(shell).toContain("'/wrapper' '--name' 'remote-w' '--' 'pi'");
     expect(shell).toContain("export CUDA_VISIBLE_DEVICES=''");
     expect(s.h.herdr.calls.some(call => call.method === "agent.start")).toBe(false);
