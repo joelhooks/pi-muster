@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 
 import { Effect, Schema } from "effect";
+import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 
 import {
   agentEnv,
@@ -19,7 +20,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { GateReceipt, Project as ProjectSchema, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
+import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { tryAcquireHeavy } from "./heavy-lock.ts";
 import { FleetStatus, busyQueue, gatesLine } from "./fleet.ts";
@@ -325,19 +326,90 @@ const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes
   return result;
 });
 
+/** Re-adoption is evidence-only: no launch, input, or silence actions. */
+const READOPT_STATES: readonly AgentRow["state"][] = ["interrupted", "silent", "nudged", "restarted"];
+const sameSessionFile = (row: AgentRow, file: string) => file === row.sessionFile || file.endsWith(`_${row.sessionId}.jsonl`);
+const adoptionBinding = (row: AgentRow, pane: PaneInfo): PaneBinding => ({
+  paneId: pane.pane_id, tabId: pane.tab_id, terminalId: pane.terminal_id,
+  openedByMuster: row.pane?.terminalId === pane.terminal_id && row.pane.openedByMuster,
+});
+const adoptionHolder = (project: Project, row: AgentRow, pane: PaneInfo) => project.agents.find(other =>
+  other.machine === row.machine && other.name !== row.name && sharesPane(adoptionBinding(row, pane), other.pane));
+
+/** Pi's read-only parser owns the header format; never open/migrate a live transcript. */
+const adoptionSession = (row: AgentRow, pane: PaneInfo) => Effect.gen(function* () {
+  const file = pane.agent_session?.kind === "path" ? pane.agent_session.value : null;
+  if (!pane.agent || !(pane.agent === "pi" || pane.agent_session?.agent === "pi") || !file) return null;
+  if (sameSessionFile(row, file)) return { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId };
+  const headerText = row.machine === "local"
+    ? yield* Effect.try({ try: () => readFileSync(file, "utf8").split("\n", 1)[0] ?? "", catch: error => input(String(error)) })
+    : yield* Effect.gen(function* () {
+        const proc = yield* Proc;
+        const result = yield* proc.run("node", ["--input-type=module", "-e", "import {readFileSync} from 'node:fs';process.stdout.write(readFileSync(process.argv[1],'utf8').split('\\n',1)[0]??'');", file], { cwd: "/", timeoutMs: 30_000 });
+        if (result.code !== 0) return yield* input("cannot read the live session header");
+        return result.stdout;
+      });
+  const header = yield* Effect.try({ try: () => parseSessionEntries(headerText).find(entry => entry.type === "session"), catch: error => input(String(error)) });
+  if (!header || typeof header.parentSession !== "string" || !sameSessionFile(row, header.parentSession)) return null;
+  const sessionId = yield* decodeWith(Schema.decodeUnknownSync(SessionId), header.id);
+  return { sessionFile: file, sessionId };
+}).pipe(Effect.orElseSucceed(() => null));
+
+const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessionFile: string; sessionId: string }) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  return yield* mutate(dir, project => Effect.gen(function* () {
+    const latest = yield* findRow(project, row.name);
+    yield* requireOwner(latest, env.sessionId, false);
+    if (latest.state !== row.state || latest.sessionId !== row.sessionId || latest.sessionFile !== row.sessionFile ||
+        latest.pane?.terminalId !== row.pane?.terminalId || latest.machine !== row.machine) return yield* input("row changed during adoption; retry");
+    const holder = adoptionHolder(project, latest, pane);
+    if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
+    const event: AgentEvent[] = latest.state === "running" ? [] : [{ type: READOPT_STATES.includes(latest.state) && latest.state !== "interrupted" ? "ACTIVE" : "ADOPT" }];
+    const state = yield* advance(latest, event);
+    const restore = latest.restore ? { ...latest.restore, argv: latest.restore.argv.map((arg, index, argv) =>
+      argv[index - 1] === "--session" ? session.sessionFile : argv[index - 1] === "--session-id" ? session.sessionId : arg) } : null;
+    const next: AgentRow = { ...latest, ...session, pane: adoptionBinding(latest, pane), state, restore, updatedAt: iso(env) };
+    return [withRow(project, next), next] as const;
+  }));
+});
+
+/** Search only the project's space (remote launches use its label on that machine). */
+const readoptionPanes = (project: Project, row: AgentRow) => Effect.gen(function* () {
+  if (row.machine === "local") return project.spaceId ? yield* paneList(project.spaceId) : [];
+  const spaces = (yield* workspaceList()).filter(space => space.label === project.label);
+  if (spaces.length !== 1) return [];
+  return yield* paneList(spaces[0]!.workspace_id);
+});
+
+const findReadoption = (project: Project, row: AgentRow) => Effect.gen(function* () {
+  const matches: Array<{ pane: PaneInfo; session: { sessionFile: string; sessionId: string } }> = [];
+  for (const pane of yield* readoptionPanes(project, row)) {
+    if (adoptionHolder(project, row, pane)) continue;
+    const session = yield* adoptionSession(row, pane);
+    if (session && (row.state === "interrupted" || pane.pane_id !== row.pane?.paneId || pane.terminal_id !== row.pane?.terminalId || session.sessionFile !== row.sessionFile)) matches.push({ pane, session });
+  }
+  // Multiple live copies are ambiguous; leave the row alone and require an explicit pane.
+  return matches.length === 1 ? matches[0] : undefined;
+});
+
 const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: boolean, mtimes: Map<string, number | null>) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(row.machine);
   return yield* onRemote(row.machine, machine, Effect.gen(function* () {
-    const pane = row.pane ? yield* locatePane(row.pane) : null;
+    let pane = row.pane ? yield* locatePane(row.pane) : null;
     let current = row;
     let action: string | null = null;
     const mine = row.owner === env.sessionId;
-    if (!pane && row.pane && PROCESS_STATES.includes(row.state)) {
+    const reAdoption = act && mine && READOPT_STATES.includes(row.state) ? yield* findReadoption(project, row) : undefined;
+    if (reAdoption) {
+      current = yield* readoptRow(dir, row, reAdoption.pane, reAdoption.session);
+      pane = reAdoption.pane;
+      action = `re-adopted ${pane.pane_id}`;
+    } else if (!pane && row.pane && PROCESS_STATES.includes(row.state)) {
       current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: null }); action = "remote pane gone: interrupted";
     } else if (pane && !pane.agent && PROCESS_STATES.includes(row.state)) {
       current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }]); action = "remote agent exited: interrupted";
-    } else if (pane && row.pane) {
+    } else if (pane && row.pane && row.state !== "interrupted") {
       const file = pane.agent_session?.kind === "path" ? pane.agent_session.value : null;
       const matches = file !== null && (file === row.sessionFile || file.endsWith(`_${row.sessionId}.jsonl`));
       const failedModel = row.state === "failed" && row.events?.some(event => event.type === "MODEL_ERROR");
@@ -347,7 +419,7 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
     }
     const mtime = current.sessionFile ? mtimes.get(`${row.machine}:${current.sessionFile}`) ?? null : null;
     const silent = mtime === null ? null : Math.max(0, env.now().getTime() - mtime);
-    if (pane && silent !== null && ["running", "silent", "nudged", "restarted"].includes(current.state)) {
+    if (!reAdoption && pane && silent !== null && ["running", "silent", "nudged", "restarted"].includes(current.state)) {
       const decision = silenceDecision(current.state, silent, silenceLimits(project.policy));
       if (decision.action !== "none") {
         action = `${decision.action} due on ${row.machine}`;
@@ -1438,8 +1510,28 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
     const machine = params.machine ?? previous?.machine ?? "local";
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
+    if (params.action === "adopt") {
+      if (params.side) {
+        if (machine !== "local") return yield* input("remote side-desk adoption is not supported");
+        return yield* adoptSideDesk(dir, project, params);
+      }
+      const row = yield* findRow(project, name);
+      yield* requireOwner(row, env.sessionId, false);
+      if (!params.pane) return yield* input("adopt requires name and pane");
+      if (!["running", "launching", "failed", ...READOPT_STATES].includes(row.state)) return yield* input(`cannot adopt a ${row.state} row`);
+      const adopt = Effect.gen(function* () {
+        const pane = (yield* readoptionPanes(project, row)).find(pane => pane.pane_id === params.pane);
+        if (!pane) return yield* input("adopt needs a pane in the project's workspace");
+        const holder = adoptionHolder(project, row, pane);
+        if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
+        const session = yield* adoptionSession(row, pane);
+        if (!session) return yield* input("adopt refused: live Pi session does not match the row or its fork parent");
+        const adopted = yield* readoptRow(dir, row, pane, session);
+        return { row: adopted, argv: [] as string[], readiness: "not checked (catalog adoption)", proof: null, sessionIdMatched: true, notes: [`re-adopted ${pane.pane_id}`, "adopted without touching the pane"] };
+      });
+      return machine === "local" ? yield* adopt : yield* onRemote(machine, yield* machineConfig(machine), adopt);
+    }
     if (machine !== "local") return yield* remoteLaunch(dir, project, params, machine);
-    if (params.action === "adopt") return yield* adoptSideDesk(dir, project, params);
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
     const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
     const existing = project.agents.find((agent) => agent.name === name);
@@ -2381,15 +2473,20 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       const modelError = issue?.severity === "error" ? issue.line : undefined;
       // A failed model launch requires an explicit restore, not automatic adoption.
       const failedModel = row.state === "failed" && row.events?.some((event) => event.type === "MODEL_ERROR");
-      const adoptionCandidate = !failedModel && (row.state === "failed" || row.state === "launching");
-      if (modelError) {
+      const reAdoption = act && row.owner === env.sessionId && READOPT_STATES.includes(row.state) ? yield* findReadoption(project, row) : undefined;
+      const adoptionCandidate = reAdoption !== undefined || row.state === "interrupted" || (!failedModel && (row.state === "failed" || row.state === "launching"));
+      if (reAdoption) {
+        current = yield* readoptRow(dir, row, reAdoption.pane, reAdoption.session);
+        pane = reAdoption.pane;
+        action = `re-adopted ${pane.pane_id}`;
+      } else if (modelError) {
         action = `FAILED (model error: ${modelError})`;
         if (act && row.owner === env.sessionId) {
           current = yield* patchRow(dir, row.name, row.state, [{ type: "FAIL" }], {
             delivery: "unproven", events: [...(row.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: modelError }],
           });
         }
-      } else if (adoptionCandidate) {
+      } else if (adoptionCandidate && !READOPT_STATES.includes(row.state)) {
         // Never learn identity from an unrelated session: that would make it
         // match on the next pass. Read the bound terminal before adopting it.
         const mine = row.owner === env.sessionId;
@@ -2437,7 +2534,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         );
         action = `rebound moved pane to ${pane.pane_id}`;
       }
-      if (!modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
+      if (!reAdoption && !modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
       const herdrFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
       if (!adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
         current = yield* patchRow(dir, row.name, current.state, [], {
