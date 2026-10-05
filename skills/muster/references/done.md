@@ -17,7 +17,13 @@ After proving or closing a lane, pull the top ranked lane when its WIP slot open
 ## Brief template
 
 - **Outcome:** what changes for the user.
+- **Premises:** cite every claim about current code with `file:line`. The worker checks each before building and reports any false premise.
 - **Write scope:** the files this worker owns.
+- **Existing tests:** before dispatch, the owner searches tests for changed strings, labels, and symbols. Name each hit in write scope as "update only these assertions"; fence parallel lanes by test name, not whole test file.
+- **Case matrix:** for branch, ref, or verify work, list cases and expected results.
+- **Caller map:** before changing an entry point's contract, name its callers and what each expects.
+- **Acceptance:** check the rendered output and name the renderer's file.
+- **Consistency:** the owner rereads acceptance lines for contradictions, such as "messages byte-identical" plus "add a hint to the messages".
 - **Checks:** regression tests, a red proof, and the full gate.
 - **Deploy:** how it goes live, the flag state, and the rollback.
 - **Proof:** the live check the owner should run and where its evidence will be recorded.
