@@ -112,7 +112,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
     ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
   }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model, project.slug), null));
-  const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug), null);
+  const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
   const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
@@ -1674,7 +1674,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     if (params.brief && params.action === "restore") row = { ...row, brief: params.brief };
 
     const resolvedModel = yield* Effect.try({
-      try: () => resolveModel(params.model ?? row.profile.model, roster, project.slug),
+      try: () => resolveModel(params.model ?? row.profile.model, roster, project.slug, row.role),
       catch: (error) => input(String(error instanceof Error ? error.message : error)),
     });
     row = { ...row, profile: { ...row.profile, model: resolvedModel.model, thinking: params.thinking ?? resolvedModel.thinking ?? row.profile.thinking } };

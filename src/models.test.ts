@@ -32,6 +32,17 @@ it("scopes the Sonnet exception to front-desk and its exact route", () => {
   expect(() => resolveModel("claude-bridge/claude-sonnet-5-5", undefined, "drovr")).toThrow("Sonnet is not used");
   expect(() => resolveModel("anthropic/claude-sonnet-5-5", undefined, "front-desk")).toThrow("Sonnet is not used");
 });
+it("allows Sonnet 5.5 for the worker role on its exact route only, and only as an explicit choice", () => {
+  expect(resolveModel("claude-bridge/claude-sonnet-5-5:low", undefined, "drovr", "worker")).toEqual({ model: "claude-bridge/claude-sonnet-5-5", thinking: "low" });
+  for (const role of ["desk", "boss", "hawk", "judge"] as const) expect(() => resolveModel("claude-bridge/claude-sonnet-5-5", undefined, "drovr", role)).toThrow("Sonnet is not used");
+  expect(() => resolveModel("claude-bridge/claude-sonnet-5", undefined, "drovr", "worker")).toThrow("Sonnet is not used");
+  expect(() => resolveModel("sonnet", undefined, "drovr", "worker")).toThrow("Sonnet is not used");
+  expect(roleDefaults(undefined, undefined, "worker", "claude-bridge/claude-sonnet-5-5").model).toBe("claude-bridge/claude-sonnet-5-5");
+  expect(() => roleDefaults(undefined, { roles: { worker: { model: "claude-bridge/claude-sonnet-5-5" } } }, "worker", undefined, "drovr")).toThrow("Sonnet is not used");
+  const roster = decodeRoster({ version: 1, roles: { worker: { model: "sol", alternates: [{ model: "claude-bridge/claude-sonnet-5-5", compactAt: 150000, useFor: ["exploratory comparison runs"] }] } } });
+  expect(roleDefaults(roster, undefined, "worker", "claude-bridge/claude-sonnet-5-5")).toMatchObject({ model: "claude-bridge/claude-sonnet-5-5", compactAt: 150000 });
+  expect(roleDefaults(roster, undefined, "worker").model).toBe("openai-codex/gpt-6.1-sol");
+});
 it("suggests exact and prefix routes, preferring the Claude bridge and limiting to three", () => {
   expect(workingRoutes("anthropic/claude-opus-5", ["other/claude-opus-5", "claude-bridge/claude-opus-5", "claude-bridge/claude-opus-5-5", "another/claude-opus-5", "other/unrelated"])).toEqual([
     "claude-bridge/claude-opus-5", "claude-bridge/claude-opus-5-5", "another/claude-opus-5",

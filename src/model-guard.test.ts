@@ -48,7 +48,7 @@ it.each([ ["opus", "claude-bridge/claude-opus-5-5"], ["sol", "openai-codex/gpt-6
   const explicit = await runWith(h, agentLaunch(dir, { action: "launch", name: "explicit", role: "worker", lane: "probe", label: "explicit", cwd: dir, model: alias }));
   expect(explicit.row.profile.model).toBe(model);
 });
-it.each(["sonnet", "anthropic/claude-sonnet-5", "claude-bridge/claude-sonnet-5-5", "fable", "fable:high", "claude-bridge/claude-fable-5-1", "nope"])("rejects forbidden/unknown choice %s", async (model) => {
+it.each(["sonnet", "anthropic/claude-sonnet-5", "anthropic/claude-sonnet-5-5", "fable", "fable:high", "claude-bridge/claude-fable-5-1", "nope"])("rejects forbidden/unknown choice %s", async (model) => {
   const { h, launch } = await setup();
   const error = await failWith(h, launch(model));
   expect(error.message).toMatch(model.includes("sonnet") ? /Sonnet is not used/ : model.includes("fable") ? /Fable is off fleet-wide \(Joel, 2026-10-04\); use opus/ : /aliases: opus, sol$/);
@@ -62,6 +62,18 @@ it("allows Joel's named front-desk Sonnet route there only, and Fable nowhere", 
   expect((await failWith(front.h, projectUpdate(front.dir, { policy: { roles: { judge: { model: "claude-bridge/claude-fable-5-1" } } } }))).message).toContain("Fable is off");
   const other = await setup("not-front-desk");
   expect((await failWith(other.h, projectUpdate(other.dir, { policy: { roles: { worker: { model: "claude-bridge/claude-sonnet-5-5" } } } }))).message).toContain("Sonnet is not used");
+});
+it("lets a worker opt into Sonnet 5.5 by explicit choice only, in any project", async () => {
+  const { h, dir, launch } = await setup("drovr");
+  const worker = await runWith(h, launch("claude-bridge/claude-sonnet-5-5:medium"));
+  expect(worker.row.profile).toMatchObject({ model: "claude-bridge/claude-sonnet-5-5", thinking: "medium" });
+  for (const role of ["judge", "boss", "hawk"] as const) {
+    const error = await failWith(h, agentLaunch(dir, { action: "launch", name: role, role, lane: "probe", label: role, cwd: dir, prompt: "start", model: "claude-bridge/claude-sonnet-5-5" }));
+    expect(error.message).toContain("Sonnet is not used");
+  }
+  expect((await failWith(h, projectUpdate(dir, { policy: { roles: { worker: { model: "claude-bridge/claude-sonnet-5-5" } } } }))).message).toContain("Sonnet is not used");
+  const bare = await failWith(h, agentLaunch(dir, { action: "launch", name: "bare", role: "worker", lane: "probe", label: "bare", cwd: dir, prompt: "start", model: "sonnet" }));
+  expect(bare.message).toContain("Sonnet is not used");
 });
 it.each(["nonzero", "empty", "timeout"])("allows a %s model listing with a skip note", async (kind) => {
   const { h, launch } = await setup();

@@ -1,6 +1,6 @@
 import { stripVTControlCharacters } from "node:util";
 import { Effect } from "effect";
-import type { Roster, Thinking } from "./domain.ts";
+import type { Role, Roster, Thinking } from "./domain.ts";
 import { InputError } from "./errors.ts";
 import { Proc } from "./runtime.ts";
 
@@ -14,21 +14,26 @@ export const modelAliases = (roster?: Roster): Readonly<Record<string, string>> 
 export const MODEL_EXCEPTIONS: ReadonlyArray<{ project: string; model: string; ruling: string; date: string }> = [
   { project: "front-desk", model: "claude-bridge/claude-sonnet-5-5", ruling: "front desk needs to be opus 5 5 and sonnet 5 5", date: "2026-10-04" },
 ];
-const allowed = (model: string, project?: string) => MODEL_EXCEPTIONS.some((e) => e.project === project && e.model === model);
+/** Joel's exceptions for one role in any project: opt-in routes, never defaults. */
+export const ROLE_MODEL_EXCEPTIONS: ReadonlyArray<{ role: Role; model: string; ruling: string; date: string }> = [
+  { role: "worker", model: "claude-bridge/claude-sonnet-5-5", ruling: "we can offer exploratry use of sonnet 55 for workers", date: "2026-10-05" },
+];
+const allowed = (model: string, project?: string, role?: Role) =>
+  MODEL_EXCEPTIONS.some((e) => e.project === project && e.model === model) || ROLE_MODEL_EXCEPTIONS.some((e) => e.role === role && e.model === model);
 
-function refuse(model: string, project?: string) {
+function refuse(model: string, project?: string, role?: Role) {
   if (/fable/i.test(model)) throw new Error("Fable is off fleet-wide (Joel, 2026-10-04); use opus");
-  if (/sonnet/i.test(model) && !allowed(model, project)) throw new Error("Sonnet is not used (Joel, 2026-10-03); use sol or opus");
+  if (/sonnet/i.test(model) && !allowed(model, project, role)) throw new Error("Sonnet is not used (Joel, 2026-10-03; workers may opt into claude-bridge/claude-sonnet-5-5); use sol or opus");
 }
 
-export function resolveModel(choice: string, roster?: Roster, project?: string): { model: string; thinking?: Thinking } {
-  if (/fable/i.test(choice) || (/sonnet/i.test(choice) && !choice.includes("/"))) refuse(choice, project); // a bare alias never matches an exception route
+export function resolveModel(choice: string, roster?: Roster, project?: string, role?: Role): { model: string; thinking?: Thinking } {
+  if (/fable/i.test(choice) || (/sonnet/i.test(choice) && !choice.includes("/"))) refuse(choice, project, role); // a bare alias never matches an exception route
   const suffix = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(choice);
   const name = suffix ? choice.slice(0, suffix.index) : choice;
   const aliases = modelAliases(roster);
   const model = name.includes("/") ? name : aliases[name];
   if (!model) throw new Error(`Unknown model alias ${name}; aliases: ${Object.keys(aliases).sort().join(", ")}`);
-  refuse(model, project);
+  refuse(model, project, role);
   if (!/^[^/\s:]+\/[^/\s:]+$/.test(model)) throw new Error(`Invalid model route ${model}; expected provider/model`);
   const thinking = suffix?.[1];
   switch (thinking) {

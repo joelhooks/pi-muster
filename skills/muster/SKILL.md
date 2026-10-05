@@ -50,7 +50,7 @@ After three closed work lanes and at every `project_review`, dispatch a short-li
 
 ## Shape it to the job
 
-Say `opus` or `sol` for a model, never a provider prefix. Fable is off fleet-wide; Sonnet only where Joel named it (front-desk).
+Say `opus` or `sol` for a model, never a provider prefix. Fable is off fleet-wide. Sonnet only where Joel named it: front-desk, and `claude-bridge/claude-sonnet-5-5` as an explicit, exploratory worker choice.
 
 Defaults fit most work. Role models come from the fleet roster (`~/.config/muster/roster.json`); each role lists alternates with what they are for and against. Pick an alternate per lane when the job matches, by passing its model to `agent_launch`. Silence limits default to 30 minutes before a nudge and 60 before a restart. When the job disagrees, change the project with `project_update` rather than working around it. Long builds want longer silence limits or no auto-restart; a cheap scout lane wants a smaller model; a lane that must keep context wants a higher compact-at. An explicit model from Joel wins. `project_update` returns the policy in force.
 

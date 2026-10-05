@@ -482,9 +482,10 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
 export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string): RoleDefaults {
   const { alternates = [], ...fleet } = roster?.roles?.[role] ?? {};
   const project = policy?.roles?.[role] ?? {};
-  const resolved = resolveModel(model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug);
+  // Role exceptions are opt-in: only an explicit launch choice can use one, never a policy or fleet default.
+  const resolved = resolveModel(model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug, model === undefined ? undefined : role);
   const chosen = resolved.model;
-  const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => { try { return resolveModel(candidate.model, roster, slug).model === chosen; } catch { return false; } }) ?? { useFor: [] };
+  const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => { try { return resolveModel(candidate.model, roster, slug, role).model === chosen; } catch { return false; } }) ?? { useFor: [] };
   return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen, ...(resolved.thinking ? { thinking: resolved.thinking } : {}),
     skills: [...new Set([...(fleet.skills ?? []), ...("skills" in alternate ? alternate.skills ?? [] : []), ...(project.skills ?? [])])],
   };
