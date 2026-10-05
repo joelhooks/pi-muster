@@ -3,7 +3,7 @@
 A merged packet is not a finished lane. The owner carries delivery through five checks:
 
 1. **Built:** committed, with tests that fail without the change, and the gate passes.
-2. **Landed:** merged to main and pushed with `shitrat`.
+2. **Landed:** merged to main, pushed with `shitrat`, then the same branch mirrored to walgit with the `walgit-sync` skill (`ls-remote` SHA must match). A walgit failure doesn't undo the landing; report its exact error.
 3. **Deployed:** live where it runs. For pi-muster, pull on the hosts and reload the sessions using it; check the version-skew warning. For a project repo, ship behind a flag when behaviour changes.
 4. **Proven:** record a check against the live system, not the test suite.
 5. **Observable:** name one working signal, one failing signal, and where each appears. Record the flag state and rollback.
