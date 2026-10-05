@@ -111,6 +111,15 @@ describe("live delivery and WIP", () => {
     expect(flowLine(p, s.h.now.getTime())).not.toContain("⚠ not flowing");
     expect(board(p, [], 0, s.h.now.getTime())).toContain("WIP 1/3 · landed, not live: one");
   });
+  it("reads naturally with nothing in flight and a fresh proof", async () => {
+    const s = await setup();
+    await s.lane("one");
+    await landed(s, "one");
+    await runWith(s.h, laneDeliver(s.dir, { slug: "one", stage: "proven", evidence: "checked live" }));
+    await runWith(s.h, laneClose(s.dir, "one"));
+    const line = flowLine(await runWith(s.h, load(s.dir)), s.h.now.getTime());
+    expect(line).toBe("WIP 0/3 · landed, not live: none · last proven just now");
+  });
   it("flags a reported or verified packet waiting more than landWaitMin", async () => {
     const s = await setup();
     await s.lane("one");

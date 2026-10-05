@@ -90,7 +90,13 @@ export function flowLine(project: Project, now: number = Date.now()): string {
   const stalled = lanes.length > 0 && now - Math.max(lastMove, oldest) > (project.policy?.flowStallMin ?? 120) * 60_000;
   const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
   const landed = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
-  return `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"} · landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"} · oldest in flight ${formatAge(Math.max(0, now - oldest))} · last proven ${lastProven ? `${formatAge(Math.max(0, now - lastProven))} ago` : "never"}`.replace(/[\r\n]+/g, " ");
+  const ago = (at: number) => { const age = formatAge(Math.max(0, now - at)); return age === "now" ? "just now" : `${age} ago`; };
+  return [
+    `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"}`,
+    `landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"}`,
+    ...(lanes.length ? [`oldest in flight ${formatAge(Math.max(0, now - oldest))}`] : []),
+    `last proven ${lastProven ? ago(lastProven) : "never"}`,
+  ].join(" · ").replace(/[\r\n]+/g, " ");
 }
 
 export function deriveTokens(project: Project, desk: readonly DeskItem[], live: LiveCounts = {}): Tokens {
