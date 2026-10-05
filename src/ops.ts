@@ -921,12 +921,24 @@ export interface LaneOpenInput {
   readonly override?: string | undefined;
 }
 
-export const laneOpen = (dir: string, params: LaneOpenInput) =>
+export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: number | undefined }) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const slug = yield* decodeWith(decodeSlug, params.slug);
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "lane_open");
+    const rank = params.rank;
+    if (rank !== undefined && !Number.isSafeInteger(rank)) return yield* input("rank must be a safe integer");
+    // Re-ranking parked work is intentionally rank-only, including its timestamps and brief.
+    if (params.open === false && rank !== undefined) {
+      const lane = yield* mutate(dir, current => {
+        const latest = current.lanes.find(lane => lane.slug === slug);
+        if (!latest || latest.state !== "proposed") return Effect.succeed([current, null] as const);
+        const next = { ...latest, rank };
+        return Effect.succeed([withLane(current, next), next] as const);
+      });
+      if (lane) return { lane, created: false, note: null, outcome: project.outcome };
+    }
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
     const wantOpen = params.open !== false;
@@ -957,6 +969,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
       repo: params.repo ?? null,
       base: params.base ?? null,
       generated: [...(params.generated ?? [])],
+      ...(params.rank !== undefined ? { rank: params.rank } : {}),
       tabId: null,
       root: null,
       state: "proposed",
@@ -1021,6 +1034,8 @@ export const laneOpen = (dir: string, params: LaneOpenInput) =>
           tabId,
           root,
           state,
+          ...(params.rank !== undefined ? { rank: params.rank } : {}),
+          ...(event ? { openedAt: iso(env) } : {}),
           // A reopened lane is live work again; the weekly review archived it only because it was closed.
           archived: false,
           updatedAt: iso(env),
