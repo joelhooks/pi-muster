@@ -581,7 +581,7 @@ describe("lane clone base", () => {
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     const verified = await runWith(h, packetVerify(dir, commit));
     expect(verified.packet.verification?.checks.find((check) => check.name === "clone base"))
-      .toMatchObject({ outcome: "pass", detail: `default branch ${launched.row.clone?.base?.sha}` });
+      .toMatchObject({ outcome: "pass", detail: `main ${launched.row.clone?.base?.sha}` });
     await runWith(h, mutate(dir, (project) => Effect.succeed([{
       ...project,
       agents: project.agents.map((row) => ({ ...row, clone: row.clone ? { ...row.clone, base: null } : null })),
