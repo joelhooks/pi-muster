@@ -1,8 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { Clock, Effect } from "effect";
-import { TestClock } from "effect/testing";
+import { Effect } from "effect";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRow } from "./domain.ts";
@@ -814,8 +813,9 @@ describe("field-use regressions", () => {
     for (const code of ["agent_pane_busy", "agent_not_found"]) {
       const h = harness();
       h.herdr.startErrors = Array(70).fill(code);
+      h.herdr.paneTail = "repo % ";
       await expect(launchedWorker(h)).rejects.toThrow(code === "agent_pane_busy" ? "agent-start available-shell wait exhausted after 15000 ms" : "start rejected");
-      expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(code === "agent_pane_busy" ? 61 : 1);
+      expect(h.herdr.calls.filter((call) => call.method === "agent.start")).toHaveLength(code === "agent_pane_busy" ? 62 : 1);
       const project = await runWith(h, load(join(h.root, "repo")));
       expect(project.agents[0]?.state).toBe("failed");
     }
@@ -1094,16 +1094,11 @@ describe("a lane from launch to close", () => {
     const dir = makeRepo(join(h.root, "repo"));
     await open(h, dir);
     await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
-    const launched = await runWith(h, Effect.gen(function* () {
-      const clock = yield* TestClock.make();
-      // Schedule.spaced uses Effect's Clock, not the harness's env.sleep.
-      // Advance each scheduled wait without waiting for real registration.
-      const result = yield* agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", cwd: dir, prompt: "do it" }).pipe(
-        Effect.provideService(Clock.Clock, { ...clock, sleep: clock.adjust }),
-      );
-      expect(clock.currentTimeMillisUnsafe()).toBe(1_000);
-      return result;
-    }).pipe(Effect.scoped));
+    let slept = 0;
+    h.sleep = ms => { slept += ms; };
+    const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", cwd: dir, prompt: "do it" }));
+    // Registration waits use the harness clock; model proof adds its existing 3 s.
+    expect(slept).toBe(4_000);
     expect(h.herdr.promptNotReady).toBe(0);
     expect(launched.row.delivery).toBe("proven");
   });

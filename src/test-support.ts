@@ -38,6 +38,9 @@ export class FakeHerdr {
   startSessions = true;
   startErrors: string[] = [];
   promptFails = false;
+  typedPrompts: string[] = [];
+  readinessPending = 0;
+  paneTail = "last lines";
   /** Reject this many agent.prompt calls with agent_not_ready, as Herdr does before it registers a fresh agent name. */
   promptNotReady = 0;
   private seq = 0;
@@ -140,7 +143,7 @@ export class FakeHerdr {
         this.pane(method, params.pane_id);
         return { type: "ok" };
       case "pane.read":
-        return { type: "pane_read", read: { pane_id: params.pane_id, text: "last lines", truncated: false } };
+        return { type: "pane_read", read: { pane_id: params.pane_id, text: this.paneTail, truncated: false } };
       case "pane.close": {
         const pane = this.pane(method, params.pane_id);
         this.panes.delete(pane.pane_id);
@@ -158,12 +161,19 @@ export class FakeHerdr {
         if (this.startSessions) this.startSession(pane, id, file);
         return { type: "agent_started", agent: this.agentInfo(pane, "idle"), argv: args };
       }
+      case "agent.get": {
+        const pane = this.pane(method, params.target);
+        const pending = this.readinessPending > 0;
+        if (pending) this.readinessPending -= 1;
+        return { type: "agent_info", agent: { ...this.agentInfo(pane, "idle"), agent: "pi", launch_pending: pending, interactive_ready: !pending } };
+      }
       case "agent.prompt":
         if (this.promptFails) throw new HerdrApiError({ operation: method, code: "agent_not_found", message: "agent gone" });
         if (this.promptNotReady > 0) {
           this.promptNotReady -= 1;
           throw new HerdrApiError({ operation: method, code: "agent_not_ready", message: `agent ${String(params.target)} is not an active named agent` });
         }
+        this.typedPrompts.push(String(params.text));
         return { type: "agent_prompted", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
       case "agent.wait":
         return { type: "agent_info", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
