@@ -1,7 +1,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { Effect } from "effect";
+import { Clock, Effect } from "effect";
+import { TestClock } from "effect/testing";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentRow } from "./domain.ts";
@@ -1089,7 +1090,20 @@ describe("a lane from launch to close", () => {
   it("retries the work prompt while Herdr has not yet registered the agent name", async () => {
     const h = harness();
     h.herdr.promptNotReady = 2;
-    const { launched } = await launchedWorker(h);
+    // Prompt registration does not depend on allocating a worker clone.
+    const dir = makeRepo(join(h.root, "repo"));
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    const launched = await runWith(h, Effect.gen(function* () {
+      const clock = yield* TestClock.make();
+      // Schedule.spaced uses Effect's Clock, not the harness's env.sleep.
+      // Advance each scheduled wait without waiting for real registration.
+      const result = yield* agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", cwd: dir, prompt: "do it" }).pipe(
+        Effect.provideService(Clock.Clock, { ...clock, sleep: clock.adjust }),
+      );
+      expect(clock.currentTimeMillisUnsafe()).toBe(1_000);
+      return result;
+    }).pipe(Effect.scoped));
     expect(h.herdr.promptNotReady).toBe(0);
     expect(launched.row.delivery).toBe("proven");
   });
@@ -1355,6 +1369,8 @@ describe("a lane from launch to close", () => {
     ])("fleet-compute: $name", async (scenario) => {
       const { h, dir } = forkHarness(template.h, template.dir);
       const commit = template.commit;
+      const runnerCalls: string[] = [];
+      if (scenario.guard === "busy") h.sleep = () => { throw new Error("busy admission must not sleep or poll in Muster"); };
       const before = sh(dir, "rev-parse", "HEAD");
       if (scenario.name === "changed commit tree") {
         // A hostile post-commit hook advances HEAD to a new commit with the old
@@ -1396,6 +1412,25 @@ describe("a lane from launch to close", () => {
         vi.stubEnv("PATH", `${h.root}:${process.env.PATH}`);
       } else {
         vi.stubEnv("MUSTER_FLEET_COMPUTE", stub);
+        // These cases test admission and exit handling, not Node startup. Keep
+        // real Git merges/aborts, but inject the already-fake runner at Proc.
+        // PATH pass above still exercises a real discovered executable.
+        if (scenario.guard === "busy" || scenario.guard === "gate") {
+          const proc = h.proc;
+          h.proc = { run: (command, args, options) => command === "node" && args[0] === stub
+            ? Effect.sync(() => {
+                const argv = args.slice(1);
+                runnerCalls.push(argv[0]!);
+                if (argv[0] === "status") return { code: 0, stderr: "", stdout: scenario.name === "busy status broken" ? "{" : JSON.stringify({ machines: [], queue: scenario.name === "busy drained" ? [] : [
+                  { id: "a", project: "other", repo: "repo", eligibleHosts: ["flagg"], enqueuedAt: "2026-09-29T05:57:00Z" },
+                  { id: "b", project: "probe", repo: "repo", eligibleHosts: ["flagg"], enqueuedAt: "2026-09-29T05:58:00Z" },
+                ] }) };
+                writeFileSync(argvPath, JSON.stringify(argv));
+                if (scenario.receipt) writeFileSync(argv[argv.indexOf("--receipt") + 1]!, JSON.stringify({ runId: "stub-run", host: "stub-host", tree: argv[argv.indexOf("--tree") + 1], slot: 1, durationMs: 42, exit: scenario.exit }));
+                return { code: scenario.code, stdout: "", stderr: "stub output tail" };
+              })
+            : proc.run(command, args, options) };
+        }
       }
       // Discovery happens during landing, and the runner bypasses local admission.
       vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 1, load: 100, freeGB: 1 });
@@ -1436,6 +1471,10 @@ describe("a lane from launch to close", () => {
       const args = JSON.parse(readFileSync(argvPath, "utf8"));
       expect(args).toEqual(["gate", "--project", "probe", "--repo", "repo", "--source", dir, "--tree", expect.any(String), "--head", before.trim(), "--branch", (await runWith(h, load(dir))).agents[0]?.clone?.branch, "--wait", "1200", "--receipt", expect.any(String), "--", "sh", "-c", "test -f work.txt"]);
       expect(existsSync(join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "MERGE_HEAD"))).toBe(false);
+      if (scenario.guard === "busy") {
+        expect(runnerCalls).toEqual(["gate", "status"]);
+        expect(machineAdapter.sample).not.toHaveBeenCalled();
+      }
     });
 
   });
