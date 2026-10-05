@@ -81,6 +81,21 @@ describe("remote launch argv delivery", () => {
     expect(s.remote.typedPrompts).toEqual([]);
   });
 
+  it("keeps a failed long-start repair small and points at the complete prompt", async () => {
+    const s = await setup();
+    s.remote.firstTurn = "error";
+    const prompt = "Private complete task.\n" + "work ".repeat(1000);
+    const result = await s.launch({ prompt });
+    expect(result.row.delivery).toBe("unproven");
+    expect(result.proof).toMatchObject({ state: "unproven", repairPrompt: expect.stringMatching(/^Read the complete work prompt at /) });
+    if (!("repair" in result) || !result.repair) throw new Error("missing repair");
+    expect(result.repair.args.prompt!.length).toBeLessThan(800);
+    const file = result.argv.at(-1)!.slice(1);
+    expect(result.repair.args.prompt).toContain(file);
+    expect(readFileSync(file, "utf8")).toBe(prompt);
+    expect(s.remote.typedPrompts).toEqual([]);
+  });
+
   it("uses @brief alone as the complete first message", async () => {
     const s = await setup();
     const brief = join(s.dir, "brief.md");

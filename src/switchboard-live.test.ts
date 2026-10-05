@@ -50,7 +50,7 @@ describe("whole fleet rows", () => {
   it("marks a terminal-verified desk outside its space and a live owner's session", async () => {
     const { h, dir } = await setup();
     await runWith(h, agentLaunch(dir, { action: "launch", name: "desk", role: "desk", lane: "desk", label: "desk", cwd: dir }));
-    const pane = [...h.herdr.panes.values()].find((p) => p.agent === "desk")!;
+    const pane = [...h.herdr.panes.values()].find((p) => p.name === "desk")!;
     pane.workspace_id = "w2";
     expect((await runWith(h, loadSystem)).groups[0]?.outsideSpace).toBe(true);
     pane.terminal_id = "reused";
@@ -224,7 +224,7 @@ describe("desk focus", () => {
   it("focuses workspace then verified desk, pastes only when idle, never presses Enter", async () => {
     const { h, dir } = await setup();
     await runWith(h, agentLaunch(dir, { action: "launch", name: "desk", role: "desk", lane: "desk", label: "desk", cwd: dir }));
-    const pane = [...h.herdr.panes.values()].find((p) => p.agent === "desk")!;
+    const pane = [...h.herdr.panes.values()].find((p) => p.name === "desk")!;
     const client = h.herdr.client();
     let idle = true;
     const focusCalls: string[] = [];

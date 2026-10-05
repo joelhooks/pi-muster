@@ -177,10 +177,11 @@ export const inheritedStartEntries = (path: string | null) => path ? Effect.gen(
 }) : Effect.succeed(1);
 
 /** The start argv is already submitted. Only new journal entries can prove it. */
-export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number) =>
+export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt) =>
   sessionSlice(path, 0, inheritedEntries).pipe(
     Effect.flatMap(slice => proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, { state: "proven", via: "argv" })),
     Effect.catch(() => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, detail: "first turn not checked: inherited journal boundary unavailable" })),
+    Effect.map(proof => proof.state === "unproven" ? { ...proof, repairPrompt } : proof),
   );
 
 /** Save privately on the provided Proc (SSH-backed remotely), then verify exact bytes and mode. */

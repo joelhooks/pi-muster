@@ -81,14 +81,14 @@ const startPrompt = (row: AgentRow, prompt: string | undefined, dir: string) => 
   if (!text) return { expected: undefined };
   if (row.brief) {
     const contents = yield* must("node", ["-e", "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8'))", row.brief], { cwd: row.cwd, timeoutMs: 10_000 });
-    if (prompt === undefined && !row.side) return { promptFile: row.brief, expected: `<file name="${row.brief}">\n${contents}\n</file>\n` };
+    if (prompt === undefined && !row.side) return { promptFile: row.brief, expected: `<file name="${row.brief}">\n${contents}\n</file>\n`, repairPrompt: `Read the complete work prompt at ${row.brief}. Do the work it describes.` };
     text = `${text}\n\n<file name="${row.brief}">\n${contents}\n</file>`;
   }
   if (text.length > 800 || text.includes("\n") || text.startsWith("@")) {
     const path = yield* writeLaunchFile(dir, text, "prompt.txt");
-    return { promptFile: path, expected: `<file name="${path}">\n${text}\n</file>\n` };
+    return { promptFile: path, expected: `<file name="${path}">\n${text}\n</file>\n`, repairPrompt: `Read the complete work prompt at ${path}. Do the work it describes.` };
   }
-  return { prompt: text, expected: text };
+  return { prompt: text, expected: text, repairPrompt: text };
 });
 
 
@@ -257,7 +257,7 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore });
       yield* paneRename(binding.paneId, label);
       const prompt = message.expected;
-      const proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries) : null;
+      const proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined) : null;
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
@@ -1847,7 +1847,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const text = message.expected;
     let proof: Proof | null = null;
     if (text && !launched.pending) {
-      proof = yield* proveStartedPrompt(launched.sessionFile!, text, inheritedEntries);
+      proof = yield* proveStartedPrompt(launched.sessionFile!, text, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined);
       if (proof.state === "unproven") skillNotes.push(`delivery: unproven: ${proof.detail}. Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: proof.repairPrompt ?? text } })}`);
       running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(running.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
     }
