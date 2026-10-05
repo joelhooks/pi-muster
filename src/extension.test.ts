@@ -72,6 +72,7 @@ const OWNER_TOOLS = [
   "project_open",
   "project_move",
   "lane_open",
+  "lane_deliver",
   "lane_close",
   "agent_launch",
   "agent_rewind",

@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Schema, SchemaTransformation } from "effect";
 import { modelAliases, resolveModel } from "./models.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
 
@@ -242,6 +242,9 @@ export const RemotePacket = Schema.Struct({ project: Slug, machine: Schema.Strin
 export const decodeRemotePacket = Schema.decodeUnknownSync(RemotePacket);
 export const decodeAgentRow = Schema.decodeUnknownSync(AgentRow);
 
+export const LaneDelivery = Schema.Literals(["none", "landed", "deployed", "proven", "waived"]);
+export type LaneDelivery = typeof LaneDelivery.Type;
+
 export const Lane = Schema.Struct({
   slug: Slug,
   kind: Schema.Literals(["work", "role"]),
@@ -257,6 +260,11 @@ export const Lane = Schema.Struct({
   tabId: Schema.NullOr(Schema.String),
   root: Schema.NullOr(PaneBinding),
   state: LaneState,
+  delivery: Schema.optionalKey(LaneDelivery),
+  deliveryAt: Schema.optionalKey(Iso),
+  deliveryEvidence: Schema.optionalKey(Schema.String),
+  deliveryHistory: Schema.optionalKey(Schema.Array(Schema.Struct({ stage: LaneDelivery, at: Iso, evidence: Schema.String }))),
+  override: Schema.optionalKey(Schema.String),
   archived: Schema.Boolean,
   createdAt: Iso,
   updatedAt: Iso,
@@ -287,6 +295,9 @@ export type RolePolicy = typeof RolePolicy.Type;
  * shapes them to the job with `project_update` instead of reading rules.
  */
 export const Policy = Schema.Struct({
+  wipLimit: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)))),
+  flowStallMin: Schema.optionalKey(Minutes),
+  landWaitMin: Schema.optionalKey(Minutes),
   comms: Schema.Literals(["intercom", "network"]).pipe(Schema.withDecodingDefaultKey(Effect.succeed("intercom" as const))),
   /** Quiet minutes before the owner pass sends `esc` and a note. */
   nudgeAfterMin: Schema.optionalKey(Minutes),
@@ -305,7 +316,7 @@ export const Policy = Schema.Struct({
 /** Policy patches omit comms; persisted policies decode it to intercom. */
 export type Policy = Partial<Pick<typeof Policy.Type, "comms">> & Omit<typeof Policy.Type, "comms">;
 
-export const Project = Schema.Struct({
+const ProjectFields = Schema.Struct({
   version: Schema.Literal(1),
   slug: Slug,
   label: Schema.String,
@@ -341,6 +352,15 @@ export const Project = Schema.Struct({
   createdAt: Iso,
   updatedAt: Iso,
 });
+export const Project = ProjectFields.pipe(Schema.decode(SchemaTransformation.transform({
+  decode: (project): typeof ProjectFields.Type => ({ ...project, lanes: project.lanes.map(lane => {
+    if (lane.delivery !== undefined) return lane;
+    const committed = project.packets.filter(packet => packet.lane === lane.slug && packet.state === "committed");
+    const at = committed.map(packet => packet.updatedAt).sort().at(-1);
+    return at ? { ...lane, delivery: "proven" as const, deliveryAt: at, deliveryEvidence: "before done-live", deliveryHistory: [{ stage: "proven" as const, at, evidence: "before done-live" }] } : { ...lane, delivery: "none" as const };
+  }) }),
+  encode: (project) => project,
+})));
 export type Project = typeof Project.Type;
 
 export const DeskKind = Schema.Literals(["decision", "approval", "blocked", "done", "fyi"]);
@@ -463,6 +483,9 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): typeof Pol
   return {
     ...(base ?? {}),
     comms: patch.comms ?? base?.comms ?? "intercom",
+    ...(patch.wipLimit !== undefined ? { wipLimit: patch.wipLimit } : {}),
+    ...(patch.flowStallMin !== undefined ? { flowStallMin: patch.flowStallMin } : {}),
+    ...(patch.landWaitMin !== undefined ? { landWaitMin: patch.landWaitMin } : {}),
     ...(patch.nudgeAfterMin !== undefined ? { nudgeAfterMin: patch.nudgeAfterMin } : {}),
     ...(patch.restartAfterMin !== undefined ? { restartAfterMin: patch.restartAfterMin } : {}),
     ...(Object.keys(roles).length > 0 ? { roles } : {}),
@@ -478,7 +501,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { comms: policy?.comms ?? "intercom", aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policy?.comms ?? "intercom", aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(["intercom", "network"])) }));

@@ -1,10 +1,11 @@
 import { createActor } from "xstate";
+import { FEED_CLAIM } from "./desk-feed.ts";
 import { decodeOwnerCursor } from "./domain.ts";
 import type { OwnerItem, OwnerKind } from "./domain.ts";
 import { ownerFeedMachine } from "./machines.ts";
 import { readOwnerSources, mentions } from "./owner-queue.ts";
 import { relayEvent } from "./relay-events.ts";
-import { ownerTimelineData } from "./owner-view.ts";
+import { ownerTimelineData, projectFlowLine } from "./owner-view.ts";
 
 export const OWNER_CURSOR = "muster-owner-queue-cursor";
 export const OWNER_NOTE = "muster-owner-note";
@@ -73,9 +74,13 @@ export function ownerFeed(deps: { session: string; home: string; project?: strin
       const items = records.map(r => r.item);
       for (const source of snapshot) sources[source.source] = source.cursor;
       cursor = sources[deps.session] ?? 0; delivered.clear(); save();
-      if (!items.length) return undefined;
+      // A Muster desk already contributes the line through its desk feed. Never show it twice.
+      const deskOwnsFlow = (globalThis as { [FEED_CLAIM]?: string })[FEED_CLAIM] === "pi-muster";
+      const flow = deskOwnsFlow ? undefined : projectFlowLine(deps.project, deps.home);
+      if (!items.length && !flow) return undefined;
       relayEvent({ ts: new Date().toISOString(), session: deps.session, project: "", kind: "owner_digest", itemCount: items.length }, deps.home);
-      return { message: message(items, deps.session, true, deps.home, deps.project, via, mentioned) };
+      const note = message(items, deps.session, true, deps.home, deps.project, via, mentioned);
+      return { message: { ...note, details: { ...note.details, ...(flow ? { flow } : {}) }, content: [flow, items.length ? note.content : undefined].filter(Boolean).join("\n") } };
     },
     turnStarted() { lifecycle.send({ type: "START" }); },
     turnEnded() { lifecycle.send({ type: "END" }); },

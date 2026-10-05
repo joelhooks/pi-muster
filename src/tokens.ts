@@ -1,4 +1,5 @@
-import type { AgentState, DeskItem, Project } from "./domain.ts";
+import { formatAge } from "./switchboard.ts";
+import type { AgentState, DeskItem, Lane, Project } from "./domain.ts";
 import { TERMINAL_PACKET_STATES } from "./domain.ts";
 
 /**
@@ -66,9 +67,35 @@ function needsToken(open: readonly DeskItem[]): string | null {
   return `🙋 ${title.length <= room ? title.join("") : `${title.slice(0, room - 1).join("")}…`}${more}`;
 }
 
+/** Role tabs are infrastructure, not feature WIP. Archived undelivered work still counts. */
+export function inFlight(project: Project): Lane[] {
+  return project.lanes.filter(lane => lane.kind === "work" &&
+    (lane.state === "open" || lane.state === "draining" ||
+      (lane.state === "closed" && (lane.delivery === "landed" || lane.delivery === "deployed"))));
+}
+export function wipRefusal(project: Project, slug: string, kind: Lane["kind"], now: number): string | null {
+  const lanes = inFlight(project);
+  const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
+  if (kind === "role" || limit === null || lanes.some(lane => lane.slug === slug) || lanes.length < limit) return null;
+  return `WIP ${lanes.length}/${limit}: ${lanes.map(lane => `${lane.slug} (${lane.delivery ?? "none"}, ${formatAge(Math.max(0, now - Date.parse(lane.createdAt)))})`).join(", ")}. Park the idea with lane_open open: false, or supply override with Joel's words.`;
+}
+export function flowLine(project: Project, now: number = Date.now()): string {
+  const lanes = inFlight(project);
+  const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
+  const history = project.lanes.filter(lane => lane.kind === "work").flatMap(lane => lane.deliveryHistory ??
+    (lane.deliveryAt ? [{ stage: lane.delivery ?? "none", at: lane.deliveryAt, evidence: lane.deliveryEvidence ?? "" }] : []));
+  const lastProven = Math.max(0, ...history.filter(entry => entry.stage === "proven").map(entry => Date.parse(entry.at)));
+  const lastMove = Math.max(lastProven, ...history.map(entry => Date.parse(entry.at)));
+  const oldest = lanes.length ? Math.min(...lanes.map(lane => Date.parse(lane.createdAt))) : now;
+  const stalled = lanes.length > 0 && now - Math.max(lastMove, oldest) > (project.policy?.flowStallMin ?? 120) * 60_000;
+  const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
+  const landed = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
+  return `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"} · landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"} · oldest in flight ${formatAge(Math.max(0, now - oldest))} · last proven ${lastProven ? `${formatAge(Math.max(0, now - lastProven))} ago` : "never"}`.replace(/[\r\n]+/g, " ");
+}
+
 export function deriveTokens(project: Project, desk: readonly DeskItem[], live: LiveCounts = {}): Tokens {
   const work = project.lanes.filter((lane) => lane.kind === "work" && !lane.archived);
-  const lanesDone = work.filter((lane) => lane.state === "closed").length;
+  const lanesDone = work.filter((lane) => lane.state === "closed" && lane.delivery !== "landed" && lane.delivery !== "deployed").length;
   const toLand = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state)).length;
   const progress =
     project.state === "archived"
