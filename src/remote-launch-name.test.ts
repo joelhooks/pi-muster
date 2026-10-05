@@ -194,6 +194,28 @@ describe("remote launch argv delivery", () => {
     expect(child.row.delivery).toBe("proven");
   });
 
+  it.each(["local", "remote"] as const)("waits for Pi's first journal write on a fresh %s launch instead of reporting the boundary unavailable", async machine => {
+    const s = await setup();
+    const fake = machine === "remote" ? s.remote : s.h.herdr;
+    fake.lazyJournal = true;
+    let sleeps = 0;
+    s.h.sleep = () => { if (++sleeps === 3) fake.flushJournals(); };
+    const result = machine === "remote" ? await s.launch() : await runWith(s.h, agentLaunch(s.dir, {
+      action: "launch", name: "local-worker", role: "worker", lane: "work", label: "local worker", cwd: s.dir, noSkills: true, prompt: "Do the local work.",
+    }));
+    expect(sleeps).toBeGreaterThanOrEqual(3);
+    expect(result.proof).toMatchObject({ state: "proven", via: "argv" });
+    expect(result.row.delivery).toBe("proven");
+    expect(fake.typedPrompts).toEqual([]);
+  });
+
+  it("reports a fresh launch whose journal never appears as unproven after the first-turn window", async () => {
+    const s = await setup();
+    s.remote.lazyJournal = true;
+    const result = await s.launch();
+    expect(result.proof).toMatchObject({ state: "unproven", detail: "no session journal entries within 90 s" });
+  });
+
   it.each(["local", "remote"] as const)("executes the %s launcher end to end with exact env, cwd and argv", async machine => {
     const s = await setup();
     const bin = join(s.h.root, "bin");

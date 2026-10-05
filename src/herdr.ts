@@ -176,10 +176,28 @@ export const inheritedStartEntries = (path: string | null) => path ? Effect.gen(
   return yield* Effect.try({ try: () => decodeSessionEntryCount(JSON.parse(result.stdout)), catch: () => new HerdrFailure({ operation: "first-turn", code: null, message: "invalid inherited session entry count" }) });
 }) : Effect.succeed(1);
 
+/** Pi writes no journal until its first assistant entry, so a missing file or boundary means wait, not fail. */
+const startBoundary = (path: string, inheritedEntries: number) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const started = env.now().getTime();
+  let slept = 0;
+  while (true) {
+    const slice = yield* sessionSlice(path, 0, inheritedEntries).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (slice) return slice;
+    const elapsed = Math.max(slept, env.now().getTime() - started);
+    if (elapsed >= FIRST_TURN_MS) return null;
+    const delay = Math.min(1000, FIRST_TURN_MS - elapsed);
+    yield* env.sleep(delay);
+    slept += delay;
+  }
+});
+
 /** The start argv is already submitted. Only new journal entries can prove it. */
 export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt) =>
-  sessionSlice(path, 0, inheritedEntries).pipe(
-    Effect.flatMap(slice => proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, { state: "proven", via: "argv" })),
+  startBoundary(path, inheritedEntries).pipe(
+    Effect.flatMap(slice => slice
+      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, { state: "proven", via: "argv" })
+      : Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, detail: "no session journal entries within 90 s" })),
     Effect.catch(() => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, detail: "first turn not checked: inherited journal boundary unavailable" })),
     Effect.map(proof => proof.state === "unproven" ? { ...proof, repairPrompt } : proof),
   );

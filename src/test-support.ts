@@ -37,6 +37,9 @@ export class FakeHerdr {
   tokens = new Map<string, Record<string, string | null>>();
   promptWorking = true;
   startSessions = true;
+  lazyJournal = false;
+  deferredJournals = new Map<string, string>();
+  flushJournals() { for (const [path, text] of this.deferredJournals) writeFileSync(path, text); this.deferredJournals.clear(); }
   startErrors: string[] = [];
   promptFails = false;
   firstTurn: "clean" | "error" | "paste" | "missing" | "mismatch" = "clean";
@@ -68,9 +71,9 @@ export class FakeHerdr {
   }
 
   private paneInfo(pane: FakePane) {
-    // Tests can inject late session evidence; an observed Pi journal exists on disk.
+    // Tests can inject late session evidence. Real Pi writes its journal at the first assistant entry; lazyJournal models that.
     const file = pane.agent_session?.kind === "path" ? pane.agent_session.value : null;
-    if (file && file.startsWith(`${dirname(this.home)}/`) && !existsSync(file)) {
+    if (file && file.startsWith(`${dirname(this.home)}/`) && !existsSync(file) && !this.deferredJournals.has(file)) {
       mkdirSync(join(file, ".."), { recursive: true });
       writeFileSync(file, `${JSON.stringify({ type: "session", id: "injected-session", cwd: pane.cwd })}\n`);
       const prompt = this.pendingStartPrompts.get(pane.pane_id);
@@ -99,9 +102,11 @@ export class FakeHerdr {
   private startSession(pane: FakePane, sessionId: string, file?: string, parent?: string) {
     const path = file ?? join(sessionDirFor(pane.cwd, this.home), `2026-09-29T00-00-00-000Z_${sessionId}.jsonl`);
     mkdirSync(join(path, ".."), { recursive: true });
-    if (!existsSync(path)) {
+    if (!existsSync(path) && !this.deferredJournals.has(path)) {
       const inherited = parent ? readFileSync(parent, "utf8").split("\n").slice(1).join("\n") : "";
-      writeFileSync(path, `${JSON.stringify({ type: "session", id: sessionId, cwd: pane.cwd })}\n${inherited}`);
+      const header = `${JSON.stringify({ type: "session", id: sessionId, cwd: pane.cwd })}\n${inherited}`;
+      // Real Pi writes nothing until its first assistant entry; lazyJournal holds the file back until flushJournals.
+      if (this.lazyJournal) this.deferredJournals.set(path, header); else writeFileSync(path, header);
     }
     pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: path };
   }
@@ -250,8 +255,9 @@ export class FakeHerdr {
     const file = pane.agent_session?.value;
     if (!file) return;
     const text = this.firstTurn === "paste" ? "[paste #1 1303 chars]" : this.firstTurn === "mismatch" ? "status only" : prompt;
-    appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } })}\n`);
-    if (this.firstTurn !== "missing") appendFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: this.firstTurn === "error" ? "error" : "stop", ...(this.firstTurn === "error" ? { errorMessage: this.firstTurnError } : {}) } })}\n`);
+    const append = (line: string) => { const held = this.deferredJournals.get(file); if (held === undefined) appendFileSync(file, line); else this.deferredJournals.set(file, held + line); };
+    append(`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } })}\n`);
+    if (this.firstTurn !== "missing") append(`${JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: this.firstTurn === "error" ? "error" : "stop", ...(this.firstTurn === "error" ? { errorMessage: this.firstTurnError } : {}) } })}\n`);
   }
 
   client(): HerdrClient {
