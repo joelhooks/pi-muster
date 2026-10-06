@@ -280,24 +280,39 @@ export function forceCloseAllowed(project: Project, agent: string): boolean {
     (Boolean(packet.verification) || ((packet.state === "committed" || packet.state === "no_changes") && Boolean(packet.landedAs))));
 }
 
-/** An empty note list admits retirement. Unknown pane/path state keeps the clone.
- * Proc and Herdr are machine-scoped by onRemote for remote rows. */
+/** Proc and Herdr are machine-scoped by onRemote for remote rows.
+ * A missing pane directory falls back to raw paths; missing root/list evidence blocks retirement. */
 const cloneRetirementNotes = (row: AgentRow) => Effect.gen(function* () {
   const panes = yield* paneList();
-  const canonical = (path: string) => row.machine === "local"
-    ? Effect.try({ try: () => realpathSync(path), catch: error => new InputError({ message: `cannot resolve ${path}: ${String(error)}` }) })
-    : must("node", ["-e", "process.stdout.write(require('node:fs').realpathSync(process.argv[1]))", path], { cwd: "/", timeoutMs: 10_000 });
-  const root = yield* canonical(row.cwd);
+  const resolved = row.machine === "local"
+    ? yield* Effect.try({
+        try: () => ({ root: realpathSync(row.cwd), paths: panes.map(pane => {
+          try { return pane.cwd ? realpathSync(pane.cwd) : null; } catch { return null; }
+        }) }),
+        catch: error => new InputError({ message: `cannot resolve clone root ${row.cwd}: ${String(error)}` }),
+      })
+    : yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Struct({ root: Schema.String, paths: Schema.Array(Schema.NullOr(Schema.String)) })),
+        yield* must("node", ["-e", "const {realpathSync}=require('node:fs'); const root=realpathSync(process.argv[1]); const paths=JSON.parse(process.argv[2]).map(path=>{try{return path?realpathSync(path):null}catch{return null}}); process.stdout.write(JSON.stringify({root,paths}));", row.cwd, JSON.stringify(panes.map(pane => pane.cwd ?? null))], { cwd: "/", timeoutMs: 10_000 }));
+  if (resolved.paths.length !== panes.length) return yield* input("pane resolution count differs from pane list");
+  const within = (cwd: string, root: string) => cwd === root || cwd.startsWith(`${root.replace(/\/$/, "")}/`);
   const notes: string[] = [];
-  for (const pane of panes) {
-    if (!pane.cwd) return yield* input(`pane ${pane.pane_id} has no cwd`);
-    const cwd = yield* canonical(pane.cwd);
-    if (cwd === root || cwd.startsWith(`${root.replace(/\/$/, "")}/`)) {
+  let keep = false;
+  for (const [index, pane] of panes.entries()) {
+    if (!pane.cwd) {
+      notes.push(`pane ${pane.pane_id} skipped: no cwd`);
+      continue;
+    }
+    const cwd = resolved.paths[index];
+    const matches = cwd !== null && cwd !== undefined
+      ? within(cwd, resolved.root)
+      : within(resolve(pane.cwd), resolve(row.cwd)) || within(resolve(pane.cwd), resolved.root);
+    if (matches) {
+      keep = true;
       notes.push(`clone kept: ${pane.pane_id} (${pane.agent ?? "shell"} ${pane.agent_status}) still runs in ${pane.cwd}; close that pane, then agent_close again to retire the clone`);
     }
   }
-  return notes;
-}).pipe(Effect.catch(error => Effect.succeed([`clone kept: cannot establish pane safety: ${error.message}; close any panes in ${row.cwd}, then agent_close again to retire the clone`])));
+  return { keep, notes };
+}).pipe(Effect.catch(error => Effect.succeed({ keep: true, notes: [`clone kept: cannot establish pane safety: ${error.message}; close any panes in ${row.cwd}, then agent_close again to retire the clone`] })));
 
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
   const env = yield* MusterEnv;
@@ -333,8 +348,8 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
       const present = yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 });
       if (present.code === 0) {
         const kept = yield* cloneRetirementNotes(row);
-        if (kept.length) notes.push(...kept);
-        else notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
+        notes.push(...kept.notes);
+        if (!kept.keep) notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
       }
     }
     return restore;
@@ -1997,9 +2012,9 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     }));
 
     let cloneError: string | null = null;
-    const kept = row.clone && existsSync(row.cwd) ? yield* cloneRetirementNotes(row) : [];
-    notes.push(...kept);
-    if (row.clone && existsSync(row.cwd) && kept.length === 0) {
+    const kept = row.clone && existsSync(row.cwd) ? yield* cloneRetirementNotes(row) : { keep: false, notes: [] };
+    notes.push(...kept.notes);
+    if (row.clone && existsSync(row.cwd) && !kept.keep) {
       const args = params.force ? ["remove", "--force", row.cwd] : ["remove", row.cwd];
       const removal = yield* must(env.workerWorktree, args, { cwd: row.clone.source, timeoutMs: 120_000 }).pipe(
         Effect.match({

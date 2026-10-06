@@ -94,13 +94,38 @@ describe("close live clone guard", () => {
     expect(result.notes.join("\n")).toContain("listing unavailable");
   });
 
-  it("keeps a clone when a pane cwd cannot be resolved", async () => {
+  it("does not let an unrelated deleted cwd block clone retirement", async () => {
     const { h, dir, row } = await setup();
     h.herdr.addPane("w1", "t1", join(h.root, "missing"));
     const result = await runWith(h, agentClose(dir, { name: row.name }));
     expect(result.row.state).toBe("closed");
+    expect(existsSync(row.cwd)).toBe(false);
+  });
+
+  it("keeps a clone when a deleted pane cwd lies under the raw clone path", async () => {
+    const { h, dir, row } = await setup();
+    const live = h.herdr.addPane("w1", "t1", join(row.cwd, "deleted"));
+    const result = await runWith(h, agentClose(dir, { name: row.name }));
     expect(existsSync(row.cwd)).toBe(true);
-    expect(result.notes.join("\n")).toContain("clone kept: cannot establish pane safety:");
+    expect(result.notes.join("\n")).toContain(`clone kept: ${live.pane_id}`);
+  });
+
+  it.each(["raw", "resolved"] as const)("compares a deleted cwd against the %s root when the row uses a symlink", async root => {
+    const { h, dir, row } = await setup();
+    const alias = join(h.root, "clone-alias"); symlinkSync(row.cwd, alias);
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(agent => agent.name === row.name ? { ...agent, cwd: alias } : agent) }, null] as const)));
+    const live = h.herdr.addPane("w1", "t1", join(root === "raw" ? alias : row.cwd, "deleted"));
+    const result = await runWith(h, agentClose(dir, { name: row.name }));
+    expect(existsSync(row.cwd)).toBe(true);
+    expect(result.notes.join("\n")).toContain(`clone kept: ${live.pane_id}`);
+  });
+
+  it("skips a cwd-less pane with a note", async () => {
+    const { h, dir, row } = await setup();
+    const unknown = h.herdr.addPane("w1", "t1", "");
+    const result = await runWith(h, agentClose(dir, { name: row.name }));
+    expect(existsSync(row.cwd)).toBe(false);
+    expect(result.notes.join("\n")).toContain(`pane ${unknown.pane_id} skipped: no cwd`);
   });
 
   it("checks the remote Herdr and resolves paths on that machine, then retires on retry", async () => {
@@ -108,6 +133,8 @@ describe("close live clone guard", () => {
     const remote = new FakeHerdr(h.home);
     const alias = join(h.root, "remote-alias"); symlinkSync(row.cwd, alias);
     const live = remote.addPane("remote-space", "remote-tab", alias); live.agent = "pi"; live.agent_status = "working";
+    remote.addPane("remote-space", "remote-tab", dir);
+    remote.addPane("remote-space", "remote-tab", join(h.root, "remote-deleted"));
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(agent => agent.name === row.name ? { ...agent, machine: "remote" } : agent) }, null] as const)));
     const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree, createId: () => "remote-id", sleep: () => Effect.void, emitPaneClose: noEmitPaneClose,
       machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: h.workerWorktree, env: {}, wrap: [] } }, remoteHerdr: () => Effect.succeed(remote.client()) };
@@ -122,7 +149,7 @@ describe("close live clone guard", () => {
     expect(result.row.state).toBe("closed");
     expect(existsSync(row.cwd)).toBe(true);
     expect(result.notes.join("\n")).toContain(`clone kept: ${live.pane_id} (pi working)`);
-    expect(commands.some(command => command.includes("realpathSync"))).toBe(true);
+    expect(commands.filter(command => command.includes("realpathSync"))).toHaveLength(1);
     expect(h.herdr.panes.has(row.pane!.paneId)).toBe(true);
     remote.panes.delete(live.pane_id);
     await close();
