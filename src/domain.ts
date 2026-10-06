@@ -75,6 +75,13 @@ export const OwnerItem = Schema.Struct({
   }))),
 });
 export type OwnerItem = typeof OwnerItem.Type;
+export const decodeNetworkPayload = Schema.decodeUnknownSync(Schema.Union([
+  Schema.Struct({ type: Schema.Literal("owner"), recipient: SessionId, item: OwnerItem }),
+  Schema.Struct({ type: Schema.Literal("message"), recipient: SessionId, author: SessionId, body: Schema.String }),
+]));
+export type NetworkPayload = ReturnType<typeof decodeNetworkPayload>;
+export const decodeNetworkPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, AgentName));
+export const decodeNetworkCursors = Schema.decodeUnknownSync(Schema.Record(AgentName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
 const decodeOwnerRecord = Schema.decodeUnknownSync(OwnerItem);
 /** Normalize legacy receipt metadata on read; never rewrite the JSONL or its CID. */
 export function decodeOwnerItem(input: unknown): OwnerItem {
@@ -179,6 +186,7 @@ export const MachineConfig = Schema.Struct({
   env: Schema.Record(Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/)), Schema.String),
   wrap: Schema.Array(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   socket: RemotePath.pipe(Schema.withDecodingDefaultKey(Effect.succeed("/home/joel/.config/herdr/herdr.sock"))),
+  comms: Schema.optionalKey(Schema.Struct({ config: RemotePath })),
 });
 export type MachineConfig = typeof MachineConfig.Type;
 export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
