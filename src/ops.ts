@@ -474,7 +474,7 @@ const adoptionBinding = (row: AgentRow, pane: PaneInfo): PaneBinding => ({
   openedByMuster: row.pane?.terminalId === pane.terminal_id && row.pane.openedByMuster,
 });
 const adoptionHolder = (project: Project, row: AgentRow, pane: PaneInfo) => project.agents.find(other =>
-  other.machine === row.machine && other.name !== row.name && sharesPane(adoptionBinding(row, pane), other.pane));
+  other.machine === row.machine && other.name !== row.name && other.state !== "closed" && sharesPane(adoptionBinding(row, pane), other.pane));
 
 /** Pi's read-only parser owns the header format; never open/migrate a live transcript. */
 const adoptionSession = (row: AgentRow, pane: PaneInfo) => Effect.gen(function* () {
@@ -495,7 +495,7 @@ const adoptionSession = (row: AgentRow, pane: PaneInfo) => Effect.gen(function* 
   return { sessionFile: file, sessionId };
 }).pipe(Effect.orElseSucceed(() => null));
 
-const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessionFile: string; sessionId: string }) => Effect.gen(function* () {
+const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessionFile: string; sessionId: string }, preserveState = false) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   return yield* mutate(dir, project => Effect.gen(function* () {
     const latest = yield* findRow(project, row.name);
@@ -504,6 +504,10 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
         latest.pane?.terminalId !== row.pane?.terminalId || latest.machine !== row.machine) return yield* input("row changed during adoption; retry");
     const holder = adoptionHolder(project, latest, pane);
     if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
+    if (preserveState) {
+      const next: AgentRow = { ...latest, pane: adoptionBinding(latest, pane), updatedAt: iso(env) };
+      return [withRow(project, next), next] as const;
+    }
     const event: AgentEvent[] = latest.state === "running" ? [] : [{ type: READOPT_STATES.includes(latest.state) && latest.state !== "interrupted" ? "ACTIVE" : "ADOPT" }];
     const state = yield* advance(latest, event);
     const selected = yield* sessionRestore(latest.profile, session.sessionFile, project, latest.role, (yield* loadRoster).roster, {}, latest.machine !== "local");
@@ -521,6 +525,20 @@ const readoptionPanes = (project: Project, row: AgentRow) => Effect.gen(function
   if (spaces.length !== 1) return [];
   return yield* paneList(spaces[0]!.workspace_id);
 });
+
+/** Exact identity repair is independent of lifecycle recovery. Never select among live copies. */
+const findRebinding = (project: Project, row: AgentRow, bound: PaneInfo | null | undefined) => Effect.gen(function* () {
+  if (row.state === "closed" || READOPT_STATES.includes(row.state) || !row.sessionFile || bound) return { kind: "none" } as const;
+  const matches = (yield* readoptionPanes(project, row)).filter(pane =>
+    pane.agent === "pi" && pane.agent_session?.kind === "path" && pane.agent_session.value === row.sessionFile);
+  if (matches.length > 1) return { kind: "refused", note: `rebind refused ${row.name}: multiple session path matches: ${matches.map(pane => pane.pane_id).join(", ")}` } as const;
+  const pane = matches[0];
+  if (!pane) return { kind: "none" } as const;
+  const holder = adoptionHolder(project, row, pane);
+  if (holder) return { kind: "refused", note: `rebind refused ${row.name}: pane ${pane.pane_id} already bound to ${holder.name}` } as const;
+  return { kind: "match", pane, session: { sessionFile: row.sessionFile, sessionId: row.sessionId } } as const;
+});
+const reboundNote = (row: AgentRow, pane: PaneInfo) => `rebound ${row.name} → ${pane.pane_id} (identity: session path match)`;
 
 const findReadoption = (project: Project, row: AgentRow) => Effect.gen(function* () {
   const matches: Array<{ pane: PaneInfo; session: { sessionFile: string; sessionId: string } }> = [];
@@ -541,8 +559,15 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
     let current = row;
     let action: string | null = null;
     const mine = row.owner === env.sessionId;
-    const reAdoption = act && mine && READOPT_STATES.includes(row.state) ? yield* findReadoption(project, row) : undefined;
-    if (reAdoption) {
+    const rebinding = mine ? yield* findRebinding(project, row, pane) : { kind: "none" } as const;
+    const reAdoption = rebinding.kind === "none" && act && mine && READOPT_STATES.includes(row.state) ? yield* findReadoption(project, row) : undefined;
+    if (rebinding.kind === "match") {
+      if (act) current = yield* readoptRow(dir, row, rebinding.pane, rebinding.session, !READOPT_STATES.includes(row.state));
+      pane = rebinding.pane;
+      action = `${reboundNote(row, pane)}${act ? "" : " (preview; act: false)"}`;
+    } else if (rebinding.kind === "refused") {
+      action = rebinding.note;
+    } else if (reAdoption) {
       current = yield* readoptRow(dir, row, reAdoption.pane, reAdoption.session);
       pane = reAdoption.pane;
       action = `re-adopted ${pane.pane_id}`;
@@ -560,7 +585,7 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
     }
     const mtime = current.sessionFile ? mtimes.get(`${row.machine}:${current.sessionFile}`) ?? null : null;
     const silent = mtime === null ? null : Math.max(0, env.now().getTime() - mtime);
-    if (!reAdoption && pane && silent !== null && ["running", "silent", "nudged", "restarted"].includes(current.state)) {
+    if (rebinding.kind === "none" && !reAdoption && pane && silent !== null && ["running", "silent", "nudged", "restarted"].includes(current.state)) {
       const decision = silenceDecision(current.state, silent, silenceLimits(project.policy));
       if (decision.action !== "none") {
         action = `${decision.action} due on ${row.machine}`;
@@ -1793,8 +1818,17 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       const row = yield* findRow(project, name);
       yield* requireOwner(row, env.sessionId, false);
       if (!params.pane) return yield* input("adopt requires name and pane");
-      if (!["running", "launching", "failed", ...READOPT_STATES].includes(row.state)) return yield* input(`cannot adopt a ${row.state} row`);
+      if (row.state === "closed") return yield* input(`cannot adopt a ${row.state} row`);
       const adopt = Effect.gen(function* () {
+        const bound = row.pane ? yield* locatePane(row.pane) : null;
+        const rebinding = yield* findRebinding(project, row, bound);
+        if (rebinding.kind === "refused") return yield* input(rebinding.note);
+        if (rebinding.kind === "match") {
+          if (rebinding.pane.pane_id !== params.pane) return yield* input(`adopt needs matching pane ${rebinding.pane.pane_id}`);
+          const adopted = yield* readoptRow(dir, row, rebinding.pane, rebinding.session, !READOPT_STATES.includes(row.state));
+          return { row: adopted, argv: [] as string[], readiness: "not checked (catalog adoption)", proof: null, sessionIdMatched: true, notes: [reboundNote(row, rebinding.pane), "adopted without touching the pane"] };
+        }
+        if (!["running", "launching", "failed", ...READOPT_STATES].includes(row.state)) return yield* input(`cannot adopt a ${row.state} row without exact session path evidence`);
         const pane = (yield* readoptionPanes(project, row)).find(pane => pane.pane_id === params.pane);
         if (!pane) return yield* input("adopt needs a pane in the project's workspace");
         const holder = adoptionHolder(project, row, pane);
@@ -2755,7 +2789,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
 
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     for (const row of project.agents) {
-      if (row.state === "closed" || row.state === "planned") continue;
+      if (row.state === "closed") continue;
       if (row.machine !== "local") {
         const unavailable: AgentLine = { name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action: `machine ${row.machine}: remote status unavailable; row unchanged` };
         lines.push(ingestion.failedMachines.has(row.machine) ? unavailable : yield* remoteStatusRow(dir, project, row, act, remoteTimes).pipe(Effect.catch(error => Effect.sync(() => {
@@ -2777,9 +2811,16 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       const modelError = issue?.severity === "error" ? issue.line : undefined;
       // A failed model launch requires an explicit restore, not automatic adoption.
       const failedModel = row.state === "failed" && row.events?.some((event) => event.type === "MODEL_ERROR");
-      const reAdoption = act && row.owner === env.sessionId && READOPT_STATES.includes(row.state) ? yield* findReadoption(project, row) : undefined;
-      const adoptionCandidate = reAdoption !== undefined || row.state === "interrupted" || (!failedModel && (row.state === "failed" || row.state === "launching"));
-      if (reAdoption) {
+      const rebinding = row.owner === env.sessionId ? yield* findRebinding(project, row, pane) : { kind: "none" } as const;
+      const reAdoption = rebinding.kind === "none" && act && row.owner === env.sessionId && READOPT_STATES.includes(row.state) ? yield* findReadoption(project, row) : undefined;
+      const adoptionCandidate = rebinding.kind !== "none" || reAdoption !== undefined || row.state === "interrupted" || (!failedModel && (row.state === "failed" || row.state === "launching"));
+      if (rebinding.kind === "match") {
+        if (act) current = yield* readoptRow(dir, row, rebinding.pane, rebinding.session, !READOPT_STATES.includes(row.state));
+        pane = rebinding.pane;
+        action = `${reboundNote(row, pane)}${act ? "" : " (preview; act: false)"}`;
+      } else if (rebinding.kind === "refused") {
+        action = rebinding.note;
+      } else if (reAdoption) {
         current = yield* readoptRow(dir, row, reAdoption.pane, reAdoption.session);
         pane = reAdoption.pane;
         action = `re-adopted ${pane.pane_id}`;
@@ -2839,7 +2880,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         );
         action = `rebound moved pane to ${pane.pane_id}`;
       }
-      if (!reAdoption && !modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
+      if (rebinding.kind === "none" && !reAdoption && !modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
       const herdrFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
       if (!adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
         current = yield* patchRow(dir, row.name, current.state, [], {

@@ -801,7 +801,12 @@ describe("pane binding safety", () => {
     const { h, dir, row } = await rootWorker();
     const binding = row.pane!;
     if (kind === "missing") h.herdr.panes.delete(binding.paneId);
-    else h.herdr.panes.get(binding.paneId)!.terminal_id = "unrelated-terminal";
+    else {
+      const unrelated = h.herdr.panes.get(binding.paneId)!;
+      unrelated.terminal_id = "unrelated-terminal";
+      delete unrelated.agent;
+      delete unrelated.agent_session;
+    }
     await runWith(h, projectStatus(dir));
     if (laneState === "draining") expect((await runWith(h, laneClose(dir, "probe"))).lane.state).toBe("draining");
     h.herdr.calls.length = 0;
@@ -1932,11 +1937,11 @@ describe("project_status live adoption", () => {
     noPaneInput(h);
   });
 
-  it("refuses a terminal-id mismatch", async () => {
+  it("rebinds a changed terminal with an exact session path without changing lifecycle or close authority", async () => {
     const { h, dir, pane, before } = await candidate();
     pane.terminal_id = "another-terminal";
     const status = await runWith(h, projectStatus(dir));
-    expect(status.project.agents[0]).toEqual(before);
+    expect(status.project.agents[0]).toEqual({ ...before, pane: { ...before.pane, terminalId: pane.terminal_id, openedByMuster: false } });
     noPaneInput(h);
   });
 
