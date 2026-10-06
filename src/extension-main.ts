@@ -458,11 +458,11 @@ export default function muster(host: ExtensionAPI) {
     name: "agent_close",
     label: "Muster agent close",
     description:
-      "Close one agent: save its pane's last 40 lines, close the pane only if Muster opened it (matched by terminal id, never by name), remove its rift clone through worker-worktree.sh (force only after packet_verify passed), and mark the row closed with its full restore command. On an already closed row it retries only the clone removal.",
+      "Close one agent: save its pane's last 40 lines, close the pane only if Muster opened it (matched by terminal id, never by name), mark the row closed with its full restore command, and retire its rift clone through worker-worktree.sh only after current-HEAD harvest or exact external rescue proof. Non-harness dirt always keeps the clone. On an already closed row it retries only the clone removal.",
     parameters: Type.Object({
       project: ProjectParam,
       name: Type.String(),
-      force: Type.Optional(Type.Boolean({ description: "Trash unharvested clone work; needs a verified packet" })),
+      force: Type.Optional(Type.Boolean({ description: "Preserve current HEAD in an immutable source-repo rescue ref before retiring; never discards non-harness dirt" })),
       takeover: Type.Optional(Type.Boolean({ description: "Act on a row another owner session launched" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {

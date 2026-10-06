@@ -20,9 +20,15 @@ Muster 🐑 (`@joelhooks/pi-muster`) is the Pi package that runs Herdr project s
 ## Checks
 
 ```bash
-npm install --ignore-scripts
+npm ci --ignore-scripts --prefer-offline   # never npm install: it rewrites package-lock.json
 npm run check
 npm test
 npm run smoke
 npm run pack:check
+```
+
+The full gate runs the suite capped at two workers; uncapped runs time out on a busy host:
+
+```bash
+muster-heavy gate --wait 1200 -- sh -c 'npm run check && VITEST_MAX_WORKERS=2 npm test'
 ```

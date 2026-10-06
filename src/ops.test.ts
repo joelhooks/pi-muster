@@ -11,7 +11,6 @@ import { queuePath, readDesk } from "./desk.ts";
 import { readJobs, registerJob } from "./heavy-lock.ts";
 import {
   agentClose,
-  forceCloseAllowed,
   agentLaunchForeground as agentLaunch,
   deskPost,
   laneClose,
@@ -1543,13 +1542,13 @@ describe("a lane from launch to close", () => {
     expect(existsSync(join(sh(dir, "rev-parse", "--absolute-git-dir"), "MERGE_HEAD"))).toBe(false);
   });
 
-  it("refuses closing another owner's agent and force without a verified packet", async () => {
+  it("refuses closing another owner's agent; force preserves work without a packet", async () => {
     const h = harness();
     const { dir } = await launchedWorker(h);
     h.sessionId = "someone-else";
     expect((await failWith(h, agentClose(dir, { name: "probe_w" }))).message).toContain("belongs to owner session");
     h.sessionId = "owner-session";
-    expect((await failWith(h, agentClose(dir, { name: "probe_w", force: true }))).message).toContain("packet_verify");
+    expect((await runWith(h, agentClose(dir, { name: "probe_w", force: true }))).cloneError).toBeNull();
   });
 
   it.each(["committed", "no_changes"] as const)("allows force once an unverified packet is recorded %s with a landing sha (squash-merged PR, branch gone)", async (state) => {
@@ -1558,11 +1557,8 @@ describe("a lane from launch to close", () => {
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, packets: project.packets.map(packet => ({ ...packet, state, landedAs: "abc1234def" })) }, null] as const)));
-    const project = await runWith(h, load(dir));
-    expect(forceCloseAllowed(project, "probe_w")).toBe(true);
-    expect(forceCloseAllowed({ ...project, packets: project.packets.map(packet => ({ ...packet, landedAs: null })) }, "probe_w")).toBe(false);
-    expect(forceCloseAllowed({ ...project, packets: project.packets.map(packet => ({ ...packet, state: "rejected" as const })) }, "probe_w")).toBe(false);
-    await runWith(h, agentClose(dir, { name: "probe_w", force: true }));
+    expect((await runWith(h, agentClose(dir, { name: "probe_w", force: true }))).cloneError).toBeNull();
+    expect(sh(dir, "rev-parse", `refs/muster/rescue/probe_w-${commit}`).trim()).toBe(commit);
     expect((await runWith(h, load(dir))).agents.find(row => row.name === "probe_w")?.state).toBe("closed");
   });
 });

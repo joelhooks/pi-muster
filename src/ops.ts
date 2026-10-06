@@ -300,12 +300,6 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   })).pipe(Effect.mapError(error => modelFailure ?? error));
 }));
 
-/** Force may trash a clone only when its work is safe elsewhere: verified, or recorded as landed with a sha (e.g. a squash-merged PR whose branch is gone). */
-export function forceCloseAllowed(project: Project, agent: string): boolean {
-  return project.packets.some(packet => packet.agent === agent &&
-    (Boolean(packet.verification) || ((packet.state === "committed" || packet.state === "no_changes") && Boolean(packet.landedAs))));
-}
-
 /** Proc and Herdr are machine-scoped by onRemote for remote rows.
  * A missing pane directory falls back to raw paths; missing root/list evidence blocks retirement. */
 const cloneRetirementNotes = (row: AgentRow) => Effect.gen(function* () {
@@ -342,11 +336,12 @@ const cloneRetirementNotes = (row: AgentRow) => Effect.gen(function* () {
 
 const latestCloneEvent = (row: AgentRow) => [...(row.events ?? [])].reverse().find(event => event.type === "CLONE_KEPT" || event.type === "CLONE_REMOVED");
 
-/** Runs through the same Proc on the clone's machine. Force is only automatic
- * after harvest proof AND classification of every dirty path. */
 type ReapSources = Map<string, { readonly origin: boolean; readonly fetched: boolean }>;
 
-const cloneReapAssessment = (project: Project, row: AgentRow, source: string, sources?: ReapSources) => Effect.gen(function* () {
+/** Runs through the same Proc on the clone's machine. Verification is not
+ * preservation: require harvest proof or an exact external rescue, and
+ * classify every dirty path before ordinary or forced retirement. */
+const cloneReapAssessment = (project: Project, row: AgentRow, source: string, rescue = false, sources?: ReapSources) => Effect.gen(function* () {
   const proc = yield* Proc;
   const run = (cwd: string, ...args: string[]) => proc.run("git", args, { cwd, timeoutMs: 30_000 });
   const head = (yield* git(row.cwd, "rev-parse", "HEAD")).trim();
@@ -364,6 +359,32 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, so
   const generated = [...DEFAULT_GENERATED, ...(lane?.generated ?? []), ".wzrrd/"];
   const other = dirty.filter(path => !isGenerated(path, generated) && !/^\.brain\/data\/[^/]+-status\.json$/.test(path));
   if (other.length) return { safe: false, force: false, detail: `dirty: ${row.cwd}; non-harness paths ${other.map(path => JSON.stringify(path)).sort().join(", ")}; HEAD ${head}` };
+  // Immutable per-HEAD refs keep earlier rescues when a restored worker advances.
+  const rescueRef = `refs/muster/rescue/${row.name}-${head}`;
+  const sourceGitDir = (yield* git(source, "rev-parse", "--path-format=absolute", "--git-common-dir")).trim();
+  const roots = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.String)),
+    yield* must("node", ["-e", "const fs=require('node:fs'); process.stdout.write(JSON.stringify(process.argv.slice(1).map(p=>fs.realpathSync(p))));", row.cwd, sourceGitDir], { cwd: source, timeoutMs: 10_000 }));
+  const [cloneRoot, retainedRoot] = roots;
+  if (!cloneRoot || !retainedRoot || retainedRoot === cloneRoot || retainedRoot.startsWith(`${cloneRoot}/`)) {
+    return { safe: false, force: false, detail: `rescue repository is inside clone: ${row.cwd}; HEAD ${head}` };
+  }
+  for (const ref of [rescueRef, `refs/muster/rescue/${row.name}`]) {
+    const retained = yield* run(source, "rev-parse", "--verify", `${ref}^{commit}`);
+    if (retained.code === 0 && retained.stdout.trim() === head) {
+      return { safe: true, force: true, detail: `rescued: ${source} ${ref}; HEAD ${head}` };
+    }
+  }
+  if (rescue) {
+    // Fetch objects without updating any existing ref or FETCH_HEAD. Atomic
+    // create-only update refuses a conflicting rescue, even from another closer.
+    yield* must("git", ["fetch", "--no-write-fetch-head", "--no-tags", "-q", "--", row.cwd, head], { cwd: source, timeoutMs: 30_000 });
+    yield* git(source, "update-ref", rescueRef, head, "");
+    const retained = yield* run(source, "rev-parse", "--verify", `${rescueRef}^{commit}`);
+    return { safe: retained.code === 0 && retained.stdout.trim() === head, force: true,
+      detail: retained.code === 0 && retained.stdout.trim() === head
+        ? `rescued: ${source} ${rescueRef}; HEAD ${head}`
+        : `rescue verification failed: ${rescueRef}; HEAD ${head}` };
+  }
   // One refresh per source/machine per status pass, including failed refreshes.
   // Individual clone-object fetches below remain necessary for reachability proof.
   const key = JSON.stringify([row.machine, source]);
@@ -435,8 +456,14 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
     const kept = yield* cloneRetirementNotes(row);
     notes.push(...kept.notes);
     if (kept.keep) return { removed: false, detail: kept.notes.join("; ") };
-    const assessment = yield* cloneReapAssessment(project, row, source, sources);
-    if (!force && !assessment.safe) return { removed: false, detail: assessment.detail };
+    const headBefore = yield* git(row.cwd, "rev-parse", "HEAD");
+    const dirtBefore = yield* git(row.cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all");
+    const assessment = yield* cloneReapAssessment(project, row, source, force, sources);
+    if (!assessment.safe) return { removed: false, detail: assessment.detail };
+    if ((yield* git(row.cwd, "rev-parse", "HEAD")) !== headBefore ||
+        (yield* git(row.cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")) !== dirtBefore) {
+      return { removed: false, detail: `clone changed during preservation: ${row.cwd}; retry agent_close` };
+    }
     const removal = yield* must(script, ["remove", ...(force || assessment.force ? ["--force"] : []), row.cwd], { cwd: source, timeoutMs: 120_000 }).pipe(Effect.result);
     if (removal._tag === "Failure") return { removed: false, detail: `${assessment.detail}; removal failed: ${removal.failure.message}` };
     if (yield* present()) return { removed: false, detail: `${assessment.detail}; removal left clone on disk` };
@@ -457,7 +484,6 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(row.machine);
-  if (params.force && !forceCloseAllowed(project, row.name)) return yield* input("force close requires a verified packet or one recorded as landed");
   const notes: string[] = [];
   const roster = (yield* loadRoster).roster;
   const restore = yield* onRemote(row.machine, machine, Effect.gen(function* () {
@@ -2534,15 +2560,11 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     const row = yield* findRow(project, params.name);
     yield* requireOwner(row, env.sessionId, params.takeover, project.slug);
     if (row.state === "closed") {
-      if (params.force && !forceCloseAllowed(project, row.name)) return yield* input("force close requires a verified packet or one recorded as landed");
       const retirement = yield* retireClone(dir, row, params.force === true, params.takeover);
       const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;
       return { row: latest, restore: latest.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
     }
     if (row.machine !== "local") return yield* remoteClose(dir, project, row, params);
-    if (params.force && !forceCloseAllowed(project, row.name)) {
-      return yield* new GuardFailed({ guard: "force-after-verify", message: `--force removes unharvested work; ${row.name} has no packet that passed packet_verify or was recorded as landed` });
-    }
     const notes: string[] = [];
     const sessionFile = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
     const selected = yield* sessionRestore(extensionsFor(project, row), sessionFile, project, row.role, (yield* loadRoster).roster);
@@ -3282,7 +3304,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         const prior = latestCloneEvent(row);
         const owned = act && (yield* requireOwner(row, env.sessionId, false, project.slug).pipe(Effect.result))._tag === "Success";
         if (owned && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
-          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source, reapSources)).pipe(Effect.orElseSucceed(() => null));
+          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source, false, reapSources)).pipe(Effect.orElseSucceed(() => null));
           // Unchanged proof plus a script failure must not retry every pass.
           if (assessment?.safe && !prior.detail.startsWith(assessment.detail)) {
             yield* retireClone(dir, row, false, false, reapSources);
