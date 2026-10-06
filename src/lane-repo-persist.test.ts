@@ -1,7 +1,6 @@
 import { EventEmitter } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Effect } from "effect";
 import { expect, it, vi } from "vitest";
 
 vi.mock("node:child_process", async importOriginal => ({
@@ -41,7 +40,10 @@ it.each(["new", "proposed", "live", "missing"] as const)("%s: explicit and omitt
       const first = await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "ship", open: state !== "proposed" }));
       if (state === "missing") h.herdr.panes.delete(first.lane.root!.paneId);
     }
-    await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "ship", ...(explicitRepo ? { repo } : {}) }));
+    const opened = await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "ship", ...(explicitRepo ? { repo } : {}) }));
+    if (explicitRepo && state !== "new") expect(opened.note).toContain("changed: repo updated");
+    // Omitting the field on another call must preserve an explicit source.
+    await runWith(h, laneOpen(dir, { slug: "work" }));
     const source = explicitRepo ? repo : dir;
     expect((await runWith(h, load(dir))).lanes[0]!.repo).toBe(explicitRepo ? repo : null);
     if (state === "new" || state === "proposed" || state === "missing") {
@@ -65,6 +67,18 @@ it("amends proposed repo and preserves it when omitted", async () => {
   expect(amendment.note).toBe("changed: repo updated; stored goal: ship");
   await runWith(h, laneOpen(dir, { slug: "work", open: false }));
   expect((await runWith(h, load(dir))).lanes[0]!.repo).toBe(repo);
+});
+
+it("refuses repo changes while a detached clone launch is still queued", async () => {
+  const { h, dir, repo } = await fixture();
+  await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "ship" }));
+  const receipt = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", lane: "work", role: "worker", label: "worker", clone: true, prompt: "Test." }));
+  if (!("jobId" in receipt)) throw new Error("expected detached job");
+  const before = await runWith(h, load(dir));
+  expect((await failWith(h, laneOpen(dir, { slug: "work", repo }))).message).toContain("active clone or launch");
+  expect(await runWith(h, load(dir))).toEqual(before);
+  expect((await runWith(h, runLaunchJob(dir, receipt.jobId))).kind).toBe("action");
+  expect((await runWith(h, load(dir))).agents[0]!.clone!.source).toBe(dir);
 });
 
 it.each(["live", "missing", "parked"])("refuses source changes with an active clone before any mutation (%s)", async state => {

@@ -1422,7 +1422,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       if (params.kind === "retro" && latest.kind !== "retro") return yield* input(`lane ${slug} is kind ${latest.kind}, not retro; choose a fresh slug for the retro lane`);
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
       if (refusal && (latest.kind === "retro" || !params.override?.trim())) return yield* input(refusal);
-      const next: Lane = { ...latest, ...deployPatch, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
+      const next: Lane = { ...latest, ...deployPatch, repo: params.repo ?? latest.repo, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
         ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) };
       return [withLane(current, next), next] as const;
     }));
@@ -1469,6 +1469,10 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         return [withLane(current, next), next] as const;
       }),
     );
+    if (existing) {
+      const changes = laneFieldChanges(existing, lane);
+      if (changes.length) note = [note, `changed: ${changes.join(", ")}`].filter(Boolean).join("; ");
+    }
     yield* publishTokens(yield* load(dir));
     return { lane, created: !existing, note, outcome: project.outcome };
   });
