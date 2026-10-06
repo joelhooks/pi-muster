@@ -253,6 +253,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
         const comms = yield* Comms;
         const sent = yield* comms.send(row.sessionId, message.expected);
         if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms brief send refused for ${row.name}: ${sent.detail ?? sent.status}`);
+        cloneNotes.push(`network brief: ${sent.status} (mailbox receipt; first-turn proof checked separately)`);
       }
       const wait = yield* waitForSession(binding.paneId, null);
       if (wait.state !== "ready") {
@@ -288,7 +289,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore });
       yield* paneRename(binding.paneId, label);
       const prompt = message.expected;
-      const proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined) : null;
+      let proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined) : null;
+      if (networkBrief && proof?.state === "proven") proof = { ...proof, via: "network" };
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
