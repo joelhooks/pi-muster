@@ -1884,7 +1884,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
   const roster = (yield* loadRoster).roster;
   const id = randomUUID();
   const log = join(env.home, ".local/state/muster/launches", `${id}.log`);
-  const row = yield* mutate(dir, project => Effect.gen(function* () {
+  const reserved = yield* mutate(dir, project => Effect.gen(function* () {
     yield* guardSideDesk(project, env.sessionId, "agent_launch");
     if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
@@ -1938,7 +1938,13 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
       owner: existing && existing.owner === existing.sessionId ? existing.owner : env.sessionId, brief, state, delivery: "none",
       restarts: existing?.restarts ?? 0, restore: existing?.restore ?? null, createdAt: existing?.createdAt ?? iso(env), updatedAt: iso(env), launchJob };
-    // Spawn while holding the catalog lock; the child claims that same lock before reading its job.
+    return [withRow(project, reserved), reserved] as const;
+  })).pipe(Effect.mapError(error => new InputError({ message: error.message })));
+  // Admission is durable before spawning. Hold the lock until the pid is saved;
+  // the child claims that same lock before it reads the reserved job.
+  const row = yield* mutate(dir, project => Effect.gen(function* () {
+    const latest = yield* findRow(project, reserved.name);
+    if (latest.launchJob?.id !== id || latest.launchJob.pid !== null || latest.state !== "launching") return yield* input("launch reservation changed before spawn");
     const pid = yield* Effect.callback<number, InputError>(resume => {
       let fd: number | undefined;
       try {
@@ -1953,13 +1959,18 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
       } catch (error) { resume(input(`launch spawn failed: ${String(error)}`)); }
       finally { if (fd !== undefined) closeSync(fd); }
     });
-    const next = { ...reserved, launchJob: { ...launchJob, pid } };
+    const next = { ...latest, launchJob: { ...latest.launchJob, pid } };
     return [withRow(project, next), next] as const;
-  })).pipe(Effect.uninterruptible, Effect.mapError(error => new InputError({ message: error.message })));
+  })).pipe(Effect.tapError(error => mutate(dir, project => Effect.gen(function* () {
+    const latest = yield* findRow(project, reserved.name);
+    if (latest.launchJob?.id !== id || latest.state !== "launching") return [project, null] as const;
+    const state = yield* stepAgent(latest.name, latest.state, { type: "LAUNCH_FAILED" });
+    return [withRow(project, { ...latest, state, launchJob: { ...latest.launchJob, outcome: "blocked" }, events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: error.message }], updatedAt: iso(env) }), null] as const;
+  }))), Effect.mapError(error => new InputError({ message: error.message })));
   return { row, jobId: id, log, tab: (yield* load(dir)).lanes.find(lane => lane.slug === row.lane)?.tabId,
     argv: [] as string[], readiness: "not checked (background launch)", proof: null, sessionIdMatched: null,
     notes: ["result arrives in your owner queue as an action; arm a herdr_watch on the pane after it arrives"] };
-});
+}).pipe(Effect.uninterruptible);
 
 export const launchResultText = (result: { row: AgentRow; argv: readonly string[]; readiness: string; proof: Proof | null; sessionIdMatched: boolean | null; notes: readonly string[] }) => [
   `${result.row.name} ${result.row.state} in pane ${result.row.pane?.paneId} (${result.row.pane?.openedByMuster ? "opened by Muster" : "caller's pane"}), readiness ${result.readiness}.`,
@@ -3029,7 +3040,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     for (const row of project.agents) {
       if (row.state === "closed") continue;
       if (row.launchJob && !row.launchJob.outcome) {
-        let alive = row.launchJob.pid === null;
+        let alive = row.launchJob.pid === null && env.now().getTime() - Date.parse(row.launchJob.startedAt) < 30_000;
         if (row.launchJob.pid !== null) {
           try { process.kill(row.launchJob.pid, 0); alive = true; }
           catch (error) { alive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
