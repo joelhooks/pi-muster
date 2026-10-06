@@ -289,7 +289,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore });
       yield* paneRename(binding.paneId, label);
       const prompt = message.expected;
-      let proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined) : null;
+      let proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined, networkBrief) : null;
       if (networkBrief && proof?.state === "proven") proof = { ...proof, via: "network" };
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
@@ -2449,7 +2449,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       ? { state: "unproven", submission: "submitted", detail: "network brief sent; first turn pending" }
       : null;
     if (text && !launched.pending) {
-      proof = yield* proveStartedPrompt(launched.sessionFile!, text, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined);
+      proof = yield* proveStartedPrompt(launched.sessionFile!, text, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined, networkBrief);
       if (networkBrief && proof.state === "proven") proof = { ...proof, via: "network" };
       if (proof.state === "unproven") skillNotes.push(`delivery: unproven: ${proof.detail}. Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: proof.repairPrompt ?? text } })}`);
       running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(running.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });

@@ -26,6 +26,14 @@ describe("first-turn journal boundary", () => {
   it.each(["[paste #1 1303 chars]", "[paste #2 +20 lines]", "[paste #3]"])("rejects marker-only user text %s", marker => {
     expect(firstTurnDetail(user(marker) + assistant(), "task")).toMatchObject({ state: "unproven", detail: "user entry is only a paste marker" });
   });
+  it("accepts one network attribution line after the exact brief, only for network delivery", () => {
+    const brief = "<file name=\"/b.md\">\n# Brief\n</file>";
+    const delivered = `${brief}\n\n[Authenticated agent message from boss-20261006T150204, not Joel.]`;
+    expect(firstTurnDetail(user(delivered) + assistant(), brief, true, true).state).toBe("proven");
+    expect(firstTurnDetail(user(delivered) + assistant(), brief, true, false)).toMatchObject({ state: "unproven", failureKind: "substituted_message" });
+    expect(firstTurnDetail(user(`${brief}\nextra\n\n[Authenticated agent message from b, not Joel.]`) + assistant(), brief, true, true)).toMatchObject({ state: "unproven", failureKind: "substituted_message" });
+    expect(firstTurnDetail(user(`${delivered}\n\n[Authenticated agent message from c, not Joel.]`) + assistant(), brief, true, true)).toMatchObject({ state: "unproven", failureKind: "substituted_message" });
+  });
   it("waits on a partial append instead of treating it as corrupt", () => {
     expect(firstTurnDetail(user("task") + '{"type":"message"', "task").state).toBe("waiting");
     expect(firstTurnDetail(user("task") + 'not json\n', "task").state).toBe("unproven");
