@@ -107,7 +107,8 @@ export const reportTokens = (workspaceId: string, source: string, tokens: Readon
     params: { workspace_id: workspaceId, source, tokens, seq, ttl_ms: ttlMs },
   }).pipe(Effect.asVoid);
 
-export type Proof = { readonly state: "proven"; readonly via: "argv" | "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly repairPrompt?: string; readonly warning?: string };
+export type FirstTurnFailure = "discovery_timeout" | "unreadable_slice" | "wrong_boundary" | "substituted_message" | "missing_prompt" | "assistant_error" | "assistant_timeout";
+export type Proof = { readonly state: "proven"; readonly via: "argv" | "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly failureKind?: FirstTurnFailure; readonly repairPrompt?: string; readonly warning?: string };
 
 export const FIRST_TURN_MS = 90_000;
 
@@ -119,52 +120,56 @@ export const readPiReceipt = (home: string, id: string) => sessionSlice(`${home}
 );
 // Below Pi's paste-collapse threshold. A file pointer avoids terminal paste semantics.
 const INLINE_PROMPT_MAX = 800;
-const sessionSlice = (path: string, offset: number, skipEntries = 0) => Effect.gen(function* () {
+const sessionSlice = (path: string, offset: number, skipEntries = 0, timeoutMs = FIRST_TURN_MS) => Effect.gen(function* () {
   const proc = yield* Proc;
-  const result = yield* proc.run("node", ["-e", `const fs=require('node:fs');const p=process.argv[1];let offset=Number(process.argv[2]);const skip=Number(process.argv[3]);const fd=fs.openSync(p,'r');try{const size=fs.fstatSync(fd).size;if(offset===-1){process.stdout.write(JSON.stringify({size,text:''}));process.exit(0)}if(skip){const chunk=Buffer.alloc(65536);let pos=0,count=0,nonempty=false;while(count<skip){const n=fs.readSync(fd,chunk,0,chunk.length,pos);if(!n)throw Error('inherited journal entries missing');for(let i=0;i<n;i++){const c=chunk[i];if(c===10){if(nonempty)count++;nonempty=false;if(count===skip){offset=pos+i+1;break}}else if(c!==9&&c!==13&&c!==32)nonempty=true}pos+=n}}if(size-offset>2097152)throw Error('first-turn journal exceeds 2 MiB');const b=Buffer.alloc(Math.max(0,size-offset));fs.readSync(fd,b,0,b.length,offset);process.stdout.write(JSON.stringify({size,text:b.toString('utf8')}))}finally{fs.closeSync(fd)}`, path, String(offset), String(skipEntries)], { cwd: "/", timeoutMs: 10_000 });
-  if (result.code !== 0) return yield* new HerdrFailure({ operation: "first-turn", code: null, message: "session file unreadable" });
-  return yield* Effect.try({ try: () => decodeSessionSlice(JSON.parse(result.stdout)), catch: () => new HerdrFailure({ operation: "first-turn", code: null, message: "invalid session slice" }) });
+  const result = yield* proc.run("node", ["-e", `const fs=require('node:fs');const p=process.argv[1];let offset=Number(process.argv[2]);const skip=Number(process.argv[3]);let fd;try{fd=fs.openSync(p,'r')}catch(e){process.exit(e.code==='ENOENT'?2:1)}try{const size=fs.fstatSync(fd).size;if(offset===-1){process.stdout.write(JSON.stringify({size,text:''}));process.exit(0)}if(skip){const chunk=Buffer.alloc(65536);let pos=0,count=0,nonempty=false;while(count<skip){const n=fs.readSync(fd,chunk,0,chunk.length,pos);if(!n)process.exit(3);for(let i=0;i<n;i++){const c=chunk[i];if(c===10){if(nonempty)count++;nonempty=false;if(count===skip){offset=pos+i+1;break}}else if(c!==9&&c!==13&&c!==32)nonempty=true}pos+=n}}if(offset>size)process.exit(3);if(size-offset>2097152)process.exit(4);const b=Buffer.alloc(Math.max(0,size-offset));fs.readSync(fd,b,0,b.length,offset);process.stdout.write(JSON.stringify({size,text:b.toString('utf8')}))}finally{fs.closeSync(fd)}`, path, String(offset), String(skipEntries)], { cwd: "/", timeoutMs }).pipe(Effect.mapError(() => new HerdrFailure({ operation: "first-turn", code: "unreadable_slice", message: "unreadable slice: session read failed or exceeded the first-turn budget" })));
+  if (result.code !== 0) return yield* new HerdrFailure({ operation: "first-turn", code: result.code === 2 ? "journal_missing" : result.code === 3 ? "wrong_boundary" : "unreadable_slice", message: result.code === 2 ? "session journal missing" : result.code === 3 ? "wrong boundary: inherited journal entries missing or journal truncated" : result.code === 4 ? "unreadable slice: first-turn journal exceeds 2 MiB" : "unreadable slice: session read failed or exceeded the first-turn budget" });
+  return yield* Effect.try({ try: () => decodeSessionSlice(JSON.parse(result.stdout)), catch: () => new HerdrFailure({ operation: "first-turn", code: "unreadable_slice", message: "unreadable slice: invalid session slice" }) });
 });
 
 /** Only the newly appended user and its first assistant can prove this submission. */
-export function firstTurnDetail(journal: string, prompt: string): { state: "waiting" | "proven" | "unproven"; detail: string } {
+export function firstTurnDetail(journal: string, prompt: string, exactPrompt = false): { state: "waiting" | "proven" | "unproven"; detail: string; failureKind?: FirstTurnFailure } {
   const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
   let matched = false;
   for (const line of journal.split("\n").slice(0, -1)) {
     if (!line.trim()) continue;
     let entry;
     try { entry = decodeFirstTurnEntry(JSON.parse(line)); }
-    catch { return { state: "unproven", detail: "invalid first-turn session entry" }; }
+    catch { return { state: "unproven", failureKind: "unreadable_slice", detail: "unreadable slice: invalid first-turn session entry" }; }
     const message = entry.message;
     if (entry.type !== "message" || !message) continue;
     if (message.role === "user") {
-      if (matched) return { state: "unproven", detail: "another user entry before the first assistant" };
+      if (matched) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message after intended prompt: no verified bridge provenance; first assistant refused" };
       const text = typeof message.content === "string" ? message.content : (message.content ?? []).filter(block => block.type === "text").map(block => block.text ?? "").join(" ");
-      if (/^\[paste #\d+(?: (?:\+\d+ lines|\d+ chars))?\]$/.test(text.trim())) return { state: "unproven", detail: "user entry is only a paste marker" };
-      if (!normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", detail: "user entry does not match the work prompt" };
+      if (/^\[paste #\d+(?: (?:\+\d+ lines|\d+ chars))?\]$/.test(text.trim())) return { state: "unproven", failureKind: "substituted_message", detail: "user entry is only a paste marker" };
+      if (exactPrompt ? normalize(text) !== normalize(prompt) : !normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message instead of intended prompt: no verified bridge provenance; substituted message refused" };
       matched = true;
-    } else if (message.role === "assistant" && matched) {
-      if (message.stopReason === "error" || message.errorMessage !== undefined) return { state: "unproven", detail: `first assistant error: ${message.errorMessage || message.stopReason}`.replace(/\s+/g, " ").slice(0, 1000) };
+    } else if (message.role === "assistant") {
+      if (!matched) return { state: "unproven", failureKind: "wrong_boundary", detail: "wrong boundary: assistant precedes intended prompt" };
+      if (message.stopReason === "error" || message.errorMessage !== undefined) return { state: "unproven", failureKind: "assistant_error", detail: `first assistant error: ${message.errorMessage || message.stopReason}`.replace(/\s+/g, " ").slice(0, 1000) };
       return { state: "proven", detail: "matching user entry and clean first assistant" };
     }
   }
-  return { state: "waiting", detail: matched ? "no first turn within 90 s" : "no matching user entry within 90 s" };
+  return { state: "waiting", failureKind: matched ? "assistant_timeout" : "missing_prompt", detail: matched ? "no first turn within 90 s" : "intended prompt missing: no matching user entry within 90 s" };
 }
 
-const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof) => Effect.gen(function* () {
+const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false) => Effect.gen(function* () {
   if (proof.state !== "proven") return proof;
   const env = yield* MusterEnv;
   const started = env.now().getTime();
   let slept = 0;
   while (true) {
-    const slice = yield* sessionSlice(path, offset).pipe(Effect.catch(() => Effect.succeed(null)));
-    if (!slice || slice.size < offset) return { state: "unproven", submission: "submitted", firstTurn: true, detail: "first turn not checked: session file unreadable or replaced" } satisfies Proof;
-    const result = firstTurnDetail(slice.text, prompt);
+    const read = yield* sessionSlice(path, offset, 0, Math.max(1, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started))).pipe(Effect.result);
+    if (read._tag === "Failure") return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: read.failure.code === "wrong_boundary" ? "wrong_boundary" : "unreadable_slice", detail: read.failure.message } satisfies Proof;
+    const slice = read.success;
+    if (slice.size < offset) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: "wrong_boundary", detail: "wrong boundary: session journal truncated" } satisfies Proof;
+    const result = firstTurnDetail(slice.text, prompt, exactPrompt);
     if (result.state === "proven") return proof;
-    if (result.state === "unproven" || Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, detail: result.detail } satisfies Proof;
+    if (result.state === "unproven" || Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: result.detail } satisfies Proof;
     const delay = Math.min(1000, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started));
     yield* env.sleep(delay);
     slept += delay;
+    if (Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: result.detail } satisfies Proof;
   }
 });
 
@@ -182,13 +187,15 @@ const startBoundary = (path: string, inheritedEntries: number) => Effect.gen(fun
   const started = env.now().getTime();
   let slept = 0;
   while (true) {
-    const slice = yield* sessionSlice(path, 0, inheritedEntries).pipe(Effect.catch(() => Effect.succeed(null)));
-    if (slice) return slice;
+    const slice = yield* sessionSlice(path, 0, inheritedEntries, Math.max(1, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started))).pipe(Effect.result);
+    if (slice._tag === "Success") return slice.success;
+    if (slice.failure.code !== "journal_missing" && slice.failure.code !== "wrong_boundary") return yield* slice.failure;
     const elapsed = Math.max(slept, env.now().getTime() - started);
-    if (elapsed >= FIRST_TURN_MS) return null;
+    if (elapsed >= FIRST_TURN_MS) return yield* new HerdrFailure({ operation: "first-turn", code: slice.failure.code, message: slice.failure.code === "wrong_boundary" ? slice.failure.message : "discovery timeout: no session journal within 90 s" });
     const delay = Math.min(1000, FIRST_TURN_MS - elapsed);
     yield* env.sleep(delay);
     slept += delay;
+    if (Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return yield* new HerdrFailure({ operation: "first-turn", code: slice.failure.code, message: slice.failure.code === "wrong_boundary" ? slice.failure.message : "discovery timeout: no session journal within 90 s" });
   }
 });
 
@@ -196,9 +203,9 @@ const startBoundary = (path: string, inheritedEntries: number) => Effect.gen(fun
 export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt) =>
   startBoundary(path, inheritedEntries).pipe(
     Effect.flatMap(slice => slice
-      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, { state: "proven", via: "argv" })
-      : Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, detail: "no session journal entries within 90 s" })),
-    Effect.catch(() => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, detail: "first turn not checked: inherited journal boundary unavailable" })),
+      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, { state: "proven", via: "argv" }, true)
+      : Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: "discovery_timeout", detail: "discovery timeout: no session journal entries within 90 s" })),
+    Effect.catch(error => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: error.code === "wrong_boundary" ? "wrong_boundary" : error.code === "journal_missing" ? "discovery_timeout" : "unreadable_slice", detail: error.message })),
     Effect.map(proof => proof.state === "unproven" ? { ...proof, repairPrompt } : proof),
   );
 

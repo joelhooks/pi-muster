@@ -1822,9 +1822,9 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       yield* guardLaunchShell(binding.paneId);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
       const wait = yield* waitForSession(binding.paneId, null, remote ? undefined : () => findSessionFile(row.cwd, row.sessionId, env.home), `exec sh ${shellQuote(script)}`);
-      if (wait.state !== "ready") return yield* input(`restart failed before rebind: replacement session ${wait.state}; old agent untouched`);
+      if (wait.state !== "ready") return yield* input(`restart failed before rebind: discovery timeout: replacement session ${wait.state}; old agent untouched; inspect the replacement launch before retrying`);
       const id = sessionIdFromFile(wait.sessionFile);
-      if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed: replacement did not prove a new session");
+      if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed before rebind: wrong boundary: replacement did not prove a new session; old agent untouched");
       const proof = yield* proveStartedPrompt(wait.sessionFile, prompt, inherited);
       if (proof.state !== "proven") return yield* input(`restart failed before rebind: ${proof.detail}; old agent untouched`);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
