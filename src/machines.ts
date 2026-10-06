@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import { setup, transition } from "xstate";
 import type { AnyStateMachine, EventObject } from "xstate";
 
-import type { AgentState, LaneState, LaneDelivery, ProjectState, LaunchJobState } from "./domain.ts";
+import type { AgentState, LaneState, LaneDelivery, ProjectState, LaunchJobState, PacketState } from "./domain.ts";
 import { IllegalTransition, InputError } from "./errors.ts";
 
 /**
@@ -198,6 +198,24 @@ export const stepLaunchJob = (id: string, from: LaunchJobState, event: LaunchJob
   const [next] = transition(launchJobMachine, snapshot, event);
   // XState returns one of this machine's four schema-owned states.
   return Effect.succeed(next.value as LaunchJobState);
+};
+
+/** A correction reopens a terminal packet, never an unlanded report. */
+export const packetMachine = setup({ types: { events: {} as { type: "CORRECT" } } }).createMachine({
+  initial: "reported",
+  states: {
+    reported: {}, verified: {},
+    committed: { on: { CORRECT: "verified" } },
+    rejected: { on: { CORRECT: "verified" } },
+    no_changes: { on: { CORRECT: "verified" } },
+  },
+});
+export const stepPacket = (id: string, from: PacketState, event: { type: "CORRECT" }) => {
+  const snapshot = packetMachine.resolveState({ value: from, context: {} });
+  if (!snapshot.can(event)) return Effect.fail(new InputError({ message: `packet ${id}: ${event.type} is not allowed from ${from}` }));
+  const [next] = transition(packetMachine, snapshot, event);
+  // The only permitted target is the schema-owned verified state.
+  return Effect.succeed(next.value as PacketState);
 };
 
 export const stepAgent = (id: string, from: AgentState, event: AgentEvent) =>

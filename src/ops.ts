@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { closeSync, openSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, fsyncSync, closeSync, openSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
@@ -24,7 +24,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { LaunchJob, AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
+import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
 import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
@@ -53,7 +53,7 @@ import {
 } from "./herdr.ts";
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
-import { PROCESS_STATES, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
+import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
@@ -2641,7 +2641,9 @@ export type LandOutcome = "committed" | "rejected" | "no_changes";
 
 export interface PacketLandInput {
   readonly id: string;
-  readonly outcome: LandOutcome;
+  readonly corrects?: string | undefined;
+  readonly takeover?: boolean | undefined;
+  readonly outcome?: LandOutcome | undefined;
   readonly gate?: string | undefined;
   readonly landedAs?: string | undefined;
   readonly attested?: boolean | undefined;
@@ -2833,18 +2835,46 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "packet_land");
     const packet = yield* findPacket(project, params.id);
+    if (params.corrects !== undefined) {
+      const reason = params.corrects.trim();
+      if (!reason || /^(placeholder|tbd|todo|-|n\/a)$/i.test(reason)) return yield* input("correction requires a real reason");
+      const corrected = yield* mutate(dir, current => Effect.gen(function* () {
+        const latest = yield* findPacket(current, packet.id);
+        const owner = yield* findRow(current, latest.agent);
+        yield* requireOwner(owner, env.sessionId, params.takeover);
+        const state = yield* stepPacket(latest.id, latest.state, { type: "CORRECT" });
+        const path = join(dataDir(dir), "corrections.jsonl");
+        yield* Effect.try({
+          try: () => {
+            const audit = decodePacketCorrection({ packetId: latest.id, at: iso(env), by: env.sessionId,
+              from: { state: latest.state, outcome: latest.state, landedAs: latest.landedAs, evidence: latest.evidence ?? null }, reason });
+            // mutate holds the catalog lock. Persist the old values before changing it.
+            const fd = openSync(path, "a", 0o600);
+            try { appendFileSync(fd, `${JSON.stringify(audit)}\n`); fsyncSync(fd); } finally { closeSync(fd); }
+          },
+          catch: error => new StoreError({ path, message: `correction audit failed; packet unchanged: ${String(error)}` }),
+        });
+        const { evidence: _evidence, attested: _attested, ...rest } = latest;
+        const next: Packet = { ...rest, state, landedAs: null, gate: null, updatedAt: iso(env) };
+        return [withPacket(current, next), next] as const;
+      }));
+      return { packet: corrected, note: "correction audited; reopened to verified; call packet_land again with the right outcome", notes: [yield* publishTokens(yield* load(dir))] };
+    }
     if (TERMINAL_PACKET_STATES.includes(packet.state)) return yield* input(`packet ${packet.id.slice(0, 12)} is already ${packet.state}`);
     const row = yield* findRow(project, packet.agent);
     const lane = project.lanes.find((candidate) => candidate.slug === packet.lane);
 
+    const outcome = params.outcome;
+    if (!outcome) return yield* input("outcome is required unless correcting a landing");
     let landedAs: string | null = null;
     let note = "";
     let gate: PacketGate | null = null;
     const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
     let evidence = params.evidence?.trim();
-    if (params.attested && params.outcome !== "committed") return yield* input("attested is only supported for committed packets");
+    if (params.attested && outcome !== "committed") return yield* input("attested is only supported for committed packets");
+    if (project.mode !== "rift-merge" && outcome === "committed" && ((!params.attested && !evidence) || (evidence !== undefined && /^(placeholder|tbd|todo|-|n\/a)$/i.test(evidence)))) return yield* input("committed landing requires non-empty, non-placeholder evidence");
     if (recording && !evidence && !params.attested) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
-    if (params.outcome === "committed" && params.attested) {
+    if (outcome === "committed" && params.attested) {
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
       const source = sourceOf(project, lane, row);
@@ -2869,7 +2899,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasOrigin ? "origin/" : ""}${base}` });
       evidence = `owner-attested: landed inside ${landedAs}; ${evidence}`;
       note = "recorded an owner-attested landing";
-    } else if (params.outcome === "committed") {
+    } else if (outcome === "committed") {
       if (packet.kind === "commit" && !params.landedAs) {
         const cloneExists = row.machine === "local" ? existsSync(row.cwd) && statSync(row.cwd).isDirectory() : yield* Effect.gen(function* () {
           const machine = yield* machineConfig(row.machine);
@@ -2923,16 +2953,32 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
         else evidence = [evidence, note].filter(Boolean).join("\n");
       }
     }
-    const event: AgentEvent | null = params.outcome === "rejected" ? { type: "REWORK" } : { type: "LAND" };
+    if (outcome === "committed" && !params.attested && project.mode !== "rift-merge") {
+      if (!landedAs) return yield* input(`mode ${project.mode} requires landedAs on the lane base branch`);
+      const source = sourceOf(project, lane, row);
+      const symbolic = yield* proc.run("git", ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: source });
+      const base = lane?.base?.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "") ??
+        (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
+      if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`landing requires a base branch, not ${base}`);
+      const hasOrigin = (yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source })).code === 0;
+      if (hasOrigin) {
+        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`], { cwd: source });
+        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch origin/${base} failed; cannot prove ${landedAs} on base origin/${base}` });
+      }
+      const baseRef = hasOrigin ? `refs/remotes/origin/${base}` : `refs/heads/${base}`;
+      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasOrigin ? "origin/" : ""}${base}` });
+      landedAs = (yield* git(source, "rev-parse", "--verify", "--end-of-options", `${landedAs}^{commit}`)).trim();
+    }
+    const event: AgentEvent | null = outcome === "rejected" ? { type: "REWORK" } : { type: "LAND" };
     const saved = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
-        const recorded = yield* recordPacketOutcome(current, { ...latest, gate: gate ?? latest.gate, ...(params.attested ? { attested: true } : {}) }, params.outcome, landedAs, gate ? [evidence, note].filter(Boolean).join("\n") : evidence, iso(env));
+        const recorded = yield* recordPacketOutcome(current, { ...latest, gate: gate ?? latest.gate, ...(params.attested ? { attested: true } : {}) }, outcome, landedAs, gate ? [evidence, note].filter(Boolean).join("\n") : evidence, iso(env));
         const agent = yield* findRow(current, packet.agent);
         const moves = agent.state === "reported" || agent.state === "verified" || (agent.state === "landed" && event.type === "REWORK");
         let updated = moves ? withRow(recorded.project, { ...agent, state: yield* stepAgent(agent.name, agent.state, event), updatedAt: iso(env) }) : recorded.project;
         if (params.attested && !moves) note += `; agent ${agent.name} left in ${agent.state} (no LAND transition)`;
-        if (params.outcome === "committed") {
+        if (outcome === "committed") {
           let supersedes = latest.supersedes;
           const seen = new Set([latest.id]);
           while (supersedes) {

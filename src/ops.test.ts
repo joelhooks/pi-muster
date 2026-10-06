@@ -1598,7 +1598,7 @@ describe("packet_land external squash landings", () => {
     const landedAs = squash(dir, commit);
     await runWith(h, packetVerify(dir, commit));
     expect((await runWith(h, load(dir))).agents[0]?.clone?.branch).toBe("origin/worker/remote-only");
-    const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(landed.note).toBe("recorded a squash landing (patch-id match)");
     expect(landed.packet).toMatchObject({ state: "committed", landedAs });
   });
@@ -1613,7 +1613,7 @@ describe("packet_land external squash landings", () => {
     sh(dir, "fetch", "-q", clone, commit);
     const landedAs = squash(dir, commit);
     await runWith(h, packetVerify(dir, commit));
-    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(result.note).toBe("recorded a squash landing (patch-id match)");
     expect(result.packet.state).toBe("committed");
     expect(result.packet.landedAs).toBe(landedAs);
@@ -1623,7 +1623,7 @@ describe("packet_land external squash landings", () => {
     const { h, dir, commit } = await verifiedWorker();
     sh(dir, "merge", "--no-ff", "-m", "external merge", commit);
     const landedAs = sh(dir, "rev-parse", "HEAD").trim();
-    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(result.note).toBe("recorded an external landing");
     expect(result.packet.state).toBe("committed");
     expect(result.packet.landedAs).toBe(landedAs);
@@ -1644,9 +1644,9 @@ describe("packet_land external squash landings", () => {
     commitInClone(clone, "extra.txt");
     sh(dir, "fetch", "-q", clone, "HEAD");
     const landedAs = squash(dir, sh(clone, "rev-parse", "HEAD").trim());
-    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(result.note).toBe("recorded a squash landing (paths identical at landedAs)");
-    expect(result.packet.evidence).toBe(result.note);
+    expect(result.packet.evidence).toBe(`reviewed PR\n${result.note}`);
     expect(result.packet.state).toBe("committed");
   });
 
@@ -1669,7 +1669,7 @@ describe("packet_land external squash landings", () => {
     const extra = commitInClone(clone, "extra.txt");
     sh(dir, "fetch", "-q", clone, extra);
     const landedAs = squash(dir, extra);
-    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(result.note).toBe("recorded a squash landing (paths identical at landedAs)");
   });
 
@@ -1684,7 +1684,7 @@ describe("packet_land external squash landings", () => {
     sh(dir, "add", "work.txt");
     sh(dir, "commit", "-q", "-m", "squash without packet object");
     const landedAs = sh(dir, "rev-parse", "HEAD").trim();
-    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(result.note).toBe("recorded a squash landing (patch-id match)");
   });
 
@@ -1695,7 +1695,7 @@ describe("packet_land external squash landings", () => {
     sh(dir, "add", "work.txt");
     sh(dir, "commit", "-q", "-m", "different squash");
     const landedAs = sh(dir, "rev-parse", "HEAD").trim();
-    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(error._tag).toBe("GuardFailed");
     expect(error.message).toContain('differing paths: "work.txt"');
     expect((await runWith(h, load(dir))).packets[0]?.state).toBe("verified");
@@ -1703,7 +1703,7 @@ describe("packet_land external squash landings", () => {
 
   it("refuses an unknown landedAs commit", async () => {
     const { h, dir, commit } = await verifiedWorker();
-    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs: "f".repeat(40) }));
+    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs: "f".repeat(40), evidence: "reviewed PR" }));
     expect(error._tag).toBe("GuardFailed");
     expect(error.message).toContain("unknown landedAs commit");
     expect((await runWith(h, load(dir))).packets[0]?.state).toBe("verified");
@@ -1718,7 +1718,7 @@ describe("packet_land external squash landings", () => {
     sh(remote, "fetch", "-q", clone, commit);
     const landedAs = squash(remote, commit);
     sh(dir, "remote", "add", "origin", remote);
-    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs }));
+    const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
     expect(result.note).toBe("recorded a squash landing (patch-id match)");
     expect(result.packet.landedAs).toBe(landedAs);
   });
