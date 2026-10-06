@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import { setup, transition } from "xstate";
 import type { AnyStateMachine, EventObject } from "xstate";
 
-import type { AgentState, LaneState, LaneDelivery, ProjectState } from "./domain.ts";
+import type { AgentState, LaneState, LaneDelivery, ProjectState, LaunchJobState } from "./domain.ts";
 import { IllegalTransition } from "./errors.ts";
 
 /**
@@ -177,6 +177,17 @@ function step<S extends string, E extends EventObject>(
   const [next] = transition(machine, snapshot, event);
   return Effect.succeed(next.value as S);
 }
+
+export type LaunchJobEvent = { type: "RUN" } | { type: "SUCCEED" } | { type: "FAIL" };
+export const launchJobMachine = setup({ types: { events: {} as LaunchJobEvent } }).createMachine({
+  id: "launch-job", initial: "queued", states: {
+    queued: { on: { RUN: "running", FAIL: "failed" } },
+    running: { on: { SUCCEED: "succeeded", FAIL: "failed" } },
+    succeeded: {}, failed: {},
+  },
+});
+export const stepLaunchJob = (id: string, from: LaunchJobState, event: LaunchJobEvent) =>
+  step(launchJobMachine, "launch-job", id, from, event);
 
 export const stepAgent = (id: string, from: AgentState, event: AgentEvent) =>
   step(agentMachine, "agent", id, from, event);

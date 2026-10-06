@@ -205,14 +205,20 @@ export const AgentLaunchRequest = Schema.Struct({
   slot: Schema.optional(Schema.Literals(["root", "split"])),
 });
 export const decodeAgentLaunchRequest = Schema.decodeUnknownSync(AgentLaunchRequest);
+export const LaunchJobState = Schema.Literals(["queued", "running", "succeeded", "failed"]);
+export type LaunchJobState = typeof LaunchJobState.Type;
+export const LaunchJobId = Schema.String.check(Schema.isPattern(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/));
+export const decodeLaunchJobId = Schema.decodeUnknownSync(LaunchJobId);
 export const LaunchJob = Schema.Struct({
-  id: Schema.String, pid: Schema.NullOr(Schema.Number), log: Path, startedAt: Iso,
+  id: LaunchJobId, project: Slug, name: AgentName, sessionId: SessionId,
+  pid: Schema.NullOr(Schema.Number), log: Path, startedAt: Iso, state: LaunchJobState,
   priorState: AgentState, owner: SessionId, request: AgentLaunchRequest,
   outcome: Schema.optionalKey(Schema.Literals(["action", "blocked"])),
 });
+export type LaunchJob = typeof LaunchJob.Type;
+export const decodeLaunchJob = Schema.decodeUnknownSync(LaunchJob);
 
 export const AgentRow = Schema.Struct({
-  launchJob: Schema.optionalKey(LaunchJob),
   machine: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("local"))),
   intercomAddress: Schema.optionalKey(Schema.String),
   events: Schema.optionalKey(Schema.Array(Schema.Struct({ type: Schema.String, at: Iso, detail: Schema.String }))),

@@ -1,5 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Effect } from "effect";
@@ -16,7 +18,7 @@ vi.mock("node:child_process", async importOriginal => ({
     return child;
   },
 }));
-import { agentClose, agentLaunch as launch, agentLaunchForeground, laneOpen, launchResultText, projectOpen, projectStatus, runLaunchJob } from "./ops.ts";
+import { agentClose, agentLaunch as launch, agentLaunchForeground, laneOpen, launchResultText, projectOpen, projectStatus, readLaunchJob, runLaunchJob } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { readOwnerQueue, mentions } from "./owner-queue.ts";
 const readOwnerItems = (owner: string, home: string) => readOwnerQueue(owner, home).items.map(entry => entry.item);
@@ -40,18 +42,22 @@ describe("asynchronous launch admission", () => {
     const before = h.herdr.calls.length;
     spawned.observe = () => {
       const catalog = JSON.parse(readFileSync(join(dir, ".brain/data/muster/project.json"), "utf8"));
-      expect(catalog.agents[0]).toMatchObject({ state: "launching", launchJob: { pid: null } });
+      expect(catalog.agents[0].state).toBe("launching");
+      expect(catalog.agents[0]).not.toHaveProperty("launchJob");
+      const args = spawned.calls.at(-1)?.[1] as string[];
+      expect(readLaunchJob(h.home, args.at(-1)!)).toMatchObject({ state: "queued", pid: null });
     };
     const start = performance.now();
     const result = await runWith(h, agentLaunch(dir, request));
     expect(performance.now() - start).toBeLessThan(1000);
     expect(result.row.state).toBe("launching");
-    expect(result.row.launchJob).toMatchObject({ id: result.jobId, pid: process.pid, owner: h.sessionId });
+    expect(result.job).toMatchObject({ id: result.jobId, pid: process.pid, owner: h.sessionId, project: "async", name: "worker", sessionId: result.row.sessionId });
+    expect(result.row).not.toHaveProperty("launchJob");
     expect(result.proof).toBeNull();
     expect(h.herdr.calls).toHaveLength(before);
     expect(spawned.calls).toHaveLength(1);
     expect(spawned.calls[0]?.[2]).toMatchObject({ detached: true });
-    expect((await runWith(h, load(dir))).agents[0]?.launchJob?.id).toBe(result.jobId);
+    expect(readLaunchJob(h.home, result.jobId).id).toBe(result.jobId);
   });
 
   it.each([
@@ -108,7 +114,7 @@ describe("asynchronous launch admission", () => {
   it("recovers a dead pid through project_status without re-spawning", async () => {
     const { h, dir, request } = await setup();
     const receipt = await runWith(h, agentLaunch(dir, request));
-    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, launchJob: { ...row.launchJob!, pid: 2147483647 } })) }, null] as const)));
+    writeFileSync(join(h.home, ".local/state/muster/launches", `${receipt.jobId}.json`), JSON.stringify({ ...receipt.job, pid: 2147483647 }));
     await runWith(h, projectStatus(dir));
     const row = (await runWith(h, load(dir))).agents[0]!;
     expect(row.state).toBe("failed");
@@ -131,7 +137,7 @@ describe("asynchronous launch admission", () => {
     if (action === "restore") await runWith(h, agentClose(dir, { name: "worker" }));
     const receipt = await runWith(h, agentLaunch(dir, { action, name: action === "fork" ? "child" : "worker", from: "worker" }));
     expect(receipt.row.state).toBe("launching");
-    expect(receipt.row.launchJob?.priorState).toBe(action === "fork" ? "planned" : "closed");
+    expect(receipt.job.priorState).toBe(action === "fork" ? "planned" : "closed");
     const result = await runWith(h, runLaunchJob(dir, receipt.jobId));
     expect(result.kind).toBe("action");
     expect((await runWith(h, load(dir))).agents.find(row => row.name === receipt.row.name)?.state).toBe("running");
@@ -159,6 +165,29 @@ describe("asynchronous launch admission", () => {
     const receipt = await runWith(h, agentLaunch(dir, { ...request, machine: "remote" }));
     expect(receipt.row).toMatchObject({ machine: "remote", cwd: "/remote/source", state: "launching" });
     expect(spawned.calls).toHaveLength(1);
+  });
+
+  it("keeps jobs across a stale-writer catalog rewrite without raising schema 4", async () => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    const path = join(dir, ".brain/data/muster/project.json");
+    const oldWriter = JSON.parse(readFileSync(path, "utf8"));
+    expect(oldWriter.writerSchemaVersion).toBeLessThanOrEqual(4);
+    expect(oldWriter.agents[0]).not.toHaveProperty("launchJob");
+    writeFileSync(path, JSON.stringify(oldWriter));
+    expect(readLaunchJob(h.home, receipt.jobId).pid).toBe(process.pid);
+    expect((await runWith(h, runLaunchJob(dir, receipt.jobId))).kind).toBe("action");
+    expect(readLaunchJob(h.home, receipt.jobId)).toMatchObject({ state: "succeeded", outcome: "action" });
+  });
+
+  it("boots the real CLI through its symlink from an unrelated cwd", () => {
+    const h = harness();
+    const link = join(h.root, "muster-launch");
+    symlinkSync(fileURLToPath(new URL("../bin/muster-launch", import.meta.url)), link);
+    const result = spawnSync(link, [], { cwd: h.root, encoding: "utf8" });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("usage: MUSTER_OWNER=");
+    expect(result.stderr).not.toContain("ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING");
   });
 
   it("uses the shared foreground renderer for queued output", async () => {
