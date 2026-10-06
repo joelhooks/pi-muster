@@ -34,9 +34,17 @@ describe("first-turn journal boundary", () => {
     const { h, pane, file } = setup();
     appendFileSync(file, user("task") + assistant());
     h.herdr.firstTurn = "missing";
+    let firstTurnWaits = 0;
+    // The next assistant arrives on the wait event, not after a real or simulated deadline.
+    // If the old clean assistant were reused, this wait would never happen.
+    h.sleep = () => {
+      firstTurnWaits++;
+      appendFileSync(file, assistant({ stopReason: "error", errorMessage: "new turn failed" }));
+    };
     const result = await runWith(h, promptWithProof(pane.pane_id, "task"));
-    expect(result).toMatchObject({ state: "unproven", detail: "no first turn within 90 s" });
-  }, 30_000);
+    expect(firstTurnWaits).toBe(1);
+    expect(result).toMatchObject({ state: "unproven", detail: "first assistant error: new turn failed" });
+  });
   it("keeps the probe suffix below 120 typed characters, and probe failure is unknown", async () => {
     expect(piReceiptSuffix("00000000-0000-0000-0000-000000000000").length).toBeLessThan(120);
     const { h } = setup();

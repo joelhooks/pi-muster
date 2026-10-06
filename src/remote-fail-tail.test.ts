@@ -12,7 +12,7 @@ import { load } from "./store.ts";
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function setup(options: { error?: string; paneTail?: string; readyAfter?: number; logUnreadable?: boolean; env?: Record<string, string> } = {}) {
+async function setup(options: { error?: string; paneTail?: string; readyAfterWaits?: number; logUnreadable?: boolean; env?: Record<string, string> } = {}) {
   const h = harness();
   const dir = makeRepo(join(h.root, "source"));
   const bin = join(h.root, "bin"); mkdirSync(bin);
@@ -24,12 +24,13 @@ async function setup(options: { error?: string; paneTail?: string; readyAfter?: 
   const original = remote.handle.bind(remote);
   let command = "";
   let launchedPane: string | undefined;
+  let readinessWaits = 0;
   remote.paneTail = options.paneTail ?? "(pane unreadable)";
   remote.handle = (method, params) => {
     const result = original(method, params);
     if (method === "pane.send_input" && String(params.text).startsWith("exec sh ")) {
       command = String(params.text); launchedPane = String(params.pane_id);
-      if (options.readyAfter === undefined && options.paneTail === undefined) {
+      if (options.readyAfterWaits === undefined && options.paneTail === undefined) {
         // A real failing executable and real redirection; the terminal vanishes after exec.
         try { execFileSync("sh", ["-c", command], { stdio: "pipe" }); } catch { /* expected Pi exit */ }
         remote.panes.delete(launchedPane);
@@ -51,21 +52,21 @@ async function setup(options: { error?: string; paneTail?: string; readyAfter?: 
     remoteHerdr: () => Effect.succeed(remote.client()),
     sleep: ms => Effect.sync(() => {
       h.now = new Date(h.now.getTime() + ms);
-      if (options.readyAfter !== undefined && launchedPane && h.now.getTime() - started >= options.readyAfter) {
+      // Advance readiness on an observed wait event; host load cannot move this boundary.
+      if (options.readyAfterWaits !== undefined && launchedPane && ++readinessWaits >= options.readyAfterWaits) {
         remote.autoLaunch = true;
         original("pane.send_input", { pane_id: launchedPane, text: command });
         launchedPane = undefined;
       }
     }),
   };
-  const started = h.now.getTime();
   const run = <A, E>(effect: Effect.Effect<A, E, Herdr | MusterEnv | Proc | Comms>) => Effect.runPromise(effect.pipe(
     Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc), Effect.provide(h.layer)));
   await run(projectOpen({ dir, slug: "probe", outcome: "remote launch evidence", reviewTrigger: "weekly", nextAction: "launch", criticalPath: [],
     space: "w1", sidebar: false, ephemeral: true, cadenceMinutes: 15, musterExtension: "/muster", deskExtension: null }));
   await run(laneOpen(dir, { slug: "work", label: "remote work", goal: "evidence", repo: dir }));
   const launch = () => run(agentLaunch(dir, { action: "launch", machine: "remote", name: "remote-w", role: "worker", lane: "work", label: "remote worker", cwd: dir, noSkills: true }));
-  return { h, dir, remote, run, launch, command: () => command, row: async () => (await run(load(dir))).agents[0]! };
+  return { h, dir, remote, run, launch, readinessWaits: () => readinessWaits, command: () => command, row: async () => (await run(load(dir))).agents[0]! };
 }
 
 describe("remote launch failure evidence", () => {
@@ -110,8 +111,9 @@ describe("remote launch failure evidence", () => {
   });
 
   it("keeps a slow healthy launch ready and normal pane loss interrupted", async () => {
-    const s = await setup({ readyAfter: 15_000, paneTail: "Creating a new session..." });
+    const s = await setup({ readyAfterWaits: 2, paneTail: "Creating a new session..." });
     const launched = await s.launch(); expect(launched.row.state).toBe("running");
+    expect(s.readinessWaits()).toBe(2);
     expect(launched.row.events?.some(event => event.type === "LAUNCH_FAILED")).not.toBe(true);
     expect(s.command()).toMatch(/^exec sh '/);
     s.remote.panes.delete(launched.row.pane!.paneId);

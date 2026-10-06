@@ -104,15 +104,21 @@ describe("desk heavy grants", () => {
   });
 
   it("admits ahead of three older ordinary waiters but behind a deploy waiter, FIFO within grants", () => {
-    let clock = Date.now();
-    const options = { ...desk(), slots: "1", now: () => clock++ };
-    for (let i = 0; i < 3; i++) enqueueHeavy(options, `ordinary-${i}`, "slot");
+    let clock = 1_800_000_000_000;
+    // All tickets belong to this live test process. OS lstart probes are irrelevant
+    // to ordering; arrival/release events, not wall time or probe speed, drive FIFO.
+    const options: HeavyOptions = { ...desk(), slots: "1", now: () => clock, health: () => "alive" };
+    const arrive = (owner: HeavyOptions, command: string, mode: "slot" | "grant" | "priority") => {
+      clock++;
+      return enqueueHeavy(owner, command, mode);
+    };
+    for (let i = 0; i < 3; i++) arrive(options, `ordinary-${i}`, "slot");
     const first = { ...options, grant: heavy.createHeavyGrant(options, "critical").id };
     const second = { ...options, grant: heavy.createHeavyGrant(options, "later").id };
-    const firstTicket = enqueueHeavy(first, "first grant", "grant");
-    const secondTicket = enqueueHeavy(second, "second grant", "grant");
+    const firstTicket = arrive(first, "first grant", "grant");
+    const secondTicket = arrive(second, "second grant", "grant");
     const deployOptions = { ...options, window: "deploy-test" };
-    const deployTicket = enqueueHeavy(deployOptions, "deploy", "priority");
+    const deployTicket = arrive(deployOptions, "deploy", "priority");
     const firstRequest = heavy.grantRequest(first, "first grant", () => firstTicket.name);
     const secondRequest = heavy.grantRequest(second, "second grant", () => secondTicket.name);
     expect(firstRequest.attempt().ok).toBe(false);
@@ -128,7 +134,7 @@ describe("desk heavy grants", () => {
     secondRequest.release();
     deploy.release();
     expect(heavyQueue(options).map((row) => row.command)).toEqual(["ordinary-0", "ordinary-1", "ordinary-2"]);
-  }, 30_000);
+  });
 
   it("never takes deploy-0 or bypasses load/memory, even without a queue ticket", () => {
     const options = { ...desk(), slots: "1" };
