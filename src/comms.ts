@@ -1,7 +1,7 @@
 import { Effect, Layer, Schema } from "effect";
 import { readFileSync } from "node:fs";
 import { decodeAgentName, decodeSlug, decodeProject, type Policy } from "./domain.ts";
-import { networkCatalogPeers, networkRowIdentity } from "./desk-route.ts";
+import { networkCatalogPeer, networkRowIdentity } from "./desk-route.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
 import { exists, load, projectPath } from "./store.ts";
@@ -211,7 +211,7 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
             if (!agent) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.did}`));
             return agent;
           }
-          const peer = yield* Effect.try({ try: () => exists(options.projectDir) ? networkCatalogPeers(options.home, options.projectDir)[address.id] : undefined, catch: () => new CommsError("NetworkComms peer catalogs invalid") });
+          const peer = yield* Effect.try({ try: () => exists(options.projectDir) ? networkCatalogPeer(options.home, options.projectDir, address.id) : undefined, catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms local catalog invalid") });
           if (peer) return peer;
           const configuredPeer = options.networkPeers?.()[address.id];
           if (configuredPeer?.includes("/")) return configuredPeer;

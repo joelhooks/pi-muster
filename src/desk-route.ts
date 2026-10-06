@@ -53,28 +53,47 @@ export function networkPeerEnvironment(project: Project, rows: readonly AgentRow
 }
 
 /** Read registered catalogs at send/receive time, never accept a caller's DID mapping. */
-export function networkCatalogPeers(home: string, dir: string): Record<string, string> {
-  const peers: Record<string, string> = {};
+/** Rows that can no longer speak yield to a live row with the same session (renamed or adopted rows). */
+const DEAD = new Set(["closed", "failed", "interrupted"]);
+
+/** Session → identity across registered catalogs. A session is ambiguous only when its
+ * live rows disagree; that fails a lookup of that session alone, never every send.
+ * An unreadable foreign catalog is skipped: its rows resolve through the later fallbacks. */
+export function networkCatalogPeerTable(home: string, dir: string): { peers: Record<string, string>; ambiguous: ReadonlySet<string> } {
+  const candidates = new Map<string, Array<{ identity: string; dead: boolean }>>();
+  const add = (project: Project) => {
+    for (const row of project.agents.filter(row => row.state !== "closed")) {
+      const list = candidates.get(row.sessionId) ?? [];
+      list.push({ identity: networkRowIdentity(project, row), dead: DEAD.has(row.state) });
+      candidates.set(row.sessionId, list);
+    }
+  };
   const local = decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8")));
-  const entries = [...readRegistry(home).values()].filter(entry => entry.dir !== dir);
-  for (const entry of entries) {
+  for (const entry of [...readRegistry(home).values()].filter(entry => entry.dir !== dir)) {
     let project: Project;
     try { project = decodeProject(JSON.parse(readFileSync(projectPath(entry.dir), "utf8"))); }
-    catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
-      throw new CommsError("NetworkComms peer catalog invalid");
-    }
-    if (project.slug !== entry.slug) throw new CommsError("NetworkComms foreign project registry entry");
-    for (const row of project.agents.filter(row => row.state !== "closed")) {
-      const identity = networkRowIdentity(project, row);
-      if (peers[row.sessionId] && peers[row.sessionId] !== identity) throw new CommsError("NetworkComms ambiguous peer session");
-      peers[row.sessionId] = identity;
-    }
+    catch { continue; }
+    if (project.slug !== entry.slug) continue;
+    add(project);
   }
-  for (const row of local.agents.filter(row => row.state !== "closed")) {
-    const identity = networkRowIdentity(local, row);
-    if (peers[row.sessionId] && peers[row.sessionId] !== identity) throw new CommsError("NetworkComms ambiguous peer session");
-    peers[row.sessionId] = identity;
+  add(local);
+  const peers: Record<string, string> = {};
+  const ambiguous = new Set<string>();
+  for (const [session, list] of candidates) {
+    const live = list.filter(item => !item.dead);
+    const identities = new Set((live.length ? live : list).map(item => item.identity));
+    if (identities.size === 1) peers[session] = [...identities][0]!;
+    else ambiguous.add(session);
   }
-  return peers;
+  return { peers, ambiguous };
+}
+
+export function networkCatalogPeers(home: string, dir: string): Record<string, string> {
+  return networkCatalogPeerTable(home, dir).peers;
+}
+
+export function networkCatalogPeer(home: string, dir: string, session: string): string | undefined {
+  const table = networkCatalogPeerTable(home, dir);
+  if (table.ambiguous.has(session)) throw new CommsError(`NetworkComms ambiguous peer session ${session}`);
+  return table.peers[session];
 }

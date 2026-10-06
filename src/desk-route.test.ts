@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { catalogCommsSender, createComms, NetworkComms } from "./comms.ts";
 import { consumeNetworkMailbox, networkConfigPath, networkIdentityPath, networkDeskIdentityPath, networkPeersPath, networkDeskPeersPath, networkCursorPath, networkProvisionName, networkRecipient, provisionNetworkAgent, seedNetworkIdentities, seedNetworkPeers, readNetworkIdentities, readNetworkPeers } from "./comms-network.ts";
 import { AgentName, CommsIdentityReference, SessionId, decodeDeskRouteReceipt, decodeNetworkPeerReferences, decodeNetworkCursors } from "./domain.ts";
-import { networkCatalogPeers, networkPeerEnvironment, resolveDeskRoute, sendDesk } from "./desk-route.ts";
+import { networkCatalogPeer, networkCatalogPeers, networkPeerEnvironment, resolveDeskRoute, sendDesk } from "./desk-route.ts";
 import { laneOpen, projectOpen } from "./ops.ts";
 import { deliverOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
@@ -163,6 +163,16 @@ describe("qualified desk routing", () => {
     expect(networkRecipient(h.home, "desk").did).toBe(reference("desk").did);
     expect(networkProvisionName("switchboard/switchboard")).toBe("switchboard");
     expect(() => networkRecipient(h.home, "unknown/desk")).toThrow("unknown recipient");
+  });
+  it("lets a live row win over a dead duplicate and fails only the ambiguous session", async () => {
+    const { h, dir, peer } = await fixture();
+    // A renamed desk leaves its old row interrupted with the same session id (seen on pennywise and computer-use).
+    await runWith(h, mutate(peer, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...p.agents[0]!, name: "old-desk", state: "interrupted" as const }] }, undefined] as const)));
+    expect(networkCatalogPeers(h.home, dir)).toEqual({ "alpha-session": "alpha/desk", "beta-session": "beta/desk" });
+    // Two live rows that disagree make only that session ambiguous; other sessions still resolve.
+    await runWith(h, mutate(peer, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, state: "running" as const })) }, undefined] as const)));
+    expect(() => networkCatalogPeer(h.home, dir, "beta-session")).toThrow("ambiguous peer session beta-session");
+    expect(networkCatalogPeer(h.home, dir, "alpha-session")).toBe("alpha/desk");
   });
   it("resolves registered aliases and peers at call time, refuses foreign aliases and non-desks", async () => {
     const { h, dir, peer } = await fixture();
