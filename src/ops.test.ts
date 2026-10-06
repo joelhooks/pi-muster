@@ -1510,8 +1510,27 @@ describe("a lane from launch to close", () => {
     const before = sh(dir, "rev-parse", "HEAD");
     const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "exit 3" }));
     expect(error.message).toContain("gate failed");
+    expect(error.message).toContain("merge aborted; source clean");
     expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
     expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+  });
+
+  it("still aborts cleanly when a failing gate rewrote a merged file", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    const commit = commitInClone(clone);
+    await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
+    await runWith(h, packetVerify(dir, commit));
+    const before = sh(dir, "rev-parse", "HEAD");
+    // pi-tui-patterns 2026-10-06: a gate that touches a merged file makes `merge --abort`
+    // refuse ("not uptodate"), leaving MERGE_HEAD and every merged file behind.
+    const gate = "echo gate-wrote >> work.txt; exit 1";
+    const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate }));
+    expect(error.message).toContain("merge aborted; source clean");
+    expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
+    expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
+    expect(existsSync(join(dir, "work.txt"))).toBe(false);
+    expect(existsSync(join(sh(dir, "rev-parse", "--absolute-git-dir"), "MERGE_HEAD"))).toBe(false);
   });
 
   it("refuses closing another owner's agent and force without a verified packet", async () => {
