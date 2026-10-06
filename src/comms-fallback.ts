@@ -28,7 +28,7 @@ export function reportedNetworkSend<R>(options: {
         writeSync(fd, `${JSON.stringify(record)}\n`);
       } finally { closeSync(fd); }
     }, catch: () => new CommsError("NetworkComms sent but receipt write failed; do not retry blindly") });
-    const delivery = fallback ? { ...fallback, detail: `intercom fallback: ${fallback.status}; network: ${network.status}${network.detail ? ` (${network.detail})` : ""}${fallback.detail ? `; fallback: ${fallback.detail}` : ""}; receipt: ${receipt}#${options.id}` } : network;
+    const delivery = fallback ? { ...fallback, detail: `intercom fallback: ${fallback.status}${fallback.id ? `; intercom id: ${fallback.id}` : ""}; network: ${network.status}${network.detail ? ` (${network.detail})` : ""}${fallback.detail ? `; fallback: ${fallback.detail}` : ""}; receipt: ${receipt}#${options.id}` } : network;
     return { ...record, receipt, delivery };
   });
 }

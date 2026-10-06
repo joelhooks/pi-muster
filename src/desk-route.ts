@@ -27,7 +27,7 @@ export function sendDesk(options: {
   comms: CommsShape;
 }) {
   return Effect.gen(function* () {
-    const target = yield* Effect.try({ try: () => resolveDeskRoute(options.home, options.dir, options.to), catch: () => new CommsError("desk_send unknown, foreign, or non-desk alias") });
+    const target = yield* Effect.try({ try: () => resolveDeskRoute(options.home, options.dir, options.to), catch: () => new CommsError(`desk_send refused alias ${options.to}: unknown, foreign, or non-desk row`) });
     const prepared = target.row.machine === "local" ? Effect.succeed(undefined) : Effect.gen(function* () {
       const { prepareRemoteNetworkAgent } = yield* Effect.promise(() => import("./comms-network.ts"));
       const { machineConfig } = yield* Effect.promise(() => import("./remote.ts"));

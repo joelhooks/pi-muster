@@ -69,6 +69,19 @@ describe("qualified desk routing", () => {
       service.dispose();
     } finally { vi.doUnmock("./comms-network.ts"); }
   });
+  it("uses only an exact provision-name DID override and ignores unrelated keys", async () => {
+    const { h } = await fixture();
+    const did = "did:web:switchboard.fleet.example.invalid";
+    privateFile(networkConfigPath(h.home), { ...config, didOverrides: { switchboard: did, "unknown/key": "did:web:unused.example.invalid" } });
+    const run = vi.fn(async (_file: string, args: readonly string[]) => {
+      const ref = reference(args[2]!); return JSON.stringify({ ...ref, did: args[4], document: { ...ref.document, id: args[4] } });
+    });
+    const result = await Effect.runPromise(provisionNetworkAgent({ home: h.home, agent: "switchboard/desk", run }));
+    expect(result.did).toBe(did);
+    expect(run).toHaveBeenCalledWith(config.provisionWrapper, ["provision", "--agent", "switchboard", "--did", did]);
+    expect((await Effect.runPromise(provisionNetworkAgent({ home: h.home, agent: "worker", run }))).did).toBe(reference("worker").did);
+    expect((await Effect.runPromise(provisionNetworkAgent({ home: h.home, agent: "switchboard-worker", run }))).did).toBe(reference("switchboard-worker").did);
+  });
   it("provisions distinct desk identities without migrating bare names; Switchboard stays stable", async () => {
     const { h } = await fixture();
     const run = vi.fn(async (_file: string, args: readonly string[]) => JSON.stringify(reference(args[2]!)));
@@ -96,12 +109,12 @@ describe("qualified desk routing", () => {
     expect(() => resolveDeskRoute(h.home, dir, "foreign/desk")).toThrow("foreign");
   });
   it("records every fallback, without sending unknown aliases or retrying an accepted message", async () => {
-    const { h, dir } = await fixture(); const relay = vi.fn(() => Effect.succeed({ status: "delivered" as const }));
+    const { h, dir } = await fixture(); const relay = vi.fn(() => Effect.succeed({ status: "delivered" as const, id: "muster-outbox-fixture" }));
     const send = vi.fn(() => Effect.succeed({ status: "failed" as const, detail: "network unavailable" }));
     const opts = { home: h.home, dir, to: "beta/desk", text: "One concrete ask.", sender: "alpha-session", id: "receipt-1", at: "2026-10-06T20:00:00Z", comms: { ...NetworkComms, send, relay } };
     const result = await runWith(h, sendDesk(opts));
     expect(result.path).toBe("intercom-fallback"); expect(result.network.detail).toBe("network unavailable");
-    expect(decodeDeskRouteReceipt(JSON.parse(readFileSync(result.receipt, "utf8").trim()))).toMatchObject({ id: "receipt-1", fallback: { status: "delivered" } });
+    expect(decodeDeskRouteReceipt(JSON.parse(readFileSync(result.receipt, "utf8").trim()))).toMatchObject({ id: "receipt-1", fallback: { status: "delivered", id: "muster-outbox-fixture" } });
     await expect(runWith(h, sendDesk({ ...opts, to: "foreign/desk" }))).rejects.toThrow();
     expect(send).toHaveBeenCalledOnce(); expect(relay).toHaveBeenCalledOnce();
     const accepted = await runWith(h, sendDesk({ ...opts, id: "receipt-2", comms: { ...opts.comms, send: () => Effect.succeed({ status: "accepted" as const }) } }));

@@ -84,7 +84,7 @@ export class MusterEnv extends Context.Service<MusterEnv, EnvShape>()("muster/En
 export type OutboxStatus = "sent" | "queued" | "rejected" | "blocked" | "failed" | "unavailable";
 
 export interface IntercomTransport {
-  readonly send: (to: string, message: string) => Effect.Effect<{ readonly status: OutboxStatus; readonly detail?: string }>;
+  readonly send: (to: string, message: string) => Effect.Effect<{ readonly status: OutboxStatus; readonly detail?: string; readonly id?: string }>;
   /** Live intercom session ids, or undefined when pi-intercom is absent or disconnected. */
   readonly sessions: () => Effect.Effect<readonly string[] | undefined>;
 }
@@ -112,7 +112,10 @@ export interface NetworkMailboxShape {
   readonly ack: (input: AckInput) => Effect.Effect<AckOutput, CommsError>;
   readonly list: (input: ListInput) => Effect.Effect<ListOutput, CommsError>;
 }
-export interface CommsDelivery { readonly status: DeliveryStatus; readonly detail?: string }
+export interface CommsDelivery {
+  readonly status: DeliveryStatus; readonly detail?: string;
+  readonly id?: string; readonly senderDid?: string; readonly recipientDid?: string; readonly seq?: number;
+}
 export class CommsError extends Error {
   readonly _tag: string = "CommsError";
 }
@@ -122,7 +125,7 @@ export class Unsupported extends CommsError {
 }
 export interface CommsShape {
   readonly mode?: () => Effect.Effect<"intercom" | "network", CommsError>;
-  /** Explicit Switchboard/cross-desk policy, not a network-failure fallback. */
+  /** Explicit intercom path, including reported network-failure fallback. */
   readonly relay?: CommsShape["send"];
   readonly postOwner?: (to: string, item: import("./domain.ts").OwnerItem) => Effect.Effect<CommsDelivery>;
   readonly consume?: (receive: (message: import("./domain.ts").NetworkPayload) => Effect.Effect<void, CommsError>) => Effect.Effect<void, CommsError>;

@@ -56,6 +56,8 @@ export const NetworkCommsConfig = Schema.Struct({
   serviceDid: Schema.String.check(Schema.isPattern(/^did:[^#]+$/u)),
   provisionWrapper: Schema.String.check(Schema.isPattern(/^\//u)),
   didTemplate: Schema.String.check(Schema.isPattern(/^did:web:[^#]*\{agent\}[^#]*$/u)),
+  /** Only an exact provision-name match overrides the template; unrelated keys are inert. */
+  didOverrides: Schema.optionalKey(Schema.Record(Schema.String, Schema.String.check(Schema.isPattern(/^did:web:[^#]+$/u)))),
   secretsCommand: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\//u))),
 });
 export type NetworkCommsConfig = typeof NetworkCommsConfig.Type;
@@ -89,11 +91,15 @@ export const NetworkIdentityName = Schema.String.check(Schema.isPattern(/^(?:[a-
 export const decodeNetworkIdentityName = Schema.decodeUnknownSync(NetworkIdentityName);
 export const decodeCommsIdentityCache = Schema.decodeUnknownSync(Schema.Record(NetworkIdentityName, CommsIdentityReference));
 
+const RouteDelivery = Schema.Struct({ status: Schema.String, detail: Schema.optionalKey(Schema.String),
+  id: Schema.optionalKey(Schema.String), senderDid: Schema.optionalKey(Schema.String), recipientDid: Schema.optionalKey(Schema.String),
+  seq: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
+});
 export const DeskRouteReceipt = Schema.Struct({
   id: Schema.String, at: Schema.String, to: Schema.String, sender: SessionId,
   path: Schema.Literals(["network", "intercom-fallback"]),
-  network: Schema.Struct({ status: Schema.String, detail: Schema.optionalKey(Schema.String) }),
-  fallback: Schema.optionalKey(Schema.Struct({ status: Schema.String, detail: Schema.optionalKey(Schema.String) })),
+  network: RouteDelivery,
+  fallback: Schema.optionalKey(RouteDelivery),
 });
 export const decodeDeskRouteReceipt = Schema.decodeUnknownSync(DeskRouteReceipt);
 

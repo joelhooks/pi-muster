@@ -158,7 +158,7 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
       const provisionName = networkProvisionName(agent);
       const config = readNetworkConfig(options.home, options.configPath);
       const path = networkIdentityPath(options.home);
-      const did = config.didTemplate.replace("{agent}", provisionName);
+      const did = Object.hasOwn(config.didOverrides ?? {}, provisionName) ? config.didOverrides![provisionName]! : config.didTemplate.replace("{agent}", provisionName);
       const cached = readNetworkIdentities(options.home)[agent];
       if (cached) {
         if (cached.did !== did) throw new CommsError(`NetworkComms cached identity differs from config: ${agent}`);
@@ -377,7 +377,7 @@ export function createNetworkComms(options: {
       const result = yield* sendWithConsumerFence({ home: options.home, did: ownDid, send: opts => service.send(target.did, body, opts) });
       const { receiptDelivery } = yield* Effect.promise(() => import("./comms.ts"));
       const delivery = yield* receiptDelivery(result.receipt);
-      return { ...delivery, detail: `${delivery.detail ? `${delivery.detail}; ` : ""}messageId: ${result.receipt.message.messageId}; seq: ${result.receipt.seq}; state: ${result.receipt.state}` };
+      return { ...delivery, id: result.receipt.message.messageId, senderDid: ownDid, recipientDid: target.did, seq: result.receipt.seq, detail: `${delivery.detail ? `${delivery.detail}; ` : ""}messageId: ${result.receipt.message.messageId}; seq: ${result.receipt.seq}; state: ${result.receipt.state}` };
     }).pipe(Effect.catch(error => Effect.gen(function* () {
       const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
       const { isKnownError } = yield* Effect.promise(() => import("./vendor/rat-king-lexicon/mailbox.send.ts"));

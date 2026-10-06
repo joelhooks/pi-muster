@@ -288,7 +288,7 @@ export default function muster(host: ExtensionAPI) {
       try {
         return await run(ctx, signal, sendDesk({ home: homedir(), dir, to: params.to, text: params.text,
           sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms: service,
-        }), result => `delivery: ${result.path} · network: ${result.network.status}${result.network.detail ? ` (${result.network.detail})` : ""}${result.fallback ? ` · FALLBACK intercom: ${result.fallback.status}${result.fallback.detail ? ` (${result.fallback.detail})` : ""}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`);
+        }), result => `delivery: ${result.path} · network: ${result.network.status}${result.network.recipientDid ? ` · DID: ${result.network.recipientDid}` : ""}${result.network.detail ? ` (${result.network.detail})` : ""}${result.fallback ? ` · FALLBACK intercom: ${result.fallback.status}${result.fallback.id ? ` · intercom id: ${result.fallback.id}` : ""}${result.fallback.detail ? ` (${result.fallback.detail})` : ""}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`);
       } finally { service.dispose(); }
     },
   });
