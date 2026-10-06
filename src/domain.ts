@@ -682,6 +682,10 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
 export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(["intercom", "network"])) }));
 export const decodeProject = Schema.decodeUnknownSync(Project);
 export const decodeDeskItem = Schema.decodeUnknownSync(DeskItem);
+/** Only the vendored mailbox's authenticated open path may supply this value. */
+export const decodeDeskOpenedMessage = Schema.decodeUnknownSync(Schema.Struct({
+  senderDid: Schema.String, tid: Schema.String, body: Schema.String, verified: Schema.Literal(true),
+}));
 export const decodeAgentName = Schema.decodeUnknownSync(AgentName);
 export const decodeSlug = Schema.decodeUnknownSync(Slug);
 
