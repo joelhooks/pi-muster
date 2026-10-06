@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Effect, Schema, Stream } from "effect";
@@ -99,9 +99,29 @@ describe("private network configuration and provisioning", () => {
     privateFile(networkIdentityPath(root), { desk: provision() });
     privateFile(networkConfigPath(root), { ...config, didTemplate: "did:web:{agent}.changed.invalid" });
     await expect(Effect.runPromise(provisionNetworkAgent({ home: root, agent: "desk" }))).rejects.toThrow("differs from config: desk");
-    privateFile(`${networkIdentityPath(root)}.lock`, {});
-    await expect(Effect.runPromise(provisionNetworkAgent({ home: root, agent: "worker" }))).rejects.toThrow("cache busy: worker");
+    privateFile(`${networkIdentityPath(root)}.lock`, { pid: process.pid, token: "live-holder" });
+    await expect(Effect.runPromise(provisionNetworkAgent({ home: root, agent: "worker", lockWaitMs: 50 }))).rejects.toThrow("cache busy: worker");
     expect(readNetworkIdentities(root).desk).toEqual(provision());
+    expect(JSON.parse(readFileSync(`${networkIdentityPath(root)}.lock`, "utf8")).token).toBe("live-holder"); // A live holder's lock is never taken.
+  });
+  it.each([
+    ["a dead holder", { pid: 2147483647, token: "dead-holder" }, false],
+    ["an empty legacy lock older than 30 s", "", true],
+  ] as const)("recovers the identity cache lock from %s and provisions", async (_name, lock, old) => {
+    const root = home(); privateFile(networkConfigPath(root), config);
+    const path = `${networkIdentityPath(root)}.lock`;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    if (typeof lock === "string") writeFileSync(path, lock, { mode: 0o600 }); else privateFile(path, lock);
+    if (old) utimesSync(path, new Date(0), new Date(0));
+    const run = vi.fn(async () => JSON.stringify(provision("worker")));
+    expect((await Effect.runPromise(provisionNetworkAgent({ home: root, agent: "worker", run, lockWaitMs: 50 }))).did).toBe(provision("worker").did);
+    expect(existsSync(path)).toBe(false); // Released after use.
+  });
+  it("waits for a young empty legacy lock instead of stealing it", async () => {
+    const root = home(); privateFile(networkConfigPath(root), config);
+    const path = `${networkIdentityPath(root)}.lock`; mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); writeFileSync(path, "", { mode: 0o600 });
+    await expect(Effect.runPromise(provisionNetworkAgent({ home: root, agent: "worker", run: async () => JSON.stringify(provision("worker")), lockWaitMs: 50 }))).rejects.toThrow("cache busy: worker");
+    expect(existsSync(path)).toBe(true);
   });
   it("unknown recipients fail by name before leasing keys", async () => {
     const root = home(); privateFile(networkConfigPath(root), config); const run = vi.fn(async () => "PRIVATE_SENTINEL");

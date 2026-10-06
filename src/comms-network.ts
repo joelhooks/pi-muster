@@ -23,6 +23,37 @@ export function readConsumerFence(home: string, did: string): LeaseFence | undef
   }
 }
 
+/** Cache-file lock shared by identity, peer and seed writers: records its holder, recovers a
+ * dead holder or an empty legacy lock older than 30 s, waits boundedly for a live one, and only
+ * ever removes its own token. A crash mid-provision must never block an identity for good. */
+export function acquireCacheLock(path: string, busy: string, waitMs = 10_000): { path: string; token: string } {
+  const token = randomUUID();
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try { writeFileSync(path, JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 }); return { path, token }; }
+    catch (error) { if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error; }
+    let stat;
+    try { stat = lstatSync(path); } catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") continue; throw error; }
+    if (!stat.isFile() || stat.uid !== process.getuid?.()) throw new CommsError(`${busy} (unsafe lock file)`);
+    let stale = false;
+    try {
+      const holder = decodeNetworkFenceLock(privateJson(path));
+      try { process.kill(holder.pid, 0); } catch (error) { stale = error instanceof Error && "code" in error && error.code === "ESRCH"; }
+    } catch { stale = Date.now() - stat.mtimeMs > 30_000; } // Legacy empty lock: recovered by age only.
+    if (stale) {
+      try { const current = lstatSync(path); if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs) unlinkSync(path); }
+      catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; }
+      continue;
+    }
+    if (Date.now() >= deadline) throw new CommsError(busy);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+  }
+}
+
+export function releaseCacheLock(lock: { path: string; token: string }) {
+  try { if (decodeNetworkFenceLock(privateJson(lock.path)).token === lock.token) unlinkSync(lock.path); } catch { /* gone or superseded */ }
+}
+
 /** acquire → inspect stale holder → bounded wait → held → release.
  * No live holder can release a successor's token. Legacy empty locks expire in 30s.
  */
@@ -173,13 +204,13 @@ export function seedNetworkPeers(home: string, value: unknown) {
     const current = readPeerCache(path, desk);
     if (Object.entries(entries).every(([session, agent]) => current[session] === agent)) continue;
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const lock = `${path}.lock`; writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
+    const lock = acquireCacheLock(`${path}.lock`, "NetworkComms peer cache busy; retry");
     const temp = `${path}.${randomUUID()}.tmp`;
     try {
       const merged = { ...readPeerCache(path, desk), ...entries };
       writeFileSync(temp, JSON.stringify((desk ? decodeNetworkDeskPeers : decodeNetworkPeers)(merged)), { flag: "wx", mode: 0o600 });
       renameSync(temp, path);
-    } finally { try { unlinkSync(temp); } catch { /* renamed */ } unlinkSync(lock); }
+    } finally { try { unlinkSync(temp); } catch { /* renamed */ } releaseCacheLock(lock); }
   }
 }
 
@@ -193,7 +224,7 @@ export const privateCommand: PrivateCommand = (file, args) => new Promise((resol
 });
 
 /** Idempotent provisioning is serialized across processes; cache stores entry names, never keys. */
-export function provisionNetworkAgent(options: { home: string; agent: string; configPath?: string; run?: PrivateCommand }): Effect.Effect<CommsIdentityReference, CommsError> {
+export function provisionNetworkAgent(options: { home: string; agent: string; configPath?: string; run?: PrivateCommand; lockWaitMs?: number }): Effect.Effect<CommsIdentityReference, CommsError> {
   return Effect.tryPromise({
     try: async () => {
       const agent = decodeNetworkIdentityName(options.agent);
@@ -207,9 +238,7 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
         return cached;
       }
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      const lock = `${path}.lock`;
-      try { writeFileSync(lock, "", { flag: "wx", mode: 0o600 }); }
-      catch { throw new CommsError(`NetworkComms identity cache busy: ${agent}; retry provisioning`); }
+      const lock = acquireCacheLock(`${path}.lock`, `NetworkComms identity cache busy: ${agent}; retry provisioning`, options.lockWaitMs);
       try {
         const identities = readIdentityCache(path, agent.includes("/"));
         if (identities[agent]) {
@@ -227,7 +256,7 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
           renameSync(temp, path);
         } finally { try { unlinkSync(temp); } catch { /* already renamed */ } }
         return reference;
-      } finally { unlinkSync(lock); }
+      } finally { releaseCacheLock(lock); }
     },
     catch: error => error instanceof CommsError ? error : new CommsError(`NetworkComms provisioning failed: ${options.agent} (output withheld)`),
   });
@@ -312,7 +341,7 @@ export function seedNetworkIdentities(home: string, value: unknown) {
     if (!Object.keys(entries).length) continue;
     const path = desk ? networkDeskIdentityPath(home) : networkIdentityPath(home);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    const lock = `${path}.lock`; writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
+    const lock = acquireCacheLock(`${path}.lock`, "NetworkComms identity cache busy; retry seeding");
     const temp = `${path}.${randomUUID()}.tmp`;
     try {
       const current = readIdentityCache(path, desk);
@@ -321,7 +350,7 @@ export function seedNetworkIdentities(home: string, value: unknown) {
       }
       writeFileSync(temp, JSON.stringify({ ...current, ...entries }), { flag: "wx", mode: 0o600 });
       renameSync(temp, path);
-    } finally { try { unlinkSync(temp); } catch { /* renamed */ } unlinkSync(lock); }
+    } finally { try { unlinkSync(temp); } catch { /* renamed */ } releaseCacheLock(lock); }
   }
 }
 
