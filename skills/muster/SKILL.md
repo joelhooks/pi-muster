@@ -99,6 +99,7 @@ Read [done means live and proven](references/done.md) when cutting a brief or fi
 - When Joel delegates an operation ("take charge"), record the scope in the handoff. Within it, the desk rules on execution choices from source and sends one ruling to the owning lane, never the same question back to Joel. A new class of risk goes to Joel: customer sends beyond the approval, broader production code, durability changes, deletion. A delegated desk never turns a failed gate into a pass.
 - When Joel stops the line (a freeze with only essentials and monitoring), the desk runs [stop the line](references/stop-the-line.md). Hawk stays standing: it drops to low thinking, or a fresh third-shift Hawk takes over. Only Joel resumes.
 - A desk holding several decisions for Joel publishes one [desk report](references/desk-report.md) page, not a chat digest. His pasted feedback goes through `desk_rulings`: each item is resolved, then the owner gets one message.
+- The Switchboard uses `desk_phone` for rats-nest only: send one report card with marked suggestions, poll its private pending map, and sync recorded phone rulings or threads resolved elsewhere; its existing network consumer owns all answers and the single DID lease.
 - Never act on GitHub as Joel. Use the ShitRat bot or ask. "Rerun until green" is not a gate.
 
 ## Talking across lanes and desks

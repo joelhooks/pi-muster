@@ -123,6 +123,26 @@ export const focusDesk = (slug: string, reference?: string) => Effect.gen(functi
   return { live: true, typed };
 });
 
+/** Borrow the current Switchboard consumer's lease; this tool never acquires or polls a mailbox. */
+export const deskPhone = (input: { action: "send" | "poll" | "sync"; card?: unknown; page?: string | undefined }) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const [{ readDeskPhoneConfig }, { deskPhoneSnapshot, sendDeskPhone, syncDeskPhone }, { openNetworkMailbox, readNetworkIdentities }, { DeskInboxError }] = yield* Effect.promise(() => Promise.all([
+    import("./desk-phone-store.ts"), import("./desk-phone.ts"), import("./comms-network.ts"), import("./desk-inbox.ts"),
+  ]));
+  const identities = yield* readDeskPhoneConfig(env.home);
+  const own = yield* Effect.try({ try: () => readNetworkIdentities(env.home).switchboard?.did, catch: () => new DeskInboxError("desk_phone Switchboard identity cache is unavailable") });
+  if (own !== identities.switchboard) return yield* Effect.fail(new DeskInboxError("desk_phone configured DID differs from the Switchboard network identity"));
+  const mailbox = yield* openNetworkMailbox({ home: env.home, agent: "switchboard", configPath: process.env.MUSTER_NETWORK_CONFIG });
+  const lease = yield* mailbox.lease.resolve(identities.switchboard);
+  if (lease.did !== identities.switchboard || lease.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || lease.harness.sessionId !== env.sessionId || Date.parse(lease.expiresAt) <= env.now().getTime()) return yield* Effect.fail(new DeskInboxError("desk_phone requires this session's existing Switchboard network consumer and live lease; no second lease will be acquired"));
+  const context = { home: env.home, identities, mailbox };
+  switch (input.action) {
+    case "send": return yield* sendDeskPhone({ ...context, card: input.card, page: input.page ?? "phone-rats-nest" });
+    case "sync": return yield* syncDeskPhone(context);
+    case "poll": return yield* deskPhoneSnapshot(env.home, identities);
+  }
+});
+
 export interface DeskAnswerInput {
   readonly project: string;
   readonly id: string;
