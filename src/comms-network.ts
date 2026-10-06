@@ -8,6 +8,11 @@ import { decodeAgentName, decodeCommsIdentityCache, decodeCommsIdentityReference
 import { CommsError, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
 
+/** acquire/re-acquire publishes; finalization retires only its own registration.
+ * Sends borrow this fence, never acquire a competing lease or own a clock.
+ */
+const consumerFences = new Map<string, { owner: symbol; fence: LeaseFence }>();
+
 export const networkConfigPath = (home: string) => join(home, ".config/muster/network.json");
 export const networkIdentityPath = (home: string) => join(home, ".local/state/muster/network-identities.json");
 
@@ -205,11 +210,12 @@ export function consumeNetworkMailbox(options: {
     const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
     const ownDid = yield* Effect.try({ try: () => networkRecipient(options.home, options.agent).did, catch: failure });
     let fence: LeaseFence | undefined;
+    const owner = Symbol("network consumer");
     const acquire = () => options.mailbox.lease.acquire({ did: ownDid,
       harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: options.session }, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     }).pipe(Effect.flatMap(lease => lease.did !== ownDid || lease.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || lease.harness.sessionId !== options.session
       ? Effect.fail(new MailboxClientError({ reason: "Mailbox lease differs from consumer identity" }))
-      : Effect.sync(() => { fence = lease; return lease; })));
+      : Effect.sync(() => { fence = lease; consumerFences.set(ownDid, { owner, fence: lease }); return lease; })));
     const run = watchNetworkMailbox({ mailbox: options.mailbox, acquire, afterSeq }).pipe(Stream.runForEach(batch => Effect.gen(function* () {
       for (const event of batch.events) {
         if (event.$type !== "sh.mschf.ratking.defs#messageEvent" || !isMessage(event)) continue;
@@ -233,7 +239,10 @@ export function consumeNetworkMailbox(options: {
         await writeFile(temp, JSON.stringify({ [options.agent]: batch.throughSeq }), { mode: 0o600 }); await rename(temp, cursorPath);
       }, catch: failure });
     })), Effect.mapError(error => "error" in error && error.error === "AuthRequired" ? new CommsError("NetworkComms authentication failed; consumer stopped") : error instanceof CommsError ? error : failure()));
-    return yield* Effect.ensuring(run, Effect.suspend(() => fence ? options.mailbox.lease.release(fence).pipe(Effect.timeout("5 seconds"), Effect.ignore) : Effect.void));
+    return yield* Effect.ensuring(run, Effect.suspend(() => {
+      if (consumerFences.get(ownDid)?.owner === owner) consumerFences.delete(ownDid);
+      return fence ? options.mailbox.lease.release(fence).pipe(Effect.timeout("5 seconds"), Effect.ignore) : Effect.void;
+    }));
   });
 }
 
@@ -254,11 +263,22 @@ export function createNetworkComms(options: {
   const targetSession = (to: CommsTarget) => options.session ? options.session(to) : typeof to === "string" ? Effect.succeed(to) : Effect.fail(new CommsError("NetworkComms recipient session required"));
   const send = (to: CommsTarget, body: string) => Effect.gen(function* () {
       const target = yield* recipient(to);
-      const service = yield* mailbox;
-      const result = yield* service.send(target.did, body);
+      const sender = options.sender();
+      if (!sender) return yield* Effect.fail(new CommsError("NetworkComms sender context missing"));
+      const ownDid = networkRecipient(options.home, sender.agent).did;
+      const service = yield* openNetworkMailbox({ ...options, agent: sender.agent });
+      const fence = consumerFences.get(ownDid)?.fence;
+      const result = yield* service.send(target.did, body, fence ? { fence } : undefined);
       const { receiptDelivery } = yield* Effect.promise(() => import("./comms.ts"));
       return yield* receiptDelivery(result.receipt);
-    }).pipe(Effect.catch(error => Effect.succeed({ status: "failed" as const, detail: error instanceof CommsError ? error.message : "NetworkComms send failed (private output withheld)" })));
+    }).pipe(Effect.catch(error => Effect.gen(function* () {
+      const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
+      const { isKnownError } = yield* Effect.promise(() => import("./vendor/rat-king-lexicon/mailbox.send.ts"));
+      const code = error instanceof MailboxClientError && error.error && isKnownError(error.error) ? error.error : undefined;
+      return { status: "failed" as const, detail: error instanceof CommsError ? error.message : code
+        ? `NetworkComms send failed: ${code}${code === "LeaseMismatch" ? "; sender lease held elsewhere (another process with this identity) or fence changed" : ""} (private output withheld)`
+        : "NetworkComms send failed (private output withheld)" };
+    })));
   return {
     mode: () => Effect.succeed("network"),
     send: (to, body) => targetSession(to).pipe(Effect.flatMap(session => {
