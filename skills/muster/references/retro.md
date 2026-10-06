@@ -1,6 +1,6 @@
 # Finished-lane retro
 
-Improve the agent's environment from finished work, not from guesses about the chat. Run after three closed work lanes since the last retro, and at every `project_review`. Three is the tool's default reminder threshold; an owner can commission an earlier review or choose another batch size in the judge's brief. Muster starts no timer and launches no agent automatically.
+Improve the agent's environment from finished work, not from guesses about the chat. The `retro` skill is the entry point; this file is the judge's procedure. Run after three closed work lanes since the last retro, and at every `project_review`. Three is the tool's default reminder threshold; an owner can commission an earlier review or choose another batch size in the judge's brief. Muster starts no timer and launches no agent automatically.
 
 ## Dispatch
 
