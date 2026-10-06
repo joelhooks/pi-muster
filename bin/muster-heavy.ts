@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
-import { homedir, platform } from "node:os";
-import { readFileSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { execFileSync, spawn } from "node:child_process";
+import { homedir, hostname, platform } from "node:os";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { finishJob, heavyReport, heavySnapshot, heavyStatus, registerJob, refreshJob, jobsPath, type HeavyOptions } from "../src/heavy-lock.ts";
 
 const usage = "usage: muster-heavy [legacy flags] -- <command> [args...] | status [--json] | report [--since 24h] [--json] | gate [--wait seconds] [--tree sha] [--host auto|flagg|pennywise] -- <command>";
@@ -11,10 +11,29 @@ const legacyValueFlags = new Set(["--wait", "--grant", "--slots", "--min-free-gb
 const legacyFlags = new Set(["--exclusive", "--reap", "--list"]);
 function ignoredLine(args: readonly string[], options: HeavyOptions) {
   const names = new Set(args.filter(arg => legacyValueFlags.has(arg) || legacyFlags.has(arg) || arg === "grant"));
-  for (const key of Object.keys(process.env)) if ((key.startsWith("MUSTER_HEAVY_") || ["MUSTER_DEPLOY_WINDOW", "MUSTER_DEPLOY_CAP_MIN", "MUSTER_EXCLUSIVE_CAP_MIN"].includes(key)) && process.env[key] !== undefined) names.add(key);
+  for (const key of Object.keys(process.env)) if ((key.startsWith("MUSTER_HEAVY_") || ["MUSTER_DEPLOY_WINDOW", "MUSTER_DEPLOY_CAP_MIN", "MUSTER_EXCLUSIVE_CAP_MIN"].includes(key)) && key !== "MUSTER_HEAVY_GATE_TMP" && process.env[key] !== undefined) names.add(key);
   if (options.window !== undefined) names.add("MUSTER_DEPLOY_WINDOW");
   if (options.grant !== undefined) names.add("MUSTER_HEAVY_GRANT");
   if (names.size) console.error(`muster-heavy: ignored legacy admission settings: ${[...names].join(", ")}`);
+}
+
+/** Only Flagg macOS jobs use RAM. An explicit ensure executable supports probes;
+ * failure warns and falls back to the inherited TMPDIR. */
+export function claimGateTmp(setting = process.env.MUSTER_HEAVY_GATE_TMP, host = { platform: process.platform, name: hostname() }): { dir: string; release: () => void } | undefined {
+  if (setting === "off" || host.platform !== "darwin" || host.name.split(".")[0]?.toLowerCase() !== "flagg") return undefined;
+  const ensure = setting || join(dirname(fileURLToPath(import.meta.url)), "gate-tmp");
+  try {
+    const root = execFileSync(ensure, ["ensure"], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    if (!root.startsWith("/") || root.includes("\n")) throw new Error("ensure did not return one absolute root");
+    const dir = mkdtempSync(join(root, `run-${process.pid}-`));
+    let released = false;
+    return { dir, release: () => { if (!released) { rmSync(dir, { recursive: true, force: true }); released = true; } } };
+  } catch (error) {
+    const stderr = error && typeof error === "object" && "stderr" in error ? String(error.stderr).trim() : "";
+    const reason = (stderr || (error instanceof Error ? error.message : String(error))).replace(/\s+/g, " ");
+    console.error(`muster-heavy: WARNING gate RAM disk unavailable (${reason}); running with inherited TMPDIR=${process.env.TMPDIR ?? "unset"}`);
+    return undefined;
+  }
 }
 
 export async function runHeavy(args: string[], options: HeavyOptions) {
@@ -66,7 +85,12 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   const command = args.slice(split + 1);
   // The wrapper pid is the job tree root. Registration precedes spawn, so a status
   // pass cannot call an initializing command lost or miss its descendants.
-  const job = registerJob(options, command.join(" "));
+  const gateTmp = claimGateTmp();
+  const cleanup = () => gateTmp?.release();
+  let job: ReturnType<typeof registerJob>;
+  try { job = registerJob(options, command.join(" "), process.cwd(), process.pid, gateTmp?.dir); }
+  catch (error) { cleanup(); throw error; }
+  process.once("exit", cleanup);
   let child: ReturnType<typeof spawn>;
   let timer: ReturnType<typeof setInterval> | undefined;
   const telemetry = (fn: () => unknown) => {
@@ -86,6 +110,8 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
     if (timer) clearInterval(timer);
     for (const { signal, listener } of listeners) process.off(signal, listener);
     telemetry(() => finishJob(options, job, code, Date.now(), cpuSeconds));
+    telemetry(cleanup);
+    process.off("exit", cleanup);
     process.exit(code);
   };
   // time's wait4 accounting preserves CPU for short jobs and exited children
@@ -94,7 +120,16 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   // from an intentional exit 143. Its %x is the child exit field (zero on signal).
   const accountingPath = join(jobsPath(options.home), `${job.id}.time`);
   const format = platform() === "linux" ? ["-f", "real %e\nuser %U\nsys %S\nexit %x"] : ["-p"];
-  child = spawn("/usr/bin/time", [...format, "-o", accountingPath, "--", ...command], { stdio: "inherit", detached: true });
+  try {
+    child = spawn("/usr/bin/time", [...format, "-o", accountingPath, "--", ...command], {
+      stdio: "inherit", detached: true,
+      ...(gateTmp && { env: { ...process.env, TMPDIR: `${gateTmp.dir}/` } }),
+    });
+  } catch (error) {
+    console.error(`muster-heavy: ${error instanceof Error ? error.message : String(error)}`);
+    finish(127);
+    return;
+  }
   telemetry(() => refreshJob(options, job));
   timer = setInterval(() => telemetry(() => refreshJob(options, job)), 5000);
   child.on("close", (code, signal) => {

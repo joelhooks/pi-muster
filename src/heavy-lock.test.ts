@@ -23,6 +23,15 @@ describe("job registry", () => {
     expect(finishJob(options, job, 7, 12000, 1.23)).toMatchObject({ state: "finished", exit: 7, wallMs: 2000, cpuSeconds: 1.23 });
     expect(finishJob(options, job, null, 13000).state).toBe("finished");
   });
+  it("preserves a claimed tmpdir through registration and terminal decoding", () => {
+    const options = setup();
+    const dir = "/Volumes/gate-tmp/run-123-example";
+    const job = registerJob(options, "RAM job", process.cwd(), process.pid, dir);
+    expect(readJobs(options.home)[0]?.tmpdir).toBe(dir);
+    expect(finishJob(options, job, 0).tmpdir).toBe(dir);
+    expect(readJobs(options.home)[0]?.tmpdir).toBe(dir);
+    expect(() => decodeHeavyJob({ ...job, tmpdir: 42 })).toThrow();
+  });
   it("rejects malformed records and impossible terminal variants", () => {
     const options = setup(); const job = registerJob(options, "test");
     expect(() => decodeHeavyJob({ ...job, state: "lost", exit: 0, lost: true })).toThrow();

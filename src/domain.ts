@@ -18,6 +18,7 @@ const JobFacts = {
   host: Schema.String, repo: Schema.String, cwd: Schema.String, command: Schema.String,
   pid: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
   startedAt: Schema.String,
+  tmpdir: Schema.optionalKey(Schema.String),
   cpuPercent: Schema.Number, rssKB: Schema.Number, peakRssKB: Schema.Number,
   cpuSeconds: Schema.Number, sampledAt: Schema.NullOr(Schema.Number),
 };
