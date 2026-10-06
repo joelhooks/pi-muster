@@ -27,6 +27,32 @@ export const Slug = Schema.String.check(
 export const SessionId = Schema.String.check(
   Schema.isPattern(SESSION_ID_RE, { message: "invalid Pi session id" }),
 );
+/** Private machine configuration, never a catalog or package artifact. */
+export const NetworkCommsConfig = Schema.Struct({
+  endpoint: Schema.String.check(Schema.isPattern(/^https?:\/\//u)),
+  serviceDid: Schema.String.check(Schema.isPattern(/^did:[^#]+$/u)),
+  provisionWrapper: Schema.String.check(Schema.isPattern(/^\//u)),
+  didTemplate: Schema.String.check(Schema.isPattern(/^did:web:[^#]*\{agent\}[^#]*$/u)),
+  secretsCommand: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\//u))),
+});
+export type NetworkCommsConfig = typeof NetworkCommsConfig.Type;
+export const decodeNetworkCommsConfig = Schema.decodeUnknownSync(NetworkCommsConfig);
+const PublicCommsKey = Schema.Struct({ kty: Schema.Literal("EC"), crv: Schema.Literal("P-256"), x: Schema.String, y: Schema.String, d: Schema.optionalKey(Schema.Never) });
+const CommsDocument = Schema.Struct({
+  id: Schema.String,
+  verificationMethod: Schema.Array(Schema.Struct({ id: Schema.String, controller: Schema.String, publicKeyJwk: PublicCommsKey })),
+  authentication: Schema.Array(Schema.String),
+  keyAgreement: Schema.Array(Schema.String),
+});
+export const CommsIdentityReference = Schema.Struct({
+  did: Schema.String.check(Schema.isPattern(/^did:web:/u)),
+  secret: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.:-]+$/u)),
+  document: CommsDocument,
+});
+export type CommsIdentityReference = typeof CommsIdentityReference.Type;
+export const decodeCommsIdentityReference = Schema.decodeUnknownSync(CommsIdentityReference);
+export const decodeCommsIdentityCache = Schema.decodeUnknownSync(Schema.Record(AgentName, CommsIdentityReference));
+
 export const OwnerKind = Schema.Literals(["fyi", "progress", "done", "question", "blocked", "action"]);
 export type OwnerKind = typeof OwnerKind.Type;
 const StrongRef = Schema.Struct({ uri: Schema.String, cid: Schema.String });
