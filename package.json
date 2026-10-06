@@ -54,6 +54,7 @@
     "skills/retro/SKILL.md",
     "src/argv.ts",
     "src/autoland.ts",
+    "src/retro-cadence.ts",
     "src/compact.ts",
     "src/comms.ts",
     "src/comms-network.ts",

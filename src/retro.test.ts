@@ -28,8 +28,14 @@ describe("finished lane retros", () => {
     expect(await s.close("judge", "role")).not.toHaveProperty("retro");
     expect(await s.close("one")).not.toHaveProperty("retro");
     expect(await s.close("two")).not.toHaveProperty("retro");
-    expect(await s.close("three")).toHaveProperty("retro", "retro: 3 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run lane_open slug: \"retro-2026-09-29\" label: \"🔁 retro\" goal: \"Review finished lanes\" kind: \"retro\"; run references/retro.md");
-    expect(await s.close("four")).toHaveProperty("retro", "retro: 4 lanes closed since the last retro; run project_review note: \"retro evidence\" for pending lanes' session, tail and report paths; run lane_open slug: \"retro-2026-09-29\" label: \"🔁 retro\" goal: \"Review finished lanes\" kind: \"retro\"; run references/retro.md");
+    const three = (await s.close("three")).retro;
+    expect(three).toContain("retro: 3 lanes closed since the last retro;");
+    expect(three).toContain("judge model: claude-bridge/claude-opus-5-5:high");
+    expect(three).toContain('missing roster judge alternate with useFor: "retro"');
+    expect(three).toContain('run project_review note: "retro evidence"');
+    expect(three).toContain('run lane_open slug: "retro-2026-09-29" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"');
+    expect(three).toContain("run references/retro.md");
+    expect((await s.close("four")).retro).toContain("retro: 4 lanes closed since the last retro;");
     await runWith(s.h, projectReview(s.dir, { note: "done", retro: true }));
     expect(await s.close("five")).not.toHaveProperty("retro");
   });

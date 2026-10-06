@@ -62,6 +62,7 @@ import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem, forwardOwner, ingestOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
+import { retroCadence, retroJudgeModel } from "./retro-cadence.ts";
 import { checkRunnableModel, checkRestoreContext, resolveModel, modelOutputIssue } from "./models.ts";
 import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./session-model.ts";
 import { resolveSkills, skillIndex } from "./skills.ts";
@@ -140,8 +141,11 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   const roster = (yield* loadRoster).roster;
   const label = params.label ?? parent?.profile.label ?? existing?.profile.label;
   if (!label) return yield* input("a remote agent needs a label");
+  const retroChoice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
+  const model = params.model ?? retroChoice?.model ?? parent?.profile.model;
   const profile = profileFor(role, { ...(parent?.profile ?? existing?.profile), label,
-    ...(params.model !== undefined ? { model: params.model } : {}),
+    ...(retroChoice?.model ? { thinking: undefined } : {}),
+    ...(model !== undefined ? { model } : {}),
     ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
     ...(params.skills !== undefined ? { skills: params.skills } : {}),
     ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
@@ -149,13 +153,13 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     ...(params.env !== undefined ? { env: params.env } : {}),
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
     ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
-  }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model, project.slug), null));
+  }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, model, project.slug), null));
   const selected = params.action === "restore" ? { model: profile.model } : yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
   const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
-  const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path)))) };
+  const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
   let remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
@@ -1418,8 +1422,14 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
     );
     yield* publishTokens(yield* load(dir));
     const latest = yield* load(dir);
-    const count = latest.lanes.filter(lane => lane.kind === "work" && lane.state === "closed" && !lane.discarded &&
-      (!latest.lastRetroAt || Date.parse(lane.closedAt ?? lane.updatedAt) > Date.parse(latest.lastRetroAt))).length;
+    const cadence = retroCadence(latest, env.now().getTime());
+    const judge = closed.kind === "work" && !closed.discarded && cadence.due
+      ? yield* Effect.gen(function* () {
+        const roster = (yield* loadRoster).roster;
+        const choice = retroJudgeModel(roster);
+        const profile = yield* decodeWith(() => roleDefaults(roster, latest.policy, "judge", choice.model, latest.slug), null);
+        return `judge model: ${profile.model}:${profile.thinking}; ${choice.notes.length ? `${choice.notes.join("; ")}; ` : ""}`;
+      }) : null;
     const retroBase = `retro-${iso(env).slice(0, 10)}`;
     const taken = new Set(latest.lanes.map(lane => lane.slug));
     let retroSlug = retroBase;
@@ -1429,7 +1439,7 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
       retroSlug = `${retroBase}-${suffix}`;
     }
     return { lane: closed, closed: true, pending: [] as string[], paneNote,
-      ...(closed.kind === "work" && !closed.discarded && count >= 3 ? { retro: `retro: ${count} lanes closed since the last retro; run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run lane_open slug: "${retroSlug}" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"; run references/retro.md` } : {}) };
+      ...(judge ? { retro: `retro: ${cadence.count} lanes closed since the last retro${cadence.reason === "day" ? " (1d)" : ""}; ${judge}run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run lane_open slug: "${retroSlug}" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"; run references/retro.md` } : {}) };
   });
 
 // ---------- agents ----------
@@ -1894,9 +1904,13 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       const inherited: ProfileInput = parent
         ? { ...parent.profile, label }
         : { label };
+      const retroChoice = retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
+      skillNotes.push(...(retroChoice?.notes ?? []));
+      const model = params.model ?? retroChoice?.model ?? parent?.profile.model;
       const requestedProfile: LaunchProfile = profileFor(role, {
         ...inherited,
-        ...(params.model !== undefined ? { model: params.model } : {}),
+        ...(retroChoice?.model ? { thinking: undefined } : {}),
+        ...(model !== undefined ? { model } : {}),
         ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
         ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
         ...(params.skills !== undefined ? { skills: params.skills } : {}),
@@ -1905,7 +1919,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
       }, yield* Effect.try({
-        try: () => roleDefaults(roster, project.policy, role, params.model ?? parent?.profile.model, project.slug),
+        try: () => roleDefaults(roster, project.policy, role, model, project.slug),
         catch: (error) => input(String(error instanceof Error ? error.message : error)),
       }));
       const resolved = requestedProfile.skills.length > 0
