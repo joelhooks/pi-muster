@@ -1919,7 +1919,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     if (!params.cwd && !parent?.cwd && !existing?.cwd && !params.clone) return yield* input("a new agent needs cwd or clone: true");
     if (params.clone && !lane.repo) return yield* input("clone: true needs a lane repo");
     const brief = params.brief ?? existing?.brief ?? null;
-    if (brief) {
+    if (brief && (machine === "local" || params.brief)) {
       yield* requireAbsolute("brief", brief);
       yield* guardDurable(project, "brief", brief);
       yield* Effect.try({ try: () => readFileSync(brief, "utf8"), catch: error => new InputError({ message: `brief is not readable: ${String(error)}` }) });
@@ -1934,7 +1934,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const state = yield* stepAgent(params.name, priorState, { type: params.action === "restore" ? "QUEUE_RESTORE" : "LAUNCH" });
     const launchJob = { id, pid: null, log, startedAt: iso(env), priorState, owner: env.sessionId, request: params };
     const reserved: AgentRow = { ...existing, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
-      cwd, clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()),
+      cwd: machine === "local" ? cwd : mapPath(cwd, yield* machineConfig(machine)), clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()),
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
       owner: existing && existing.owner === existing.sessionId ? existing.owner : env.sessionId, brief, state, delivery: "none",
       restarts: existing?.restarts ?? 0, restore: existing?.restore ?? null, createdAt: existing?.createdAt ?? iso(env), updatedAt: iso(env), launchJob };
@@ -1993,13 +1993,14 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     const state = failed && latest.state !== "failed" ? yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" }) : latest.state;
     const next = { ...latest, state, launchJob: { ...latest.launchJob, outcome: kind }, updatedAt: iso(env),
       ...(failed ? { events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: body }] } : {}) };
+    // The caller is local even when the worker is remote or network-backed.
+    // Record an outcome only once the waking result is durable in its queue.
+    const notice = yield* deliverOwnerItem({ owner: job.owner, home: env.home, session: env.sessionId, project: current.slug,
+      item: { author: `muster-launch-${id}`, lane: row.lane, kind, title: `Launch ${row.name} ${failed ? "failed" : "finished"}`, body, refs: [job.log] },
+      send: () => Effect.succeed({ status: "failed", detail: "result persisted for the owner's queue reader" }), message: body });
+    if (!notice.queued) return yield* input(`launch result could not be queued; log: ${job.log}`);
     return [withRow(current, next), next] as const;
   }));
-  const project = yield* load(dir);
-  // The caller is local even when the worker is remote or network-backed.
-  yield* deliverOwnerItem({ owner: job.owner, home: env.home, session: env.sessionId, project: project.slug,
-    item: { author: env.sessionId, lane: row.lane, kind, title: `Launch ${row.name} ${failed ? "failed" : "finished"}`, body, refs: [job.log] },
-    send: () => Effect.succeed({ status: "failed", detail: "result persisted for the owner's queue reader" }), message: body });
   return { kind, body };
 });
 

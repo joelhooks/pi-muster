@@ -4,7 +4,8 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 - Launch and fork start Pi with the work message in argv (long text uses a private `@file`); only `exec sh <private launcher>` is typed. Restore sends a message only for an explicit `prompt` or `brief`; saved restore argv never carries it. Names are set after detection for watches, never delivery; a refused rename reports the holder without stealing.
 - Remote startup failures retain a private per-launch stderr log under the worker's Git metadata (`muster-launch/launch-*`, or `.pi/muster/launch-*` for a non-Git cwd); inspect the error and row events before retrying, even when the pane has disappeared.
-- An unproven launch includes a single repair call; first-turn proof waits up to 90 s and rejects paste markers and assistant errors. Read the pane and session first; a prompt already working must not be sent again. A current-code desk must restart after an update to use the new launch behavior.
+- The immediate launch receipt contains no delivery proof. The owner-queue action carries the full result; arm the pane watch after that action. A dead launch job is marked failed by `project_status`, never re-spawned automatically. Inspect the named log before retrying.
+- An unproven launch result includes a single repair call; first-turn proof waits up to 90 s and rejects paste markers and assistant errors. Read the pane and session first; a prompt already working must not be sent again. A current-code desk must restart after an update to use the new launch behavior.
 
 - Restore reads the session's latest model and thinking changes; explicit overrides win. If context/window evidence is unavailable, the receipt warns and proceeds: verify the target window before sending the next turn.
 

@@ -25,7 +25,7 @@ import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 async function setup() {
   const h = harness();
   const dir = makeRepo(join(h.root, "repo"));
-  await runWith(h, projectOpen({ dir, slug: "async", outcome: "launch without waiting", nextAction: "launch", criticalPath: ["work"], space: "w1", ephemeral: true, musterExtension: "/muster", deskExtension: null }));
+  await runWith(h, projectOpen({ dir, slug: "async", outcome: "launch without waiting", reviewTrigger: "weekly", nextAction: "launch", criticalPath: ["work"], space: "w1", ephemeral: true, musterExtension: "/muster", deskExtension: null }));
   await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "launch" }));
   const request = { action: "launch" as const, name: "worker", role: "worker" as const, lane: "work", label: "worker", cwd: dir, prompt: "Do the work." };
   return { h, dir, request };
