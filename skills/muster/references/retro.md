@@ -24,6 +24,7 @@ Read transcripts through session tools in bounded slices. Start with `session_in
 
 | Category | Question |
 | --- | --- |
+| Vision | Read the project's `VISION.md` first. Which friction most slowed progress toward it, and which fix moves the project furthest? |
 | Navigation | Was a dependency or renderer hard to find? Would a conditional pointer help? |
 | Automated checks | Could a deterministic check catch the error? Read the repo's checks and CI first; repair unwired checks instead of inventing duplicates. |
 | Coding standards | Did review miss a judgment call? Mechanical patterns belong in a deterministic check, not another written rule. |
