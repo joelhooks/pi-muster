@@ -64,11 +64,22 @@ describe("owner queue", () => {
     const result = await Effect.runPromise(deliverOwnerItem({ owner: "old", home: f.home, session: "probe", project: "p", item: { author: "probe", kind: "question", title: "wake", mention: "old" }, send: to => { calls.push(to); return Effect.succeed({ status: "delivered" as const }); } }));
     expect(calls).toEqual(["owner"]); expect(result.woke).toBe(true);
     expect(mentions(readOwnerQueue("owner", f.home).items[0]!.item, "owner")).toBe(true);
-    forwardOwner({ from: "a", to: "b", project: "p", home: f.home });
+    // Tail-first: compression only repoints forwards that already target `from`.
     forwardOwner({ from: "b", to: "owner", project: "p", home: f.home });
+    forwardOwner({ from: "a", to: "b", project: "p", home: f.home });
     expect(() => forwardOwner({ from: "owner", to: "a", project: "p", home: f.home })).toThrow("owner forward cycle");
-    for (let n = 3; n >= 0; n--) forwardOwner({ from: "a" + n, to: n === 3 ? "owner" : "a" + (n + 1), project: "p", home: f.home });
+    // Built tail-first, so write-time compression cannot shorten it.
+    for (let n = 15; n >= 0; n--) forwardOwner({ from: "a" + n, to: n === 15 ? "owner" : "a" + (n + 1), project: "p", home: f.home });
     expect(() => forwardOwner({ from: "extra", to: "a0", project: "p", home: f.home })).toThrow(/depth/);
+  });
+  it("repeated restarts compress the chain to one hop and keep each source's boundary", () => {
+    const f = fixture();
+    appendOwnerItem("d0", { author: "w", project: "p", kind: "question", title: "early" }, f.home);
+    for (let n = 0; n < 6; n++) forwardOwner({ from: "d" + n, to: "d" + (n + 1), project: "p", home: f.home });
+    for (let n = 0; n < 6; n++) expect(ownerRoute("d" + n, f.home, "p")).toMatchObject({ owner: "d6", sources: [{ owner: "d" + n }] });
+    expect(ownerRoute("d0", f.home, "p").sources[0]!.forward.cursor).toBe(1);
+    forwardOwner({ from: "q0", to: "d0", project: "q", home: f.home });
+    expect(ownerRoute("q0", f.home, "q").owner).toBe("d0");
   });
   it("reclaims a direct reverse forward, preserves its file and leaves other projects and sessions alone", () => {
     const f = fixture();
@@ -90,8 +101,8 @@ describe("owner queue", () => {
   });
   it("does not retire an indirect three-session cycle", () => {
     const f = fixture();
-    forwardOwner({ from: "a", to: "b", project: "p", home: f.home });
     forwardOwner({ from: "b", to: "c", project: "p", home: f.home });
+    forwardOwner({ from: "a", to: "b", project: "p", home: f.home });
     const directory = dirname(ownerPath("a", f.home));
     const before = readdirSync(directory).map(name => [name, readFileSync(join(directory, name), "utf8")]);
     expect(() => forwardOwner({ from: "c", to: "a", project: "p", home: f.home })).toThrow("owner forward cycle");

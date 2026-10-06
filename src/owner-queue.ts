@@ -4,7 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { Effect } from "effect";
 import { decodeOwnerItem, decodeOwnerReader, decodeOwnerSession, decodeOwnerForward, decodeProject } from "./domain.ts";
 import type { OwnerItem, OwnerKind } from "./domain.ts";
@@ -47,7 +47,9 @@ function readForward(session: string, home: string, project: string) {
   }
   return undefined;
 }
-/** Four hops at most; corrupt records and cycles fail closed. */
+/** Writes compress chains to one hop; the read bound covers chains written before that. */
+const MAX_OWNER_HOPS = 16;
+/** Bounded hops; corrupt records and cycles fail closed. */
 export function ownerRoute(owner: string, home = homedir(), project?: string) {
   const sources: Array<{ owner: string; forward: ReturnType<typeof decodeOwnerForward> }> = [];
   const seen = new Set<string>();
@@ -57,7 +59,7 @@ export function ownerRoute(owner: string, home = homedir(), project?: string) {
     seen.add(owner);
     const forward = project === undefined ? undefined : readForward(owner, home, project);
     if (!forward) return { owner, sources };
-    if (sources.length === 4) throw new Error("owner forward depth exceeds 4");
+    if (sources.length === MAX_OWNER_HOPS) throw new Error(`owner forward depth exceeds ${MAX_OWNER_HOPS}`);
     sources.push({ owner, forward }); owner = forward.to;
   }
 }
@@ -76,7 +78,7 @@ export function forwardOwner(params: { from: string; to: string; project: string
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const route = ownerRoute(params.to, params.home, params.project);
   if (route.owner === params.from || route.sources.some(s => s.owner === params.from)) throw new Error("owner forward cycle");
-  if (route.sources.length >= 4) throw new Error("owner forward depth exceeds 4");
+  if (route.sources.length >= MAX_OWNER_HOPS) throw new Error(`owner forward depth exceeds ${MAX_OWNER_HOPS}`);
   const existing = readForward(params.from, params.home, params.project);
   if (existing?.to === params.to) return retired; // Never move the history boundary on a repeated takeover.
   let heartbeatAt: string | undefined;
@@ -88,6 +90,18 @@ export function forwardOwner(params: { from: string; to: string; project: string
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, JSON.stringify(record), { mode: 0o600 }); renameSync(temp, path);
+  // Every restart adds a hop. Repoint earlier forwards to the new owner, keeping
+  // each record's own cursor and heartbeat boundary, so chains stay one hop deep.
+  const suffix = `.${createHash("sha256").update(params.project).digest("hex")}.forward`;
+  for (const name of readdirSync(dirname(path))) {
+    if (!name.endsWith(suffix) || name === basename(path)) continue;
+    const earlier = join(dirname(path), name);
+    let prior;
+    try { prior = decodeOwnerForward(JSON.parse(readFileSync(earlier, "utf8"))); } catch { continue; /* readers fail closed on it */ }
+    if (prior.to !== params.from || prior.project !== params.project) continue;
+    const priorTemp = `${earlier}.${process.pid}.tmp`;
+    writeFileSync(priorTemp, JSON.stringify({ ...prior, to: params.to }), { mode: 0o600 }); renameSync(priorTemp, earlier);
+  }
   return retired;
 }
 /** The original records stay intact; source aliases carry routing and display context. */
@@ -174,7 +188,7 @@ export function ownerSourceReader(owner: string, home = homedir(), observe?: (ev
         const legacy = fresh.has(source) ? undefined : forwards.get(`${source}.forward`);
         const forward = scoped ?? (legacy?.project === project && project !== undefined ? legacy : undefined);
         if (!forward) return { owner: source, sources };
-        if (sources.length === 4) throw new Error("owner forward depth exceeds 4");
+        if (sources.length === MAX_OWNER_HOPS) throw new Error(`owner forward depth exceeds ${MAX_OWNER_HOPS}`);
         sources.push({ owner: source, forward }); source = forward.to;
       }
     };
