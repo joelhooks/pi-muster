@@ -68,6 +68,7 @@ const OWNER_TOOLS = [
   "thinking_set",
   "desk_inbox",
   "desk_answer",
+  "desk_phone",
   "desk_report",
   "desk_rulings",
   "project_digest",

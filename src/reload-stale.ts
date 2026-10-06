@@ -28,7 +28,7 @@ export function musterToolNames(env: Readonly<NodeJS.ProcessEnv>): string[] {
     ...(env.MUSTER_AGENT && env.MUSTER_PROJECT && env.MUSTER_OWNER ? ["packet_report"] : []),
     "skill_find",
     ...(worker ? ["context_mark"] : [
-      "desk_send", "thinking_set", "desk_inbox", "desk_answer", "desk_report", "desk_rulings", "project_digest",
+      "desk_send", "thinking_set", "desk_inbox", "desk_answer", "desk_phone", "desk_report", "desk_rulings", "project_digest",
       "project_open", "project_move", "lane_open", "lane_deliver", "lane_close", "agent_launch",
       "agent_rewind", "agent_close", "packet_verify", "packet_land", "desk_post", "project_status", "project_update", "project_review",
     ]),
