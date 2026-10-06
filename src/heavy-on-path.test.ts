@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { mutate } from "./store.ts";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";

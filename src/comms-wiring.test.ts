@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { createComms, NetworkComms, remoteCommsEnvironment } from "./comms.ts";
 import { networkConfigPath, networkIdentityPath } from "./comms-network.ts";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { Comms } from "./runtime.ts";
 import { load, mutate } from "./store.ts";
 import { harness, runWith } from "./test-support.ts";

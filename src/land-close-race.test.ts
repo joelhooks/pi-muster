@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { agentClose, agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen } from "./ops.ts";
+import { agentClose, agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen } from "./ops.ts";
 import { Herdr } from "./runtime.ts";
 import { closedDir, load } from "./store.ts";
 import { harness, makeRepo, runWith, sh } from "./test-support.ts";

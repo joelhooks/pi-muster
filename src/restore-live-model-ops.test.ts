@@ -4,7 +4,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { agentClose, agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
+import { agentClose, agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
 import { liveProc } from "./runtime.ts";
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";

@@ -12,7 +12,7 @@ import { machineAdapter, tryAcquireHeavy } from "./heavy-lock.ts";
 import {
   agentClose,
   forceCloseAllowed,
-  agentLaunch,
+  agentLaunchForeground as agentLaunch,
   deskPost,
   laneClose,
   laneDeliver,

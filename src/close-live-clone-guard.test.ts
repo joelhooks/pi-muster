@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { agentClose, agentLaunch, laneOpen, projectOpen, packetReport, packetVerify } from "./ops.ts";
+import { agentClose, agentLaunchForeground as agentLaunch, laneOpen, projectOpen, packetReport, packetVerify } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { FakeHerdr } from "./test-support.ts";
 import { MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";

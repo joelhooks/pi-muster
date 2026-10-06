@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, openSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
 
-import { Effect, Schema } from "effect";
+import { Cause, Effect, Schema } from "effect";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 
 import {
@@ -55,7 +56,7 @@ import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
-import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
+import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
@@ -208,6 +209,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     }
     const now = iso(env);
     let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
+      ...(existing?.launchJob ? { launchJob: existing.launchJob } : {}),
       profile: remoteProfile, owner: env.sessionId, sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
       brief: params.brief ? mapPath(params.brief, machine) : existing?.brief ?? null,
       state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
@@ -1874,12 +1876,142 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   );
 }));
 
-export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
+/** Fast admission only. No process/model/pane probes run in the caller's turn. */
+export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(function* () {
+  const params = yield* decodeWith(decodeAgentLaunchRequest, raw);
+  if (params.action === "adopt" || params.action === "restart") return yield* agentLaunchForeground(dir, params);
+  const env = yield* MusterEnv;
+  const roster = (yield* loadRoster).roster;
+  const id = randomUUID();
+  const log = join(env.home, ".local/state/muster/launches", `${id}.log`);
+  const row = yield* mutate(dir, project => Effect.gen(function* () {
+    yield* guardSideDesk(project, env.sessionId, "agent_launch");
+    if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
+    if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
+    const existing = project.agents.find(row => row.name === params.name);
+    const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
+    const previous = parent ?? existing;
+    const machine = params.machine ?? previous?.machine ?? "local";
+    if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
+    if (machine !== "local") {
+      yield* machineConfig(machine);
+      if (params.side || params.pane) return yield* input("remote launch does not adopt supplied panes or side desks");
+    }
+    const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
+    if (params.action === "restore") {
+      if (!existing) return yield* input(`no row ${params.name} to restore`);
+      yield* stepAgent(params.name, existing.state, { type: "RESTORE" }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
+      if (!existing.sessionFile) return yield* input(`row ${params.name} has no session file to restore; use launch`);
+    } else if (existing && !["planned", "failed"].includes(existing.state) && !(existing.state === "interrupted" && !existing.sessionFile)) {
+      return yield* input(`row ${params.name} is ${existing.state}; restore it, or pick a new name`);
+    }
+    if (parent && !parent.sessionFile) return yield* input("fork needs a parent session file");
+    const role = side ? "desk" : params.role ?? parent?.role ?? existing?.role;
+    const lane = yield* findLane(project, side?.lane ?? params.lane ?? parent?.lane ?? existing?.lane ?? "");
+    if (lane.state !== "open") return yield* input(`lane ${lane.slug} is ${lane.state}`);
+    if (!role) return yield* input("a new agent needs role and lane");
+    const label = params.label ?? parent?.profile.label ?? existing?.profile.label;
+    if (!label) return yield* input("a new agent needs a label");
+    const cwd = params.cwd ?? parent?.cwd ?? existing?.cwd ?? lane.repo ?? project.dir;
+    yield* requireAbsolute("cwd", cwd);
+    yield* guardDurable(project, "cwd", cwd);
+    if (machine === "local" && !params.clone && (!existsSync(cwd) || !statSync(cwd).isDirectory())) return yield* input(`cwd ${cwd} does not exist`);
+    if (!params.cwd && !parent?.cwd && !existing?.cwd && !params.clone) return yield* input("a new agent needs cwd or clone: true");
+    if (params.clone && !lane.repo) return yield* input("clone: true needs a lane repo");
+    const brief = params.brief ?? existing?.brief ?? null;
+    if (brief) {
+      yield* requireAbsolute("brief", brief);
+      yield* guardDurable(project, "brief", brief);
+      yield* Effect.try({ try: () => readFileSync(brief, "utf8"), catch: error => new InputError({ message: `brief is not readable: ${String(error)}` }) });
+    }
+    for (const path of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", path);
+    const choice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
+    const model = params.model ?? choice?.model ?? parent?.profile.model ?? existing?.profile.model;
+    const defaults = yield* decodeWith(() => roleDefaults(roster, project.policy, role, model, project.slug), null);
+    const resolved = yield* decodeWith(() => resolveModel(model ?? defaults.model, roster, project.slug, role), null);
+    const profile = profileFor(role, { ...(parent?.profile ?? existing?.profile), label, model: resolved.model, thinking: params.thinking ?? resolved.thinking ?? defaults.thinking }, defaults);
+    const priorState = existing?.state ?? "planned";
+    const state = yield* stepAgent(params.name, priorState, { type: params.action === "restore" ? "QUEUE_RESTORE" : "LAUNCH" });
+    const launchJob = { id, pid: null, log, startedAt: iso(env), priorState, owner: env.sessionId, request: params };
+    const reserved: AgentRow = { machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
+      cwd, clone: existing?.clone ?? null, profile, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()),
+      sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
+      owner: existing?.owner === existing?.sessionId ? existing.owner : env.sessionId, brief, state, delivery: "none",
+      restarts: existing?.restarts ?? 0, restore: existing?.restore ?? null, createdAt: existing?.createdAt ?? iso(env), updatedAt: iso(env), launchJob };
+    // Spawn while holding the catalog lock; the child claims that same lock before reading its job.
+    const pid = yield* Effect.callback<number, InputError>(resume => {
+      let fd: number | undefined;
+      try {
+        mkdirSync(dirname(log), { recursive: true, mode: 0o700 });
+        fd = openSync(log, "a", 0o600);
+        const child = spawn(process.execPath, [join(env.musterRoot, "bin/muster-launch.ts"), dir, id], {
+          detached: true, stdio: ["ignore", fd, fd],
+          env: { ...process.env, HOME: env.home, MUSTER_OWNER: env.sessionId, MUSTER_LAUNCH_PANE: env.paneId ?? "", MUSTER_WORKER_WORKTREE: env.workerWorktree },
+        });
+        child.once("error", error => resume(Effect.fail(new InputError({ message: `launch spawn failed: ${error.message}` }))));
+        child.once("spawn", () => { child.unref(); resume(child.pid ? Effect.succeed(child.pid) : input("launch process has no pid")); });
+      } catch (error) { resume(input(`launch spawn failed: ${String(error)}`)); }
+      finally { if (fd !== undefined) closeSync(fd); }
+    });
+    const next = { ...reserved, launchJob: { ...launchJob, pid } };
+    return [withRow(project, next), next] as const;
+  })).pipe(Effect.uninterruptible, Effect.mapError(error => new InputError({ message: error.message })));
+  return { row, jobId: id, log, tab: (yield* load(dir)).lanes.find(lane => lane.slug === row.lane)?.tabId,
+    argv: [] as string[], readiness: "not checked (background launch)", proof: null, sessionIdMatched: null,
+    notes: ["result arrives in your owner queue as an action; arm a herdr_watch on the pane after it arrives"] };
+});
+
+export const launchResultText = (result: { row: AgentRow; argv: readonly string[]; readiness: string; proof: Proof | null; sessionIdMatched: boolean | null; notes: readonly string[] }) => [
+  `${result.row.name} ${result.row.state} in pane ${result.row.pane?.paneId} (${result.row.pane?.openedByMuster ? "opened by Muster" : "caller's pane"}), readiness ${result.readiness}.`,
+  `session ${result.row.sessionId}${result.sessionIdMatched === false ? " (differs from the minted id; Herdr's is recorded)" : ""}: ${result.row.sessionFile ?? "file not found yet"}`,
+  result.proof ? `delivery: ${result.proof.state}${result.proof.state === "unproven" ? ` — ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent",
+  ...(result.row.clone ? [`clone base: ${result.row.clone.base ? `${result.row.clone.base.ref} ${result.row.clone.base.sha}` : "unproven (old catalog)"}`] : []),
+  `argv: pi ${result.argv.join(" ")}`, ...result.notes,
+].join("\n");
+
+export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const row = yield* mutate(dir, project => Effect.gen(function* () {
+    const row = project.agents.find(row => row.launchJob?.id === id);
+    if (!row || row.launchJob?.outcome || row.launchJob?.pid !== process.pid) return yield* input("launch job is stale, finished, or owned by another process");
+    return [project, row] as const;
+  }));
+  const job = row.launchJob!;
+  const result = yield* agentLaunchForeground(dir, job.request, id).pipe(Effect.exit);
+  const failed = result._tag === "Failure";
+  let body: string;
+  if (failed) {
+    body = `Launch ${row.name} failed: ${String(Cause.squash(result.cause))}\nlog: ${job.log}`;
+    console.error(body);
+    const tail = yield* Effect.try({ try: () => readFileSync(job.log, "utf8").slice(-4000), catch: () => new InputError({ message: "log unavailable" }) }).pipe(Effect.orElseSucceed(() => "log unavailable"));
+    body += `\nLog tail (UNTRUSTED):\n${tail}`;
+  } else body = launchResultText(result.value);
+  const kind = failed ? "blocked" as const : "action" as const;
+  yield* mutate(dir, current => Effect.gen(function* () {
+    const latest = yield* findRow(current, row.name);
+    if (latest.launchJob?.id !== id || latest.launchJob.outcome) return yield* input("launch job changed before report");
+    const state = failed && latest.state !== "failed" ? yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" }) : latest.state;
+    const next = { ...latest, state, launchJob: { ...latest.launchJob, outcome: kind }, updatedAt: iso(env),
+      ...(failed ? { events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: body }] } : {}) };
+    return [withRow(current, next), next] as const;
+  }));
+  const project = yield* load(dir);
+  // The caller is local even when the worker is remote or network-backed.
+  yield* deliverOwnerItem({ owner: job.owner, home: env.home, session: env.sessionId, project: project.slug,
+    item: { author: env.sessionId, lane: row.lane, kind, title: `Launch ${row.name} ${failed ? "failed" : "finished"}`, body, refs: [job.log] },
+    send: () => Effect.succeed({ status: "failed", detail: "result persisted for the owner's queue reader" }), message: body });
+  return { kind, body };
+});
+
+export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, jobId?: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
     const name = yield* decodeWith(decodeAgentName, params.name);
-    const project = yield* load(dir);
+    const catalog = yield* load(dir);
+    const jobRow = jobId ? catalog.agents.find(row => row.name === name && row.launchJob?.id === jobId) : undefined;
+    if (jobId && (!jobRow || jobRow.launchJob?.outcome)) return yield* input("launch job is stale or already finished");
+    const project = jobRow ? { ...catalog, agents: catalog.agents.map(row => row === jobRow ? { ...row, state: jobRow.launchJob!.priorState } : row) } : catalog;
     if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
     const machine = params.machine ?? previous?.machine ?? "local";
@@ -2034,6 +2166,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         updatedAt: now,
       };
     }
+    if (jobRow?.launchJob) row = { ...row, launchJob: jobRow.launchJob };
     if (params.brief && params.action === "restore") row = { ...row, brief: params.brief };
 
     const resolvedModel = yield* Effect.try({
@@ -2894,6 +3027,23 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     for (const row of project.agents) {
       if (row.state === "closed") continue;
+      if (row.launchJob && !row.launchJob.outcome) {
+        let alive = row.launchJob.pid === null;
+        if (row.launchJob.pid !== null) {
+          try { process.kill(row.launchJob.pid, 0); alive = true; }
+          catch (error) { alive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
+        }
+        let state = row.state;
+        const action = alive ? `launch job ${row.launchJob.id} running; log: ${row.launchJob.log}` : `launch job ${row.launchJob.id} died without an outcome; log: ${row.launchJob.log}; no automatic re-spawn`;
+        if (!alive && act && row.owner === env.sessionId) state = yield* mutate(dir, current => Effect.gen(function* () {
+          const latest = yield* findRow(current, row.name);
+          if (latest.launchJob?.id !== row.launchJob!.id || latest.launchJob.outcome) return [current, latest.state] as const;
+          const state = latest.state === "failed" ? latest.state : yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" });
+          return [withRow(current, { ...latest, state, launchJob: { ...latest.launchJob, outcome: "blocked" }, events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: action }], updatedAt: iso(env) }), state] as const;
+        }));
+        lines.push({ name: row.name, role: row.role, lane: row.lane, state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action });
+        continue;
+      }
       if (row.machine !== "local") {
         const unavailable: AgentLine = { name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action: `machine ${row.machine}: remote status unavailable; row unchanged` };
         lines.push(ingestion.failedMachines.has(row.machine) ? unavailable : yield* remoteStatusRow(dir, project, row, act, remoteTimes).pipe(Effect.catch(error => Effect.sync(() => {

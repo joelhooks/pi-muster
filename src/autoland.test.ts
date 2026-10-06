@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { beforeAll, describe, expect, it } from "vitest";
 import { findLanding } from "./autoland.ts";
 import { decodeProject } from "./domain.ts";
-import { projectOpen, laneOpen, agentLaunch, packetReport } from "./ops.ts";
+import { projectOpen, laneOpen, agentLaunchForeground as agentLaunch, packetReport } from "./ops.ts";
 import { load } from "./store.ts";
 import { ProcError } from "./errors.ts";
 import { liveProc } from "./runtime.ts";

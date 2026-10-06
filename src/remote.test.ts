@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
 import { mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
-import { agentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";

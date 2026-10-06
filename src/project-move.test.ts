@@ -5,7 +5,7 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ProcError } from "./errors.ts";
-import { agentLaunch, githubOrigin, checkoutVisibility, laneOpen, projectMove, projectOpen, publicCheckout } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, githubOrigin, checkoutVisibility, laneOpen, projectMove, projectOpen, publicCheckout } from "./ops.ts";
 import { Proc } from "./runtime.ts";
 import type { ProcShape } from "./runtime.ts";
 import { readRegistry } from "./registry.ts";

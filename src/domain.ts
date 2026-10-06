@@ -191,7 +191,28 @@ export const MachineConfig = Schema.Struct({
 export type MachineConfig = typeof MachineConfig.Type;
 export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
 
+export const AgentLaunchRequest = Schema.Struct({
+  action: Schema.Literals(["launch", "fork", "restore", "adopt", "restart"]),
+  name: AgentName,
+  machine: Schema.optional(Schema.String), role: Schema.optional(Role), lane: Schema.optional(Schema.String),
+  label: Schema.optional(Schema.String), cwd: Schema.optional(Schema.String), clone: Schema.optional(Schema.Boolean),
+  from: Schema.optional(Schema.String), side: Schema.optional(Schema.Boolean), at: Schema.optional(Schema.String),
+  model: Schema.optional(Schema.String), thinking: Schema.optional(Thinking),
+  appendSystemPrompt: Schema.optional(Schema.Array(Schema.String)), skills: Schema.optional(Schema.Array(Schema.String)),
+  noSkills: Schema.optional(Schema.Boolean), extensions: Schema.optional(Schema.Array(Schema.String)),
+  env: Schema.optional(Schema.Record(Schema.String, Schema.String)), compactAt: Schema.optional(Schema.NullOr(Schema.Number)),
+  brief: Schema.optional(Schema.String), prompt: Schema.optional(Schema.String), pane: Schema.optional(Schema.String),
+  slot: Schema.optional(Schema.Literals(["root", "split"])),
+});
+export const decodeAgentLaunchRequest = Schema.decodeUnknownSync(AgentLaunchRequest);
+export const LaunchJob = Schema.Struct({
+  id: Schema.String, pid: Schema.NullOr(Schema.Number), log: Path, startedAt: Iso,
+  priorState: AgentState, owner: SessionId, request: AgentLaunchRequest,
+  outcome: Schema.optionalKey(Schema.Literals(["action", "blocked"])),
+});
+
 export const AgentRow = Schema.Struct({
+  launchJob: Schema.optionalKey(LaunchJob),
   machine: Schema.String.pipe(Schema.withDecodingDefaultKey(Effect.succeed("local"))),
   intercomAddress: Schema.optionalKey(Schema.String),
   events: Schema.optionalKey(Schema.Array(Schema.Struct({ type: Schema.String, at: Iso, detail: Schema.String }))),

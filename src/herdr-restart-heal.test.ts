@@ -4,7 +4,7 @@ import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AgentRow } from "./domain.ts";
-import { agentLaunch, finishRestart, laneOpen, packetReport, projectOpen, projectStatus } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, projectOpen, projectStatus } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { MusterEnv } from "./runtime.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";

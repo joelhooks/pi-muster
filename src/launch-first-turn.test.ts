@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";
 
 async function setup() {

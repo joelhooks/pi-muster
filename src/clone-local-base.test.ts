@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Mode } from "./domain.ts";
 import { MusterEnv } from "./runtime.ts";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { shellQuote } from "./argv.ts";
 import { runWith, harness, makeRepo, sh } from "./test-support.ts";
 

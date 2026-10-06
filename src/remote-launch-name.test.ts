@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { agentLaunch, laneOpen, projectOpen, type AgentLaunchInput } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, type AgentLaunchInput } from "./ops.ts";
 import { promptWithProof } from "./herdr.ts";
 import { mutate } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";

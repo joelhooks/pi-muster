@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 
 import { queuePath, readDesk } from "./desk.ts";
 import type { DeskItem, Project } from "./domain.ts";
-import { agentLaunch, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, projectOpen } from "./ops.ts";
 import { deskAnswer, inboxText, loadInbox, loadSystem, registryPath } from "./switchboard-ops.ts";
 import { SwitchboardState, handleKey, heatStrip, renderOverlay, renderRankedSummary as renderWidget } from "./switchboard-view.ts";
 import { activity, answerPost, fleetStats, formatAge, inbox, latestPost, recentPosts, switchboardNeeds, switchboardTokens } from "./switchboard.ts";
