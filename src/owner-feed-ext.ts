@@ -9,7 +9,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { OWNER_NOTE, ownerFeed } from "./owner-feed.ts";
 import { OwnerTimelineView, ownerInboxText, ownerLine, readOwnerTimelineData } from "./owner-view.ts";
-import { ownerPath, writeReader, retireReader, ingestOwnerItem } from "./owner-queue.ts";
+import { ownerPath, writeReaderAsync, retireReader, ingestOwnerItem } from "./owner-queue.ts";
 
 import { Effect } from "effect";
 import type { NetworkPayload } from "./domain.ts";
@@ -30,6 +30,7 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
   let pending: ReturnType<typeof setTimeout> | undefined;
   let consumer: AbortController | undefined;
   let networkActor: ActorRefFrom<typeof networkConsumerMachine> | undefined;
+  let beating: Promise<void> | undefined;
   const home = () => env.HOME ?? homedir();
   const stop = () => {
     networkActor?.send({ type: "STOP" }); networkActor?.stop(); networkActor = undefined;
@@ -38,7 +39,12 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     if (poll) clearInterval(poll);
     if (pending) clearTimeout(pending);
     poll = pending = undefined;
-    if (session && readerStartedAt) retireReader(session, home(), readerStartedAt);
+    if (session && readerStartedAt) {
+      const [owner, root, startedAt] = [session, home(), readerStartedAt];
+      retireReader(owner, root, startedAt);
+      // A heartbeat already in flight could land after this retire; retire again once it settles.
+      void beating?.finally(() => retireReader(owner, root, startedAt));
+    }
     readerStartedAt = undefined;
     feed?.dispose(); feed = undefined; session = undefined;
   };
@@ -90,7 +96,12 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
         // Do not advertise a reader that cannot read its queue, even when busy.
         current.inbox({ limit: 1 });
         if (ctx.isIdle()) current.flush();
-        writeReader(id, home(), Date.now(), process.pid, startedAt);
+        // One heartbeat in flight; a stalled disk skips beats instead of freezing the TUI.
+        if (!beating && readerStartedAt === startedAt) {
+          beating = writeReaderAsync(id, home(), Date.now(), process.pid, startedAt)
+            .catch(() => { /* no heartbeat means writers fall back to intercom */ })
+            .finally(() => { beating = undefined; });
+        }
       } catch { /* no heartbeat means writers fall back to intercom */ }
     };
     const schedule = () => {

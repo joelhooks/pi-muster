@@ -65,7 +65,8 @@ describe("owner feed lifecycle", () => {
     vi.useFakeTimers();
     try {
       handlers.get("session_start")!({}, ctx);
-      expect(readerFresh("reader", home)).toBe(true);
+      // The heartbeat is async so a stalled rename never freezes the TUI.
+      await vi.waitFor(() => expect(readerFresh("reader", home)).toBe(true));
       appendOwnerItem("reader", { author: "sender", kind: "progress", title: "silent" }, home);
       await vi.advanceTimersByTimeAsync(30000); expect(sent).toEqual([]);
       appendOwnerItem("reader", { author: "sender", kind: "question", title: "wake" }, home);
@@ -79,6 +80,9 @@ describe("owner feed lifecycle", () => {
     } finally {
       handlers.get("session_shutdown")!(); vi.useRealTimers();
     }
+    expect(readerFresh("reader", home)).toBe(false);
+    // A heartbeat still in flight at shutdown must not bring presence back.
+    await new Promise(resolve => setTimeout(resolve, 100));
     expect(readerFresh("reader", home)).toBe(false);
   });
 });
