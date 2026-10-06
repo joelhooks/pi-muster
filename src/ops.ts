@@ -2288,11 +2288,14 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         const comms = yield* Comms;
         const sent = yield* comms.send(row.sessionId, message.expected);
         if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms brief send refused for ${row.name}: ${sent.detail ?? sent.status}`);
+        skillNotes.push(`network brief: ${sent.status} (mailbox receipt; first-turn proof checked separately)`);
       }
       const wait = yield* waitForSession(binding.paneId, null, () => findSessionFile(row.cwd, row.sessionId, env.home));
       const sessionFile = wait.state === "ready" ? wait.sessionFile : null;
       if (wait.state === "ready" && wait.slow) skillNotes.push(slowStartNote(wait));
-      if (wait.state === "pending") skillNotes.push(`slow start: Pi still starting after 120 s in ${binding.paneId}; delivery: none (pending). The start argv already carries any work message; inspect the session before any explicit re-prompt.`);
+      if (wait.state === "pending") skillNotes.push(networkBrief
+        ? `slow start: Pi still starting after 120 s in ${binding.paneId}; network brief sent, first turn pending. Inspect the session before any explicit re-prompt.`
+        : `slow start: Pi still starting after 120 s in ${binding.paneId}; delivery: none (pending). The start argv already carries any work message; inspect the session before any explicit re-prompt.`);
       if (wait.state === "missing") {
         const tail = wait.tail;
         const issue = modelOutputIssue(tail);
@@ -2341,9 +2344,12 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     });
 
     const text = message.expected;
-    let proof: Proof | null = null;
+    let proof: Proof | null = text && networkBrief && launched.pending
+      ? { state: "unproven", submission: "submitted", detail: "network brief sent; first turn pending" }
+      : null;
     if (text && !launched.pending) {
       proof = yield* proveStartedPrompt(launched.sessionFile!, text, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined);
+      if (networkBrief && proof.state === "proven") proof = { ...proof, via: "network" };
       if (proof.state === "unproven") skillNotes.push(`delivery: unproven: ${proof.detail}. Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: proof.repairPrompt ?? text } })}`);
       running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(running.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
     }

@@ -108,7 +108,7 @@ export const reportTokens = (workspaceId: string, source: string, tokens: Readon
   }).pipe(Effect.asVoid);
 
 export type FirstTurnFailure = "discovery_timeout" | "unreadable_slice" | "wrong_boundary" | "substituted_message" | "missing_prompt" | "assistant_error" | "assistant_timeout";
-export type Proof = { readonly state: "proven"; readonly via: "argv" | "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly failureKind?: FirstTurnFailure; readonly repairPrompt?: string; readonly warning?: string };
+export type Proof = { readonly state: "proven"; readonly via: "argv" | "network" | "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly failureKind?: FirstTurnFailure; readonly repairPrompt?: string; readonly warning?: string };
 
 export const FIRST_TURN_MS = 90_000;
 

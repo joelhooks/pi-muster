@@ -59,6 +59,13 @@ export const NetworkCommsConfig = Schema.Struct({
 });
 export type NetworkCommsConfig = typeof NetworkCommsConfig.Type;
 export const decodeNetworkCommsConfig = Schema.decodeUnknownSync(NetworkCommsConfig);
+/** Private consumer snapshot borrowed by detached senders; never a lease acquisition. */
+export const NetworkSendFence = Schema.Struct({
+  did: Schema.String.check(Schema.isPattern(/^did:[^#]+$/u)),
+  leaseId: Schema.String.check(Schema.isMinLength(1)),
+  generation: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
+});
+export const decodeNetworkSendFence = Schema.decodeUnknownSync(NetworkSendFence);
 const PublicCommsKey = Schema.Struct({ kty: Schema.Literal("EC"), crv: Schema.Literal("P-256"), x: Schema.String, y: Schema.String, d: Schema.optionalKey(Schema.Never) });
 const CommsDocument = Schema.Struct({
   id: Schema.String,

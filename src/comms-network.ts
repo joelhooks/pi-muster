@@ -1,17 +1,63 @@
 import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Effect, Layer, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { decodeAgentName, decodeCommsIdentityCache, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
+import { decodeNetworkSendFence, decodeAgentName, decodeCommsIdentityCache, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
 import { CommsError, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
 
-/** acquire/re-acquire publishes; finalization retires only its own registration.
- * Sends borrow this fence, never acquire a competing lease or own a clock.
- */
-const consumerFences = new Map<string, { owner: symbol; fence: LeaseFence }>();
+/** One private, atomic snapshot per DID. Detached senders borrow it, never acquire. */
+export const networkFencePath = (home: string, did: string) => join(home, ".local/state/muster/network-fences", `${createHash("sha256").update(did).digest("hex")}.json`);
+
+export function readConsumerFence(home: string, did: string): LeaseFence | undefined {
+  try {
+    const fence = decodeNetworkSendFence(privateJson(networkFencePath(home, did)));
+    if (fence.did !== did) throw new Error("fence belongs to another DID");
+    return fence;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
+    throw new CommsError("NetworkComms invalid consumer fence (private output withheld)");
+  }
+}
+
+const publishConsumerFence = (home: string, fence: LeaseFence) => Effect.tryPromise({
+  try: async () => {
+    const path = networkFencePath(home, fence.did);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const temp = `${path}.${randomUUID()}.tmp`;
+    await writeFile(`${path}.lock`, "", { flag: "wx", mode: 0o600 });
+    try {
+      await writeFile(temp, JSON.stringify({ did: fence.did, leaseId: fence.leaseId, generation: fence.generation }), { flag: "wx", mode: 0o600 });
+      await rename(temp, path);
+    } finally {
+      await unlink(temp).catch(() => {});
+      await unlink(`${path}.lock`);
+    }
+  }, catch: () => new CommsError("NetworkComms could not publish consumer fence"),
+});
+
+/** Only a protocol lease mismatch permits one fresh read and one retry. */
+export function sendWithConsumerFence(options: {
+  home: string; did: string;
+  send: (opts?: import("./vendor/rat-king-mailbox-client/index.ts").SendOptions) => ReturnType<Effect.Success<ReturnType<typeof openNetworkMailbox>>["send"]>;
+}) {
+  return Effect.gen(function* () {
+    const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
+    let unpublished = false;
+    const attempt = () => Effect.try({ try: () => readConsumerFence(options.home, options.did), catch: () => new CommsError("NetworkComms invalid consumer fence (private output withheld)") }).pipe(
+      Effect.flatMap(fence => { unpublished = fence === undefined; return options.send(fence ? { fence } : undefined); }),
+    );
+    return yield* attempt().pipe(
+      Effect.catch(error => error instanceof MailboxClientError && error.error === "LeaseMismatch" ? attempt() : Effect.fail(error)),
+      Effect.catch(error => error instanceof MailboxClientError && error.error === "LeaseMismatch" && unpublished
+        ? Effect.fail(new CommsError("NetworkComms send failed: LeaseMismatch; sender lease held elsewhere (another process with this identity); boss consumer has no published fence; restart the boss onto current code"))
+        : Effect.fail(error)),
+    );
+  });
+}
 
 export const networkConfigPath = (home: string) => join(home, ".config/muster/network.json");
 export const networkIdentityPath = (home: string) => join(home, ".local/state/muster/network-identities.json");
@@ -210,12 +256,15 @@ export function consumeNetworkMailbox(options: {
     const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
     const ownDid = yield* Effect.try({ try: () => networkRecipient(options.home, options.agent).did, catch: failure });
     let fence: LeaseFence | undefined;
-    const owner = Symbol("network consumer");
     const acquire = () => options.mailbox.lease.acquire({ did: ownDid,
       harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: options.session }, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     }).pipe(Effect.flatMap(lease => lease.did !== ownDid || lease.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || lease.harness.sessionId !== options.session
       ? Effect.fail(new MailboxClientError({ reason: "Mailbox lease differs from consumer identity" }))
-      : Effect.sync(() => { fence = lease; consumerFences.set(ownDid, { owner, fence: lease }); return lease; })));
+      : Effect.gen(function* () {
+        fence = lease; // Release even if publishing fails.
+        yield* publishConsumerFence(options.home, lease).pipe(Effect.uninterruptible, Effect.mapError(() => new MailboxClientError({ reason: "NetworkComms could not publish consumer fence" })));
+        return lease;
+      })));
     const run = watchNetworkMailbox({ mailbox: options.mailbox, acquire, afterSeq }).pipe(Stream.runForEach(batch => Effect.gen(function* () {
       for (const event of batch.events) {
         if (event.$type !== "sh.mschf.ratking.defs#messageEvent" || !isMessage(event)) continue;
@@ -240,8 +289,17 @@ export function consumeNetworkMailbox(options: {
       }, catch: failure });
     })), Effect.mapError(error => "error" in error && error.error === "AuthRequired" ? new CommsError("NetworkComms authentication failed; consumer stopped") : error instanceof CommsError ? error : failure()));
     return yield* Effect.ensuring(run, Effect.suspend(() => {
-      if (consumerFences.get(ownDid)?.owner === owner) consumerFences.delete(ownDid);
-      return fence ? options.mailbox.lease.release(fence).pipe(Effect.timeout("5 seconds"), Effect.ignore) : Effect.void;
+      if (!fence) return Effect.void;
+      const retired = fence;
+      return Effect.tryPromise({ try: async () => {
+        const path = networkFencePath(options.home, ownDid);
+        await writeFile(`${path}.lock`, "", { flag: "wx", mode: 0o600 });
+        try {
+          const current = readConsumerFence(options.home, ownDid);
+          // Serialize with publishers: an old consumer cannot retire a newer registration.
+          if (current?.leaseId === retired.leaseId && current.generation === retired.generation) await unlink(path);
+        } finally { await unlink(`${path}.lock`); }
+      }, catch: failure }).pipe(Effect.ignore, Effect.ensuring(options.mailbox.lease.release(retired).pipe(Effect.timeout("5 seconds"), Effect.ignore)));
     }));
   });
 }
@@ -267,8 +325,7 @@ export function createNetworkComms(options: {
       if (!sender) return yield* Effect.fail(new CommsError("NetworkComms sender context missing"));
       const ownDid = networkRecipient(options.home, sender.agent).did;
       const service = yield* openNetworkMailbox({ ...options, agent: sender.agent });
-      const fence = consumerFences.get(ownDid)?.fence;
-      const result = yield* service.send(target.did, body, fence ? { fence } : undefined);
+      const result = yield* sendWithConsumerFence({ home: options.home, did: ownDid, send: opts => service.send(target.did, body, opts) });
       const { receiptDelivery } = yield* Effect.promise(() => import("./comms.ts"));
       return yield* receiptDelivery(result.receipt);
     }).pipe(Effect.catch(error => Effect.gen(function* () {
