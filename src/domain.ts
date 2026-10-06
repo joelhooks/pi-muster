@@ -211,7 +211,7 @@ export const LaunchJobId = Schema.String.check(Schema.isPattern(/^[a-f0-9]{8}-[a
 export const decodeLaunchJobId = Schema.decodeUnknownSync(LaunchJobId);
 export const LaunchJob = Schema.Struct({
   id: LaunchJobId, project: Slug, name: AgentName, sessionId: SessionId,
-  pid: Schema.NullOr(Schema.Number), log: Path, startedAt: Iso, state: LaunchJobState,
+  pid: Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))), log: Path, startedAt: Iso, state: LaunchJobState,
   priorState: AgentState, owner: SessionId, request: AgentLaunchRequest,
   outcome: Schema.optionalKey(Schema.Literals(["action", "blocked"])),
 });

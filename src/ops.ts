@@ -116,7 +116,7 @@ const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
 
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
-const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string) => withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
+const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string, jobId?: string) => withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(nameOfMachine);
   const catalogs = [project];
@@ -224,7 +224,10 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     // Read the remote environment, never transplant the owner's machine-specific PATH.
     const remotePath = agentEnvironment.PATH ?? (yield* must("printenv", ["PATH"], { cwd, timeoutMs: 10_000 })).trim();
     agentEnvironment.PATH = [join(machine.musterExtension, "bin"), remotePath].filter(Boolean).join(":");
-    yield* mutate(dir, current => Effect.succeed([withRow(current, row), row] as const));
+    yield* mutate(dir, current => Effect.gen(function* () {
+      if (jobId && current.agents.find(agent => agent.name === row.name)?.state === "closed") return yield* input("launch row was closed while preparing the job");
+      return [withRow(current, row), row] as const;
+    }));
     const launch = Effect.gen(function* () {
       const spaces = yield* workspaceList();
       const matches = spaces.filter(space => space.label === project.label);
@@ -1876,7 +1879,11 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
 }));
 
 const launchJobPath = (home: string, id: string) => join(home, ".local/state/muster/launches", `${decodeLaunchJobId(id)}.json`);
-export const readLaunchJob = (home: string, id: string): LaunchJob => decodeLaunchJob(JSON.parse(readFileSync(launchJobPath(home, id), "utf8")));
+export const readLaunchJob = (home: string, id: string): LaunchJob => {
+  const job = decodeLaunchJob(JSON.parse(readFileSync(launchJobPath(home, id), "utf8")));
+  if (job.id !== id || job.name !== job.request.name || job.request.action === "adopt" || job.request.action === "restart") throw new Error("launch sidecar identity or action mismatch");
+  return job;
+};
 const writeLaunchJob = (home: string, job: LaunchJob) => Effect.try({
   try: () => {
     const path = launchJobPath(home, job.id);
@@ -2033,7 +2040,7 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     const latest = yield* findRow(current, row.name);
     const latestJob = yield* readJob(env.home, id);
     if (latestJob.outcome || latestJob.pid !== process.pid) return yield* input("launch job changed before report");
-    const state = failed && latest.state !== "failed" ? yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" }) : latest.state;
+    const state = failed && latest.state !== "failed" && latest.state !== "closed" ? yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" }) : latest.state;
     const next = { ...latest, state, updatedAt: iso(env),
       ...(failed ? { events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: body }] } : {}) };
     // The caller is local even when the worker is remote or network-backed.
@@ -2056,7 +2063,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     const catalog = yield* load(dir);
     const job = jobId ? yield* readJob(env.home, jobId) : undefined;
     const jobRow = job ? catalog.agents.find(row => row.name === name && row.sessionId === job.sessionId) : undefined;
-    if (job && (!jobRow || job.outcome || job.project !== catalog.slug)) return yield* input("launch job is stale or already finished");
+    if (job && (!jobRow || jobRow.state === "closed" || job.outcome || job.project !== catalog.slug)) return yield* input("launch job is stale or already finished");
     const project = jobRow && job ? { ...catalog, agents: catalog.agents.map(row => row === jobRow ? { ...row, state: job.priorState } : row) } : catalog;
     if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
@@ -2097,7 +2104,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       });
       return machine === "local" ? yield* adopt : yield* onRemote(machine, yield* machineConfig(machine), adopt);
     }
-    if (machine !== "local") return yield* remoteLaunch(dir, project, { ...params, action: params.action }, machine);
+    if (machine !== "local") return yield* remoteLaunch(dir, project, { ...params, action: params.action }, machine, jobId);
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
     const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
     const existing = project.agents.find((agent) => agent.name === name);
@@ -2252,6 +2259,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     const piReceiptId = env.createId();
     yield* mutate(dir, (current) => Effect.gen(function* () {
       const previous = current.agents.find(agent => agent.name === row.name);
+      if (jobId && previous?.state === "closed") return yield* input("launch row was closed while preparing the job");
       if (previous && !(params.action === "restore" && previous.owner === previous.sessionId)) {
         const note = yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
         if (note) skillNotes.push(note);
