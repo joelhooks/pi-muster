@@ -304,6 +304,9 @@ export const GateReceipt = Schema.Struct({
   ...GateFields,
   exit: Schema.NullOr(Schema.Number.check(Schema.isInt())),
   lostReason: Schema.optionalKey(Schema.String),
+  /** fleet-compute: whether a flagg run started on a checkout equal to the tree. */
+  exactTree: Schema.optionalKey(Schema.Boolean),
+  dirtyCount: Schema.optionalKey(Schema.Number),
 });
 export type GateReceipt = typeof GateReceipt.Type;
 export const PacketGate = Schema.Struct({ ...GateFields, receipt: Path });

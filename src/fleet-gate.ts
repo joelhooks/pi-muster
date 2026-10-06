@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { Effect, Schema } from "effect";
 import { GateReceipt, decodeSlug } from "./domain.ts";
@@ -65,6 +66,24 @@ export function gateRepoName(source: string, origin: string): string {
 }
 
 /** Fleet owns registration, host eligibility and queueing for every repo. No policy copy here. */
+/** Paths where the checkout differs from `tree`: tracked changes plus untracked,
+ * non-ignored files. Measured like fleet-compute's worktree drift, on a scratch index. */
+export const checkoutDrift = (source: string, tree: string) => Effect.gen(function* () {
+  const proc = yield* Proc;
+  const dir = mkdtempSync(join(tmpdir(), "muster-drift-"));
+  const env = { GIT_INDEX_FILE: join(dir, "index") };
+  const run = (...args: string[]) => proc.run("git", args, { cwd: source, env });
+  return yield* Effect.gen(function* () {
+    const read = yield* run("read-tree", tree);
+    if (read.code !== 0) return yield* input(`cannot read --tree ${tree}: ${read.stderr.trim()}`);
+    yield* run("update-index", "-q", "--refresh", "--ignore-missing");
+    const changed = yield* run("diff-files", "--name-only");
+    const untracked = yield* run("ls-files", "--others", "--exclude-standard");
+    if (changed.code !== 0 || untracked.code !== 0) return yield* input(`cannot compare the checkout with --tree ${tree}`);
+    return [...new Set([...changed.stdout.split("\n"), ...untracked.stdout.split("\n")].filter(Boolean))].sort();
+  }).pipe(Effect.ensuring(Effect.sync(() => rmSync(dir, { recursive: true, force: true }))));
+});
+
 export const runFleetGate = (options: FleetGateOptions) => Effect.gen(function* () {
   const proc = yield* Proc;
   // Refuse even in local fallback mode: a gate without --tree must describe the committed checkout.
@@ -72,10 +91,18 @@ export const runFleetGate = (options: FleetGateOptions) => Effect.gen(function* 
   if (!options.tree && (yield* git(source, "status", "--porcelain=v1", "--untracked-files=normal")).trim()) {
     return yield* input("dirty working tree: commit it or pass --tree <git write-tree SHA>; no gate was run");
   }
+  const off = process.env.MUSTER_FLEET_COMPUTE === "off";
   const runner = yield* fleetRunner(source);
-  if (!runner) return { kind: "local" as const, note: `muster-heavy gate: local admission (${process.env.MUSTER_FLEET_COMPUTE === "off" ? "MUSTER_FLEET_COMPUTE=off" : "fleet-compute missing"})` };
+  // A missing runner is never a quiet unlocked run: callers believe they hold the lock.
+  if (!runner && !off) return yield* input("fleet-compute not found (not on PATH, and MUSTER_FLEET_COMPUTE names no file); set MUSTER_FLEET_COMPUTE to its absolute path, or MUSTER_FLEET_COMPUTE=off for an explicit unlocked local run; no gate was run");
   const head = (yield* git(source, "rev-parse", "HEAD")).trim();
   const tree = (yield* git(source, "rev-parse", "--verify", "--end-of-options", `${options.tree ?? head}^{tree}`)).trim();
+  // Flagg and local runs execute this checkout, so --tree must describe it. Only pinned pennywise ships the tree itself.
+  if (options.tree && (!runner || options.host !== "pennywise")) {
+    const drift = yield* checkoutDrift(source, tree);
+    if (drift.length) return yield* input(`checkout differs from --tree ${tree} in ${drift.length} path(s): ${drift.slice(0, 5).join(", ")}${drift.length > 5 ? ", ..." : ""}; this run would execute the checkout, not the tree. Check out or stage exactly that tree, or pin --host pennywise; no gate was run`);
+  }
+  if (!runner) return { kind: "local" as const, note: "muster-heavy gate: local admission (MUSTER_FLEET_COMPUTE=off)" };
   const origin = yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source });
   const repo = yield* Effect.try({ try: () => gateRepoName(source, origin.code === 0 ? origin.stdout : ""), catch: error => input(`cannot resolve gate repo: ${String(error)}`) });
   const receiptPath = join(options.home, ".local/state/muster/gates", `${randomUUID()}.json`);
@@ -92,6 +119,8 @@ export const runFleetGate = (options: FleetGateOptions) => Effect.gen(function* 
   });
   if (receipt && receipt.tree !== tree) return yield* input(`fleet gate receipt tree ${receipt.tree} differs from ${tree}`);
   if (receipt && receipt.exit !== null && receipt.exit !== result.code) return yield* input(`fleet gate receipt exit ${receipt.exit} differs from runner exit ${result.code}`);
+  // The checkout can move while a gate queues; fleet-compute records the drift it started on.
+  if (receipt?.host === "flagg" && receipt.exactTree === false) return yield* input(`fleet gate ran on flagg in a checkout that differed from tree ${tree} (${receipt.dirtyCount ?? "?"} path(s)); not proven. Receipt ${receiptPath}`);
   // Admission timeout has no external receipt; never invent host/run/duration proof for it.
   const note = receipt
     ? `muster-heavy gate: host ${receipt.host}; run ${receipt.runId}; exit ${receipt.exit ?? "lost"}; duration ${receipt.durationMs}ms; receipt ${receiptPath}`

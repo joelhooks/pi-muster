@@ -1,7 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -21,7 +21,7 @@ function fixture(origin = "git@github.com:joelhooks/pi-muster.git") {
   git("add", "file");
   git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "initial");
   if (origin) git("remote", "add", "origin", origin);
-  const options: FleetGateOptions = { cwd, home: cwd, wait: 1200, host: "auto", command: ["sh", "-c", "npm run check && npm test"] };
+  const options: FleetGateOptions = { cwd, home: dirname(cwd), wait: 1200, host: "auto", command: ["sh", "-c", "npm run check && npm test"] };
   return { cwd, git, options };
 }
 
@@ -67,12 +67,59 @@ describe("fleet gate routing", () => {
     expect(calls[0]!.args).toContain(repo);
   });
 
-  it.each(["off", "missing"])("falls back with a note when runner is %s", async mode => {
-    vi.stubEnv("MUSTER_FLEET_COMPUTE", mode === "off" ? "off" : "");
+  const noRunner: ProcShape = { run: (command, args, o) => command === "sh"
+    ? Effect.succeed({ code: 1, stdout: "", stderr: "" }) : liveProc.run(command, args, o) };
+
+  it("runs locally only when MUSTER_FLEET_COMPUTE=off says so", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
     const { options } = fixture();
-    const proc: ProcShape = { run: (command, args, o) => command === "sh"
-      ? Effect.succeed({ code: 1, stdout: "", stderr: "" }) : liveProc.run(command, args, o) };
-    expect(await run(options, proc)).toMatchObject({ kind: "local", note: expect.stringContaining(mode === "off" ? "MUSTER_FLEET_COMPUTE=off" : "fleet-compute missing") });
+    expect(await run(options, noRunner)).toMatchObject({ kind: "local", note: expect.stringContaining("MUSTER_FLEET_COMPUTE=off") });
+  });
+
+  it.each(["", "/no/such/fleet-compute"])("refuses by name, never unlocked, when fleet-compute is missing (MUSTER_FLEET_COMPUTE=%j)", async setting => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", setting);
+    const { options } = fixture();
+    await expect(run({ ...options, host: "flagg" }, noRunner)).rejects.toThrow(/fleet-compute not found.*no gate was run/);
+  });
+
+  it.each(["flagg", "auto"] as const)("refuses --tree that is not the checkout on --host %s", async host => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
+    const { cwd, options, git } = fixture();
+    const committed = git("rev-parse", "HEAD^{tree}");
+    writeFileSync(join(cwd, "file"), "changed\n");
+    git("add", "file");
+    const staged = git("write-tree");
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "next");
+    const { calls, proc } = fakeRunner();
+    await expect(run({ ...options, tree: committed, host }, proc)).rejects.toThrow(/checkout differs from --tree.*file/);
+    writeFileSync(join(cwd, "stray"), "untracked\n");
+    await expect(run({ ...options, tree: staged, host }, proc)).rejects.toThrow(/1 path\(s\): stray/);
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses a mismatched --tree on the explicit local path too", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
+    const { cwd, options, git } = fixture();
+    const tree = git("rev-parse", "HEAD^{tree}");
+    writeFileSync(join(cwd, "file"), "changed\n");
+    await expect(run({ ...options, tree }, noRunner)).rejects.toThrow(/checkout differs from --tree/);
+  });
+
+  it("lets pinned pennywise gate a tree the checkout does not hold, since it ships the tree", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
+    const { cwd, options, git } = fixture();
+    const tree = git("rev-parse", "HEAD^{tree}");
+    writeFileSync(join(cwd, "file"), "changed\n");
+    const { calls, proc } = fakeRunner();
+    expect((await run({ ...options, tree, host: "pennywise" }, proc)).kind).toBe("fleet");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("fails closed when a flagg receipt says the run started on a drifted checkout", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
+    const { options } = fixture();
+    await expect(run(options, fakeRunner(0, true, { host: "flagg", exactTree: false, dirtyCount: 2 }).proc)).rejects.toThrow(/differed from tree.*not proven/);
+    expect(await run(options, fakeRunner(0, true, { host: "flagg", exactTree: true }).proc)).toMatchObject({ kind: "fleet", code: 0 });
   });
 
   it.each(["tracked", "staged", "untracked"])("refuses %s dirt without --tree before runner admission", async dirt => {
@@ -150,18 +197,19 @@ describe("fleet gate routing", () => {
 describe("heavy gate CLI", () => {
   it.each([0, 1, 75])("streams a fake runner and exits %s", exit => {
     const { cwd, git } = fixture();
-    const runner = join(cwd, "runner.ts");
+    const scratch = dirname(cwd);
+    const runner = join(scratch, "runner.ts");
     writeFileSync(runner, `import { writeFileSync } from 'node:fs';
 const args = process.argv.slice(2), value = flag => args[args.indexOf(flag)+1];
-writeFileSync(${JSON.stringify(join(cwd, "args.json"))}, JSON.stringify(args));
+writeFileSync(${JSON.stringify(join(scratch, "args.json"))}, JSON.stringify(args));
 ${exit === 75 ? "" : `writeFileSync(value('--receipt'), JSON.stringify({host:'pennywise',runId:'cli-run',tree:value('--tree'),slot:0,durationMs:5,exit:${exit}}));`}
 console.log('streamed output'); process.exit(${exit});\n`);
     const result = spawnSync(process.execPath, [cli, "gate", "--tree", git("rev-parse", "HEAD^{tree}"), "--host", "flagg", "--wait", "3", "--", "sh", "-c", "echo arbitrary command"], {
-      cwd, encoding: "utf8", timeout: 20_000, env: { ...process.env, MUSTER_FLEET_COMPUTE: runner, MUSTER_DEPLOY_WINDOW: undefined, MUSTER_HEAVY_GRANT: undefined, HOME: cwd },
+      cwd, encoding: "utf8", timeout: 20_000, env: { ...process.env, MUSTER_FLEET_COMPUTE: runner, MUSTER_DEPLOY_WINDOW: undefined, MUSTER_HEAVY_GRANT: undefined, HOME: scratch },
     });
     expect(result.status, result.stderr).toBe(exit);
     expect(result.stdout).toContain("streamed output");
-    expect(JSON.parse(readFileSync(join(cwd, "args.json"), "utf8"))).toEqual(expect.arrayContaining(["--host", "flagg", "--", "sh", "-c", "echo arbitrary command"]));
+    expect(JSON.parse(readFileSync(join(scratch, "args.json"), "utf8"))).toEqual(expect.arrayContaining(["--host", "flagg", "--", "sh", "-c", "echo arbitrary command"]));
     expect(result.stderr).toContain(exit === 75 ? "no receipt" : "host pennywise; run cli-run");
   }, 30_000);
 
