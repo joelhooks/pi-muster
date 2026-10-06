@@ -89,7 +89,11 @@ export const decodeCommsIdentityReference = Schema.decodeUnknownSync(CommsIdenti
 /** Identity-cache extension only: catalogs retain their existing row schema. */
 export const NetworkIdentityName = Schema.String.check(Schema.isPattern(/^(?:[a-z0-9]+(?:-[a-z0-9]+)*\/)?[a-z][a-z0-9_-]{0,31}$/u));
 export const decodeNetworkIdentityName = Schema.decodeUnknownSync(NetworkIdentityName);
-export const decodeCommsIdentityCache = Schema.decodeUnknownSync(Schema.Record(NetworkIdentityName, CommsIdentityReference));
+export const NetworkDeskName = NetworkIdentityName.check(Schema.isPattern(/\//u));
+/** Shared-file decoders retain the exact legacy schema. */
+export const decodeCommsIdentityCache = Schema.decodeUnknownSync(Schema.Record(AgentName, CommsIdentityReference));
+export const decodeNetworkIdentityCache = Schema.decodeUnknownSync(Schema.Record(NetworkIdentityName, CommsIdentityReference));
+export const decodeNetworkDeskIdentityCache = Schema.decodeUnknownSync(Schema.Record(NetworkDeskName, CommsIdentityReference));
 
 const RouteDelivery = Schema.Struct({ status: Schema.String, detail: Schema.optionalKey(Schema.String),
   id: Schema.optionalKey(Schema.String), senderDid: Schema.optionalKey(Schema.String), recipientDid: Schema.optionalKey(Schema.String),
@@ -130,8 +134,11 @@ export const decodeNetworkPayload = Schema.decodeUnknownSync(Schema.Union([
   Schema.Struct({ type: Schema.Literal("message"), recipient: SessionId, author: SessionId, body: Schema.String }),
 ]));
 export type NetworkPayload = ReturnType<typeof decodeNetworkPayload>;
-export const decodeNetworkPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, NetworkIdentityName));
-export const decodeNetworkCursors = Schema.decodeUnknownSync(Schema.Record(NetworkIdentityName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
+export const decodeNetworkPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, AgentName));
+export const decodeNetworkDeskPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, NetworkDeskName));
+export const decodeNetworkPeerReferences = Schema.decodeUnknownSync(Schema.Record(SessionId, NetworkIdentityName));
+export const decodeNetworkCursors = Schema.decodeUnknownSync(Schema.Record(AgentName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
+export const decodeNetworkDeskCursors = Schema.decodeUnknownSync(Schema.Record(NetworkDeskName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
 const decodeOwnerRecord = Schema.decodeUnknownSync(OwnerItem);
 /** Normalize legacy receipt metadata on read; never rewrite the JSONL or its CID. */
 export function decodeOwnerItem(input: unknown): OwnerItem {

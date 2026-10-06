@@ -1,16 +1,16 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect, Schema, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { catalogCommsSender, createComms, NetworkComms } from "./comms.ts";
-import { consumeNetworkMailbox, networkConfigPath, networkIdentityPath, networkProvisionName, networkRecipient, provisionNetworkAgent } from "./comms-network.ts";
-import { decodeDeskRouteReceipt, decodeNetworkPeers } from "./domain.ts";
-import { networkCatalogPeers, resolveDeskRoute, sendDesk } from "./desk-route.ts";
+import { consumeNetworkMailbox, networkConfigPath, networkIdentityPath, networkDeskIdentityPath, networkPeersPath, networkDeskPeersPath, networkCursorPath, networkProvisionName, networkRecipient, provisionNetworkAgent, seedNetworkIdentities, seedNetworkPeers, readNetworkIdentities, readNetworkPeers } from "./comms-network.ts";
+import { AgentName, CommsIdentityReference, SessionId, decodeDeskRouteReceipt, decodeNetworkPeerReferences, decodeNetworkCursors } from "./domain.ts";
+import { networkCatalogPeers, networkPeerEnvironment, resolveDeskRoute, sendDesk } from "./desk-route.ts";
 import { laneOpen, projectOpen } from "./ops.ts";
 import { deliverOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { registryPath } from "./registry.ts";
-import { mutate } from "./store.ts";
+import { load, mutate } from "./store.ts";
 import { harness, runWith } from "./test-support.ts";
 
 const config = { endpoint: "https://mailbox.example.invalid", serviceDid: "did:web:mailbox.example.invalid", provisionWrapper: "/private/wrapper", didTemplate: "did:web:{agent}.example.invalid" };
@@ -35,6 +35,61 @@ async function fixture() {
 }
 
 describe("qualified desk routing", () => {
+  it("keeps new provisioning writes readable by the exact legacy identity schema", async () => {
+    const { h } = await fixture();
+    const run = async (_file: string, args: readonly string[]) => JSON.stringify(reference(args[2]!));
+    await Effect.runPromise(provisionNetworkAgent({ home: h.home, agent: "worker", run }));
+    await Effect.runPromise(provisionNetworkAgent({ home: h.home, agent: "alpha/desk", run }));
+    const legacy = Schema.decodeUnknownSync(Schema.Record(AgentName, CommsIdentityReference));
+    const raw = JSON.parse(readFileSync(networkIdentityPath(h.home), "utf8"));
+    expect(legacy(raw)).toEqual(raw); // Record decoding can discard non-matching keys; lossless decode proves isolation.
+    expect(Object.keys(raw)).toEqual(["worker"]);
+  });
+  it("isolates identity, peer and cursor writes while exact legacy schemas decode every shared file losslessly", async () => {
+    const { h, dir } = await fixture();
+    const run = async (_file: string, args: readonly string[]) => JSON.stringify(reference(args[2]!));
+    await Effect.runPromise(provisionNetworkAgent({ home: h.home, agent: "worker", run }));
+    const before = readFileSync(networkIdentityPath(h.home), "utf8");
+    await Effect.runPromise(provisionNetworkAgent({ home: h.home, agent: "alpha/desk", run }));
+    seedNetworkIdentities(h.home, { "beta/desk": reference(networkProvisionName("beta/desk")) });
+    expect(readFileSync(networkIdentityPath(h.home), "utf8")).toBe(before);
+    const merged = readNetworkIdentities(h.home);
+    expect(Object.keys(merged).sort()).toEqual(["alpha/desk", "beta/desk", "worker"]);
+    seedNetworkPeers(h.home, { "worker-session": "worker", "alpha-session": "alpha/desk" });
+    const peerBefore = readFileSync(networkPeersPath(h.home), "utf8");
+    seedNetworkPeers(h.home, { "beta-session": "beta/desk" });
+    expect(readFileSync(networkPeersPath(h.home), "utf8")).toBe(peerBefore);
+    expect(readNetworkPeers(h.home)).toEqual({ "worker-session": "worker", "alpha-session": "alpha/desk", "beta-session": "beta/desk" });
+    const { Main } = await import("./vendor/rat-king-lexicon/runtime.lease.ts");
+    for (const agent of ["worker", "alpha/desk"]) {
+      const lease = Schema.decodeUnknownSync(Main)({ did: merged[agent]!.did, leaseId: "3jzfcijpj2z2b", generation: 1, expiresAt: "2026-10-07T00:00:00Z", harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: `${networkProvisionName(agent)}-session` } });
+      await Effect.runPromise(consumeNetworkMailbox({ home: h.home, agent, session: `${networkProvisionName(agent)}-session`,
+        mailbox: { lease: { acquire: () => Effect.succeed(lease), renew: () => Effect.succeed(lease), resolve: () => Effect.succeed(lease), release: () => Effect.void },
+          watch: () => Stream.succeed({ events: [], throughSeq: 7 }), open: () => Effect.die("no messages"), deliver: () => Effect.die("no messages"), ack: () => Effect.die("no messages") },
+        senderAgent: () => Effect.die("no messages"), receive: () => Effect.die("no messages"),
+      }));
+    }
+    const oldIdentities = Schema.decodeUnknownSync(Schema.Record(AgentName, CommsIdentityReference));
+    const oldPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, AgentName));
+    const oldCursors = Schema.decodeUnknownSync(Schema.Record(AgentName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
+    const identityRaw = JSON.parse(readFileSync(networkIdentityPath(h.home), "utf8"));
+    const peersRaw = JSON.parse(readFileSync(networkPeersPath(h.home), "utf8"));
+    expect(oldIdentities(identityRaw)).toEqual(identityRaw); expect(Object.keys(identityRaw)).toEqual(["worker"]);
+    expect(oldPeers(peersRaw)).toEqual(peersRaw);
+    const cursorDir = dirname(networkCursorPath(h.home, "worker"));
+    expect(readdirSync(cursorDir)).toEqual(["worker.json"]);
+    for (const name of readdirSync(cursorDir)) {
+      const raw = JSON.parse(readFileSync(join(cursorDir, name), "utf8"));
+      expect(oldCursors(raw)).toEqual(raw); expect(decodeNetworkCursors(raw)).toEqual({ worker: 7 });
+    }
+    for (const path of [networkDeskIdentityPath(h.home), networkDeskPeersPath(h.home), networkCursorPath(h.home, "alpha/desk")]) expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(networkCursorPath(h.home, "alpha/desk"), "utf8"))).toEqual({ "alpha/desk": 7 });
+    const project = await runWith(h, load(dir));
+    const env = networkPeerEnvironment(project, [...project.agents, { ...project.agents[0]!, name: "worker", role: "worker", sessionId: "worker-session" }]);
+    const oldEnv = JSON.parse(env.MUSTER_NETWORK_PEERS);
+    expect(oldPeers(oldEnv)).toEqual(oldEnv); expect(oldEnv).toEqual({ "alpha-session": "desk", "worker-session": "worker" });
+    expect(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS)).toEqual({ "alpha-session": "alpha/desk" });
+  });
   it("reports and records intercom fallback for a failed network owner notification", async () => {
     const { h } = await fixture();
     const relay = vi.fn(() => Effect.succeed({ status: "delivered" as const }));
@@ -51,7 +106,7 @@ describe("qualified desk routing", () => {
     const { h, dir } = await fixture();
     let adapter: Parameters<typeof import("./comms-network.ts").createNetworkComms>[0] | undefined;
     vi.doMock("./comms-network.ts", () => ({
-      readNetworkConfig: () => config,
+      readNetworkConfig: () => config, seedNetworkPeers, readNetworkPeers,
       provisionNetworkAgent: () => Effect.succeed(reference("desk")),
       createNetworkComms: (options: NonNullable<typeof adapter>) => { adapter = options; return { ...NetworkComms, mode: () => Effect.succeed("network" as const) }; },
     }));
@@ -69,13 +124,18 @@ describe("qualified desk routing", () => {
       service.dispose();
       const remote = createComms({ ...options, projectDir: join(h.home, "no-local-catalog"), adapterEnv: () => "network",
         networkSender: () => ({ agent: "worker", session: "worker-session" }),
-        networkPeers: () => decodeNetworkPeers({ "worker-session": "worker", "alpha-session": "alpha/desk" }),
+        networkPeers: () => decodeNetworkPeerReferences({ "worker-session": "worker", "alpha-session": "alpha/desk" }),
       });
       await Effect.runPromise(remote.mode!());
       expect(adapter?.sender()).toEqual({ agent: "worker", session: "worker-session" });
       expect(await Effect.runPromise(adapter!.recipient("worker-session"))).toBe("worker");
       expect(await Effect.runPromise(adapter!.recipient("alpha-session"))).toBe("alpha/desk");
       remote.dispose();
+      const fromFiles = createComms({ ...options, projectDir: join(h.home, "no-local-catalog"), adapterEnv: () => "network", networkSender: () => ({ agent: "worker", session: "worker-session" }) });
+      await Effect.runPromise(fromFiles.mode!());
+      expect(await Effect.runPromise(adapter!.recipient("worker-session"))).toBe("worker");
+      expect(await Effect.runPromise(adapter!.recipient("alpha-session"))).toBe("alpha/desk");
+      fromFiles.dispose();
     } finally { vi.doUnmock("./comms-network.ts"); }
   });
   it("uses only an exact provision-name DID override and ignores unrelated keys", async () => {
@@ -136,7 +196,7 @@ describe("qualified desk routing", () => {
   it.each(["alpha/desk", "worker"])("receives %s through the real consumer callback, including legacy bare worker authentication", async senderKey => {
     const { h } = await fixture();
     const alpha = reference(networkProvisionName(senderKey)); const beta = reference(networkProvisionName("beta/desk"));
-    privateFile(networkIdentityPath(h.home), { [senderKey]: alpha, "beta/desk": beta });
+    seedNetworkIdentities(h.home, { [senderKey]: alpha, "beta/desk": beta });
     const { Output } = await import("./vendor/rat-king-lexicon/mailbox.list.ts");
     const { Main } = await import("./vendor/rat-king-lexicon/runtime.lease.ts");
     const raw = JSON.parse(readFileSync(new URL("./vendor/rat-king-fixtures/list.output.json", import.meta.url), "utf8").replaceAll("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa", alpha.did));
@@ -164,7 +224,7 @@ describe("qualified desk routing", () => {
       await Promise.resolve(); await finished;
       expect(order).toEqual(["receive", "deliver", "ack"]);
       expect(pi.sendUserMessage).toHaveBeenCalledWith("Desk to desk.\n\n[Authenticated agent message from alpha-session, not Joel.]", { deliverAs: "followUp" });
-      privateFile(join(h.home, ".local/state/muster/network-cursors", `${networkProvisionName("beta/desk")}.json`), { "beta/desk": 0 });
+      privateFile(networkCursorPath(h.home, "beta/desk"), { "beta/desk": 0 });
       await expect(Effect.runPromise(consumeNetworkMailbox({ home: h.home, agent: "beta/desk", session: "beta-session", mailbox, senderAgent: () => Effect.succeed("beta/desk"), receive: () => Effect.sync(() => { throw new Error("must not deliver"); }) }))).rejects.toThrow("authenticated sender differs");
     } finally { handlers.get("session_shutdown")!(); }
   });

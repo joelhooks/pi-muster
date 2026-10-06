@@ -12,7 +12,7 @@ import { Type } from "typebox";
 
 import { registerCompaction } from "./compact.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
-import { MAX_CADENCE_MINUTES, decodeNetworkPeers } from "./domain.ts";
+import { MAX_CADENCE_MINUTES, decodeNetworkPeers, decodeNetworkDeskPeers } from "./domain.ts";
 import { sendDesk } from "./desk-route.ts";
 import { createComms, catalogCommsSender, catalogNetworkPeers } from "./comms.ts";
 import {
@@ -137,14 +137,14 @@ export default function muster(host: ExtensionAPI) {
             networkConfig: () => env.MUSTER_NETWORK_CONFIG,
             networkPeers: () => {
               try { return catalogNetworkPeers(dir); }
-              catch { return decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")); }
+              catch { return { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) }; }
             },
             networkSender: () => {
               const session = ctx.sessionManager.getSessionId();
               const local = catalogCommsSender(dir, session);
               if (local) return local;
               if (!env.MUSTER_AGENT) return undefined;
-              const peers = decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}"));
+              const peers = { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) };
               return { agent: peers[session] ?? env.MUSTER_AGENT, session };
             },
           });

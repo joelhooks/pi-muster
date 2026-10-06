@@ -5,7 +5,7 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Effect, Layer, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
+import { decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
 import { CommsError, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
 
@@ -104,6 +104,11 @@ export function sendWithConsumerFence(options: {
 
 export const networkConfigPath = (home: string) => join(home, ".config/muster/network.json");
 export const networkIdentityPath = (home: string) => join(home, ".local/state/muster/network-identities.json");
+export const networkDeskIdentityPath = (home: string) => join(home, ".local/state/muster/network-desk-identities.json");
+export const networkPeersPath = (home: string) => join(home, ".local/state/muster/network-peers.json");
+export const networkDeskPeersPath = (home: string) => join(home, ".local/state/muster/network-desk-peers.json");
+const identityPath = (home: string, agent: string) => agent.includes("/") ? networkDeskIdentityPath(home) : networkIdentityPath(home);
+export const networkCursorPath = (home: string, agent: string) => join(home, ".local/state/muster", agent.includes("/") ? "network-desk-cursors" : "network-cursors", `${networkProvisionName(agent)}.json`);
 
 /** Wrapper names stay valid and collision-free; Switchboard retains its fleet DID. */
 export function networkProvisionName(identity: string): string {
@@ -127,10 +132,11 @@ export function readNetworkConfig(home: string, path = networkConfigPath(home)) 
   }
   catch (error) { if (error instanceof CommsError) throw error; throw new CommsError(`NetworkComms missing or invalid config: ${path}`); }
 }
-export function readNetworkIdentities(home: string) {
-  const path = networkIdentityPath(home);
+function readIdentityCache(path: string, desk: boolean) {
   try {
-    const cache = decodeCommsIdentityCache(privateJson(path));
+    const raw = privateJson(path);
+    const cache = (desk ? decodeNetworkDeskIdentityCache : decodeCommsIdentityCache)(raw);
+    if (raw === null || typeof raw !== "object" || Object.keys(raw).length !== Object.keys(cache).length) throw new Error("identity namespace mismatch");
     if (Object.values(cache).some(entry => entry.did !== entry.document.id)) throw new Error("document mismatch");
     return cache;
   }
@@ -138,6 +144,42 @@ export function readNetworkIdentities(home: string) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return {};
     if (error instanceof CommsError) throw error;
     throw new CommsError(`NetworkComms invalid identity cache: ${path}`);
+  }
+}
+
+/** Bare references remain in the old file; only new code opens desk sidecars. */
+export function readNetworkIdentities(home: string) {
+  return { ...readIdentityCache(networkIdentityPath(home), false), ...readIdentityCache(networkDeskIdentityPath(home), true) };
+}
+
+function readPeerCache(path: string, desk: boolean) {
+  try { return (desk ? decodeNetworkDeskPeers : decodeNetworkPeers)(privateJson(path)); }
+  catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return {};
+    throw new CommsError("NetworkComms invalid peer cache");
+  }
+}
+export function readNetworkPeers(home: string) {
+  return { ...readPeerCache(networkPeersPath(home), false), ...readPeerCache(networkDeskPeersPath(home), true) };
+}
+
+/** Partition before writing: old readers never see qualified values or keys. */
+export function seedNetworkPeers(home: string, value: unknown) {
+  const peers = decodeNetworkPeerReferences(value);
+  for (const desk of [false, true]) {
+    const entries = Object.fromEntries(Object.entries(peers).filter(([, agent]) => agent.includes("/") === desk));
+    if (!Object.keys(entries).length) continue;
+    const path = desk ? networkDeskPeersPath(home) : networkPeersPath(home);
+    const current = readPeerCache(path, desk);
+    if (Object.entries(entries).every(([session, agent]) => current[session] === agent)) continue;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const lock = `${path}.lock`; writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      const merged = { ...readPeerCache(path, desk), ...entries };
+      writeFileSync(temp, JSON.stringify((desk ? decodeNetworkDeskPeers : decodeNetworkPeers)(merged)), { flag: "wx", mode: 0o600 });
+      renameSync(temp, path);
+    } finally { try { unlinkSync(temp); } catch { /* renamed */ } unlinkSync(lock); }
   }
 }
 
@@ -157,7 +199,7 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
       const agent = decodeNetworkIdentityName(options.agent);
       const provisionName = networkProvisionName(agent);
       const config = readNetworkConfig(options.home, options.configPath);
-      const path = networkIdentityPath(options.home);
+      const path = identityPath(options.home, agent);
       const did = Object.hasOwn(config.didOverrides ?? {}, provisionName) ? config.didOverrides![provisionName]! : config.didTemplate.replace("{agent}", provisionName);
       const cached = readNetworkIdentities(options.home)[agent];
       if (cached) {
@@ -169,7 +211,7 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
       try { writeFileSync(lock, "", { flag: "wx", mode: 0o600 }); }
       catch { throw new CommsError(`NetworkComms identity cache busy: ${agent}; retry provisioning`); }
       try {
-        const identities = readNetworkIdentities(options.home);
+        const identities = readIdentityCache(path, agent.includes("/"));
         if (identities[agent]) {
           if (identities[agent].did !== did) throw new CommsError(`NetworkComms cached identity differs from config: ${agent}`);
           return identities[agent];
@@ -264,20 +306,23 @@ export function watchNetworkMailbox(options: {
 
 /** Public references can cross machines; keys never do. Existing references must match. */
 export function seedNetworkIdentities(home: string, value: unknown) {
-  const incoming = decodeCommsIdentityCache(value);
-  const path = networkIdentityPath(home);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const lock = `${path}.lock`;
-  writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
-  try {
-    const current = readNetworkIdentities(home);
-    for (const [agent, reference] of Object.entries(incoming)) {
-      if (reference.did !== reference.document.id || (current[agent] && JSON.stringify(current[agent]) !== JSON.stringify(reference))) throw new CommsError(`NetworkComms peer reference mismatch: ${agent}`);
-    }
-    const temp = `${path}.${process.pid}.tmp`;
-    writeFileSync(temp, JSON.stringify({ ...current, ...incoming }), { flag: "wx", mode: 0o600 });
-    renameSync(temp, path);
-  } finally { unlinkSync(lock); }
+  const incoming = decodeNetworkIdentityCache(value);
+  for (const desk of [false, true]) {
+    const entries = Object.fromEntries(Object.entries(incoming).filter(([agent]) => agent.includes("/") === desk));
+    if (!Object.keys(entries).length) continue;
+    const path = desk ? networkDeskIdentityPath(home) : networkIdentityPath(home);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const lock = `${path}.lock`; writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      const current = readIdentityCache(path, desk);
+      for (const [agent, reference] of Object.entries(entries)) {
+        if (reference.did !== reference.document.id || (current[agent] && JSON.stringify(current[agent]) !== JSON.stringify(reference))) throw new CommsError(`NetworkComms peer reference mismatch: ${agent}`);
+      }
+      writeFileSync(temp, JSON.stringify({ ...current, ...entries }), { flag: "wx", mode: 0o600 });
+      renameSync(temp, path);
+    } finally { try { unlinkSync(temp); } catch { /* renamed */ } unlinkSync(lock); }
+  }
 }
 
 /** Scoped lifecycle: acquire → watch → authenticate/open → ingest → deliver/ack → checkpoint.
@@ -292,11 +337,11 @@ export function consumeNetworkMailbox(options: {
 }) {
   const failure = () => new CommsError("NetworkComms consumer failed (private output withheld)");
   return Effect.gen(function* () {
-    const cursorPath = join(options.home, ".local/state/muster/network-cursors", `${networkProvisionName(options.agent)}.json`);
+    const cursorPath = networkCursorPath(options.home, options.agent);
     const afterSeq = yield* Effect.try({
       try: () => {
         try {
-          const checkpoint = decodeNetworkCursors(privateJson(cursorPath))[options.agent];
+          const checkpoint = (options.agent.includes("/") ? decodeNetworkDeskCursors : decodeNetworkCursors)(privateJson(cursorPath))[options.agent];
           if (checkpoint === undefined) throw new Error("cursor belongs to another agent");
           return checkpoint;
         }

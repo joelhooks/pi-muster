@@ -160,6 +160,8 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
     if (selected === "network") {
       const network = yield* Effect.tryPromise({ try: () => import("./comms-network.ts"), catch: () => new CommsError("NetworkComms adapter unavailable") });
       yield* Effect.try({ try: () => network.readNetworkConfig(options.home, options.networkConfig?.()), catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms config invalid") });
+      const configuredPeers = options.networkPeers?.() ?? {};
+      yield* Effect.try({ try: () => network.seedNetworkPeers(options.home, configuredPeers), catch: () => new CommsError("NetworkComms peer cache unavailable") });
       return network.createNetworkComms({
         home: options.home,
         configPath: options.networkConfig?.(),
@@ -212,6 +214,9 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
           const peer = yield* Effect.try({ try: () => exists(options.projectDir) ? networkCatalogPeers(options.home, options.projectDir)[address.id] : undefined, catch: () => new CommsError("NetworkComms peer catalogs invalid") });
           if (peer) return peer;
           const configuredPeer = options.networkPeers?.()[address.id];
+          if (configuredPeer?.includes("/")) return configuredPeer;
+          const deskPeer = yield* Effect.try({ try: () => network.readNetworkPeers(options.home)[address.id], catch: () => new CommsError("NetworkComms peer cache invalid") });
+          if (deskPeer) return deskPeer;
           if (configuredPeer) return configuredPeer;
           const catalog = yield* project(options.projectDir);
           const row = catalog.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id);

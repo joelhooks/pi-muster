@@ -44,6 +44,14 @@ export function networkRowIdentity(project: Project, row: AgentRow): string {
   return row.role === "desk" ? `${project.slug}/${row.name}` : row.name;
 }
 
+/** Old launch readers see bare names only; new readers have a separate desk channel. */
+export function networkPeerEnvironment(project: Project, rows: readonly AgentRow[]) {
+  return {
+    MUSTER_NETWORK_PEERS: JSON.stringify(Object.fromEntries(rows.map(row => [row.sessionId, row.name]))),
+    MUSTER_NETWORK_DESK_PEERS: JSON.stringify(Object.fromEntries(rows.filter(row => row.role === "desk").map(row => [row.sessionId, networkRowIdentity(project, row)]))),
+  };
+}
+
 /** Read registered catalogs at send/receive time, never accept a caller's DID mapping. */
 export function networkCatalogPeers(home: string, dir: string): Record<string, string> {
   const peers: Record<string, string> = {};

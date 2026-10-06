@@ -50,7 +50,7 @@ it("network aliases and remote intercom addresses bind to the real Pi session, n
   if (!row) throw new Error("worker missing");
   await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, policy: { ...project.policy, comms: "network" }, agents: project.agents.map(row => ({ ...row, intercomAddress: "worker@remote" })) }, undefined] as const)));
   let session: ((to: import("./runtime.ts").CommsTarget) => Effect.Effect<string, import("./runtime.ts").CommsError>) | undefined;
-  vi.doMock("./comms-network.ts", () => ({ readNetworkConfig: () => config, createNetworkComms: (options: { session: typeof session }) => { session = options.session; return NetworkComms; } }));
+  vi.doMock("./comms-network.ts", () => ({ readNetworkConfig: () => config, seedNetworkPeers() {}, readNetworkPeers: () => ({}), createNetworkComms: (options: { session: typeof session }) => { session = options.session; return NetworkComms; } }));
   try {
     const service = createComms({ home: h.home, projectDir: dir, events: { emit() {}, on() {} }, createId: () => "id", adapterEnv: () => "network" });
     if (!service.mode) throw new Error("mode missing"); await Effect.runPromise(service.mode());
