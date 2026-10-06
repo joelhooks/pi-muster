@@ -161,10 +161,15 @@ export interface HeavySlotView {
  * slots is live count + 1, not capacity. Only mode=exclusive blocks fleet placement.
  * Full command strings identify fc-<runId> runs. Never truncate them.
  */
+/** Fleet may use this floor for placement. Local execution never consults it. */
+function configuredMemoryFloor(value = process.env.MUSTER_HEAVY_MIN_FREE_GB): number {
+  const number = value?.trim() ? Number(value) : 16;
+  return Number.isFinite(number) && number >= 0 ? number : 16;
+}
 export function heavySnapshot(options: HeavyOptions, now = (options.now ?? Date.now)()) {
   const jobs = liveJobs(options, now);
   return { slots: jobs.length + 1, load: loadavg()[0] ?? 0, loadLimit: Number.MAX_SAFE_INTEGER,
-    availableGB: freemem() / 1024 ** 3, minFreeGB: 0,
+    availableGB: freemem() / 1024 ** 3, minFreeGB: configuredMemoryFloor(),
     holders: jobs.map((job, index) => ({ name: `slot-${index}`, held: true, holder: { pid: job.pid, host: job.host, command: job.command, startedAt: job.startedAt, mode: "job" as const }, ageSeconds: Math.max(0, Math.floor((now - Date.parse(job.startedAt)) / 1000)), stale: false })),
     exclusivePending: { name: "exclusive-pending", held: false, holder: null, ageSeconds: null, stale: false } satisfies HeavySlotView,
     jobs };

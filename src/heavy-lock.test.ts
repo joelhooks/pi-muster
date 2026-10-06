@@ -2,13 +2,13 @@ import { spawnSync, spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeHeavyJob } from "./domain.ts";
 import { finishJob, heavyReport, heavySnapshot, jobsPath, parseCpuTime, parseProcessSamples, parseSince, readJobs, registerJob, sampleJobs, treeSample } from "./heavy-lock.ts";
 
 const homes: string[] = [];
 function setup() { const home = mkdtempSync(join(tmpdir(), "heavy-jobs-test-")); homes.push(home); return { home }; }
-afterEach(() => { for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { vi.unstubAllEnvs(); for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 function cli(home: string, args: string[], env: Record<string, string> = {}) {
   return spawnSync(process.execPath, [resolve("bin/muster-heavy.ts"), ...args], { encoding: "utf8", timeout: 20000, env: { ...process.env, HOME: home, ...env } });
 }
@@ -38,13 +38,14 @@ describe("job registry", () => {
     expect(snapshot.jobs.map(row => row.id)).toEqual([foreign.id]);
     expect(snapshot.holders[0]?.stale).toBe(false);
   });
-  it("keeps every field fleet-compute placement reads and always advertises room", () => {
+  it("keeps every field fleet-compute placement reads and advertises spare slot capacity", () => {
+    vi.stubEnv("MUSTER_HEAVY_MIN_FREE_GB", undefined);
     const options = setup();
     registerJob(options, "sh -c fc-contract sleep 20"); registerJob(options, "second sleep 20");
     const snapshot = JSON.parse(JSON.stringify(heavySnapshot(options)));
     expect(snapshot.slots).toBe(snapshot.holders.length + 1);
     for (const key of ["slots", "load", "loadLimit", "availableGB", "minFreeGB"]) expect(typeof snapshot[key]).toBe("number");
-    expect(snapshot.minFreeGB).toBe(0); expect(snapshot.loadLimit).toBe(Number.MAX_SAFE_INTEGER);
+    expect(snapshot.minFreeGB).toBe(16); expect(snapshot.loadLimit).toBe(Number.MAX_SAFE_INTEGER);
     expect(snapshot.exclusivePending).toEqual({ name: "exclusive-pending", held: false, holder: null, ageSeconds: null, stale: false });
     expect(snapshot.holders).toHaveLength(2);
     for (const holder of snapshot.holders) {
@@ -53,6 +54,24 @@ describe("job registry", () => {
       expect(holder.holder.mode).toBe("job"); expect(holder.held).toBe(true);
     }
     expect(snapshot.holders.map((row: { holder: { command: string } }) => row.holder.command)).toContain("sh -c fc-contract sleep 20");
+  });
+});
+
+describe("informational memory floor", () => {
+  it.each([
+    { configured: "32", expected: 32 },
+    { configured: "0", expected: 0 },
+    { configured: "", expected: 16 },
+    { configured: "bad", expected: 16 },
+    { configured: "-1", expected: 16 },
+    { configured: "Infinity", expected: 16 },
+  ])("reports $configured as $expected without gating registration", ({ configured, expected }) => {
+    vi.stubEnv("MUSTER_HEAVY_MIN_FREE_GB", configured);
+    const options = setup();
+    const job = registerJob(options, "runs immediately");
+    const snapshot = heavySnapshot(options);
+    expect(snapshot.minFreeGB).toBe(expected);
+    expect(snapshot.jobs.map(row => row.id)).toContain(job.id);
   });
 });
 
