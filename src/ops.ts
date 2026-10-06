@@ -62,7 +62,7 @@ import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtim
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
-import { deliverOwnerItem, forwardOwner, ingestOwnerItem } from "./owner-queue.ts";
+import { deliverOwnerItem, forwardOwner, ingestOwnerItem, ownerRoute } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { retroCadence, retroJudgeModel } from "./retro-cadence.ts";
@@ -336,10 +336,12 @@ const cloneRetirementNotes = (row: AgentRow) => Effect.gen(function* () {
 
 const latestCloneEvent = (row: AgentRow) => [...(row.events ?? [])].reverse().find(event => event.type === "CLONE_KEPT" || event.type === "CLONE_REMOVED");
 
+type ReapSources = Map<string, { readonly origin: boolean; readonly fetched: boolean }>;
+
 /** Runs through the same Proc on the clone's machine. Verification is not
  * preservation: require harvest proof or an exact external rescue, and
  * classify every dirty path before ordinary or forced retirement. */
-const cloneReapAssessment = (project: Project, row: AgentRow, source: string, rescue = false) => Effect.gen(function* () {
+const cloneReapAssessment = (project: Project, row: AgentRow, source: string, rescue = false, sources?: ReapSources) => Effect.gen(function* () {
   const proc = yield* Proc;
   const run = (cwd: string, ...args: string[]) => proc.run("git", args, { cwd, timeoutMs: 30_000 });
   const head = (yield* git(row.cwd, "rev-parse", "HEAD")).trim();
@@ -383,14 +385,20 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
         ? `rescued: ${source} ${rescueRef}; HEAD ${head}`
         : `rescue verification failed: ${rescueRef}; HEAD ${head}` };
   }
-  const origin = yield* run(source, "remote", "get-url", "origin");
-  if (origin.code === 0) {
-    const fetch = yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*");
-    if (fetch.code !== 0) return { safe: false, force: false, detail: `unreachable: ${row.cwd}; HEAD ${head}; origin fetch failed` };
+  // One refresh per source/machine per status pass, including failed refreshes.
+  // Individual clone-object fetches below remain necessary for reachability proof.
+  const key = JSON.stringify([row.machine, source]);
+  let refreshed = sources?.get(key);
+  if (!refreshed) {
+    const origin = (yield* run(source, "remote", "get-url", "origin")).code === 0;
+    const fetched = !origin || (yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")).code === 0;
+    refreshed = { origin, fetched };
+    sources?.set(key, refreshed);
   }
+  if (!refreshed.fetched) return { safe: false, force: false, detail: `unreachable: ${row.cwd}; HEAD ${head}; origin fetch failed` };
   let ref = lane?.base ?? row.clone?.base?.ref ?? "HEAD";
   if (ref === "default branch") ref = "HEAD";
-  if (origin.code === 0 && !ref.startsWith("origin/")) {
+  if (refreshed.origin && !ref.startsWith("origin/")) {
     const remote = yield* run(source, "rev-parse", "--verify", `origin/${ref}^{commit}`);
     if (remote.code === 0) ref = `origin/${ref}`;
   }
@@ -436,7 +444,7 @@ const clonePresent = (row: AgentRow) => cloneOnMachine(row, () => Effect.gen(fun
   return (yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 })).code === 0;
 }));
 
-const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = false) => Effect.gen(function* () {
+const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = false, sources?: ReapSources) => Effect.gen(function* () {
   if (!row.clone) return { cloneError: null, notes: [] as string[] };
   const project = yield* load(dir);
   const env = yield* MusterEnv;
@@ -450,7 +458,7 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
     if (kept.keep) return { removed: false, detail: kept.notes.join("; ") };
     const headBefore = yield* git(row.cwd, "rev-parse", "HEAD");
     const dirtBefore = yield* git(row.cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all");
-    const assessment = yield* cloneReapAssessment(project, row, source, force);
+    const assessment = yield* cloneReapAssessment(project, row, source, force, sources);
     if (!assessment.safe) return { removed: false, detail: assessment.detail };
     if ((yield* git(row.cwd, "rev-parse", "HEAD")) !== headBefore ||
         (yield* git(row.cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")) !== dirtBefore) {
@@ -463,7 +471,7 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
   })).pipe(Effect.catch(error => Effect.succeed({ removed: false, detail: `clone kept: ${row.cwd}; ${error.message}` })));
   yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
-    yield* requireOwner(latest, env.sessionId, takeover);
+    yield* requireOwner(latest, env.sessionId, takeover, project.slug);
     if (latest.cwd !== row.cwd || latest.state !== "closed") return yield* input("clone row changed during retirement");
     const type = result.removed ? "CLONE_REMOVED" : "CLONE_KEPT";
     const prior = latestCloneEvent(latest);
@@ -505,7 +513,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
   }));
   const closed = yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
-    yield* requireOwner(latest, env.sessionId, params.takeover);
+    yield* requireOwner(latest, env.sessionId, params.takeover, project.slug);
     if (latest.sessionId !== row.sessionId || latest.pane?.terminalId !== row.pane?.terminalId) return yield* input("remote row changed during close; re-read it");
     const next = { ...latest, restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
     return [withRow(current, next), next] as const;
@@ -644,7 +652,7 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
   const env = yield* MusterEnv;
   return yield* mutate(dir, project => Effect.gen(function* () {
     const latest = yield* findRow(project, row.name);
-    yield* requireOwner(latest, env.sessionId, false);
+    yield* requireOwner(latest, env.sessionId, false, project.slug);
     if (latest.state !== row.state || latest.sessionId !== row.sessionId || latest.sessionFile !== row.sessionFile ||
         latest.pane?.terminalId !== row.pane?.terminalId || latest.machine !== row.machine) return yield* input("row changed during adoption; retry");
     const holder = adoptionHolder(project, latest, pane);
@@ -1322,6 +1330,23 @@ export interface LaneOpenInput {
   readonly deployRule?: string | undefined;
 }
 
+const guardLaneRepo = (project: Project, slug: string, repo: string | undefined) => {
+  const lane = project.lanes.find(lane => lane.slug === slug);
+  if (repo === undefined || repo === (lane?.repo ?? project.dir)) return Effect.void;
+  const active = project.agents.filter(row => row.lane === slug && row.state !== "closed" &&
+    (row.clone || row.state === "launching" || row.state === "restoring"));
+  return active.length ? input(`lane ${slug} repo change refused: active clone or launch (${active.map(row => row.name).join(", ")}); close those workers before changing the source`) : Effect.void;
+};
+
+const laneFieldChanges = (latest: Lane, next: Lane) => {
+  const changes: string[] = [];
+  if (next.repo !== latest.repo) changes.push("repo updated");
+  if (next.base !== latest.base) changes.push("base updated");
+  if (next.deployLevel !== latest.deployLevel) changes.push("deployLevel updated");
+  if (next.deployRule !== latest.deployRule) changes.push("deployRule updated");
+  return changes;
+};
+
 export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: number | undefined }) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -1347,17 +1372,20 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const goal = params.goal ?? existing?.goal;
     if (label === undefined || goal === undefined) return yield* input(`new lane ${slug} requires goal and label`);
     if (wantOpen && existing?.state === "proposed" && params.goal === undefined) return yield* input(`first opening lane ${slug} requires goal`);
+    yield* guardLaneRepo(project, slug, params.repo);
     if (existing?.state === "open" && existing.root) {
       const live = yield* locatePane(existing.root);
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
         const requestedBase = params.base;
         // An open lane is never archived; this also repairs a lane reopened before reopening cleared the flag.
-        const lane = requestedBase === undefined && params.deployLevel === undefined && !existing.archived ? existing : yield* mutate(dir, (current) => {
-          const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
-          const next = { ...latest, ...deployPatch, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
-          return Effect.succeed([withLane(current, next), next] as const);
-        });
-        return { lane, created: false, note: null, outcome: project.outcome };
+        const { lane, note } = requestedBase === undefined && params.repo === undefined && params.deployLevel === undefined && !existing.archived
+          ? { lane: existing, note: null } : yield* mutate(dir, current => Effect.gen(function* () {
+            yield* guardLaneRepo(current, slug, params.repo);
+            const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
+            const next = { ...latest, ...deployPatch, repo: params.repo ?? latest.repo, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
+            return [withLane(current, next), { lane: next, note: `changed: ${laneFieldChanges(latest, next).join(", ") || "none"}` }] as const;
+          }));
+        return { lane, created: false, note, outcome: project.outcome };
       }
     }
     if (wantOpen && !project.spaceId) return yield* input("the project has no space; run project_open with space or createSpace first");
@@ -1384,13 +1412,15 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       updatedAt: iso(env),
     };
     if (!wantOpen) {
-      const { lane, note } = yield* mutate(dir, (current) => {
+      const { lane, note } = yield* mutate(dir, current => Effect.gen(function* () {
+        yield* guardLaneRepo(current, slug, params.repo);
         const stored = current.lanes.find((candidate) => candidate.slug === slug);
         const latest = stored ?? base;
         const next = {
           ...latest,
           ...deployPatch,
           ...(rank !== undefined ? { rank } : {}),
+          repo: params.repo ?? latest.repo,
           base: params.base ?? latest.base,
           goal: latest.state === "proposed" ? params.goal ?? latest.goal : latest.goal,
           label: latest.state === "proposed" ? params.label ?? latest.label : latest.label,
@@ -1399,27 +1429,26 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         if (next.rank !== latest.rank) changes.push(`rank ${latest.rank ?? "unset"}→${next.rank}`);
         if (next.goal !== latest.goal) changes.push("goal updated");
         if (next.label !== latest.label) changes.push("label updated");
-        if (next.base !== latest.base) changes.push("base updated");
-        if (next.deployLevel !== latest.deployLevel) changes.push("deployLevel updated");
-        if (next.deployRule !== latest.deployRule) changes.push("deployRule updated");
+        changes.push(...laneFieldChanges(latest, next));
         // A pure re-rank preserves the brief timestamp; amendments share one locked write.
         const rankOnly = stored?.state === "proposed" && rank !== undefined && changes.every(change => change.startsWith("rank "));
         const lane = rankOnly ? next : { ...next, updatedAt: iso(env) };
         const note = lane.state === "proposed"
           ? `changed: ${stored ? changes.join(", ") || "none" : "created"}; stored goal: ${lane.goal.slice(0, 200)}`
           : null;
-        return Effect.succeed([withLane(current, lane), { lane, note }] as const);
-      });
+        return [withLane(current, lane), { lane, note }] as const;
+      }));
       return { lane, created: !existing, note, outcome: project.outcome };
     }
     const event = base.state === "open" ? null : base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
     // Reserve WIP under the catalog lock before opening any pane. Other callers see it immediately.
     yield* mutate(dir, current => Effect.gen(function* () {
+      yield* guardLaneRepo(current, slug, params.repo);
       const latest = current.lanes.find(lane => lane.slug === slug) ?? base;
       if (params.kind === "retro" && latest.kind !== "retro") return yield* input(`lane ${slug} is kind ${latest.kind}, not retro; choose a fresh slug for the retro lane`);
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
       if (refusal && (latest.kind === "retro" || !params.override?.trim())) return yield* input(refusal);
-      const next: Lane = { ...latest, ...deployPatch, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
+      const next: Lane = { ...latest, ...deployPatch, repo: params.repo ?? latest.repo, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
         ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) };
       return [withLane(current, next), next] as const;
     }));
@@ -1428,7 +1457,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const liveRoot = root ? yield* locatePane(root) : null;
     let note: string | null = null;
     if (!liveRoot) {
-      const tab = yield* tabCreate(project.spaceId as string, base.repo ?? project.dir, base.label).pipe(Effect.tapError(() =>
+      const tab = yield* tabCreate(project.spaceId as string, params.repo ?? base.repo ?? project.dir, base.label).pipe(Effect.tapError(() =>
         mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findLane(current, slug);
           const state = base.state === "open" ? latest.state : yield* stepLane(slug, latest.state, { type: "OPEN_FAILED", prior: base.state });
@@ -1443,6 +1472,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     }
     const lane = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
+        yield* guardLaneRepo(current, slug, params.repo);
         const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
         const state = latest.state;
         const next: Lane = {
@@ -1465,6 +1495,10 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         return [withLane(current, next), next] as const;
       }),
     );
+    if (existing) {
+      const changes = laneFieldChanges(existing, lane);
+      if (changes.length) note = [note, `changed: ${changes.join(", ")}`].filter(Boolean).join("; ");
+    }
     yield* publishTokens(yield* load(dir));
     return { lane, created: !existing, note, outcome: project.outcome };
   });
@@ -1833,7 +1867,7 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     if (params.side !== true) return yield* input("adopt requires side: true and from: the parent desk");
     const parent = yield* sideParent(project, params.from, env.sessionId);
     const row = yield* findRow(project, params.name);
-    yield* requireOwner(row, env.sessionId, false);
+    yield* requireOwner(row, env.sessionId, false, project.slug);
     if (row.name === parent.name || row.state !== "running" || !row.pane) return yield* input("adopt needs an existing running row with its own pane");
     const lane = yield* findLane(project, params.lane ?? parent.lane);
     if (lane.slug !== parent.lane || lane.state !== "open") return yield* input("adopt lane must be the parent desk's open lane");
@@ -1846,7 +1880,7 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     yield* guardPaneBinding(project, row, binding);
     const adopted = yield* mutate(dir, current => Effect.gen(function* () {
       const latest = yield* findRow(current, row.name);
-      yield* requireOwner(latest, env.sessionId, false);
+      yield* requireOwner(latest, env.sessionId, false, project.slug);
       if (latest.state !== "running" || latest.lane !== row.lane || !latest.pane || !sharesPane(binding, latest.pane)) return yield* input("row changed during adoption; retry");
       const latestParent = yield* sideParent(current, parent.name, env.sessionId);
       const latestLane = yield* findLane(current, lane.slug);
@@ -1915,7 +1949,7 @@ export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; repl
 const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(`restart-${old.name.slice(0, 23)}`, Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
-  if (!self) yield* requireOwner(old, env.sessionId, false);
+  if (!self) yield* requireOwner(old, env.sessionId, false, project.slug);
   if (!old.pane || !old.sessionFile) return yield* input("restart needs a live pane and current session file");
   const oldPane = old.pane;
   const state = yield* stepAgent(old.name, old.state, { type: "RESTARTED" });
@@ -1965,7 +1999,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       row = yield* mutate(dir, current => Effect.gen(function* () {
         const latest = yield* findRow(current, old.name);
         if (latest.sessionId !== old.sessionId || latest.sessionFile !== old.sessionFile || latest.owner !== old.owner || latest.state !== old.state || latest.pane?.terminalId !== oldPane.terminalId) return yield* input("row changed during restart; old agent untouched, retry");
-        if (!self) yield* requireOwner(latest, env.sessionId, false);
+        if (!self) yield* requireOwner(latest, env.sessionId, false, project.slug);
         yield* guardPaneBinding(current, latest, binding);
         const next = withRow(current, row);
         const agents = next.agents.map(other => other.owner === old.sessionId ? { ...other, owner: id, restore: other.restore ? { ...other.restore, env: { ...other.restore.env, MUSTER_OWNER: id } } : null, updatedAt: iso(env) } : other);
@@ -2207,7 +2241,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         return yield* adoptSideDesk(dir, project, params);
       }
       const row = yield* findRow(project, name);
-      yield* requireOwner(row, env.sessionId, false);
+      yield* requireOwner(row, env.sessionId, false, project.slug);
       if (!params.pane) return yield* input("adopt requires name and pane");
       if (row.state === "closed") return yield* input(`cannot adopt a ${row.state} row`);
       const adopt = Effect.gen(function* () {
@@ -2499,15 +2533,24 @@ export interface AgentCloseInput {
   readonly takeover?: boolean | undefined;
 }
 
-const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined) =>
-  row.owner === sessionId || takeover
-    ? Effect.void
-    : Effect.fail(
-        new GuardFailed({
-          guard: "owner",
-          message: `${row.name} belongs to owner session ${row.owner}. Only its owner acts on its pane; pass takeover: true to adopt it.`,
-        }),
-      );
+const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined, project: string) =>
+  Effect.gen(function* () {
+    if (row.owner === sessionId || takeover) return;
+    // Closed rows retain their historical owner. A project-scoped forward gives
+    // its replacement authority without rewriting the catalog or live-pane rules.
+    if (row.state === "closed") {
+      const env = yield* MusterEnv;
+      const owner = yield* Effect.try({
+        try: () => ownerRoute(row.owner, env.home, project).owner,
+        catch: error => new GuardFailed({ guard: "owner", message: `cannot resolve ${row.name}'s owner: ${String(error)}` }),
+      });
+      if (owner === sessionId) return;
+    }
+    return yield* new GuardFailed({
+      guard: "owner",
+      message: `${row.name} belongs to owner session ${row.owner}. Only its owner acts on its pane; pass takeover: true to adopt it.`,
+    });
+  });
 
 export const agentClose = (dir: string, params: AgentCloseInput) =>
   Effect.gen(function* () {
@@ -2515,7 +2558,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "agent_close");
     const row = yield* findRow(project, params.name);
-    yield* requireOwner(row, env.sessionId, params.takeover);
+    yield* requireOwner(row, env.sessionId, params.takeover, project.slug);
     if (row.state === "closed") {
       const retirement = yield* retireClone(dir, row, params.force === true, params.takeover);
       const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;
@@ -2559,7 +2602,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     // current row, not the snapshot read before closing the pane.
     const closed = yield* mutate(dir, (current) => Effect.gen(function* () {
       const latest = yield* findRow(current, row.name);
-      yield* requireOwner(latest, env.sessionId, params.takeover);
+      yield* requireOwner(latest, env.sessionId, params.takeover, project.slug);
       if (latest.state === "closed") return [current, latest] as const;
       if (latest.sessionId !== row.sessionId || latest.cwd !== row.cwd || latest.pane?.terminalId !== row.pane?.terminalId) {
         return yield* new GuardFailed({ guard: "close-binding", message: `${row.name} changed session or pane during close; re-read its row before closing the replacement` });
@@ -2965,7 +3008,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const corrected = yield* mutate(dir, current => Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
         const owner = yield* findRow(current, latest.agent);
-        yield* requireOwner(owner, env.sessionId, params.takeover);
+        yield* requireOwner(owner, env.sessionId, params.takeover, project.slug);
         const state = yield* stepPacket(latest.id, latest.state, { type: "CORRECT" });
         const path = join(dataDir(dir), "corrections.jsonl");
         yield* Effect.try({
@@ -3249,6 +3292,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
 
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
+    const reapSources: ReapSources = new Map();
     for (const row of project.agents) {
       if (row.state === "closed") {
         if (!row.clone || latestCloneEvent(row)?.type === "CLONE_REMOVED") continue;
@@ -3258,11 +3302,12 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         })));
         if (!present) continue;
         const prior = latestCloneEvent(row);
-        if (act && row.owner === env.sessionId && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
-          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source)).pipe(Effect.orElseSucceed(() => null));
+        const owned = act && (yield* requireOwner(row, env.sessionId, false, project.slug).pipe(Effect.result))._tag === "Success";
+        if (owned && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
+          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source, false, reapSources)).pipe(Effect.orElseSucceed(() => null));
           // Unchanged proof plus a script failure must not retry every pass.
           if (assessment?.safe && !prior.detail.startsWith(assessment.detail)) {
-            yield* retireClone(dir, row, false);
+            yield* retireClone(dir, row, false, false, reapSources);
             if (!(yield* clonePresent(row))) continue;
           }
         }
