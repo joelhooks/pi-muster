@@ -12,6 +12,28 @@ import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
  * shadow a state.
  */
 
+/** Local command telemetry, not an admission contract. Terminal variants cannot look live. */
+const JobFacts = {
+  id: Schema.String.check(Schema.isPattern(/^[a-f0-9-]{36}$/u)),
+  host: Schema.String, repo: Schema.String, cwd: Schema.String, command: Schema.String,
+  pid: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  startedAt: Schema.String,
+  cpuPercent: Schema.Number, rssKB: Schema.Number, peakRssKB: Schema.Number,
+  cpuSeconds: Schema.Number, sampledAt: Schema.NullOr(Schema.Number),
+};
+export const HeavyJob = Schema.Union([
+  Schema.Struct({ ...JobFacts, state: Schema.Literal("running") }),
+  Schema.Struct({ ...JobFacts, state: Schema.Literal("finished"), exit: Schema.Number, wallMs: Schema.Number, finishedAt: Schema.String }),
+  Schema.Struct({ ...JobFacts, state: Schema.Literal("lost"), exit: Schema.Null, lost: Schema.Literal(true), wallMs: Schema.Number, finishedAt: Schema.String }),
+]);
+export type HeavyJob = typeof HeavyJob.Type;
+export const decodeHeavyJob = Schema.decodeUnknownSync(HeavyJob);
+export const HeavySampleCache = Schema.Struct({
+  sampledAt: Schema.Number,
+  jobs: Schema.Record(Schema.String, Schema.Struct({ cpuPercent: Schema.Number, rssKB: Schema.Number, peakRssKB: Schema.Number, cpuSeconds: Schema.Number })),
+});
+export const decodeHeavySampleCache = Schema.decodeUnknownSync(HeavySampleCache);
+
 export const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const SESSION_ID_RE = /^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/;

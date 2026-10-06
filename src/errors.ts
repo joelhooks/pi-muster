@@ -47,11 +47,6 @@ export class GuardFailed extends Schema.TaggedError<GuardFailed>()("GuardFailed"
   message: Schema.String,
 }) {}
 
-export class HeavyJobBusy extends Schema.TaggedError<HeavyJobBusy>()("HeavyJobBusy", {
-  holder: Schema.String,
-  message: Schema.String,
-}) {}
-
 export type MusterError =
   | InputError
   | NotFound
@@ -60,5 +55,4 @@ export type MusterError =
   | ProcError
   | HerdrFailure
   | PacketCheckFailed
-  | GuardFailed
-  | HeavyJobBusy;
+  | GuardFailed;

@@ -7,7 +7,6 @@ import { describe, expect, it, vi } from "vitest";
 import { parseThreshold, roleThreshold } from "./compact.ts";
 import { silenceLimits } from "./domain.ts";
 import type { DeskItem, Project } from "./domain.ts";
-import { heavySlots, machineAdapter, readHolder, slotPath, tryAcquire, tryAcquireSlot } from "./heavy-lock.ts";
 import { workPrompt } from "./ops.ts";
 import { costFromLines, readSessionCost, turnCost } from "./session-file.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, silenceDecision } from "./silence.ts";
@@ -159,42 +158,6 @@ describe("compaction thresholds", () => {
     expect(parseThreshold("nope")).toBeUndefined();
     expect(roleThreshold("worker")).toBe(200000);
     expect(roleThreshold("king")).toBeUndefined();
-  });
-});
-
-describe("heavy-job lock", () => {
-  it("admits one holder and takes over a dead one", () => {
-    const lock = join(mkdtempSync(join(tmpdir(), "lock-")), "heavy.lock");
-    const first = tryAcquire(lock, "gate one");
-    expect(first.ok).toBe(true);
-    const second = tryAcquire(lock, "gate two");
-    expect(second.ok).toBe(false);
-    if (!second.ok) expect(second.holder?.command).toBe("gate one");
-    if (first.ok) first.release();
-    const dead = tryAcquire(lock, "dead gate", 999_999_99);
-    expect(dead.ok).toBe(true);
-    expect(readHolder(lock)?.command).toBe("dead gate");
-    const taken = tryAcquire(lock, "live gate");
-    expect(taken.ok).toBe(true);
-    if (taken.ok) taken.release();
-  });
-
-  it("admits up to the slot count, keeps slot 0 on the legacy path, and reports a holder when full", () => {
-    const lock = join(mkdtempSync(join(tmpdir(), "lock-")), "heavy.lock");
-    const cores = vi.spyOn(machineAdapter, "performanceCores").mockReturnValue(12);
-    try {
-      expect(heavySlots({})).toBe(8);
-      expect(heavySlots({ MUSTER_HEAVY_SLOTS: "2" })).toBe(2);
-    } finally { cores.mockRestore(); }
-    const held = [tryAcquireSlot(lock, "a", 2), tryAcquireSlot(lock, "b", 2)];
-    expect(held.every((slot) => slot.ok)).toBe(true);
-    expect(readHolder(slotPath(lock, 0))?.command).toBe("a");
-    expect(readHolder(slotPath(lock, 1))?.command).toBe("b");
-    const full = tryAcquireSlot(lock, "c", 2);
-    expect(full.ok).toBe(false);
-    if (!full.ok) expect(full.holder?.command).toBe("a");
-    for (const slot of held) if (slot.ok) slot.release();
-    expect(tryAcquireSlot(lock, "d", 2).ok).toBe(true);
   });
 });
 

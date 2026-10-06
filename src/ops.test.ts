@@ -8,7 +8,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import type { AgentRow } from "./domain.ts";
 import { FORBIDDEN_FLAGS, profileFor } from "./argv.ts";
 import { queuePath, readDesk } from "./desk.ts";
-import { machineAdapter, tryAcquireHeavy } from "./heavy-lock.ts";
+import { readJobs, registerJob } from "./heavy-lock.ts";
 import {
   agentClose,
   forceCloseAllowed,
@@ -45,8 +45,6 @@ import type { Harness } from "./test-support.ts";
 beforeEach(() => {
   vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
   vi.stubEnv("MUSTER_PROJECT", "");
-  vi.spyOn(machineAdapter, "performanceCores").mockReturnValue(12);
-  vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 16, load: 20, freeGB: 64 });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
@@ -1357,7 +1355,7 @@ describe("a lane from launch to close", () => {
     expect(error._tag).toBe("GuardFailed");
   });
 
-  it("fails fast with every slot holder, aborts the merge, then lands after a slot drains", async () => {
+  it("lands a registered local gate immediately despite other jobs and old slot settings", async () => {
     vi.stubEnv("MUSTER_HEAVY_SLOTS", "2");
     vi.stubEnv("MUSTER_FLEET_COMPUTE", "/missing/fleet-compute.ts");
     const h = harness();
@@ -1367,26 +1365,13 @@ describe("a lane from launch to close", () => {
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, packetVerify(dir, commit));
-    const before = sh(dir, "rev-parse", "HEAD");
-    const a = tryAcquireHeavy({ home: h.home }, "other gate a");
-    const b = tryAcquireHeavy({ home: h.home }, "other gate b");
-    expect(a.ok && b.ok).toBe(true);
-    try {
-      const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
-      expect(error._tag).toBe("HeavyJobBusy");
-      expect(error.message).toContain("other gate a");
-      expect(error.message).toContain("other gate b");
-      expect(sh(dir, "rev-parse", "HEAD")).toBe(before);
-      expect(sh(dir, "status", "--porcelain", "--untracked-files=no")).toBe("");
-      if (a.ok) a.release();
-      const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
-      expect(landed.packet.state).toBe("committed");
-      expect(landed.packet.gate).toBeNull();
-    } finally {
-      if (a.ok) a.release();
-      if (b.ok) b.release();
-    }
-  });
+    registerJob({ home: h.home }, "other gate a");
+    registerJob({ home: h.home }, "other gate b");
+    const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+    expect(landed.packet.state).toBe("committed");
+    expect(landed.packet.gate).toBeNull();
+    expect(readJobs(h.home)).toEqual(expect.arrayContaining([expect.objectContaining({ command: "sh -c test -f work.txt", state: "finished", exit: 0 })]));
+  }, 15000); // A real CLI registration and gate join this fixture's Git/launch subprocesses.
 
   describe("fleet-compute admission", () => {
     let template: { h: Harness; dir: string; commit: string };
@@ -1481,7 +1466,7 @@ describe("a lane from launch to close", () => {
         }
       }
       // Discovery happens during landing, and the runner bypasses local admission.
-      vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 1, load: 100, freeGB: 1 });
+      vi.stubEnv("MUSTER_HEAVY_MIN_FREE_GB", "999999");
       if (scenario.guard === null) {
         const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
         expect(result.packet.gate).toMatchObject({ runId: "stub-run", host: "stub-host", slot: 1, durationMs: 42, tree: sh(dir, "rev-parse", "HEAD^{tree}").trim() });
@@ -1494,7 +1479,7 @@ describe("a lane from launch to close", () => {
         expect((await runWith(h, load(dir))).packets[0]?.gate).toEqual(result.packet.gate);
       } else {
         const error = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
-        expect(error._tag).toBe(scenario.guard === "busy" ? "HeavyJobBusy" : "GuardFailed");
+        expect(error._tag).toBe("GuardFailed");
         if ("guard" in error) expect(error.guard).toBe(scenario.guard);
         if (scenario.name === "busy") expect(error.message).toContain("queue position: flagg 2; oldest waiter 3m");
         if (scenario.name === "busy drained") expect(error.message).toContain("queue length: 0; oldest waiter 0m");
@@ -1521,7 +1506,6 @@ describe("a lane from launch to close", () => {
       expect(existsSync(join(sh(dir, "rev-parse", "--absolute-git-dir").trim(), "MERGE_HEAD"))).toBe(false);
       if (scenario.guard === "busy") {
         expect(runnerCalls).toEqual(["gate", "status"]);
-        expect(machineAdapter.sample).not.toHaveBeenCalled();
       }
     });
 
