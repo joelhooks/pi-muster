@@ -36,7 +36,7 @@ Use a side desk when Joel wants to explore an evolving design alongside the main
 - An unready dependency gets a placeholder packet, not a blocked lane.
 - A release that spans code and live config splits at the start: code, config, and early review as disjoint lanes, one writer per checkout, one combined release packet. The final integrated gate still runs. drovr split at hour five; it could have split at hour zero.
 - The judge reviews the SOP on a slow clock and never sets priorities.
-- Briefs live in the project's Brain, never `/tmp`. Use the [done and brief template](references/done.md#brief-template): outcome, write scope, checks, deploy, live proof, signals, and the report rule.
+- Briefs live in the project's Brain, never `/tmp`. Use the [done and brief template](references/done.md#brief-template): outcome, write scope, checks, deploy, live proof, signals, and the report rule. [Brief patterns](references/briefs.md) says what makes each section work.
 
 ## Keep work flowing
 
