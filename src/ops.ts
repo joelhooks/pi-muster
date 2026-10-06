@@ -2284,6 +2284,32 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
     const indexEnv = { GIT_INDEX_FILE: join(scratch, "index") };
     const isolatedGit = (...args: string[]) => must("git", args, { cwd: source, env: indexEnv });
     const abort = () => proc.run("git", ["merge", "--abort"], { cwd: source, env: indexEnv });
+    // `merge --abort` refuses outright when the gate touched a merged file, leaving
+    // MERGE_HEAD and every merged path. The clean-source guard proved each incoming
+    // path matched HEAD before the merge, so restoring those paths loses no owner work.
+    const incomingSet = new Set(incoming);
+    const dirtyBefore = new Set(dirty);
+    const leftovers = () => Effect.gen(function* () {
+      const left = parsePorcelainZ(yield* git(source, "status", "--porcelain=v1", "-z")).filter(path => incomingSet.has(path) && !dirtyBefore.has(path));
+      return { left, mergeHead: existsSync(join(gitDir, "MERGE_HEAD")) };
+    });
+    const abortVerified = (tree: string) => Effect.gen(function* () {
+      yield* isolatedGit("read-tree", tree).pipe(Effect.ignore);
+      yield* proc.run("git", ["update-index", "-q", "--refresh"], { cwd: source, env: indexEnv });
+      const aborted = yield* abort();
+      let state = yield* leftovers();
+      if (state.left.length || state.mergeHead) {
+        yield* proc.run("git", ["merge", "--quit"], { cwd: source, env: indexEnv });
+        const inHead = new Set((yield* git(source, "--literal-pathspecs", "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", ...state.left)).split("\0").filter(Boolean));
+        const restore = state.left.filter(path => inHead.has(path));
+        if (restore.length) yield* proc.run("git", ["--literal-pathspecs", "checkout", "HEAD", "--", ...restore], { cwd: source, env: indexEnv });
+        for (const path of state.left.filter(path => !inHead.has(path))) rmSync(join(source, path), { force: true });
+        state = yield* leftovers();
+      }
+      if (!state.left.length && !state.mergeHead) return "merge aborted; source clean";
+      const why = (aborted.stderr || aborted.stdout).trim().slice(-400);
+      return `merge NOT fully aborted: ${state.mergeHead ? "MERGE_HEAD is still present; " : ""}${state.left.length} merged path(s) remain in ${source}: ${state.left.slice(0, 20).join(", ")}${state.left.length > 20 ? ", …" : ""}${why ? ` (merge --abort: ${why})` : ""}. Clean it before landing again`;
+    });
     return yield* Effect.gen(function* () {
       yield* isolatedGit("read-tree", "HEAD");
       const merge = yield* proc.run("git", ["-c", "user.name=shitratgit[bot]", "-c", "user.email=286405550+shitratgit[bot]@users.noreply.github.com", "merge", "--no-ff", "--no-commit", branch], { cwd: source, env: indexEnv });
@@ -2297,11 +2323,11 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
       if (params.gate) {
         const tree = (yield* isolatedGit("write-tree")).trim();
         const head = (yield* git(source, "rev-parse", "HEAD")).trim();
-        const gate = yield* runGate(source, params.gate, { project, tree, head, branch, receiptPath, savedReceipt }).pipe(Effect.tapError(abort));
+        const gate = yield* runGate(source, params.gate, { project, tree, head, branch, receiptPath, savedReceipt }).pipe(Effect.tapError(() => abortVerified(tree)));
         receipt = gate.receipt;
         if (gate.code !== 0) {
-          yield* abort();
-          return yield* new GuardFailed({ guard: "gate", message: `gate failed (exit ${gate.code}); merge aborted:\n${(gate.stdout + gate.stderr).trim().slice(-1500)}` });
+          const outcome = yield* abortVerified(tree);
+          return yield* new GuardFailed({ guard: "gate", message: `gate failed (exit ${gate.code}); ${outcome}:\n${(gate.stdout + gate.stderr).trim().slice(-1500)}` });
         }
       }
       const message = params.message ?? `muster: land ${row.lane}/${row.name} ${packet.id.slice(0, 12)}`;
