@@ -2870,6 +2870,33 @@ const runGate = (source: string, gate: string, context: {
     return { ...result, receipt: null };
   });
 
+/** Prove packet content in a committed tree, never in the caller's dirty checkout. */
+const proveLandingContent = (source: string, row: AgentRow, packet: Packet, target: string) =>
+  Effect.gen(function* () {
+    const proc = yield* Proc;
+    // HEAD's merge-base with an ancestor packet is the packet itself (an empty
+    // diff). Use the worker's recorded starting point instead.
+    const base = row.clone?.base
+      ? (yield* git(source, "merge-base", packet.id, row.clone.base.sha)).trim()
+      : (yield* git(source, "rev-parse", `${packet.id}^`)).trim();
+    const paths = (yield* git(source, "diff", "--no-ext-diff", "--no-textconv", "--name-only", "--no-renames", "-z", base, packet.id)).split("\0").filter(Boolean);
+    if (!paths.length) return;
+    const differing = (yield* git(source, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--name-only", "--no-renames", "-z", packet.id, target, "--", ...paths)).split("\0").filter(Boolean);
+    if (!differing.length) return;
+    const gitDir = (yield* git(source, "rev-parse", "--absolute-git-dir")).trim();
+    const scratch = mkdtempSync(join(gitDir, "muster-content-"));
+    try {
+      const patch = join(scratch, "packet.patch");
+      writeFileSync(patch, yield* git(source, "diff", "--no-ext-diff", "--no-textconv", "--binary", "--full-index", "--no-renames", base, packet.id));
+      const env = { GIT_INDEX_FILE: join(scratch, "index") };
+      yield* must("git", ["read-tree", target], { cwd: source, env });
+      const reverse = yield* proc.run("git", ["apply", "--cached", "--check", "-R", patch], { cwd: source, env });
+      if (reverse.code !== 0) return yield* new GuardFailed({ guard: "landing-content", message: `ancestor but content missing in ${differing.map(path => JSON.stringify(path)).join(", ")}` });
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  });
+
 const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet, params: PacketLandInput) =>
   Effect.gen(function* () {
     const proc = yield* Proc;
@@ -2892,7 +2919,11 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
     const onBranch = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, branch], { cwd: source })).code === 0;
     if (!onBranch) return yield* new GuardFailed({ guard: "harvest", message: `${packet.id.slice(0, 12)} is not on ${branch} in ${source}` });
     const merged = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, "HEAD"], { cwd: source })).code === 0;
-    if (merged) return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), note: "already on HEAD; nothing merged", gate: null };
+    if (merged) {
+      const head = (yield* git(source, "rev-parse", "HEAD")).trim();
+      yield* proveLandingContent(source, row, packet, head);
+      return { landedAs: head, note: "already on HEAD; content proven; nothing merged", gate: null };
+    }
     const base = (yield* git(source, "merge-base", "HEAD", branch)).trim();
     const incoming = (yield* git(source, "diff", "--name-only", "--no-renames", "-z", base, branch)).split("\0").filter(Boolean);
     const overlaps = dirty.filter((path) => !path.startsWith(".brain/data/muster/") && incoming.some((changed) =>
@@ -3513,7 +3544,17 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         (!packet.autolandCheckedAt || now - Date.parse(packet.autolandCheckedAt) >= AUTOLAND_RECHECK_MS))
         .sort((a, b) => a.reportedAt.localeCompare(b.reportedAt)).slice(0, AUTOLAND_CAP);
       for (const packet of candidates) {
-        const landing = yield* findLanding(snapshot, packet, { notes: autolandNotes });
+        let landing = yield* findLanding(snapshot, packet, { notes: autolandNotes });
+        if (landing?.how === "ancestor") {
+          const row = yield* findRow(snapshot, packet.agent);
+          const source = sourceOf(snapshot, snapshot.lanes.find(lane => lane.slug === packet.lane), row);
+          // Prove the current base tree, not the historical packet/merge tree.
+          const content = yield* proveLandingContent(source, row, packet, `refs/remotes/origin/${landing.base}`).pipe(Effect.result);
+          if (content._tag === "Failure") {
+            autolandNotes.push(`autoland: ${packet.id.slice(0, 8)} refused: ${content.failure.message}`);
+            landing = null;
+          }
+        }
         const recorded = yield* mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findPacket(current, packet.id);
           const row = yield* findRow(current, latest.agent);
