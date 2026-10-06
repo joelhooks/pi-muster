@@ -47,11 +47,12 @@ async function fixture(remote: boolean) {
         const script = command === "ssh" ? args.at(-1)! : args.join(" ");
         if (command === "ssh") ssh.push(script);
         const rescue = script.includes("refs/muster/rescue/");
-        if (failFetch && rescue && script.includes("fetch")) return Effect.succeed({ code: 1, stdout: "", stderr: "injected rescue fetch failure" });
+        const rescueFetch = script.includes("fetch") && script.includes("--no-tags");
+        if (failFetch && rescueFetch) return Effect.succeed({ code: 1, stdout: "", stderr: "injected rescue fetch failure" });
         if (wrongReadback && rescue && script.includes("rev-parse")) return Effect.succeed({ code: 0, stdout: `${"0".repeat(40)}\n`, stderr: "" });
         const result = command === "ssh" ? liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: options.timeoutMs }) : h.proc.run(command, args, options);
         return result.pipe(Effect.tap(() => Effect.sync(() => {
-          if (advanceOnFetch && rescue && script.includes("fetch")) { advanceOnFetch = false; commit(row.cwd, "late.txt", "late commit"); }
+          if (advanceOnFetch && rescueFetch) { advanceOnFetch = false; commit(row.cwd, "late.txt", "late commit"); }
         })));
       } }),
     );
@@ -83,7 +84,7 @@ for (const remote of [false, true]) describe(remote ? "SSH preservation" : "loca
     expect((await f.close(true)).cloneError).toBeNull();
     f.retained(head);
     expect(existsSync(f.row.cwd)).toBe(false);
-    if (remote) expect(f.ssh.some(s => s.includes("'fetch'") && s.includes("refs/muster/rescue/"))).toBe(true);
+    if (remote) expect(f.ssh.some(s => s.includes("'update-ref'") && s.includes("refs/muster/rescue/"))).toBe(true);
   });
 
   it("ordinary close accepts exact legacy rescue, without moving it", async () => {
@@ -117,6 +118,17 @@ for (const remote of [false, true]) describe(remote ? "SSH preservation" : "loca
     expect(result.cloneError).toContain(kind === "fetch" ? "injected rescue fetch failure" : kind === "readback" ? "rescue verification failed" : "clone changed during preservation");
     expect(existsSync(f.row.cwd)).toBe(true);
     expect(result.row.events?.at(-1)?.type).toBe("CLONE_KEPT");
+  });
+
+  it("refuses a conflicting immutable rescue ref without changing it", async () => {
+    const f = await fixture(remote);
+    const old = sh(f.dir, "rev-parse", "HEAD").trim();
+    const head = f.commit(f.row.cwd);
+    const ref = `refs/muster/rescue/worker-${head}`;
+    sh(f.dir, "update-ref", ref, old);
+    expect((await f.close(true)).cloneError).not.toBeNull();
+    expect(sh(f.dir, "rev-parse", ref).trim()).toBe(old);
+    expect(existsSync(f.row.cwd)).toBe(true);
   });
 
   it("refuses a rescue repository inside the disposable clone", async () => {

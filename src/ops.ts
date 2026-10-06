@@ -366,16 +366,23 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
   if (!cloneRoot || !retainedRoot || retainedRoot === cloneRoot || retainedRoot.startsWith(`${cloneRoot}/`)) {
     return { safe: false, force: false, detail: `rescue repository is inside clone: ${row.cwd}; HEAD ${head}` };
   }
-  if (rescue) {
-    yield* must("git", ["fetch", "--no-write-fetch-head", "--no-tags", "-q", "--", row.cwd, `${head}:${rescueRef}`], { cwd: source, timeoutMs: 30_000 });
-  }
   for (const ref of [rescueRef, `refs/muster/rescue/${row.name}`]) {
     const retained = yield* run(source, "rev-parse", "--verify", `${ref}^{commit}`);
     if (retained.code === 0 && retained.stdout.trim() === head) {
       return { safe: true, force: true, detail: `rescued: ${source} ${ref}; HEAD ${head}` };
     }
   }
-  if (rescue) return { safe: false, force: false, detail: `rescue verification failed: ${rescueRef}; HEAD ${head}` };
+  if (rescue) {
+    // Fetch objects without updating any existing ref or FETCH_HEAD. Atomic
+    // create-only update refuses a conflicting rescue, even from another closer.
+    yield* must("git", ["fetch", "--no-write-fetch-head", "--no-tags", "-q", "--", row.cwd, head], { cwd: source, timeoutMs: 30_000 });
+    yield* git(source, "update-ref", rescueRef, head, "");
+    const retained = yield* run(source, "rev-parse", "--verify", `${rescueRef}^{commit}`);
+    return { safe: retained.code === 0 && retained.stdout.trim() === head, force: true,
+      detail: retained.code === 0 && retained.stdout.trim() === head
+        ? `rescued: ${source} ${rescueRef}; HEAD ${head}`
+        : `rescue verification failed: ${rescueRef}; HEAD ${head}` };
+  }
   const origin = yield* run(source, "remote", "get-url", "origin");
   if (origin.code === 0) {
     const fetch = yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*");
