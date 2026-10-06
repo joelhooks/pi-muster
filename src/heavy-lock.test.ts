@@ -128,7 +128,7 @@ describe("desk heavy grants", () => {
     secondRequest.release();
     deploy.release();
     expect(heavyQueue(options).map((row) => row.command)).toEqual(["ordinary-0", "ordinary-1", "ordinary-2"]);
-  });
+  }, 30_000);
 
   it("never takes deploy-0 or bypasses load/memory, even without a queue ticket", () => {
     const options = { ...desk(), slots: "1" };
@@ -221,7 +221,7 @@ describe("heavy FIFO queue", () => {
       expect(existsSync(join(options.home, ".local/state/muster/heavy-queue", names[head]!))).toBe(false);
       if (result.ok) result.release();
     }
-  }, 30_000);
+  });
 
   it("admits the two oldest with two free slots, but not a third or a no-ticket caller", () => {
     const options = setup();
