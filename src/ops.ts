@@ -843,12 +843,20 @@ export function findPacket(project: Project, id: string): Effect.Effect<Packet, 
   );
 }
 
-const withRow = (project: Project, row: AgentRow): Project => ({
-  ...project,
-  agents: project.agents.some((agent) => agent.name === row.name)
-    ? project.agents.map((agent) => (agent.name === row.name ? row : agent))
-    : [...project.agents, row],
-});
+/** A saved restore command must hand the row back to its current owner, not a past one. */
+const ownerSynced = (row: AgentRow): AgentRow =>
+  row.restore?.env.MUSTER_OWNER !== undefined && row.restore.env.MUSTER_OWNER !== row.owner
+    ? { ...row, restore: { ...row.restore, env: { ...row.restore.env, MUSTER_OWNER: row.owner } } }
+    : row;
+const withRow = (project: Project, input: AgentRow): Project => {
+  const row = ownerSynced(input);
+  return {
+    ...project,
+    agents: project.agents.some((agent) => agent.name === row.name)
+      ? project.agents.map((agent) => (agent.name === row.name ? row : agent))
+      : [...project.agents, row],
+  };
+};
 const withLane = (project: Project, lane: Lane): Project => ({
   ...project,
   lanes: project.lanes.some((candidate) => candidate.slug === lane.slug)
@@ -3285,7 +3293,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
             if (note) handoverNotes.push(note);
           }
           const next = { ...current, agents: current.agents.map((row) =>
-            row.state === "closed" ? row : { ...row, owner: env.sessionId, updatedAt: iso(env) }) };
+            row.state === "closed" ? row : ownerSynced({ ...row, owner: env.sessionId, updatedAt: iso(env) })) };
           return [next, next] as const;
         }))
       : yield* load(dir);

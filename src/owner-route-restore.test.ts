@@ -55,6 +55,7 @@ it("external-owned restore retains caller ownership and forwarding", async () =>
   h.sessionId = "replacement";
   const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "probe" }));
   expect(restored.row.owner).toBe("replacement");
+  expect((await runWith(h, load(dir))).agents[0]?.restore?.env.MUSTER_OWNER).toBe("replacement");
   expect(restored.notes).toContain(`restore moved external owner ${oldOwner} → replacement for probe`);
   expect(ownerRoute(oldOwner, h.home, "probe").owner).toBe("replacement");
 });
@@ -69,6 +70,8 @@ it("explicit takeover reclaims a stale reverse forward and reports its retiremen
   const status = await runWith(h, projectStatus(dir, { act: false, takeover: true }));
   expect(status.notes).toContain(`retired reverse forward ${desk} → ${oldOwner} for probe`);
   expect(status.project.agents[0]?.owner).toBe(desk);
+  // A saved restore must not hand the row back to the previous owner.
+  expect(status.project.agents[0]?.restore?.env.MUSTER_OWNER).toBe(desk);
   expect(ownerRoute(oldOwner, h.home, "probe").owner).toBe(desk);
   expect(forwardFiles(h.home, desk).filter(name => name.includes(".retired-"))).toHaveLength(1);
 });
