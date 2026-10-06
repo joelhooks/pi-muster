@@ -187,6 +187,14 @@ describe("remote owner operations", () => {
     expect(restored.row.profile.skills).toEqual(["/only-remote/SKILL.md"]);
     expect(restored.argv).toContain("/only-remote/SKILL.md");
   });
+  it("names the unreadable remote path, with a hint for a brief", async () => {
+    const s = setup(); await s.open();
+    const original = s.proc.run;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh" && args.at(-1)?.includes("'test' '-r' '/flagg-only/brief.md'")
+      ? Effect.succeed({ code: 1, stdout: "", stderr: "" }) : original(command, args, options));
+    await expect(s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "brief-worker", role: "worker", lane: "work", label: "brief worker", cwd: s.dir, brief: "/flagg-only/brief.md" })))
+      .rejects.toThrow(/\/flagg-only\/brief\.md is not readable on remote; briefs are not copied/);
+  });
   it("refuses at maxPanes before allocating any clone or pane", async () => {
     const s = setup(); s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, maxPanes: 1 }) }); await s.open(); await s.launch();
     const count = s.remote.panes.size; const calls = s.calls.length;

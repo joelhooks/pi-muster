@@ -168,7 +168,10 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
     const requiredPaths = [...remoteProfile.skills, ...remoteProfile.extensions, ...remoteProfile.appendSystemPrompt,
       ...(params.brief ? [mapPath(params.brief, machine)] : []), ...(params.action === "restore" && existing?.sessionFile ? [existing.sessionFile] : [])];
-    for (const path of requiredPaths) yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 });
+    for (const path of requiredPaths) {
+      yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.mapError(error => new ProcError({ ...error,
+        message: `${path} is not readable on ${nameOfMachine}${params.brief && path === mapPath(params.brief, machine) ? "; briefs are not copied to remote machines, so put the brief in the lane repo or copy it there first" : ""}` })));
+    }
     let cwd = params.cwd ? mapPath(yield* requireAbsolute("cwd", params.cwd), machine) : existing?.cwd ?? parent?.cwd ?? remoteSource;
     let clone = existing?.clone ?? null;
     const cloneNotes: string[] = [];
