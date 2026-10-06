@@ -5,7 +5,7 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Effect, Layer, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { decodeNetworkSendFence, decodeAgentName, decodeCommsIdentityCache, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
+import { decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
 import { CommsError, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
 
@@ -23,20 +23,54 @@ export function readConsumerFence(home: string, did: string): LeaseFence | undef
   }
 }
 
-const publishConsumerFence = (home: string, fence: LeaseFence) => Effect.tryPromise({
+/** acquire → inspect stale holder → bounded wait → held → release.
+ * No live holder can release a successor's token. Legacy empty locks expire in 30s.
+ */
+const acquireFenceLock = (path: string) => Effect.gen(function* () {
+  const token = randomUUID();
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const acquired = yield* Effect.try({ try: () => {
+      try { writeFileSync(path, JSON.stringify({ pid: process.pid, token }), { flag: "wx", mode: 0o600 }); return true; }
+      catch (error) { if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error; }
+      let stat;
+      try { stat = lstatSync(path); } catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return false; throw error; }
+      if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.uid !== process.getuid?.()) throw new Error("unsafe lock");
+      let dead = false;
+      try {
+        const holder = decodeNetworkFenceLock(privateJson(path));
+        try { process.kill(holder.pid, 0); } catch (error) { dead = error instanceof Error && "code" in error && error.code === "ESRCH"; }
+      } catch { /* Legacy empty locks are recovered only by age. */ }
+      if (dead || Date.now() - stat.mtimeMs > 30_000) {
+        const current = lstatSync(path);
+        if (current.ino === stat.ino && current.mtimeMs === stat.mtimeMs) unlinkSync(path);
+      }
+      return false;
+    }, catch: () => new CommsError("NetworkComms consumer fence lock invalid") });
+    if (acquired) return { path, token };
+    yield* Effect.sleep("25 millis");
+  }
+  return yield* Effect.fail(new CommsError("NetworkComms consumer fence lock busy; bounded wait expired"));
+});
+const ownsFenceLock = (lock: { path: string; token: string }) => {
+  try { return decodeNetworkFenceLock(privateJson(lock.path)).token === lock.token; } catch { return false; }
+};
+const releaseFenceLock = (lock: { path: string; token: string }) => Effect.sync(() => { if (ownsFenceLock(lock)) unlinkSync(lock.path); });
+
+const publishConsumerFence = (home: string, fence: LeaseFence) => Effect.gen(function* () {
+  const path = networkFencePath(home, fence.did);
+  yield* Effect.tryPromise({ try: () => mkdir(dirname(path), { recursive: true, mode: 0o700 }), catch: () => new CommsError("NetworkComms could not create fence directory") });
+  return yield* Effect.acquireUseRelease(acquireFenceLock(`${path}.lock`), lock => Effect.tryPromise({
   try: async () => {
     const path = networkFencePath(home, fence.did);
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temp = `${path}.${randomUUID()}.tmp`;
-    await writeFile(`${path}.lock`, "", { flag: "wx", mode: 0o600 });
     try {
       await writeFile(temp, JSON.stringify({ did: fence.did, leaseId: fence.leaseId, generation: fence.generation }), { flag: "wx", mode: 0o600 });
+      if (!ownsFenceLock(lock)) throw new Error("fence lock superseded");
       await rename(temp, path);
-    } finally {
-      await unlink(temp).catch(() => {});
-      await unlink(`${path}.lock`);
-    }
+    } finally { await unlink(temp).catch(() => {}); }
   }, catch: () => new CommsError("NetworkComms could not publish consumer fence"),
+  }), releaseFenceLock);
 });
 
 /** Only a protocol lease mismatch permits one fresh read and one retry. */
@@ -47,11 +81,20 @@ export function sendWithConsumerFence(options: {
   return Effect.gen(function* () {
     const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
     let unpublished = false;
+    let previous: LeaseFence | undefined;
+    const read = () => Effect.try({ try: () => readConsumerFence(options.home, options.did), catch: () => new CommsError("NetworkComms invalid consumer fence (private output withheld)") });
+    const awaitPublish = () => Effect.gen(function* () {
+      for (let attempt = 0; attempt < 40; attempt++) {
+        const fresh = yield* read();
+        if (fresh && (!previous || fresh.leaseId !== previous.leaseId || fresh.generation !== previous.generation)) return;
+        yield* Effect.sleep("25 millis");
+      }
+    });
     const attempt = () => Effect.try({ try: () => readConsumerFence(options.home, options.did), catch: () => new CommsError("NetworkComms invalid consumer fence (private output withheld)") }).pipe(
-      Effect.flatMap(fence => { unpublished = fence === undefined; return options.send(fence ? { fence } : undefined); }),
+      Effect.flatMap(fence => { previous = fence; unpublished = fence === undefined; return options.send(fence ? { fence } : undefined); }),
     );
     return yield* attempt().pipe(
-      Effect.catch(error => error instanceof MailboxClientError && error.error === "LeaseMismatch" ? attempt() : Effect.fail(error)),
+      Effect.catch(error => error instanceof MailboxClientError && error.error === "LeaseMismatch" ? awaitPublish().pipe(Effect.flatMap(attempt)) : Effect.fail(error)),
       Effect.catch(error => error instanceof MailboxClientError && error.error === "LeaseMismatch" && unpublished
         ? Effect.fail(new CommsError("NetworkComms send failed: LeaseMismatch; sender lease held elsewhere (another process with this identity); boss consumer has no published fence; restart the boss onto current code"))
         : Effect.fail(error)),
@@ -61,6 +104,19 @@ export function sendWithConsumerFence(options: {
 
 export const networkConfigPath = (home: string) => join(home, ".config/muster/network.json");
 export const networkIdentityPath = (home: string) => join(home, ".local/state/muster/network-identities.json");
+export const networkDeskIdentityPath = (home: string) => join(home, ".local/state/muster/network-desk-identities.json");
+export const networkPeersPath = (home: string) => join(home, ".local/state/muster/network-peers.json");
+export const networkDeskPeersPath = (home: string) => join(home, ".local/state/muster/network-desk-peers.json");
+const identityPath = (home: string, agent: string) => agent.includes("/") ? networkDeskIdentityPath(home) : networkIdentityPath(home);
+export const networkCursorPath = (home: string, agent: string) => join(home, ".local/state/muster", agent.includes("/") ? "network-desk-cursors" : "network-cursors", `${networkProvisionName(agent)}.json`);
+
+/** Wrapper names stay valid and collision-free; Switchboard retains its fleet DID. */
+export function networkProvisionName(identity: string): string {
+  const name = decodeNetworkIdentityName(identity);
+  if (!name.includes("/")) return name;
+  if (name === "switchboard/switchboard" || name === "switchboard/desk") return "switchboard";
+  return `desk-${createHash("sha256").update(name).digest("hex").slice(0, 26)}`;
+}
 
 function privateJson(path: string): unknown {
   const stat = lstatSync(path);
@@ -76,10 +132,11 @@ export function readNetworkConfig(home: string, path = networkConfigPath(home)) 
   }
   catch (error) { if (error instanceof CommsError) throw error; throw new CommsError(`NetworkComms missing or invalid config: ${path}`); }
 }
-export function readNetworkIdentities(home: string) {
-  const path = networkIdentityPath(home);
+function readIdentityCache(path: string, desk: boolean) {
   try {
-    const cache = decodeCommsIdentityCache(privateJson(path));
+    const raw = privateJson(path);
+    const cache = (desk ? decodeNetworkDeskIdentityCache : decodeCommsIdentityCache)(raw);
+    if (raw === null || typeof raw !== "object" || Object.keys(raw).length !== Object.keys(cache).length) throw new Error("identity namespace mismatch");
     if (Object.values(cache).some(entry => entry.did !== entry.document.id)) throw new Error("document mismatch");
     return cache;
   }
@@ -87,6 +144,42 @@ export function readNetworkIdentities(home: string) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") return {};
     if (error instanceof CommsError) throw error;
     throw new CommsError(`NetworkComms invalid identity cache: ${path}`);
+  }
+}
+
+/** Bare references remain in the old file; only new code opens desk sidecars. */
+export function readNetworkIdentities(home: string) {
+  return { ...readIdentityCache(networkIdentityPath(home), false), ...readIdentityCache(networkDeskIdentityPath(home), true) };
+}
+
+function readPeerCache(path: string, desk: boolean) {
+  try { return (desk ? decodeNetworkDeskPeers : decodeNetworkPeers)(privateJson(path)); }
+  catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return {};
+    throw new CommsError("NetworkComms invalid peer cache");
+  }
+}
+export function readNetworkPeers(home: string) {
+  return { ...readPeerCache(networkPeersPath(home), false), ...readPeerCache(networkDeskPeersPath(home), true) };
+}
+
+/** Partition before writing: old readers never see qualified values or keys. */
+export function seedNetworkPeers(home: string, value: unknown) {
+  const peers = decodeNetworkPeerReferences(value);
+  for (const desk of [false, true]) {
+    const entries = Object.fromEntries(Object.entries(peers).filter(([, agent]) => agent.includes("/") === desk));
+    if (!Object.keys(entries).length) continue;
+    const path = desk ? networkDeskPeersPath(home) : networkPeersPath(home);
+    const current = readPeerCache(path, desk);
+    if (Object.entries(entries).every(([session, agent]) => current[session] === agent)) continue;
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const lock = `${path}.lock`; writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      const merged = { ...readPeerCache(path, desk), ...entries };
+      writeFileSync(temp, JSON.stringify((desk ? decodeNetworkDeskPeers : decodeNetworkPeers)(merged)), { flag: "wx", mode: 0o600 });
+      renameSync(temp, path);
+    } finally { try { unlinkSync(temp); } catch { /* renamed */ } unlinkSync(lock); }
   }
 }
 
@@ -103,10 +196,11 @@ export const privateCommand: PrivateCommand = (file, args) => new Promise((resol
 export function provisionNetworkAgent(options: { home: string; agent: string; configPath?: string; run?: PrivateCommand }): Effect.Effect<CommsIdentityReference, CommsError> {
   return Effect.tryPromise({
     try: async () => {
-      const agent = decodeAgentName(options.agent);
+      const agent = decodeNetworkIdentityName(options.agent);
+      const provisionName = networkProvisionName(agent);
       const config = readNetworkConfig(options.home, options.configPath);
-      const path = networkIdentityPath(options.home);
-      const did = config.didTemplate.replace("{agent}", agent);
+      const path = identityPath(options.home, agent);
+      const did = Object.hasOwn(config.didOverrides ?? {}, provisionName) ? config.didOverrides![provisionName]! : config.didTemplate.replace("{agent}", provisionName);
       const cached = readNetworkIdentities(options.home)[agent];
       if (cached) {
         if (cached.did !== did) throw new CommsError(`NetworkComms cached identity differs from config: ${agent}`);
@@ -117,14 +211,14 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
       try { writeFileSync(lock, "", { flag: "wx", mode: 0o600 }); }
       catch { throw new CommsError(`NetworkComms identity cache busy: ${agent}; retry provisioning`); }
       try {
-        const identities = readNetworkIdentities(options.home);
+        const identities = readIdentityCache(path, agent.includes("/"));
         if (identities[agent]) {
           if (identities[agent].did !== did) throw new CommsError(`NetworkComms cached identity differs from config: ${agent}`);
           return identities[agent];
         }
         let reference: CommsIdentityReference;
         try {
-          reference = decodeCommsIdentityReference(JSON.parse(await (options.run ?? privateCommand)(config.provisionWrapper, ["provision", "--agent", agent, "--did", did])));
+          reference = decodeCommsIdentityReference(JSON.parse(await (options.run ?? privateCommand)(config.provisionWrapper, ["provision", "--agent", provisionName, "--did", did])));
         } catch { throw new CommsError(`NetworkComms provisioning failed: ${agent} (output withheld)`); }
         if (reference.did !== did || reference.document.id !== did) throw new CommsError(`NetworkComms provision identity mismatch: ${agent}`);
         const temp = `${path}.${process.pid}.tmp`;
@@ -157,7 +251,7 @@ export function prepareRemoteNetworkAgent(options: { home: string; agent: string
 }
 
 export function networkRecipient(home: string, agent: string): CommsIdentityReference {
-  const reference = readNetworkIdentities(home)[decodeAgentName(agent)];
+  const reference = readNetworkIdentities(home)[decodeNetworkIdentityName(agent)];
   if (!reference) throw new CommsError(`NetworkComms unknown recipient: ${agent}; provision it first`);
   return reference;
 }
@@ -212,20 +306,23 @@ export function watchNetworkMailbox(options: {
 
 /** Public references can cross machines; keys never do. Existing references must match. */
 export function seedNetworkIdentities(home: string, value: unknown) {
-  const incoming = decodeCommsIdentityCache(value);
-  const path = networkIdentityPath(home);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const lock = `${path}.lock`;
-  writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
-  try {
-    const current = readNetworkIdentities(home);
-    for (const [agent, reference] of Object.entries(incoming)) {
-      if (reference.did !== reference.document.id || (current[agent] && JSON.stringify(current[agent]) !== JSON.stringify(reference))) throw new CommsError(`NetworkComms peer reference mismatch: ${agent}`);
-    }
-    const temp = `${path}.${process.pid}.tmp`;
-    writeFileSync(temp, JSON.stringify({ ...current, ...incoming }), { flag: "wx", mode: 0o600 });
-    renameSync(temp, path);
-  } finally { unlinkSync(lock); }
+  const incoming = decodeNetworkIdentityCache(value);
+  for (const desk of [false, true]) {
+    const entries = Object.fromEntries(Object.entries(incoming).filter(([agent]) => agent.includes("/") === desk));
+    if (!Object.keys(entries).length) continue;
+    const path = desk ? networkDeskIdentityPath(home) : networkIdentityPath(home);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    const lock = `${path}.lock`; writeFileSync(lock, "", { flag: "wx", mode: 0o600 });
+    const temp = `${path}.${randomUUID()}.tmp`;
+    try {
+      const current = readIdentityCache(path, desk);
+      for (const [agent, reference] of Object.entries(entries)) {
+        if (reference.did !== reference.document.id || (current[agent] && JSON.stringify(current[agent]) !== JSON.stringify(reference))) throw new CommsError(`NetworkComms peer reference mismatch: ${agent}`);
+      }
+      writeFileSync(temp, JSON.stringify({ ...current, ...entries }), { flag: "wx", mode: 0o600 });
+      renameSync(temp, path);
+    } finally { try { unlinkSync(temp); } catch { /* renamed */ } unlinkSync(lock); }
+  }
 }
 
 /** Scoped lifecycle: acquire → watch → authenticate/open → ingest → deliver/ack → checkpoint.
@@ -240,11 +337,11 @@ export function consumeNetworkMailbox(options: {
 }) {
   const failure = () => new CommsError("NetworkComms consumer failed (private output withheld)");
   return Effect.gen(function* () {
-    const cursorPath = join(options.home, ".local/state/muster/network-cursors", `${decodeAgentName(options.agent)}.json`);
+    const cursorPath = networkCursorPath(options.home, options.agent);
     const afterSeq = yield* Effect.try({
       try: () => {
         try {
-          const checkpoint = decodeNetworkCursors(privateJson(cursorPath))[options.agent];
+          const checkpoint = (options.agent.includes("/") ? decodeNetworkDeskCursors : decodeNetworkCursors)(privateJson(cursorPath))[options.agent];
           if (checkpoint === undefined) throw new Error("cursor belongs to another agent");
           return checkpoint;
         }
@@ -291,15 +388,12 @@ export function consumeNetworkMailbox(options: {
     return yield* Effect.ensuring(run, Effect.suspend(() => {
       if (!fence) return Effect.void;
       const retired = fence;
-      return Effect.tryPromise({ try: async () => {
-        const path = networkFencePath(options.home, ownDid);
-        await writeFile(`${path}.lock`, "", { flag: "wx", mode: 0o600 });
-        try {
-          const current = readConsumerFence(options.home, ownDid);
-          // Serialize with publishers: an old consumer cannot retire a newer registration.
-          if (current?.leaseId === retired.leaseId && current.generation === retired.generation) await unlink(path);
-        } finally { await unlink(`${path}.lock`); }
-      }, catch: failure }).pipe(Effect.ignore, Effect.ensuring(options.mailbox.lease.release(retired).pipe(Effect.timeout("5 seconds"), Effect.ignore)));
+      const path = networkFencePath(options.home, ownDid);
+      return Effect.acquireUseRelease(acquireFenceLock(`${path}.lock`), lock => Effect.tryPromise({ try: async () => {
+        const current = readConsumerFence(options.home, ownDid);
+        // Serialize with publishers: an old consumer cannot retire a newer registration.
+        if (ownsFenceLock(lock) && current?.leaseId === retired.leaseId && current.generation === retired.generation) await unlink(path);
+      }, catch: failure }), releaseFenceLock).pipe(Effect.ignore, Effect.ensuring(options.mailbox.lease.release(retired).pipe(Effect.timeout("5 seconds"), Effect.ignore)));
     }));
   });
 }
@@ -323,11 +417,12 @@ export function createNetworkComms(options: {
       const target = yield* recipient(to);
       const sender = options.sender();
       if (!sender) return yield* Effect.fail(new CommsError("NetworkComms sender context missing"));
-      const ownDid = networkRecipient(options.home, sender.agent).did;
       const service = yield* openNetworkMailbox({ ...options, agent: sender.agent });
+      const ownDid = networkRecipient(options.home, sender.agent).did;
       const result = yield* sendWithConsumerFence({ home: options.home, did: ownDid, send: opts => service.send(target.did, body, opts) });
       const { receiptDelivery } = yield* Effect.promise(() => import("./comms.ts"));
-      return yield* receiptDelivery(result.receipt);
+      const delivery = yield* receiptDelivery(result.receipt);
+      return { ...delivery, id: result.receipt.message.messageId, senderDid: ownDid, recipientDid: target.did, seq: result.receipt.seq, detail: `${delivery.detail ? `${delivery.detail}; ` : ""}messageId: ${result.receipt.message.messageId}; seq: ${result.receipt.seq}; state: ${result.receipt.state}` };
     }).pipe(Effect.catch(error => Effect.gen(function* () {
       const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
       const { isKnownError } = yield* Effect.promise(() => import("./vendor/rat-king-lexicon/mailbox.send.ts"));

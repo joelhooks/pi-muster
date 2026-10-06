@@ -58,7 +58,7 @@ export function createIntercom(events: EventBus, createId: () => string): LiveIn
 
   return {
     send: (to, message) =>
-      Effect.callback<{ status: OutboxStatus; detail?: string }>((resume) => {
+      Effect.callback<{ status: OutboxStatus; detail?: string; id: string }>((resume) => {
         const requestId = `muster-${createId()}`;
         let done = false;
         const finish = (status: OutboxStatus, detail?: string) => {
@@ -66,7 +66,7 @@ export function createIntercom(events: EventBus, createId: () => string): LiveIn
           done = true;
           clearTimeout(timer);
           if (typeof off === "function") off();
-          resume(Effect.succeed(detail ? { status, detail } : { status }));
+          resume(Effect.succeed(detail ? { status, detail, id: requestId } : { status, id: requestId }));
         };
         const off = events.on(OUTBOX_RESULT_EVENT, (payload) => {
           const result = payload as { requestId?: unknown; status?: unknown; code?: unknown; detail?: unknown };

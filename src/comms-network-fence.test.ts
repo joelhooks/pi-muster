@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Context, Effect, Layer, Schema, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
-import { consumeNetworkMailbox, createNetworkComms, networkConfigPath, networkIdentityPath } from "./comms-network.ts";
+import { consumeNetworkMailbox, createNetworkComms, networkConfigPath, networkIdentityPath, networkFencePath, sendWithConsumerFence } from "./comms-network.ts";
 import type { LeaseFence, SendOptions } from "./vendor/rat-king-mailbox-client/index.ts";
 import { MailboxClientError } from "./vendor/rat-king-mailbox-client/error.ts";
 import { Main } from "./vendor/rat-king-lexicon/runtime.lease.ts";
@@ -30,6 +30,75 @@ async function withMailbox(test: (service: ReturnType<typeof createNetworkComms>
 }
 
 describe("same-process consumer send fence", () => {
+  it("recovers a dead holder lock before a live consumer sends with its own fence", async () => {
+    await withMailbox(async (service, home) => {
+      const path = networkFencePath(home, reference("desk").did);
+      privateFile(`${path}.lock`, { pid: 2147483647, token: "dead-holder" });
+      const mailbox = {
+        lease: { acquire: () => Effect.succeed(lease(1)), renew: () => Effect.succeed(lease(1)), resolve: () => Effect.succeed(lease(1)), release: () => Effect.void },
+        watch: () => Stream.fromEffect(service.send("worker-session", "brief").pipe(Effect.map(result => { expect(result.status).toBe("accepted"); return { events: [], throughSeq: 2 }; }))),
+        open: () => Effect.die("no envelope"), deliver: () => Effect.die("no delivery"), ack: () => Effect.die("no ack"),
+      };
+      await Effect.runPromise(consumeNetworkMailbox({ home, agent: "desk", session: "desk-session", mailbox, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void }));
+    }, opts => { expect(opts?.fence?.generation).toBe(1); return Effect.succeed(output); });
+  });
+  it("sends from a live consumer across stale-lock recovery and mid-flight re-acquisition", async () => {
+    let live: ReturnType<typeof lease> | undefined; let acquisitions = 0; const seen: Array<number | undefined> = [];
+    await withMailbox(async (service, home) => {
+      privateFile(`${networkFencePath(home, reference("desk").did)}.lock`, { pid: 2147483647, token: "dead" });
+      let pending: Promise<import("./runtime.ts").CommsDelivery> | undefined;
+      const mailbox = {
+        lease: {
+          acquire: () => Effect.suspend(() => {
+            live = lease(++acquisitions);
+            if (acquisitions === 2) pending = Effect.runPromise(service.send("worker-session", "during re-acquire"));
+            return Effect.succeed(live).pipe(Effect.delay("40 millis"));
+          }),
+          renew: () => Effect.succeed(lease(acquisitions)), resolve: () => Effect.succeed(lease(acquisitions)), release: () => Effect.void,
+        },
+        watch: (_seq: number, fence: LeaseFence) => Stream.fromEffect(Effect.gen(function* () {
+          if (fence.generation === 1) return yield* Effect.fail(new MailboxClientError({ error: "LeaseMismatch", reason: "re-acquire", status: 409 }));
+          const sent = yield* Effect.promise(() => pending!);
+          expect(sent.status).toBe("accepted"); return { events: [], throughSeq: 2 };
+        })),
+        open: () => Effect.die("no envelope"), deliver: () => Effect.die("no delivery"), ack: () => Effect.die("no ack"),
+      };
+      await Effect.runPromise(consumeNetworkMailbox({ home, agent: "desk", session: "desk-session", mailbox, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void }));
+      expect(acquisitions).toBe(2); expect(seen).toEqual([1, 2]);
+    }, opts => {
+      seen.push(opts?.fence?.generation);
+      return opts?.fence?.generation === live?.generation ? Effect.succeed(output) : Effect.fail(new MailboxClientError({ error: "LeaseMismatch", reason: "publish pending", status: 409 }));
+    });
+  });
+  it("recovers old zero-byte locks left by legacy consumers", async () => {
+    await withMailbox(async (service, home) => {
+      const path = networkFencePath(home, reference("desk").did);
+      mkdirSync(dirname(path), { recursive: true }); writeFileSync(`${path}.lock`, "", { mode: 0o600 });
+      utimesSync(`${path}.lock`, new Date(0), new Date(0));
+      const mailbox = {
+        lease: { acquire: () => Effect.succeed(lease(1)), renew: () => Effect.succeed(lease(1)), resolve: () => Effect.succeed(lease(1)), release: () => Effect.void },
+        watch: () => Stream.fromEffect(service.send("worker-session", "brief").pipe(Effect.map(result => { expect(result.status).toBe("accepted"); return { events: [], throughSeq: 2 }; }))),
+        open: () => Effect.die("no envelope"), deliver: () => Effect.die("no delivery"), ack: () => Effect.die("no ack"),
+      };
+      await Effect.runPromise(consumeNetworkMailbox({ home, agent: "desk", session: "desk-session", mailbox, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void }));
+    }, () => Effect.succeed(output));
+  });
+  it("waits for a re-acquired fence to publish before its single retry", async () => {
+    const home = mkdtempSync(join(tmpdir(), "network-republish-")); const did = reference("desk").did;
+    privateFile(networkFencePath(home, did), lease(1)); let calls = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const result = await Effect.runPromise(sendWithConsumerFence({ home, did, send: opts => Effect.suspend(() => {
+        calls++;
+        if (calls === 1) {
+          timer = setTimeout(() => privateFile(networkFencePath(home, did), lease(2)), 40);
+          return Effect.fail(new MailboxClientError({ error: "LeaseMismatch", reason: "generation re-acquired", status: 409 }));
+        }
+        return opts?.fence?.generation === 2 ? Effect.succeed(output) : Effect.fail(new MailboxClientError({ error: "LeaseMismatch", reason: "publish not settled", status: 409 }));
+      }) }));
+      expect(result).toEqual(output); expect(calls).toBe(2);
+    } finally { if (timer) clearTimeout(timer); }
+  });
   it("borrows the live fence, refreshes it on 409 reacquisition, then sends unfenced after release", async () => {
     let live: LeaseFence | undefined; const seen: Array<LeaseFence | undefined> = []; let acquisitions = 0;
     await withMailbox(async (service, home) => {
