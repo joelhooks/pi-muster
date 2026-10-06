@@ -1,0 +1,210 @@
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { Effect } from "effect";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
+import { load, mutate, projectPath } from "./store.ts";
+import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
+import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
+import { appendOwnerItem, ingestOwnerItem, ownerRoute } from "./owner-queue.ts";
+import { ownerFeed } from "./owner-feed.ts";
+import muster, { registerRestartExit } from "./extension-main.ts";
+import * as ops from "./ops.ts";
+import { InputError } from "./errors.ts";
+
+beforeEach(() => vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"));
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
+async function setup(remote = false, role: "worker" | "desk" = "worker") {
+  const h = harness();
+  const dir = makeRepo(join(h.root, "repo"));
+  await runWith(h, projectOpen({ dir, slug: "probe", outcome: "restart", reviewTrigger: "weekly", nextAction: "test", criticalPath: [], space: "w1", sidebar: false, ephemeral: true }));
+  await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "restart" }));
+  const host = remote ? new FakeHerdr(h.home) : h.herdr;
+  const proc: ProcShape = { run: (command, args, options) => {
+    if (command === "ssh") {
+      const script = args.at(-1) ?? "";
+      if (script.includes("'muster-prerequisites'") || script.includes("exec env  'test'") || script.includes("exec env  'pi'")) return Effect.succeed({ code: 0, stdout: "", stderr: "" });
+      return h.proc.run("sh", ["-c", script], { ...options, cwd: dir });
+    }
+    if (command === "pi") return Effect.succeed({ code: 0, stdout: "", stderr: "" });
+    return h.proc.run(command, args, options);
+  } };
+  const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: dir, workerWorktree: h.workerWorktree,
+    createId: () => "receipt", sleep: ms => Effect.sync(() => h.sleep(ms)), emitPaneClose: h.emitPaneClose,
+    machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: dir, workerWorktree: h.workerWorktree, env: {}, wrap: [] } },
+    remoteHerdr: () => Effect.succeed(host.client()),
+  };
+  const run = <A, E>(effect: Effect.Effect<A, E, MusterEnv | Proc | import("./runtime.ts").Herdr | import("./runtime.ts").Comms>) => runWith(h, effect.pipe(Effect.provideService(MusterEnv, { ...env, sessionId: h.sessionId }), Effect.provideService(Proc, proc)));
+  const launch = await run(agentLaunch(dir, { action: "launch", machine: remote ? "remote" : "local", name: "worker", role, lane: "work", label: "worker", cwd: dir, noSkills: true, prompt: "Initial work." }));
+  return { h, dir, host, run, launch, env, proc };
+}
+
+describe("restart by fork", () => {
+  it.each([false, true])("replaces a worker on its own host (remote %s), never in place", async remote => {
+    const s = await setup(remote);
+    const old = s.launch.row;
+    expect(old.sessionFile).not.toBeNull();
+    appendFileSync(old.sessionFile!, '\n' + JSON.stringify({ type: "model_change", provider: "openai-codex", modelId: "gpt-6.1-sol" }) + '\n' + JSON.stringify({ type: "thinking_level_change", thinkingLevel: "low" }) + '\n');
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    expect(result.proof).toMatchObject({ state: "proven", via: "argv" });
+    expect(result.row.pane?.tabId).toBe(old.pane?.tabId);
+    expect(result.row.pane?.paneId).not.toBe(old.pane?.paneId);
+    expect(result.row.sessionId).not.toBe(old.sessionId);
+    expect(result.row.parentSessionFile).toBe(old.sessionFile);
+    expect(result.argv).toContain("--fork");
+    expect(result.argv).toContain(old.sessionFile);
+    expect(result.argv).toContain("openai-codex/gpt-6.1-sol:low");
+    expect(result.row.restore?.argv).toContain(result.row.sessionFile);
+    expect(result.row.restore?.argv).not.toContain(old.sessionFile);
+    expect(result.row.events?.at(-1)).toMatchObject({ type: "RESTARTED", detail: expect.stringContaining(old.sessionId) });
+    expect(s.host.panes.has(old.pane!.paneId)).toBe(false);
+    expect(s.host.panes.get(result.row.pane!.paneId)?.name).toBe(old.name);
+    expect(s.host.initialPrompts.at(-1)).toMatch(/You continue worker after a restart onto [a-f0-9]{40}/);
+    expect(s.host.typedPrompts).toEqual([]);
+    expect((await s.run(load(s.dir))).agents.filter(row => row.name === old.name)).toHaveLength(1);
+  });
+
+  it("self desk replacement moves all owned rows, root, restore env and scoped forward together", async () => {
+    const s = await setup(false, "desk");
+    const old = s.launch.row;
+    s.h.sessionId = old.sessionId;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents.map(row => ({ ...row, owner: old.sessionId })), { ...old, name: "child", role: "worker", sessionId: "child-session", owner: old.sessionId, pane: null, state: "planned" }] }, undefined] as const)));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    const project = await s.run(load(s.dir));
+    expect(project.agents.every(row => row.owner === result.row.sessionId)).toBe(true);
+    expect(project.agents[1]?.restore?.env.MUSTER_OWNER).toBe(result.row.sessionId);
+    expect(project.lanes.find(l => l.slug === "work")?.root).toEqual(result.row.pane);
+    expect(ownerRoute(old.sessionId, s.h.home, project.slug).owner).toBe(result.row.sessionId);
+    expect(s.host.panes.has(old.pane!.paneId)).toBe(true); // no active-turn close
+    expect("endSession" in result && result.endSession).toBeTruthy();
+    if (!("endSession" in result) || !result.endSession) throw Error("missing shutdown receipt");
+    await s.run(finishRestart(s.dir, result.endSession));
+    expect(s.host.panes.has(old.pane!.paneId)).toBe(false);
+  });
+
+  it.each([false, true])("failed fresh-turn proof keeps the original catalog and pane (remote %s)", async remote => {
+    const s = await setup(remote);
+    const before = await s.run(load(s.dir));
+    const panes = [...s.host.panes.keys()];
+    s.host.firstTurn = "error";
+    const outcome = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.result));
+    expect(outcome._tag).toBe("Failure");
+    expect(ownerRoute(s.launch.row.sessionId, s.h.home, "probe").owner).toBe(s.launch.row.sessionId);
+    expect(await s.run(load(s.dir))).toEqual(before);
+    expect([...s.host.panes.keys()]).toEqual(panes);
+    expect(s.host.calls.some(call => call.method === "pane.close" && call.params.pane_id === s.launch.row.pane?.paneId)).toBe(false);
+  });
+
+  it("a changed owner refuses the rebind without forwarding or closing the old agent", async () => {
+    const s = await setup();
+    const handle = s.host.handle.bind(s.host);
+    vi.spyOn(s.host, "handle").mockImplementation((method, params) => {
+      const result = handle(method, params);
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) {
+        const p = JSON.parse(readFileSync(projectPath(s.dir), "utf8"));
+        p.agents[0].owner = "other-owner";
+        writeFileSync(projectPath(s.dir), JSON.stringify(p));
+      }
+      return result;
+    });
+    const outcome = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.result));
+    expect(outcome).toMatchObject({ _tag: "Failure", failure: { message: expect.stringContaining("row changed") } });
+    expect((await s.run(load(s.dir))).agents[0]).toMatchObject({ sessionId: s.launch.row.sessionId, owner: "other-owner", pane: s.launch.row.pane });
+    expect(ownerRoute(s.launch.row.sessionId, s.h.home, "probe").owner).toBe(s.launch.row.sessionId);
+    expect(s.host.panes.has(s.launch.row.pane!.paneId)).toBe(true);
+  });
+
+  it("a replacement desk verifies a pending packet and gets a worker reply once without taking boss-owned workers", async () => {
+    const s = await setup(false, "desk");
+    const old = s.launch.row;
+    s.h.sessionId = old.sessionId;
+    const child = await s.run(agentLaunch(s.dir, { action: "launch", name: "child", role: "worker", lane: "work", label: "child", cwd: s.dir, prompt: "child work" }));
+    const artifact = join(s.h.root, "proof.txt"); writeFileSync(artifact, "evidence");
+    const packet = await s.run(packetReport({ dir: s.dir, agent: "child", owner: old.sessionId, cwd: s.dir, artifact, summary: "pending", checks: [] }));
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...child.row, name: "boss-owned", sessionId: "boss-worker", owner: "live-boss", pane: null }] }, undefined] as const)));
+    const reply = appendOwnerItem(old.sessionId, { author: child.row.sessionId, project: "probe", kind: "question", title: "worker reply" }, s.h.home);
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    s.h.sessionId = result.row.sessionId;
+    expect((await s.run(packetVerify(s.dir, packet.packet.id))).packet.state).toBe("verified");
+    expect((await s.run(load(s.dir))).agents.find(r => r.name === "boss-owned")?.owner).toBe("live-boss");
+    expect(ingestOwnerItem(old.sessionId, reply, s.h.home, "probe")).toBe(false);
+    const send = vi.fn();
+    const feed = ownerFeed({ session: result.row.sessionId, home: s.h.home, appendEntry: () => {}, sendMessage: send });
+    expect(feed.flush()).toBeGreaterThanOrEqual(1); expect(feed.flush()).toBe(0);
+    expect(send.mock.calls.filter(([note]) => String(note.content).includes("worker reply"))).toHaveLength(1);
+    feed.dispose();
+    await s.run(projectUpdate(s.dir, { policy: { wipLimit: 1 } }));
+    const retro = await s.run(laneOpen(s.dir, { slug: "retro", label: "🔁 retro", goal: "Fresh retro at full work WIP", kind: "retro" }));
+    expect(retro.lane.kind).toBe("retro");
+    const fresh = await s.run(agentLaunch(s.dir, { action: "launch", name: "retro-reader", role: "judge", lane: "retro", label: "🔁 judge", cwd: s.dir, prompt: "Review the finished work." }));
+    expect(fresh.proof?.state).toBe("proven");
+  });
+
+  it.each([false, true])("status silence restart uses the same proven replacement (remote %s)", async remote => {
+    const s = await setup(remote);
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, state: "nudged" })) }, undefined] as const)));
+    s.h.now = new Date(Date.now() + 90 * 60_000);
+    const result = await s.run(projectStatus(s.dir));
+    expect(result.agents[0]?.action).toContain("restarted by fork");
+    expect(result.agents[0]?.pane).not.toBe(s.launch.row.pane?.paneId);
+    expect(s.host.calls.some(c => c.method === "pane.send_input" && c.params.text === "/new")).toBe(false);
+  });
+
+  it("a self silence restart returns the same exit receipt and stops the old owner's pass", async () => {
+    const s = await setup(false, "desk");
+    const old = s.launch.row;
+    s.h.sessionId = old.sessionId;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: old.sessionId, state: "nudged" })) }, undefined] as const)));
+    s.h.now = new Date(Date.now() + 90 * 60_000);
+    const result = await s.run(projectStatus(s.dir));
+    expect(result.endSession?.oldPane).toEqual(old.pane);
+    expect(result.agents[0]?.action).toContain("restarted by fork");
+    expect(s.host.panes.has(old.pane!.paneId)).toBe(true);
+  });
+
+  it("never closes a self desk pane Muster did not open", async () => {
+    const s = await setup(false, "desk");
+    const old = s.launch.row;
+    s.h.sessionId = old.sessionId;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: old.sessionId, pane: row.pane ? { ...row.pane, openedByMuster: false } : null })) }, undefined] as const)));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    if (!("endSession" in result) || !result.endSession) throw Error("missing exit");
+    await s.run(finishRestart(s.dir, result.endSession));
+    expect(s.host.panes.has(old.pane!.paneId)).toBe(true);
+    expect(s.host.calls.some(c => c.method === "pane.close" && c.params.pane_id === old.pane!.paneId)).toBe(false);
+  });
+
+  it("a failed restart tool never arms agent_end shutdown", async () => {
+    vi.stubEnv("MUSTER_ROLE", "desk");
+    vi.spyOn(ops, "agentLaunch").mockReturnValue(Effect.fail(new InputError({ message: "rebind failed" })));
+    const hooks = new Map<string, Array<(event: unknown, ctx: unknown) => unknown>>();
+    const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
+    muster({ registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => tools.set(t.name, t),
+      on: (name: string, callback: (event: unknown, ctx: unknown) => unknown) => hooks.set(name, [...(hooks.get(name) ?? []), callback]),
+      registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {}, registerMessageRenderer: () => {}, getFlag: () => undefined,
+      events: { on: () => () => {}, emit: () => {} } } as never);
+    const shutdown = vi.fn();
+    const ctx = { cwd: "/project", sessionManager: { getSessionId: () => "old", getBranch: () => [] }, shutdown };
+    expect(await tools.get("agent_launch")?.execute("test", { action: "restart", name: "desk" }, undefined, undefined, ctx)).toMatchObject({ isError: true });
+    for (const hook of hooks.get("agent_end") ?? []) await hook({}, ctx);
+    expect(shutdown).not.toHaveBeenCalled();
+  });
+
+  it("unarmed, wrong-session and repeated agent_end cannot quit a process", async () => {
+    const hooks = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    const close = vi.fn(async () => {});
+    const arm = registerRestartExit({ on: (name: string, callback: (event: unknown, ctx: unknown) => unknown) => { hooks.set(name, callback); } } as never, close);
+    const shutdown = vi.fn();
+    const ctx = { sessionManager: { getSessionId: () => "old" }, shutdown };
+    hooks.get("agent_end")?.({}, ctx); expect(shutdown).not.toHaveBeenCalled();
+    await hooks.get("session_shutdown")?.({}, ctx); expect(close).not.toHaveBeenCalled();
+    const binding = { paneId: "p1", terminalId: "terminal", tabId: "tab", openedByMuster: true };
+    arm({ sessionId: "old", dir: "/project", restart: { oldPane: binding, replacementPane: { ...binding, paneId: "p2" }, name: "desk" } });
+    hooks.get("agent_end")?.({}, { ...ctx, sessionManager: { getSessionId: () => "other" } });
+    expect(shutdown).not.toHaveBeenCalled();
+    hooks.get("agent_end")?.({}, ctx); hooks.get("agent_end")?.({}, ctx);
+    expect(shutdown).toHaveBeenCalledOnce(); expect(close).not.toHaveBeenCalled();
+    await hooks.get("session_shutdown")?.({}, ctx); await hooks.get("session_shutdown")?.({}, ctx);
+    expect(close).toHaveBeenCalledOnce();
+  });
+});

@@ -25,6 +25,7 @@ export type AgentEvent =
   | { type: "SILENT" }
   | { type: "NUDGE" }
   | { type: "RESTART" }
+  | { type: "RESTARTED" }
   | { type: "ACTIVE" }
   | { type: "REPORT"; readonly paneLive?: boolean }
   | { type: "VERIFY" }
@@ -40,6 +41,7 @@ const CLOSABLE = {
 } as const;
 
 const WORKING = {
+  RESTARTED: "running",
   REPORT: "reported",
   PANE_GONE: "interrupted",
   FAIL: "failed",
@@ -59,9 +61,9 @@ export const agentMachine = setup({
     silent: { on: { NUDGE: "nudged", ACTIVE: "running", ...WORKING } },
     nudged: { on: { RESTART: "restarted", ACTIVE: "running", ...WORKING } },
     restarted: { on: { ACTIVE: "running", SILENT: "silent", ...WORKING } },
-    reported: { on: { REPORT: { target: "reported", guard: "paneLive" }, VERIFY: "verified", REWORK: "running", LAND: "landed", PANE_GONE: "interrupted", ...CLOSABLE } },
-    verified: { on: { REPORT: { target: "reported", guard: "paneLive" }, LAND: "landed", REWORK: "running", ...CLOSABLE } },
-    landed: { on: { REPORT: { target: "reported", guard: "paneLive" }, PANE_GONE: "interrupted", REWORK: "running", ...CLOSABLE } },
+    reported: { on: { REPORT: { target: "reported", guard: "paneLive" }, RESTARTED: "running", VERIFY: "verified", REWORK: "running", LAND: "landed", PANE_GONE: "interrupted", ...CLOSABLE } },
+    verified: { on: { REPORT: { target: "reported", guard: "paneLive" }, LAND: "landed", RESTARTED: "running", REWORK: "running", ...CLOSABLE } },
+    landed: { on: { REPORT: { target: "reported", guard: "paneLive" }, PANE_GONE: "interrupted", RESTARTED: "running", REWORK: "running", ...CLOSABLE } },
     interrupted: { on: { ADOPT: "running", LAUNCH: "launching", RESTORE: "restoring", ...CLOSABLE } },
     restoring: { on: { STARTED: "running", LAUNCH_FAILED: "failed", PANE_GONE: "interrupted" } },
     failed: { on: { LAUNCH: "launching", RESTORE: "restoring", ADOPT: "running", ...CLOSABLE } },

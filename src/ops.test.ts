@@ -79,6 +79,12 @@ async function launchedWorker(h: Harness) {
   return { dir, launched, clone: launched.row.cwd };
 }
 
+/** Route the fake /muster install git probe to the fixture, not to real fleet code. */
+function restartCode(h: Harness, dir: string) {
+  const run = h.proc.run;
+  h.proc = { run: (command, args, options) => run(command, args, command === "git" && options.cwd === "/muster" ? { ...options, cwd: dir } : options) };
+}
+
 function commitInClone(clone: string, file = "work.txt") {
   writeFileSync(join(clone, file), "packet\n");
   sh(clone, "add", file);
@@ -218,6 +224,7 @@ describe("slow Pi startup", () => {
   it.each(["last lines", "Error: No API key found for anthropic"])("continues the owner pass after one restart fails: %s", async tail => {
     const h = harness();
     const { dir, launched } = await launchedWorker(h);
+    restartCode(h, dir);
     const second = await runWith(h, agentLaunch(dir, {
       action: "launch", name: "second", role: "worker", lane: "probe", label: "🔨 second", cwd: dir, brief: launched.row.brief!,
     }));
@@ -228,25 +235,31 @@ describe("slow Pi startup", () => {
     age(31);
     await runWith(h, projectStatus(dir));
     age(61);
-    const failedPane = launched.row.pane!.paneId;
-    let restarting = false;
+    let failedReplacement: string | undefined;
     const handle = h.herdr.handle.bind(h.herdr);
     vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => {
-      if (params.pane_id === failedPane) {
-        if (method === "pane.send_input" && params.text === "/new") { restarting = true; return { type: "ok" }; }
-        if (method === "pane.read" && restarting) return { type: "pane_read", read: { text: tail } };
+      if (method === "pane.split" && params.target_pane_id === launched.row.pane!.paneId) {
+        const result = handle(method, params);
+        if (typeof result === "object" && result !== null && "pane" in result && typeof result.pane === "object" && result.pane !== null && "pane_id" in result.pane && typeof result.pane.pane_id === "string") failedReplacement = result.pane.pane_id;
+        return result;
+      }
+      if (params.pane_id === failedReplacement) {
+        if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) return { type: "ok" };
+        if (method === "pane.read") return { type: "pane_read", read: { text: tail } };
       }
       return handle(method, params);
     });
     const result = await runWith(h, projectStatus(dir));
-    expect(result.agents[0]?.state).toBe("failed");
-    expect(result.agents[0]?.action).toContain(tail.startsWith("Error:") ? "restart failed: model error" : "restart failed: no Pi session appeared");
-    expect(result.agents[1]?.state).toBe("restarted");
-    expect(result.agents[1]?.action).toContain("re-prompt proven");
+    expect(result.agents[0]?.state).toBe("nudged");
+    expect(result.agents[0]?.action).toContain("restart failed:");
+    expect(result.agents[1]?.state).toBe("running");
+    expect(result.agents[1]?.action).toContain("first turn proven");
     const rows = (await runWith(h, load(dir))).agents;
-    expect(rows[0]?.state).toBe("failed");
-    if (tail.startsWith("Error:")) expect(rows[0]?.events?.at(-1)).toMatchObject({ type: "MODEL_ERROR", detail: tail });
-    expect(rows[1]?.sessionId).toMatch(/^fresh-/);
+    expect(rows[0]?.state).toBe("nudged");
+    expect(rows[0]?.sessionId).toBe(launched.row.sessionId);
+    expect(rows[0]?.pane).toEqual(launched.row.pane);
+    expect(h.herdr.panes.has(launched.row.pane!.paneId)).toBe(true);
+    expect(rows[1]?.sessionId).not.toBe(second.row.sessionId);
     expect(rows[1]?.delivery).toBe("proven");
     expect(result.board).toContain("second");
     expect(result.notes.join("\n")).toContain("brain:");
@@ -332,6 +345,7 @@ describe("slow Pi startup", () => {
   it.each([25_000, Infinity])("shares the evidenced wait with restart (session at %s)", async appearAt => {
     const h = harness();
     const { dir, launched } = await launchedWorker(h);
+    restartCode(h, dir);
     const file = launched.row.sessionFile!;
     const age = (min: number) => { const at = new Date(h.now.getTime() - min * 60_000); utimesSync(file, at, at); };
     age(31);
@@ -340,22 +354,29 @@ describe("slow Pi startup", () => {
     h.startupLoad = { load: 20, cpus: 8 };
     let elapsed = 0;
     h.sleep = ms => { elapsed += ms; h.now = new Date(h.now.getTime() + ms); };
+    let replacement: string | undefined;
+    let pending: Record<string, unknown> | undefined;
     const handle = h.herdr.handle.bind(h.herdr);
     vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => {
-      if (method === "pane.send_input" && params.text === "/new") return { type: "ok" };
-      if (method === "pane.read") return { type: "pane_read", read: { text: "creating a new session…" } };
-      if (method === "pane.get" && elapsed >= appearAt) {
-        const pane = h.herdr.panes.get(String(params.pane_id));
-        if (pane) pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: join(h.root, "2026-10-04T00-00-00Z_restarted.jsonl") };
+      if (method === "pane.split") {
+        const result = handle(method, params);
+        if (typeof result === "object" && result !== null && "pane" in result && typeof result.pane === "object" && result.pane !== null && "pane_id" in result.pane && typeof result.pane.pane_id === "string") replacement = result.pane.pane_id;
+        return result;
+      }
+      if (params.pane_id === replacement) {
+        if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) { pending = params; return { type: "ok" }; }
+        if (method === "pane.read") return { type: "pane_read", read: { text: "creating a new session…" } };
+        if (method === "pane.get" && elapsed >= appearAt && pending) { handle("pane.send_input", pending); pending = undefined; }
       }
       return handle(method, params);
     });
     const prompts = h.herdr.calls.filter(call => call.method === "agent.prompt").length;
     const result = await runWith(h, projectStatus(dir));
-    expect(elapsed).toBe(appearAt === Infinity ? 120_000 : appearAt + 3_000);
-    expect(result.agents[0]?.state).toBe("restarted");
-    expect(result.agents[0]?.action).toContain(appearAt === Infinity ? "slow start, prompt pending" : "slow start: Pi session appeared after 25s (load 20)");
-    expect(h.herdr.calls.filter(call => call.method === "agent.prompt")).toHaveLength(prompts + (appearAt === Infinity ? 0 : 1));
+    expect(elapsed).toBe(appearAt === Infinity ? 120_000 : appearAt);
+    expect(result.agents[0]?.state).toBe(appearAt === Infinity ? "nudged" : "running");
+    expect(result.agents[0]?.action).toContain(appearAt === Infinity ? "restart failed:" : "restarted by fork");
+    expect(h.herdr.calls.filter(call => call.method === "agent.prompt")).toHaveLength(prompts);
+    expect(h.herdr.panes.has(launched.row.pane!.paneId)).toBe(appearAt === Infinity);
   });
 });
 
@@ -1967,9 +1988,10 @@ describe("project_status", () => {
     expect(gone.agents[0]?.action).toBe("pane gone: interrupted");
   });
 
-  it("nudges at 30 minutes and restarts with /new at 60, only for its own rows", async () => {
+  it("nudges at 30 minutes and restarts by fork at 60, only for its own rows", async () => {
     const h = harness();
     const { dir, launched } = await launchedWorker(h);
+    restartCode(h, dir);
     const file = launched.row.sessionFile as string;
     const age = (minutes: number) => {
       const when = new Date(h.now.getTime() - minutes * 60_000);
@@ -1989,12 +2011,13 @@ describe("project_status", () => {
 
     age(61);
     const restarted = await runWith(h, projectStatus(dir));
-    expect(restarted.agents[0]?.state).toBe("restarted");
-    expect(restarted.agents[0]?.action).toContain("/new");
+    expect(restarted.agents[0]?.state).toBe("running");
+    expect(restarted.agents[0]?.action).toContain("restarted by fork");
     const row = (await runWith(h, load(dir))).agents[0];
     expect(row?.restarts).toBe(1);
-    expect(row?.sessionId).toMatch(/^fresh-/);
-    expect(h.herdr.calls.some((call) => call.method === "pane.send_input" && call.params.text === "/new")).toBe(true);
+    expect(row?.sessionId).not.toBe(launched.row.sessionId);
+    expect(row?.parentSessionFile).toBe(file);
+    expect(h.herdr.calls.some((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("exec sh"))).toBe(true);
   });
 });
 

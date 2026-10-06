@@ -36,14 +36,11 @@ export function musterToolNames(env: Readonly<NodeJS.ProcessEnv>): string[] {
 }
 
 type Failure = { kind: "stale" } | { kind: "load"; line: string };
-function restartMessage(failure: Failure, ctx: ExtensionContext): string {
-  const file = ctx.sessionManager.getSessionFile();
-  // JSON quoting is shell-safe for ordinary paths; escape shell expansion inside double quotes.
-  const quoted = file ? JSON.stringify(file).replace(/[$`]/g, "\\$&") : "<session file>";
+function restartMessage(failure: Failure, _ctx: ExtensionContext, env: Readonly<NodeJS.ProcessEnv>): string {
   const reason = failure.kind === "stale"
-    ? "pi-muster's dependencies changed after this Pi started, and /reload can't load them."
+    ? "pi-muster's dependencies changed after this Pi started."
     : `pi-muster failed to load: ${failure.line}.`;
-  return `⚠ ${reason} Restart Pi on this session: pi --session ${quoted}.`;
+  return `⚠ ${reason} Ask your owner on current code to call agent_launch action: "restart" name: "${env.MUSTER_AGENT ?? "<own row>"}". It forks into a new pane, proves the first turn, rebinds the row, then quits the old Pi. Never /reload or restart in place.`;
 }
 
 function registerStubs(pi: ExtensionAPI, env: Readonly<NodeJS.ProcessEnv>, failure: Failure) {
@@ -54,12 +51,12 @@ function registerStubs(pi: ExtensionAPI, env: Readonly<NodeJS.ProcessEnv>, failu
       // Accept old calls too: validation must not hide the recovery message.
       parameters: Type.Object({}, { additionalProperties: true }),
       async execute(_id, _params, _signal, _update, ctx) {
-        return { content: [{ type: "text", text: restartMessage(failure, ctx) }], details: { ok: false, reason: failure.kind }, isError: true };
+        return { content: [{ type: "text", text: restartMessage(failure, ctx, env) }], details: { ok: false, reason: failure.kind }, isError: true };
       },
     });
   }
   pi.on("session_start", (_event, ctx) => {
-    pi.sendMessage({ customType: "muster-load-warning", content: restartMessage(failure, ctx), display: true }, { triggerTurn: false });
+    pi.sendMessage({ customType: "muster-load-warning", content: restartMessage(failure, ctx, env), display: true }, { triggerTurn: false });
   });
 }
 

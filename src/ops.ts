@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
@@ -111,7 +112,7 @@ const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
 
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
-const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, nameOfMachine: string) => withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
+const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string) => withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(nameOfMachine);
   const catalogs = [project];
@@ -519,24 +520,16 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
       if (decision.action !== "none") {
         action = `${decision.action} due on ${row.machine}`;
         if (act && mine) {
-          yield* paneSendKeys(pane.pane_id, ["Escape"]);
-          if (decision.action === "nudge") yield* paneRun(pane.pane_id, nudgeNote(silent));
-          else {
-            const tail = yield* paneRead(pane.pane_id, CLOSE_READ_LINES);
-            const saved = join(closedDir(dir), `${row.name}-restart-${env.now().getTime()}.txt`);
-            mkdirSync(dirname(saved), { recursive: true }); writeFileSync(saved, tail);
-            yield* paneRun(pane.pane_id, "/new");
-            const wait = yield* waitForSession(pane.pane_id, current.sessionFile);
-            if (wait.state !== "ready") return yield* input(`machine ${row.machine}: restart submitted but no fresh session evidence`);
-            current = yield* patchRow(dir, row.name, current.state, decision.events, { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? row.sessionId, restarts: current.restarts + 1 });
-            const prompt = workPrompt(current, undefined);
-            if (prompt) {
-              const proof = yield* promptWithProof(pane.pane_id, prompt);
-              current = yield* patchRow(dir, row.name, current.state, [], { delivery: proof.state, events: [...(current.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.state === "proven" ? "matching user entry and clean first assistant" : `${proof.detail}; inspect before repair: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: pane.pane_id, prompt: proof.repairPrompt ?? prompt } })}` }] });
-            }
+          if (decision.action === "nudge") {
+            yield* paneSendKeys(pane.pane_id, ["Escape"]);
+            yield* paneRun(pane.pane_id, nudgeNote(silent));
+            current = yield* patchRow(dir, row.name, current.state, decision.events);
+          } else {
+            const result = yield* restartByFork(dir, project, current).pipe(Effect.result);
+            if (result._tag === "Failure") action = `restart failed: ${result.failure.message}`;
+            else { current = result.success.row; pane = current.pane ? yield* locatePane(current.pane) : null; action = `restarted by fork on ${row.machine}; first turn proven`; }
           }
-          if (decision.action === "nudge") current = yield* patchRow(dir, row.name, current.state, decision.events);
-          action = `${decision.action} on ${row.machine}`;
+          if (decision.action === "nudge") action = `${decision.action} on ${row.machine}`;
         }
       }
     }
@@ -1367,7 +1360,7 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
 // ---------- agents ----------
 
 export interface AgentLaunchInput {
-  readonly action: LaunchKind | "adopt";
+  readonly action: LaunchKind | "adopt" | "restart";
   readonly machine?: string | undefined;
   readonly side?: boolean | undefined;
   readonly name: string;
@@ -1622,16 +1615,116 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     return { row: adopted, argv: [] as string[], readiness: "not checked (catalog adoption)", proof: null, sessionIdMatched: null, notes: ["adopted without touching the pane", `Parent desk: deliver this fence on the next conversation turn: ${sideDeskFence(parent.name)}`] };
   });
 
+/** Called only at session_shutdown after the old caller's agent_end. */
+export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; replacementPane: PaneBinding; name: string }) => Effect.gen(function* () {
+  yield* closeOwnedPane(restart.oldPane, dir, `self restart ${restart.name}`);
+  yield* agentRename(restart.replacementPane.paneId, restart.name).pipe(Effect.catch(() => Effect.void));
+});
+
+/** Replacement is provisional until fresh fork evidence is proven. No catalog launch reservation
+ * is needed: the per-name lock fences concurrent replacements while the old row stays live. */
+const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(`restart-${old.name.slice(0, 23)}`, Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const self = old.sessionId === env.sessionId;
+  if (!self) yield* requireOwner(old, env.sessionId, false);
+  if (!old.pane || !old.sessionFile) return yield* input("restart needs a live pane and current session file");
+  const oldPane = old.pane;
+  const state = yield* stepAgent(old.name, old.state, { type: "RESTARTED" });
+  const pane = yield* locatePane(oldPane);
+  if (!pane || pane.agent !== "pi" || pane.agent_session?.kind !== "path" || pane.agent_session.value !== old.sessionFile) return yield* input("restart refused: old pane does not prove the catalog session");
+  const remote = old.machine !== "local";
+  const machine = remote ? yield* machineConfig(old.machine) : null;
+  const launchProject = machine ? { ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null } : project;
+  const selected = yield* sessionRestore(old.profile, old.sessionFile, project, old.role, (yield* loadRoster).roster, {}, remote);
+  const notes = [...selected.notes];
+  const modelNote = yield* checkRunnableModel(selected.profile.model, old.cwd, { tokens: selected.live.contextTokens });
+  if (modelNote) notes.push(modelNote);
+  const sha = (yield* git(machine?.musterExtension ?? env.musterRoot, "rev-parse", "HEAD")).trim();
+  let row: AgentRow = { ...old, profile: selected.profile, sessionId: `${mintSessionId(old.name, env.now())}-${randomUUID().slice(0, 8)}`, sessionFile: null, parentSessionFile: old.sessionFile, pane: null };
+  if (row.owner === old.sessionId) row = { ...row, owner: row.sessionId };
+  const profile = extensionsFor(launchProject, row);
+  const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.`;
+  const inherited = yield* inheritedStartEntries(old.sessionFile);
+  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: old.sessionFile, profile, musterExtension: launchProject.musterExtension, prompt });
+  const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, MUSTER_COMMS: "intercom", MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}) };
+  const bin = join(machine?.musterExtension ?? env.musterRoot, "bin");
+  if (machine || environment.PATH !== undefined) environment.PATH = [bin, environment.PATH ?? (yield* must("printenv", ["PATH"], { cwd: old.cwd })).trim()].join(":");
+  const launchDir = remote ? (yield* git(old.cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")).trim() : join(env.home, ".pi/agent");
+  const receipt = env.createId();
+  const wrap = machine?.wrap.map(arg => arg.replaceAll("{name}", old.name)) ?? [];
+  const script = yield* writeLaunchFile(launchDir, `#!/bin/sh\nset -e\n${shellPrelude(old.cwd, environment, environment.PATH === undefined ? bin : undefined)}${piReceiptSuffix(receipt)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
+  // A desk replacement is also a split in its own tab, never a fresh desk tab.
+  // The root binding transfers with the row so closing the old root cannot strand the lane.
+  let phase: "provisional" | "rebound" = "provisional";
+  return yield* Effect.acquireUseRelease(
+    paneSplit(pane.pane_id, "right", old.cwd),
+    fresh => Effect.gen(function* () {
+      const binding: PaneBinding = { paneId: fresh.pane_id, terminalId: fresh.terminal_id, tabId: fresh.tab_id, openedByMuster: true };
+      yield* guardLaunchShell(binding.paneId);
+      yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
+      const wait = yield* waitForSession(binding.paneId, null, remote ? undefined : () => findSessionFile(row.cwd, row.sessionId, env.home));
+      if (wait.state !== "ready") return yield* input(`restart failed before rebind: replacement session ${wait.state}; old agent untouched`);
+      const id = sessionIdFromFile(wait.sessionFile);
+      if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed: replacement did not prove a new session");
+      const proof = yield* proveStartedPrompt(wait.sessionFile, prompt, inherited);
+      if (proof.state !== "proven") return yield* input(`restart failed before rebind: ${proof.detail}; old agent untouched`);
+      row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
+        events: [...(old.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
+        restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: environment } };
+      const stillOld = yield* locatePane(oldPane);
+      if (!stillOld || stillOld.agent_session?.kind !== "path" || stillOld.agent_session.value !== old.sessionFile) return yield* input("old Pi changed during restart; rebind refused");
+      row = yield* mutate(dir, current => Effect.gen(function* () {
+        const latest = yield* findRow(current, old.name);
+        if (latest.sessionId !== old.sessionId || latest.sessionFile !== old.sessionFile || latest.owner !== old.owner || latest.state !== old.state || latest.pane?.terminalId !== oldPane.terminalId) return yield* input("row changed during restart; old agent untouched, retry");
+        if (!self) yield* requireOwner(latest, env.sessionId, false);
+        yield* guardPaneBinding(current, latest, binding);
+        const next = withRow(current, row);
+        const agents = next.agents.map(other => other.owner === old.sessionId ? { ...other, owner: id, restore: other.restore ? { ...other.restore, env: { ...other.restore.env, MUSTER_OWNER: id } } : null, updatedAt: iso(env) } : other);
+        const lanes = next.lanes.map(lane => old.machine === "local" && sharesPane(oldPane, lane.root) ? { ...lane, root: binding, tabId: binding.tabId, updatedAt: iso(env) } : lane);
+        return [{ ...next, agents, lanes }, yield* findRow({ ...next, agents }, row.name)] as const;
+      })).pipe(Effect.catch(error => Effect.gen(function* () {
+        // mutate can fail registering a project after its atomic catalog write.
+        // In that case the replacement is already authoritative: never tear it down.
+        const saved = yield* load(dir);
+        const rebound = saved.agents.find(other => other.name === old.name && other.sessionId === id && other.pane?.terminalId === binding.terminalId);
+        if (!rebound) return yield* error;
+        notes.push(`catalog rebind committed; post-write bookkeeping failed: ${error.message}`);
+        return rebound;
+      })));
+      phase = "rebound";
+      // The catalog is authoritative. Never forward before its atomic write succeeds.
+      yield* recordOwnerForward(old.sessionId, id, project.slug, env).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`catalog rebound; scoped owner forward needs repair: ${error.message}`); })));
+      if (self) notes.push("Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place.");
+      else {
+        if (!oldPane.openedByMuster) {
+          const retiring = yield* locatePane(oldPane);
+          if (retiring?.agent_session?.kind === "path" && retiring.agent_session.value === old.sessionFile) yield* paneRun(retiring.pane_id, "/quit").pipe(Effect.catch(error => Effect.sync(() => { notes.push(`old Pi quit failed: ${error.message}`); })));
+        }
+        notes.push(yield* closeOwnedPane(oldPane, dir, `restart ${old.name}`).pipe(Effect.catch(error => Effect.succeed(`old pane close failed: ${error.message}; close only ${oldPane.paneId}/${oldPane.terminalId}`))));
+      }
+      yield* agentRename(binding.paneId, old.name).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`rename pending: ${error.message}`); })));
+      yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
+      return { row, argv, readiness: "proven", proof, sessionIdMatched: argv.includes(id), notes, ...(self ? { endSession: { oldPane, replacementPane: binding, name: old.name } } : {}) };
+    }),
+    fresh => phase === "rebound" ? Effect.void : closeOwnedPane({ paneId: fresh.pane_id, terminalId: fresh.terminal_id, tabId: fresh.tab_id, openedByMuster: true }, dir, "failed restart replacement").pipe(Effect.catch(() => Effect.void)),
+  );
+}));
+
 export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
     const name = yield* decodeWith(decodeAgentName, params.name);
     const project = yield* load(dir);
-    yield* guardSideDesk(project, env.sessionId, "agent_launch");
+    if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
     const machine = params.machine ?? previous?.machine ?? "local";
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
+    if (params.action === "restart") {
+      const row = yield* findRow(project, name);
+      const restart = restartByFork(dir, project, row);
+      return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
+    }
     if (params.action === "adopt") {
       if (params.side) {
         if (machine !== "local") return yield* input("remote side-desk adoption is not supported");
@@ -1653,7 +1746,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       });
       return machine === "local" ? yield* adopt : yield* onRemote(machine, yield* machineConfig(machine), adopt);
     }
-    if (machine !== "local") return yield* remoteLaunch(dir, project, params, machine);
+    if (machine !== "local") return yield* remoteLaunch(dir, project, { ...params, action: params.action }, machine);
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
     const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
     const existing = project.agents.find((agent) => agent.name === name);
@@ -2562,6 +2655,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const now = env.now().getTime();
     const limits = silenceLimits(project.policy);
     const lines: AgentLine[] = [];
+    let endSession: Parameters<typeof finishRestart>[1] | undefined;
     let stuck = 0;
 
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
@@ -2697,40 +2791,9 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
             yield* paneRun(paneId, nudgeNote(silentFor));
             action = `nudged after ${Math.floor(silentFor / 60_000)}m`;
           } else if (decision.action === "restart") {
-            const tail = yield* paneRead(paneId, CLOSE_READ_LINES).pipe(Effect.catch(() => Effect.succeed("")));
-            const saved = join(closedDir(dir), `${current.name}-restart-${now}.txt`);
-            mkdirSync(dirname(saved), { recursive: true });
-            writeFileSync(saved, tail);
-            yield* paneSendKeys(paneId, ["Escape"]);
-            yield* paneRun(paneId, "/new");
-            const wait = yield* waitForSession(paneId, current.sessionFile);
-            const text = workPrompt(current, undefined);
-            const issue = wait.state === "missing" ? modelOutputIssue(wait.tail) : null;
-            if (wait.state === "missing") {
-              current = yield* patchRow(dir, current.name, current.state, [{ type: "FAIL" }], {
-                delivery: "unproven",
-                ...(issue?.severity === "error" ? { events: [...(current.events ?? []), { type: "MODEL_ERROR" as const, at: iso(env), detail: issue.line }] } : {}),
-              }).pipe(Effect.catch(() => Effect.succeed(current)));
-              action = issue?.severity === "error"
-                ? `restart failed: model error in ${paneId}: ${issue.line}; tail saved to ${saved}`
-                : `restart failed: no Pi session appeared in ${paneId}; tail saved to ${saved}`;
-            } else {
-              const proof = text && wait.state === "ready"
-                ? yield* promptWithProof(paneId, text).pipe(
-                    Effect.catch((error) => Effect.succeed<Proof>({ state: "unproven", submission: "uncertain", detail: error.message })),
-                  )
-                : null;
-              const receipt = wait.state === "pending" ? pendingPromptNote(paneId, text)
-                : wait.slow ? slowStartNote(wait)
-                : "";
-              action = `restarted with /new after ${Math.floor(silentFor / 60_000)}m; ${proof ? `re-prompt ${proof.state}` : text ? "re-prompt pending" : "no brief to re-prompt"}; ${receipt}; tail saved to ${saved}`;
-              current = yield* patchRow(dir, current.name, current.state, decision.events, {
-                restarts: current.restarts + 1,
-                ...(proof?.state === "unproven" ? { events: [...(current.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: `${proof.detail}; inspect before repair: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: paneId, prompt: proof.repairPrompt ?? text } })}` }] } : {}),
-                ...(wait.state === "ready" ? { sessionFile: wait.sessionFile, sessionId: sessionIdFromFile(wait.sessionFile) ?? current.sessionId } : {}),
-                delivery: wait.state === "pending" ? "none" : proof?.state === "proven" ? "proven" : "unproven",
-              }).pipe(Effect.catch(() => Effect.succeed(current)));
-            }
+            const result = yield* restartByFork(dir, project, current).pipe(Effect.result);
+            if (result._tag === "Failure") action = `restart failed: ${result.failure.message}`;
+            else { current = result.success.row; endSession = result.success.endSession; action = `restarted by fork after ${Math.floor(silentFor / 60_000)}m; first turn proven`; }
           }
           if (decision.action !== "restart") {
             current = yield* patchRow(dir, current.name, current.state, decision.events).pipe(Effect.catch(() => Effect.succeed(current)));
@@ -2753,10 +2816,11 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         sessionId: current.sessionId,
         action,
       });
+      if (endSession) break; // The replacement now owns the remaining rows.
     }
 
     const autolandNotes: string[] = [];
-    if (act) {
+    if (act && !endSession) {
       const snapshot = yield* load(dir);
       const candidates = snapshot.packets.filter(packet => autolandEligible(packet) &&
         snapshot.agents.some(row => row.name === packet.agent && row.owner === env.sessionId) &&
@@ -2795,7 +2859,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
-    return { project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes].join("\n"), notes: [...ingestion.notes, tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes].join("\n"), notes: [...ingestion.notes, tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));

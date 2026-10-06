@@ -25,7 +25,7 @@ describe("dependency reload gate", () => {
   it("loads the thin dynamic entry through Pi/jiti, then returns stubs on a changed install", () => {
     const output = execFileSync(process.execPath, ["src/reload-stale-repro.ts"], { encoding: "utf8", timeout: 20_000 });
     expect(output).toContain('"ok":true');
-    expect(output).toContain("pi --session");
+    expect(output).toContain('agent_launch action: \\"restart\\"');
   }, 25_000);
   it("hashes the installed lock, falling back to the root lock", () => {
     const root = fixture();
@@ -57,10 +57,10 @@ describe("dependency reload gate", () => {
     expect(load).toHaveBeenCalledTimes(1);
     expect([...f.defs.keys()]).toEqual(musterToolNames({}));
     const result = await f.defs.get("project_status")!.execute("id", { project: "/p" }, undefined, undefined, ctx);
-    expect(result.content[0]?.text).toContain('pi --session "/sessions/my session.jsonl"');
+    expect(result.content[0]?.text).toContain('agent_launch action: "restart" name: "<own row>"');
     expect(result.content[0]?.text).toContain("dependencies changed");
     f.hooks.get("session_start")!({}, ctx);
-    expect(f.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining("pi --session"), display: true }), { triggerTurn: false });
+    expect(f.sendMessage).toHaveBeenCalledWith(expect.objectContaining({ content: expect.stringContaining('agent_launch action: "restart"'), display: true }), { triggerTurn: false });
     await guardedLoad({ pi: fake().pi as never, root, load, env: {} });
     expect(load).toHaveBeenCalledTimes(1); // Never advance the original stamp.
   });
@@ -70,6 +70,6 @@ describe("dependency reload gate", () => {
     const result = await f.defs.get("project_open")!.execute("id", {}, undefined, undefined, ctx);
     expect(result.content[0]?.text).toContain("Schema.TaggedError is not a function");
     expect(result.content[0]?.text).not.toContain("stack detail");
-    expect(result.content[0]?.text).toContain("pi --session");
+    expect(result.content[0]?.text).toContain('agent_launch action: "restart"');
   });
 });
