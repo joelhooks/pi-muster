@@ -99,7 +99,7 @@ export const nudgeSwitchboards = (project: string, record: { id: string; kind: s
     const live = yield* intercom.sessions();
     for (const target of targets) {
       if (target === env.sessionId || (live && !live.includes(target))) continue;
-      yield* intercom.send(target, `☎️ Desk queue changed: [${project}#${record.resolves ?? record.id}] ${record.resolves ? "resolved" : record.kind}. Read desk_inbox for the current fleet; don't answer without Joel.`)
+      yield* (intercom.relay ?? intercom.send)(target, `☎️ Desk queue changed: [${project}#${record.resolves ?? record.id}] ${record.resolves ? "resolved" : record.kind}. Read desk_inbox for the current fleet; don't answer without Joel.`)
         .pipe(Effect.catchCause(() => Effect.void));
     }
   }).pipe(Effect.catchCause(() => Effect.void));
@@ -159,7 +159,7 @@ export const deskAnswer = (params: DeskAnswerInput) =>
     const nudged: string[] = [];
     for (const desk of desks) {
       const message = `☎️ Joel answered ${itemRef({ project: params.project, id: item.id })} "${item.title}": ${params.answer.trim()}`;
-      const result = yield* intercom.send({ kind: "alias", project: params.project, row: desk.name }, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
+      const result = yield* (intercom.relay ?? intercom.send)({ kind: "alias", project: params.project, row: desk.name }, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
       const status = result.status === "delivered" && live && !live.includes(desk.sessionId) ? "queued, no live session" : result.status === "delivered" ? "sent" : result.status;
       nudged.push(`${desk.name} (${desk.sessionId}): ${status}`);
     }

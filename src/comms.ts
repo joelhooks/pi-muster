@@ -1,11 +1,31 @@
 import { Effect, Layer, Schema } from "effect";
-import { decodeAgentName, decodeSlug, type Policy } from "./domain.ts";
+import { readFileSync } from "node:fs";
+import { decodeAgentName, decodeSlug, decodeProject, type Policy } from "./domain.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
-import { exists, load } from "./store.ts";
+import { exists, load, projectPath } from "./store.ts";
 import { Comms, CommsError, Unsupported, type CommsAddress, type CommsDelivery, type CommsLease, type CommsShape, type CommsTarget, type IntercomTransport, type LeaseAuthorityShape, type NetworkMailboxShape } from "./runtime.ts";
 import type { MainValue as Lease } from "./vendor/rat-king-lexicon/runtime.lease.ts";
 import type { ReceiptValue as Receipt } from "./vendor/rat-king-lexicon/defs.ts";
+
+/** Session context is resolved at use time; no arbitrary desk identity fallback. */
+export function catalogCommsSender(dir: string, session: string) {
+  try {
+    const project = decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8")));
+    const row = project.agents.find(row => row.sessionId === session);
+    return row ? { agent: row.name, session } : undefined;
+  } catch { return undefined; }
+}
+export function catalogNetworkPeers(dir: string) {
+  const project = decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8")));
+  return Object.fromEntries(project.agents.map(row => [row.sessionId, row.name]));
+}
+
+export function remoteCommsEnvironment(project: Pick<import("./domain.ts").Project, "policy">, machine: Pick<import("./domain.ts").MachineConfig, "comms">): Record<string, string> {
+  if (project.policy?.comms !== "network") return { MUSTER_COMMS: "intercom" };
+  if (!machine.comms) throw new CommsError("network project requires a remote comms config block; launch refused");
+  return { MUSTER_COMMS: "network", MUSTER_NETWORK_CONFIG: machine.comms.config };
+}
 
 export type CommsAdapter = "intercom" | "network";
 export function selectComms(env: string | undefined, policy?: Pick<Policy, "comms">): CommsAdapter {
@@ -115,7 +135,7 @@ export const IntercomCommsLayer = (transport: IntercomTransport, lookup: Paramet
 export const NetworkCommsLayer = Layer.succeed(Comms)(NetworkComms);
 
 /** Called by tools, never at extension startup. Re-read policy and catalog at operation time. */
-export function createComms(options: { events: Parameters<typeof createIntercom>[0]; createId: () => string; home: string; projectDir: string; adapterEnv: () => string | undefined; networkSender?: () => { agent: string; session: string } | undefined }) {
+export function createComms(options: { events: Parameters<typeof createIntercom>[0]; createId: () => string; home: string; projectDir: string; adapterEnv: () => string | undefined; followProjectPolicy?: boolean; networkConfig?: () => string | undefined; networkPeers?: () => Readonly<Record<string, string>>; networkSender?: () => { agent: string; session: string } | undefined }) {
   let transport: ReturnType<typeof createIntercom> | undefined;
   const project = (dir: string) => load(dir).pipe(Effect.mapError(error => new CommsError(error.message)));
   const lookup: Parameters<typeof IntercomComms>[1] = address => Effect.gen(function* () {
@@ -126,16 +146,40 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
     if (!row) return yield* Effect.fail(new CommsError(`unknown agent alias: ${address.project}/${address.row}`));
     return row.intercomAddress ?? row.sessionId;
   });
-  const adapter = Effect.gen(function* () {
+  const selection = Effect.gen(function* () {
     const env = options.adapterEnv();
     // An explicit override must not depend on a readable project catalog.
-    const policy = env === undefined && exists(options.projectDir) ? (yield* project(options.projectDir)).policy : undefined;
-    const selected = yield* Effect.try({ try: () => selectComms(env, policy), catch: error => new CommsError(String(error)) });
+    const follow = env === "network" && options.followProjectPolicy && exists(options.projectDir);
+    const policy = (env === undefined || follow) && exists(options.projectDir) ? (yield* project(options.projectDir)).policy : undefined;
+    const selected = yield* Effect.try({ try: () => selectComms(follow ? undefined : env, policy), catch: error => new CommsError(String(error)) });
+    return selected;
+  });
+  const adapter = Effect.gen(function* () {
+    const selected = yield* selection;
     if (selected === "network") {
       const network = yield* Effect.tryPromise({ try: () => import("./comms-network.ts"), catch: () => new CommsError("NetworkComms adapter unavailable") });
-      yield* Effect.try({ try: () => network.readNetworkConfig(options.home), catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms config invalid") });
+      yield* Effect.try({ try: () => network.readNetworkConfig(options.home, options.networkConfig?.()), catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms config invalid") });
       return network.createNetworkComms({
         home: options.home,
+        configPath: options.networkConfig?.(),
+        session: to => Effect.gen(function* () {
+          const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
+          if (address.kind === "alias") {
+            const known = yield* Effect.try({ try: () => readRegistry(options.home).get(address.project), catch: () => new CommsError("NetworkComms registry unreadable") });
+            const catalog = yield* project(known?.dir ?? options.projectDir);
+            const row = catalog.slug === address.project ? catalog.agents.find(row => row.name === address.row) : undefined;
+            if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.project}/${address.row}`));
+            return row.sessionId;
+          }
+          if (address.kind === "session") {
+            const catalog = yield* project(options.projectDir).pipe(Effect.option);
+            const row = catalog._tag === "Some" ? catalog.value.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id) : undefined;
+            if (row) return row.sessionId;
+            const peers = options.networkPeers?.() ?? {};
+            return Object.entries(peers).find(([session, agent]) => session === address.id || agent === address.id)?.[0] ?? address.id;
+          }
+          return yield* Effect.fail(new Unsupported("NetworkComms direct DID send needs a recipient session"));
+        }),
         sender: options.networkSender ?? (() => undefined),
         recipient: to => Effect.gen(function* () {
           const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
@@ -150,6 +194,8 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
             if (!agent) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.did}`));
             return agent;
           }
+          const peer = options.networkPeers?.()[address.id];
+          if (peer) return decodeAgentName(peer);
           const catalog = yield* project(options.projectDir);
           const row = catalog.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id);
           if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.id}`));
@@ -161,6 +207,13 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
     return IntercomComms(transport, lookup);
   });
   const service: CommsShape = {
+    relay: (to, message) => Effect.suspend(() => {
+      transport ??= createIntercom(options.events, options.createId);
+      return IntercomComms(transport, lookup).send(to, message);
+    }),
+    mode: () => selection.pipe(Effect.flatMap(selected => selected === "intercom" ? Effect.succeed("intercom" as const) : adapter.pipe(Effect.flatMap(service => service.mode ? service.mode() : Effect.succeed("network" as const))))),
+    postOwner: (to, item) => adapter.pipe(Effect.flatMap(service => service.postOwner ? service.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "owner mailbox not selected" })), Effect.catch(() => Effect.succeed<CommsDelivery>({ status: "failed", detail: "NetworkComms owner send refused" }))),
+    consume: receive => adapter.pipe(Effect.flatMap(service => service.consume ? service.consume(payload => adapter.pipe(Effect.flatMap(current => current.consume ? receive(payload) : Effect.fail(new CommsError("NetworkComms disabled by project policy; consumer stopped"))))) : Effect.void)),
     send: (to, message) => adapter.pipe(Effect.flatMap(service => service.send(to, message)), Effect.catchCause(cause => Effect.succeed<CommsDelivery>({ status: "failed", detail: String(cause) }))),
     ask: (to, message, opts) => adapter.pipe(Effect.flatMap(service => service.ask(to, message, opts))),
     reply: (id, message) => adapter.pipe(Effect.flatMap(service => service.reply(id, message))),

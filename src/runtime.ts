@@ -121,6 +121,11 @@ export class Unsupported extends CommsError {
   override readonly name = "Unsupported";
 }
 export interface CommsShape {
+  readonly mode?: () => Effect.Effect<"intercom" | "network", CommsError>;
+  /** Explicit Switchboard/cross-desk policy, not a network-failure fallback. */
+  readonly relay?: CommsShape["send"];
+  readonly postOwner?: (to: string, item: import("./domain.ts").OwnerItem) => Effect.Effect<CommsDelivery>;
+  readonly consume?: (receive: (message: import("./domain.ts").NetworkPayload) => Effect.Effect<void, CommsError>) => Effect.Effect<void, CommsError>;
   readonly send: (to: CommsTarget, message: string) => Effect.Effect<CommsDelivery>;
   readonly ask: (to: CommsTarget, message: string, options: { readonly timeoutMs: number }) => Effect.Effect<CommsDelivery, CommsError>;
   readonly reply: (id: string, message: string) => Effect.Effect<CommsDelivery, CommsError>;

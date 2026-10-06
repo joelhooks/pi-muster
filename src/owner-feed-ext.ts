@@ -9,18 +9,31 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { OWNER_NOTE, ownerFeed } from "./owner-feed.ts";
 import { OwnerTimelineView, ownerInboxText, ownerLine, readOwnerTimelineData } from "./owner-view.ts";
-import { ownerPath, writeReader, retireReader } from "./owner-queue.ts";
+import { ownerPath, writeReader, retireReader, ingestOwnerItem } from "./owner-queue.ts";
+
+import { Effect } from "effect";
+import type { NetworkPayload } from "./domain.ts";
+import { CommsError } from "./runtime.ts";
+import { createActor, type ActorRefFrom } from "xstate";
+import { networkConsumerMachine } from "./machines.ts";
 
 /** Registration is inert. Session lifecycle owns its file watch and fallback poll. */
-export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>) {
+export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>, network?: {
+  mode?: (ctx: ExtensionContext) => Promise<"intercom" | "network">;
+  consume: (ctx: ExtensionContext, signal: AbortSignal, receive: (payload: NetworkPayload) => Effect.Effect<void, CommsError>) => Promise<void>;
+}) {
   let feed: ReturnType<typeof ownerFeed> | undefined;
   let session: string | undefined;
   let readerStartedAt: string | undefined;
   let watcher: FSWatcher | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   let pending: ReturnType<typeof setTimeout> | undefined;
+  let consumer: AbortController | undefined;
+  let networkActor: ActorRefFrom<typeof networkConsumerMachine> | undefined;
   const home = () => env.HOME ?? homedir();
   const stop = () => {
+    networkActor?.send({ type: "STOP" }); networkActor?.stop(); networkActor = undefined;
+    consumer?.abort(); consumer = undefined;
     watcher?.close(); watcher = undefined;
     if (poll) clearInterval(poll);
     if (pending) clearTimeout(pending);
@@ -41,7 +54,38 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
   pi.on("session_start", (_event, ctx) => {
     stop(); const current = get(ctx); const id = ctx.sessionManager.getSessionId();
     const startedAt = new Date().toISOString(); readerStartedAt = startedAt;
+    const actor = network ? createActor(networkConsumerMachine).start() : undefined;
+    networkActor = actor;
+    const failed = (error?: unknown) => {
+      if (!actor || networkActor !== actor || actor.getSnapshot().value === "failed") return;
+      actor.send({ type: "FAILURE" }); consumer?.abort(); consumer = undefined;
+      const detail = error instanceof CommsError ? error.message : "NetworkComms consumer stopped. Check its config, identity lease and recipient binding (private output withheld).";
+      pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. Reload or toggle comms off then on after fixing it.`, display: true }, { triggerTurn: true });
+    };
+    const refreshNetwork = () => {
+      if (!network || !actor) return;
+      void (network.mode?.(ctx) ?? Promise.resolve("network")).then(mode => {
+        if (networkActor !== actor) return;
+        if (mode === "intercom") { actor.send({ type: "INTERCOM" }); consumer?.abort(); consumer = undefined; return; }
+        if (actor.getSnapshot().value !== "off") return;
+        actor.send({ type: "NETWORK" });
+        const controller = new AbortController(); consumer = controller;
+        void network.consume(ctx, controller.signal, payload => Effect.try({
+          try: () => {
+            if (controller.signal.aborted) throw new Error("retired consumer");
+            if (payload.type === "owner") {
+              ingestOwnerItem(id, payload.item, home());
+              if (ctx.isIdle()) current.flush();
+            } else {
+              // Preserve the brief prefix for first-turn proof; attribution is not operator authority.
+              pi.sendUserMessage(`${payload.body}\n\n[Authenticated agent message from ${payload.author}, not Joel.]`, { deliverAs: "followUp" });
+            }
+          }, catch: () => new CommsError("NetworkComms mailbox delivery could not be recorded"),
+        })).then(() => { if (networkActor === actor && !controller.signal.aborted) actor.send({ type: "INTERCOM" }); }).catch(error => { if (!controller.signal.aborted) failed(error); });
+      }).catch(failed);
+    };
     const tick = () => {
+      refreshNetwork();
       try {
         // Do not advertise a reader that cannot read its queue, even when busy.
         current.inbox({ limit: 1 });
