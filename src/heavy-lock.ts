@@ -64,13 +64,13 @@ function isCode(error: unknown, code: string) { return error instanceof Error &&
 function alive(pid: number) {
   try { process.kill(pid, 0); return true; } catch (error) { return isCode(error, "EPERM"); }
 }
-export function registerJob(options: HeavyOptions, command: string, cwd = process.cwd(), pid = process.pid): HeavyJob {
+export function registerJob(options: HeavyOptions, command: string, cwd = process.cwd(), pid = process.pid, tmpdir?: string): HeavyJob {
   let repo = cwd;
   try { repo = basename(execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim()); }
   catch { /* Outside Git, cwd is the repo identity. */ }
   const job: HeavyJob = { id: randomUUID(), host: hostname(), repo, cwd, command, pid,
     startedAt: new Date((options.now ?? Date.now)()).toISOString(), state: "running",
-    cpuPercent: 0, rssKB: 0, peakRssKB: 0, cpuSeconds: 0, sampledAt: null };
+    cpuPercent: 0, rssKB: 0, peakRssKB: 0, cpuSeconds: 0, sampledAt: null, ...(tmpdir !== undefined && { tmpdir }) };
   atomicJSON(jobPath(options.home, job.id), job);
   return job;
 }

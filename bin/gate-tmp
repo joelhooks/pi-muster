@@ -1,0 +1,106 @@
+#!/bin/sh
+#   gate-tmp.sh ensure        create /Volumes/gate-tmp if missing; print its path
+#   gate-tmp.sh run -- CMD    run CMD with TMPDIR=/Volumes/gate-tmp/run-<pid>-<rand>/,
+#                             removed after CMD exits; inherited TMPDIR if the disk is unavailable
+set -u
+
+volume_name=gate-tmp
+root=/Volumes/$volume_name
+sectors=${GATE_TMP_SECTORS:-33554432}
+
+fail() {
+  echo "gate-tmp: $*" >&2
+  return 1
+}
+
+mounted_device() {
+  mount | awk -v r="$root" '$2 == "on" && $3 == r { print $1 }'
+}
+
+is_ram_device() {
+  hdiutil info | awk -v d="$1" '
+    /^image-path/ { ram = ($3 ~ /^ram:\/\//) }
+    $1 == d && ram { found = 1 }
+    END { exit found ? 0 : 1 }'
+}
+
+create_disk() {
+  dev=$(hdiutil attach -nobrowse -nomount "ram://$sectors" | awk 'NR == 1 { print $1 }') || return 1
+  [ -n "$dev" ] || return 1
+  if newfs_hfs -v "$volume_name" "$dev" >/dev/null &&
+    diskutil mount "$dev" >/dev/null &&
+    mkdir -p "$root/.fseventsd" &&
+    touch "$root/.fseventsd/no_log" &&
+    diskutil unmount "$dev" >/dev/null &&
+    diskutil mount "$dev" >/dev/null; then
+    return 0
+  fi
+  hdiutil detach "$dev" >/dev/null 2>&1
+  return 1
+}
+
+ram_root() {
+  [ ! -L "$root" ] && [ -d "$root" ] || return 1
+  dev=$(mounted_device)
+  [ -n "$dev" ] && is_ram_device "$dev"
+}
+
+sweep_dead_runs() {
+  ram_root || { fail "refusing sweep: $root is not a RAM mount"; return 1; }
+  for dir in "$root"/run-*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    name=${dir#"$root"/}
+    printf '%s\n' "$name" | grep -Eq '^run-[0-9]+-.+$' || continue
+    pid=${name#run-}
+    pid=${pid%%-*}
+    # kill -0 failures also include permission errors. A visible process is not dead.
+    if ! kill -0 "$pid" 2>/dev/null && ! ps -p "$pid" -o pid= 2>/dev/null | grep -q '[0-9]'; then
+      ram_root || return 1
+      rm -rf -- "$dir"
+    fi
+  done
+}
+
+ensure() {
+  [ "$(uname -s)" = Darwin ] && [ "$(hostname -s | tr '[:upper:]' '[:lower:]')" = flagg ] || { fail "not Flagg macOS"; return 1; }
+  [ ! -L "$root" ] || { fail "refusing symlink root"; return 1; }
+  dev=$(mounted_device)
+  if [ -z "$dev" ]; then
+    create_disk || { fail "could not create the RAM disk at $root"; return 1; }
+    dev=$(mounted_device)
+  fi
+  is_ram_device "$dev" || { fail "$root is mounted from $dev, which is not a RAM disk"; return 1; }
+  [ -e "$root/.fseventsd/no_log" ] || touch "$root/.fseventsd/no_log" 2>/dev/null
+  mdutil -s "$root" 2>/dev/null | grep -q "Indexing disabled" || mdutil -i off "$root" >/dev/null 2>&1
+  sweep_dead_runs || return 1
+  echo "$root"
+}
+
+run() {
+  [ "${1:-}" = "--" ] && shift
+  [ $# -gt 0 ] || { fail "usage: gate-tmp.sh run -- CMD [ARGS...]"; exit 2; }
+  run_dir=
+  if out=$(ensure); then
+    run_dir=$(mktemp -d "$out/run-$$-XXXXXX") || run_dir=
+  fi
+  if [ -z "$run_dir" ]; then
+    echo "gate-tmp: WARNING RAM disk unavailable ($(printf '%s' "$out" | tr '\n' ' ')); running with inherited TMPDIR=${TMPDIR:-unset}" >&2
+    exec "$@"
+  fi
+  trap 'ram_root && rm -rf -- "$run_dir"' EXIT
+  TMPDIR=$run_dir/ "$@" &
+  child=$!
+  trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
+  while :; do
+    wait "$child"
+    code=$?
+    kill -0 "$child" 2>/dev/null || break
+  done
+  exit "$code"
+}
+
+case "${1:-}" in
+  ensure) ensure ;;
+  run) shift; run "$@" ;;
+  *) fail "usage: gate-tmp.sh ensure | run -- CMD [ARGS...]"; exit 2 ;;
+esac

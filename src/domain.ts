@@ -18,6 +18,7 @@ const JobFacts = {
   host: Schema.String, repo: Schema.String, cwd: Schema.String, command: Schema.String,
   pid: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
   startedAt: Schema.String,
+  tmpdir: Schema.optionalKey(Schema.String),
   cpuPercent: Schema.Number, rssKB: Schema.Number, peakRssKB: Schema.Number,
   cpuSeconds: Schema.Number, sampledAt: Schema.NullOr(Schema.Number),
 };
@@ -657,7 +658,7 @@ export const decodeDeskItem = Schema.decodeUnknownSync(DeskItem);
 export const decodeAgentName = Schema.decodeUnknownSync(AgentName);
 export const decodeSlug = Schema.decodeUnknownSync(Slug);
 
-const TEMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"];
+const TEMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/", "/Volumes/gate-tmp/"];
 
 /** `/tmp` dies on reboot; a pilot project lost every handoff and runner there. */
 export function isTempPath(path: string): boolean {

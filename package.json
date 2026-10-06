@@ -36,6 +36,7 @@
     "AGENTS.md",
     "LICENSE",
     "bin/muster-heavy",
+    "bin/gate-tmp",
     "bin/muster-digest",
     "bin/muster-heavy.ts",
     "bin/muster-launch.ts",
