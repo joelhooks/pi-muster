@@ -43,6 +43,7 @@ import {
   paneSendKeys,
   paneSplit,
   promptWithProof,
+  snapshotRestartSession,
   piReceiptSuffix,
   readPiReceipt,
   reportTokens,
@@ -1994,12 +1995,23 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   if (row.owner === old.sessionId) row = { ...row, owner: row.sessionId };
   const profile = extensionsFor(launchProject, row);
   const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.`;
-  const inherited = yield* inheritedStartEntries(old.sessionFile);
-  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: old.sessionFile, profile, musterExtension: launchProject.musterExtension, prompt });
-  const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, MUSTER_COMMS: "intercom", MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}) };
+  // provisional → proven → rebound → activated. Failed provisional forks never
+  // acquire the identity lease. Network work is submitted only after activation.
+  const network = project.policy?.comms === "network";
+  const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}), ...(network ? { MUSTER_COMMS: "network", ...networkPeerEnvironment(project, [...project.agents.filter(agent => agent.name !== row.name), row]) } : {}) };
   const bin = join(machine?.musterExtension ?? env.musterRoot, "bin");
   if (machine || environment.PATH !== undefined) environment.PATH = [bin, environment.PATH ?? (yield* must("printenv", ["PATH"], { cwd: old.cwd })).trim()].join(":");
   const launchDir = remote ? (yield* git(old.cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")).trim() : join(env.home, ".pi/agent");
+  yield* must("mkdir", ["-p", launchDir], { cwd: old.cwd });
+  const snapshot = join(launchDir, `restart-${row.sessionId}.jsonl`);
+  const snapshotScript = `import {snapshotRestartSession} from ${JSON.stringify(`${machine?.musterExtension ?? env.musterRoot}/src/herdr.ts`)}; snapshotRestartSession(process.argv[1], process.argv[2]);`;
+  // Use the executing checkout's helper locally (the install root can be older).
+  if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile, snapshot], { cwd: old.cwd });
+  else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
+  const inherited = yield* inheritedStartEntries(snapshot);
+  const gate = join(launchDir, `restart-${row.sessionId}.ready`);
+  environment.MUSTER_RESTART_GATE = gate;
+  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: snapshot, profile, musterExtension: launchProject.musterExtension, prompt });
   const receipt = env.createId();
   const wrap = machine?.wrap.map(arg => arg.replaceAll("{name}", old.name)) ?? [];
   const script = yield* writeLaunchFile(launchDir, `#!/bin/sh\nset -e\n${shellPrelude(old.cwd, environment, environment.PATH === undefined ? bin : undefined)}${piReceiptSuffix(receipt)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
@@ -2016,7 +2028,19 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       if (wait.state !== "ready") return yield* input(`restart failed before rebind: discovery timeout: replacement session ${wait.state}; old agent untouched; inspect the replacement launch before retrying`);
       const id = sessionIdFromFile(wait.sessionFile);
       if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed before rebind: wrong boundary: replacement did not prove a new session; old agent untouched");
-      const proof = yield* proveStartedPrompt(wait.sessionFile, prompt, inherited);
+      let proof: Proof = yield* proveStartedPrompt(wait.sessionFile, prompt, inherited, prompt, false, true);
+      if (proof.state === "unproven" && proof.failureKind === "missing_prompt") {
+        // Pi catches and drops an argv prompt if a session_start hook already
+        // opened a turn. Retry only a genuinely absent user, then recheck the
+        // ORIGINAL boundary so a real intervening reply still refuses.
+        // Herdr prompt readiness requires a name. Do not claim the old name
+        // while it is still alive; this provisional name belongs only to the fork.
+        yield* agentRename(binding.paneId, `restart-${randomUUID().slice(0, 8)}`);
+        const submitted = yield* promptWithProof(binding.paneId, prompt);
+        proof = submitted.state === "proven" ? yield* proveStartedPrompt(wait.sessionFile, prompt, inherited, prompt, false, true) : submitted;
+        if (proof.state === "proven" && submitted.state === "proven") proof = { ...proof, via: submitted.via };
+        notes.push("startup omitted the argv continuation; submitted it once after readiness and rechecked the original fork boundary");
+      }
       if (proof.state !== "proven") return yield* input(`restart failed before rebind: ${proof.detail}; old agent untouched`);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
         events: [...(old.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
@@ -2042,8 +2066,39 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
         return rebound;
       })));
       phase = "rebound";
-      // The catalog is authoritative. Never forward before its atomic write succeeds.
+      // Install scoped owner forwarding before telling the replacement to read
+      // its inbox, and never before the authoritative catalog write.
       yield* recordOwnerForward(old.sessionId, id, project.slug, env).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`catalog rebound; scoped owner forward needs repair: ${error.message}`); })));
+      // Activation is host-local, including remote hosts without the owner's catalog.
+      // Never roll back a committed catalog or claim the old agent is untouched here.
+      const activate = yield* must("node", ["-e", "require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.argv[2]), {flag:'wx',mode:0o600})", gate, id], { cwd: old.cwd }).pipe(Effect.result);
+      if (activate._tag === "Failure") {
+        const detail = `catalog rebound; consumer activation needs repair: ${activate.failure.message}; write the session id as JSON to ${gate}`;
+        notes.push(detail); proof = { state: "unproven", submission: "uncertain", detail };
+      }
+      if (network && activate._tag === "Success") {
+        const continuation = `Your restart handover for ${old.name} onto ${sha} is committed. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox, then continue on network.`;
+        const delivery = yield* Effect.gen(function* () {
+          const boundary = yield* inheritedStartEntries(wait.sessionFile);
+          const comms = yield* Comms;
+          const sent = yield* comms.send(id, continuation);
+          if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms restart brief refused: ${sent.detail ?? sent.status}`);
+          return yield* proveStartedPrompt(wait.sessionFile, continuation, boundary, continuation, true, true);
+        }).pipe(Effect.result);
+        if (delivery._tag === "Success") { proof = delivery.success; if (proof.state !== "proven") notes.push(`catalog rebound; network continuation needs repair: ${proof.detail}`); }
+        else {
+          const detail = `catalog rebound; network continuation needs repair: ${delivery.failure.message}`;
+          notes.push(detail); proof = { state: "unproven", submission: "uncertain", detail };
+        }
+      }
+      if (proof.state !== "proven") {
+        row = { ...row, delivery: "unproven" };
+        yield* mutate(dir, current => Effect.gen(function* () {
+          const latest = yield* findRow(current, old.name);
+          if (latest.sessionId !== id) return [current, undefined] as const;
+          return [withRow(current, { ...latest, delivery: "unproven" }), undefined] as const;
+        })).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`delivery catalog update needs repair: ${error.message}`); })));
+      }
       if (self) notes.push(`Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place.${oldPane.openedByMuster ? "" : ` ${adoptedSelfNote(oldPane)}`}`);
       else {
         let quitRequested = false;
@@ -2059,7 +2114,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
         notes.push(yield* renameRestart(binding, old.name));
       }
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
-      return { row, argv, readiness: "proven", proof, sessionIdMatched: argv.includes(id), notes, ...(self ? { endSession: { oldPane, replacementPane: binding, name: old.name } } : {}) };
+      return { row, argv, readiness: proof.state === "proven" ? "proven" : "rebound; delivery unproven", proof, sessionIdMatched: argv.includes(id), notes, ...(self ? { endSession: { oldPane, replacementPane: binding, name: old.name } } : {}) };
     }),
     fresh => phase === "rebound" ? Effect.void : closeOwnedPane({ paneId: fresh.pane_id, terminalId: fresh.terminal_id, tabId: fresh.tab_id, openedByMuster: true }, dir, "failed restart replacement").pipe(Effect.catch(() => Effect.void)),
   );

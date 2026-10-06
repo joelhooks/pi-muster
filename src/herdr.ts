@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Effect } from "effect";
 import { decodeFirstTurnEntry, decodeSessionSlice, decodeSessionEntryCount } from "./domain.ts";
@@ -110,6 +111,24 @@ export const reportTokens = (workspaceId: string, source: string, tokens: Readon
 export type FirstTurnFailure = "discovery_timeout" | "unreadable_slice" | "wrong_boundary" | "substituted_message" | "missing_prompt" | "assistant_error" | "assistant_timeout";
 export type Proof = { readonly state: "proven"; readonly via: "argv" | "network" | "prompt" | "wait" | "enter"; readonly warning?: string } | { readonly state: "unproven"; readonly submission: "submitted" | "uncertain"; readonly detail: string; readonly modelError?: string; readonly firstTurn?: true; readonly failureKind?: FirstTurnFailure; readonly repairPrompt?: string; readonly warning?: string };
 
+/** Freeze the inherited boundary before Pi starts. Never change the source journal.
+ * A live caller can append tool results and its empty in-flight assistant between
+ * counting the parent and --fork reading it. A private, immutable fork input keeps
+ * that race out of the first-turn proof; real assistant content is never ignored.
+ */
+export function snapshotRestartSession(source: string, destination: string): void {
+  const lines = readFileSync(source, "utf8").split("\n").filter(line => line.trim());
+  // Fail closed on a partial append or unreadable entry. Preserve original bytes
+  // of every retained entry, including tool blocks and parent links.
+  const entries = lines.map(line => decodeFirstTurnEntry(JSON.parse(line)));
+  if (entries[0]?.type !== "session") throw new Error("restart source has no session header");
+  const last = entries.at(-1);
+  if (last?.type === "message" && last.message?.role === "assistant"
+    && Array.isArray(last.message.content) && last.message.content.length === 0
+    && last.message.errorMessage === undefined && (last.message.stopReason === undefined || last.message.stopReason === "stop")) lines.pop();
+  writeFileSync(destination, lines.join("\n") + "\n", { flag: "wx", mode: 0o600 });
+}
+
 export const FIRST_TURN_MS = 90_000;
 
 /** Short shell probe runs in the pane's actual PATH; it never changes launch argv. */
@@ -128,7 +147,7 @@ const sessionSlice = (path: string, offset: number, skipEntries = 0, timeoutMs =
 });
 
 /** Only the newly appended user and its first assistant can prove this submission. */
-export function firstTurnDetail(journal: string, prompt: string, exactPrompt = false, network = false): { state: "waiting" | "proven" | "unproven"; detail: string; failureKind?: FirstTurnFailure } {
+export function firstTurnDetail(journal: string, prompt: string, exactPrompt = false, network = false, restart = false): { state: "waiting" | "proven" | "unproven"; detail: string; failureKind?: FirstTurnFailure } {
   const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
   // The network consumer appends exactly one attribution line after the brief body.
   const unattributed = (text: string) => network ? text.replace(/\n\n\[Authenticated agent message from [^\]\n]+, not Joel\.\]\s*$/u, "") : text;
@@ -147,6 +166,10 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
       if (exactPrompt ? normalize(unattributed(text)) !== normalize(prompt) : !normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message does not match the intended prompt: no verified bridge provenance; substituted message refused" };
       matched = true;
     } else if (message.role === "assistant") {
+      // Pi 1.0.3 can append an empty stop at startup before the argv user.
+      // Restart proof ignores only that content-free placeholder, never a reply,
+      // a tool call, thinking, or an error. Ordinary launch proof stays strict.
+      if (restart && !matched && Array.isArray(message.content) && message.content.length === 0 && (message.stopReason === undefined || message.stopReason === "stop") && message.errorMessage === undefined) continue;
       if (!matched) return { state: "unproven", failureKind: "wrong_boundary", detail: "wrong boundary: assistant precedes intended prompt" };
       if (message.stopReason === "error" || message.errorMessage !== undefined) return { state: "unproven", failureKind: "assistant_error", detail: `first assistant error: ${message.errorMessage || message.stopReason}`.replace(/\s+/g, " ").slice(0, 1000) };
       return { state: "proven", detail: "matching user entry and clean first assistant" };
@@ -155,7 +178,7 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
   return { state: "waiting", failureKind: matched ? "assistant_timeout" : "missing_prompt", detail: matched ? "no first turn within 90 s" : "no matching user entry within 90 s" };
 }
 
-const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false, network = false) => Effect.gen(function* () {
+const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false, network = false, restart = false) => Effect.gen(function* () {
   if (proof.state !== "proven") return proof;
   const env = yield* MusterEnv;
   const started = env.now().getTime();
@@ -165,7 +188,7 @@ const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Pro
     if (read._tag === "Failure") return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: read.failure.code === "wrong_boundary" ? "wrong_boundary" : "unreadable_slice", detail: read.failure.message } satisfies Proof;
     const slice = read.success;
     if (slice.size < offset) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: "wrong_boundary", detail: "wrong boundary: session journal truncated" } satisfies Proof;
-    const result = firstTurnDetail(slice.text, prompt, exactPrompt, network);
+    const result = firstTurnDetail(slice.text, prompt, exactPrompt, network, restart);
     if (result.state === "proven") return proof;
     if (result.state === "unproven" || Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: result.detail } satisfies Proof;
     const delay = Math.min(1000, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started));
@@ -202,10 +225,10 @@ const startBoundary = (path: string, inheritedEntries: number) => Effect.gen(fun
 });
 
 /** The start argv is already submitted. Only new journal entries can prove it. */
-export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt, network = false) =>
+export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt, network = false, restart = false) =>
   startBoundary(path, inheritedEntries).pipe(
     Effect.flatMap(slice => slice
-      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, network ? { state: "proven", via: "network" } : { state: "proven", via: "argv" }, true, network)
+      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, network ? { state: "proven", via: "network" } : { state: "proven", via: "argv" }, true, network, restart)
       : Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: "discovery_timeout", detail: "discovery timeout: no session journal entries within 90 s" })),
     Effect.catch(error => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: error.code === "wrong_boundary" ? "wrong_boundary" : error.code === "journal_missing" ? "discovery_timeout" : "unreadable_slice", detail: error.message })),
     Effect.map(proof => proof.state === "unproven" ? { ...proof, repairPrompt } : proof),

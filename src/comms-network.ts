@@ -5,9 +5,26 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Effect, Layer, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
+import { decodeOwnerSession, decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
 import { CommsError, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
+
+/** Wait without touching the mailbox or acquiring the old DID's lease.
+ * Cancellation is harmless; missing and foreign markers fail closed.
+ */
+export const awaitRestartActivation = (session: string, gate = process.env.MUSTER_RESTART_GATE) => Effect.gen(function* () {
+  if (!gate) return;
+  while (true) {
+    const ready = yield* Effect.try({
+      try: () => {
+        try { return decodeOwnerSession(privateJson(gate)) === session; }
+        catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return false; throw error; }
+      }, catch: () => new CommsError("NetworkComms restart activation invalid; consumer has not acquired a lease"),
+    });
+    if (ready) return;
+    yield* Effect.sleep(100);
+  }
+});
 
 /** One private, atomic snapshot per DID. Detached senders borrow it, never acquire. */
 export const networkFencePath = (home: string, did: string) => join(home, ".local/state/muster/network-fences", `${createHash("sha256").update(did).digest("hex")}.json`);
@@ -324,13 +341,14 @@ export function watchNetworkMailbox(options: {
   mailbox: Pick<Effect.Success<ReturnType<typeof openNetworkMailbox>>, "watch">;
   acquire: () => Effect.Effect<LeaseFence, import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError>;
   afterSeq: number;
+  reacquire?: () => Effect.Effect<LeaseFence, import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError>;
 }) {
   let checkpoint = options.afterSeq;
-  const subscribe = (): Stream.Stream<Batch, import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError> => Stream.unwrap(options.acquire().pipe(Effect.map(fence => options.mailbox.watch(checkpoint, fence)))).pipe(
+  const subscribe = (reacquire = false): Stream.Stream<Batch, import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError> => Stream.unwrap((reacquire ? options.reacquire ?? options.acquire : options.acquire)().pipe(Effect.map(fence => options.mailbox.watch(checkpoint, fence)))).pipe(
     Stream.tap(batch => Effect.sync(() => { checkpoint = batch.throughSeq; })),
-    Stream.catchTag("MailboxClientError", error => error.error === "LeaseMismatch" ? subscribe() : Stream.fail(error)),
+    Stream.catchTag("MailboxClientError", error => error.error === "LeaseMismatch" ? subscribe(true) : Stream.fail(error)),
   );
-  return Stream.suspend(subscribe);
+  return Stream.suspend(() => subscribe());
 }
 
 /** Public references can cross machines; keys never do. Existing references must match. */
@@ -374,6 +392,7 @@ export function consumeNetworkMailbox(options: {
 }) {
   const failure = () => new CommsError("NetworkComms consumer failed (private output withheld)");
   return Effect.gen(function* () {
+    yield* awaitRestartActivation(options.session);
     const cursorPath = networkCursorPath(options.home, options.agent);
     const afterSeq = yield* Effect.try({
       try: () => {
@@ -399,7 +418,11 @@ export function consumeNetworkMailbox(options: {
         yield* publishConsumerFence(options.home, lease).pipe(Effect.uninterruptible, Effect.mapError(() => new MailboxClientError({ reason: "NetworkComms could not publish consumer fence" })));
         return lease;
       })));
-    const run = watchNetworkMailbox({ mailbox: options.mailbox, acquire, afterSeq }).pipe(Stream.runForEach(batch => Effect.gen(function* () {
+    const reacquire = () => options.mailbox.lease.resolve(ownDid).pipe(Effect.flatMap(current =>
+      current.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || current.harness.sessionId !== options.session
+        ? Effect.fail(new MailboxClientError({ error: "LeaseTakenOver", reason: "Identity lease belongs to another session" }))
+        : acquire()));
+    const run = watchNetworkMailbox({ mailbox: options.mailbox, acquire, reacquire, afterSeq }).pipe(Stream.runForEach(batch => Effect.gen(function* () {
       for (const event of batch.events) {
         if (event.$type !== "sh.mschf.ratking.defs#messageEvent" || !isMessage(event)) continue;
         const authenticated = yield* (options.open ?? options.mailbox.open)(event.envelope).pipe(
@@ -444,7 +467,7 @@ export function consumeNetworkMailbox(options: {
         const temp = `${cursorPath}.${process.pid}.tmp`;
         await writeFile(temp, JSON.stringify({ [options.agent]: batch.throughSeq }), { mode: 0o600 }); await rename(temp, cursorPath);
       }, catch: failure });
-    })), Effect.mapError(error => "error" in error && error.error === "AuthRequired" ? new CommsError("NetworkComms authentication failed; consumer stopped") : error instanceof CommsError ? error : failure()));
+    })), Effect.mapError(error => "error" in error && error.error === "AuthRequired" ? new CommsError("NetworkComms authentication failed; consumer stopped") : "error" in error && ["LeaseMismatch", "StaleGeneration", "LeaseExpired", "LeaseTakenOver"].includes(String(error.error)) ? new CommsError("NetworkComms consumer lost its identity lease; another session may have taken over. Consumer stopped; this notice is desk-visible.") : error instanceof CommsError ? error : failure()));
     return yield* Effect.ensuring(run, Effect.suspend(() => {
       if (!fence) return Effect.void;
       const retired = fence;
@@ -503,6 +526,7 @@ export function createNetworkComms(options: {
     consume: receive => Effect.gen(function* () {
       const sender = options.sender();
       if (!sender) return yield* Effect.fail(new CommsError("NetworkComms consumer sender context missing"));
+      yield* awaitRestartActivation(sender.session);
       const service = yield* mailbox;
       return yield* consumeNetworkMailbox({ home: options.home, agent: sender.agent, session: sender.session, mailbox: service,
         senderAgent: author => options.recipient(author), receive,
