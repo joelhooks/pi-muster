@@ -280,6 +280,25 @@ export function forceCloseAllowed(project: Project, agent: string): boolean {
     (Boolean(packet.verification) || ((packet.state === "committed" || packet.state === "no_changes") && Boolean(packet.landedAs))));
 }
 
+/** An empty note list admits retirement. Unknown pane/path state keeps the clone.
+ * Proc and Herdr are machine-scoped by onRemote for remote rows. */
+const cloneRetirementNotes = (row: AgentRow) => Effect.gen(function* () {
+  const panes = yield* paneList();
+  const canonical = (path: string) => row.machine === "local"
+    ? Effect.try({ try: () => realpathSync(path), catch: error => new InputError({ message: `cannot resolve ${path}: ${String(error)}` }) })
+    : must("node", ["-e", "process.stdout.write(require('node:fs').realpathSync(process.argv[1]))", path], { cwd: "/", timeoutMs: 10_000 });
+  const root = yield* canonical(row.cwd);
+  const notes: string[] = [];
+  for (const pane of panes) {
+    if (!pane.cwd) return yield* input(`pane ${pane.pane_id} has no cwd`);
+    const cwd = yield* canonical(pane.cwd);
+    if (cwd === root || cwd.startsWith(`${root.replace(/\/$/, "")}/`)) {
+      notes.push(`clone kept: ${pane.pane_id} (${pane.agent ?? "shell"} ${pane.agent_status}) still runs in ${pane.cwd}; close that pane, then agent_close again to retire the clone`);
+    }
+  }
+  return notes;
+}).pipe(Effect.catch(error => Effect.succeed([`clone kept: cannot establish pane safety: ${error.message}; close any panes in ${row.cwd}, then agent_close again to retire the clone`])));
+
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(row.machine);
@@ -294,7 +313,10 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       const holder = project.agents.find(other => other.machine === row.machine && other.name !== row.name && other.state !== "closed" && row.pane && sharesPane(row.pane, other.pane));
       if (row.pane && !holder) {
-        const pane = yield* locatePane(row.pane);
+        const pane = yield* locatePane(row.pane).pipe(Effect.catch(error => {
+          notes.push(`pane lookup failed: ${error.message}`);
+          return Effect.succeed(null);
+        }));
         if (pane) {
           const tail = yield* paneRead(pane.pane_id, CLOSE_READ_LINES);
           const saved = join(closedDir(dir), `${row.name}-${env.now().getTime()}.txt`);
@@ -309,7 +331,11 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     if (row.clone) {
       const proc = yield* Proc;
       const present = yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 });
-      if (present.code === 0) notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
+      if (present.code === 0) {
+        const kept = yield* cloneRetirementNotes(row);
+        if (kept.length) notes.push(...kept);
+        else notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
+      }
     }
     return restore;
   }));
@@ -1939,7 +1965,10 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       if (row.pane) {
         const binding = row.pane;
         const holder = project.agents.find((other) => other.machine === row.machine && other.name !== row.name && other.state !== "closed" && sharesPane(binding, other.pane));
-        const located = holder ? null : yield* locatePane(row.pane);
+        const located = holder ? null : yield* locatePane(row.pane).pipe(Effect.catch(error => {
+          notes.push(`pane lookup failed: ${error.message}`);
+          return Effect.succeed(null);
+        }));
         if (holder) {
           notes.push(`pane ${row.pane.paneId} kept: ${holder.name} is bound to it`);
         } else if (located) {
@@ -1968,7 +1997,9 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     }));
 
     let cloneError: string | null = null;
-    if (row.clone && existsSync(row.cwd)) {
+    const kept = row.clone && existsSync(row.cwd) ? yield* cloneRetirementNotes(row) : [];
+    notes.push(...kept);
+    if (row.clone && existsSync(row.cwd) && kept.length === 0) {
       const args = params.force ? ["remove", "--force", row.cwd] : ["remove", row.cwd];
       const removal = yield* must(env.workerWorktree, args, { cwd: row.clone.source, timeoutMs: 120_000 }).pipe(
         Effect.match({
