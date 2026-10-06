@@ -7,14 +7,14 @@ import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./
 import { parseModelWindows, restoreContextNote } from "./models.ts";
 import { profileFor } from "./argv.ts";
 const profile = profileFor("worker", { label: "worker", model: "openai-codex/gpt-6.1-sol", thinking: "high" });
-const lines = (...entries: unknown[]) => entries.map(entry => JSON.stringify(entry)).join("\n");
+const lines = (...entries: object[]) => entries.map((entry, i) => JSON.stringify({ id: `e${i}`, parentId: i ? `e${i - 1}` : null, ...entry })).join("\n");
 const session = lines(
   { type: "model_change", provider: "openai-codex", modelId: "gpt-6.1-sol" },
   { type: "thinking_level_change", thinkingLevel: "medium" },
   { type: "model_change", provider: "claude-bridge", modelId: "claude-opus-5-5", timestamp: "2026-10-05T17:40:09.345Z" },
   { type: "message", message: { role: "assistant", usage: { input: 1000, output: 3000, cacheRead: 400000, cacheWrite: 30000 } } },
 );
-it("takes the last independent model and thinking changes with Pi context accounting", () => {
+it("takes model and thinking changes on the selected branch with Pi context accounting", () => {
   const live = parseSessionModel(session);
   expect(live).toMatchObject({ model: "claude-bridge/claude-opus-5-5", thinking: "medium", contextTokens: 434000 });
   expect(restoreProfile({ profile, live }).profile).toMatchObject({ model: live.model, thinking: "medium" });
@@ -33,13 +33,13 @@ it("applies model refusal to a session route", () => {
   expect(() => restoreProfile({ profile, live: parseSessionModel(lines({ type: "model_change", provider: "claude-bridge", modelId: "claude-fable-5-1" })) })).toThrow("Fable is off fleet-wide");
 });
 it("ignores error usage and uses native totalTokens when available", () => {
-  expect(parseSessionModel(session + "\n" + lines({ type: "message", message: { role: "assistant", stopReason: "error", usage: { totalTokens: 0 } } })).contextTokens).toBe(434000);
+  expect(parseSessionModel(session + "\n" + lines({ type: "message", id: "error", parentId: "e3", message: { role: "assistant", stopReason: "error", usage: { totalTokens: 0 } } })).contextTokens).toBe(434000);
   expect(parseSessionModel(lines({ type: "message", message: { role: "assistant", usage: { totalTokens: 230000 } } })).contextTokens).toBe(230000);
 });
 it("remote projection stays bounded for a session above Proc's 16 MiB limit and preserves only restore evidence", () => {
   const dir = mkdtempSync(join(tmpdir(), "restore-model-"));
   const file = join(dir, "session.jsonl");
-  const text = session + "\n" + lines({ type: "message", message: { role: "user", content: "private text ".repeat(1500000) } }) + "\n{partial";
+  const text = session + "\n" + lines({ type: "message", id: "user", parentId: "e3", message: { role: "user", content: "private text ".repeat(1500000) } }) + "\n{partial";
   try {
     writeFileSync(file, text);
     const projected = execFileSync(process.execPath, ["--input-type=module", "-e", SESSION_MODEL_READ_SCRIPT, file], { encoding: "utf8", maxBuffer: 1024 });
