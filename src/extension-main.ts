@@ -318,8 +318,8 @@ export default function muster(host: ExtensionAPI) {
     parameters: Type.Object({
       project: ProjectParam,
       slug: Type.String({ description: "kebab-case lane id" }),
-      label: Type.String({ description: "Tab label: an emoji plus the lane in plain words" }),
-      goal: Type.String(),
+      label: Type.Optional(Type.String({ description: "Tab label: an emoji plus the lane in plain words; required for a new lane, omitted keeps an existing label" })),
+      goal: Type.Optional(Type.String({ description: "Required for a new lane or first opening; omitted keeps an existing parked goal" })),
       kind: Type.Optional(StringEnum(["work", "role", "retro"] as const, { description: "Work counts toward WIP; role does not; retro has one standing slot outside WIP." })),
       writeScope: Type.Optional(Type.Array(Type.String())),
       repo: Type.Optional(Type.String({ description: "Source repo for this lane's clones and landings; default the project dir" })),

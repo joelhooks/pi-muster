@@ -1087,8 +1087,8 @@ export const projectMove = (dir: string, destination: string) =>
 
 export interface LaneOpenInput {
   readonly slug: string;
-  readonly label: string;
-  readonly goal: string;
+  readonly label?: string | undefined;
+  readonly goal?: string | undefined;
   readonly kind?: Lane["kind"] | undefined;
   readonly writeScope?: readonly string[] | undefined;
   readonly repo?: string | undefined;
@@ -1122,6 +1122,10 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const existing = project.lanes.find((lane) => lane.slug === slug);
     if (params.kind === "retro" && existing && existing.kind !== "retro") return yield* input(`lane ${slug} is kind ${existing.kind}, not retro; choose a fresh slug for the retro lane`);
     const wantOpen = params.open !== false;
+    const label = params.label ?? existing?.label;
+    const goal = params.goal ?? existing?.goal;
+    if (label === undefined || goal === undefined) return yield* input(`new lane ${slug} requires goal and label`);
+    if (wantOpen && existing?.state === "proposed" && params.goal === undefined) return yield* input(`first opening lane ${slug} requires goal`);
     if (existing?.state === "open" && existing.root) {
       const live = yield* locatePane(existing.root);
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
@@ -1143,8 +1147,8 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const base: Lane = existing ?? {
       slug,
       kind: params.kind ?? "work",
-      label: params.label,
-      goal: params.goal,
+      label,
+      goal,
       writeScope: [...(params.writeScope ?? [])],
       repo: params.repo ?? null,
       base: params.base ?? null,
@@ -1167,8 +1171,8 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
           ...deployPatch,
           ...(rank !== undefined ? { rank } : {}),
           base: params.base ?? latest.base,
-          goal: latest.state === "proposed" ? params.goal : latest.goal,
-          label: latest.state === "proposed" ? params.label : latest.label,
+          goal: latest.state === "proposed" ? params.goal ?? latest.goal : latest.goal,
+          label: latest.state === "proposed" ? params.label ?? latest.label : latest.label,
         };
         const changes: string[] = [];
         if (next.rank !== latest.rank) changes.push(`rank ${latest.rank ?? "unset"}→${next.rank}`);
