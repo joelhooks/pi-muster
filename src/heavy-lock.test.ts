@@ -707,9 +707,9 @@ describe("exclusive deploy policy", () => {
 
 describe("heavy gate slots", () => {
   it("derives the count from performance cores (fallback takes half the available CPUs)", () => {
-    expect(heavySlotCount(12)).toBe(4);
-    expect(heavySlotCount(8)).toBe(2);
-    expect(heavySlotCount(16 / 2)).toBe(2);
+    expect(heavySlotCount(12)).toBe(8);
+    expect(heavySlotCount(8)).toBe(5);
+    expect(heavySlotCount(16 / 2)).toBe(5);
     expect(heavySlotCount(1)).toBe(1);
     expect(heavySlotCount(12, "7")).toBe(7);
     for (const value of ["0", "-1", "2.5", "no", "Infinity", ""]) expect(() => heavySlotCount(12, value)).toThrow();

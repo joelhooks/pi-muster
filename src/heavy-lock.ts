@@ -166,7 +166,8 @@ export function heavySlotCount(performanceCores: number, override?: string): num
   if (configured !== undefined && !Number.isInteger(configured)) throw new Error("MUSTER_HEAVY_SLOTS must be an integer");
   if (configured !== undefined) return configured;
   if (!Number.isFinite(performanceCores) || performanceCores < 0) throw new Error("performance cores must be finite and non-negative");
-  return Math.max(1, Math.floor(performanceCores / 3));
+  // Two slots per three performance cores (Flagg: 12 → 8). The memory floor, not load, refuses a job.
+  return Math.max(1, Math.floor(performanceCores * 2 / 3));
 }
 
 export interface MachineSample {
