@@ -1,3 +1,5 @@
+// Pi TUI patterns: message-fold, detail-fold (delegated to owner-view).
+// Renderer changes stay separate from this file's wake and delivery lifecycle.
 import { mkdirSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";

@@ -32,11 +32,11 @@ describe("owner timeline", () => {
       expect(old()).toEqual(before);
     } finally { vi.useRealTimers(); }
   });
-  it.each([100, 40, 10, 1, 0])("keeps mention cards first and every line within %i columns", width => {
+  it.each([100, 40, 36, 32, 10, 1, 0])("keeps mention cards first and every line within %i columns", width => {
     const { data } = fixture();
     const lines = new OwnerTimelineView(data, { expanded: false, now: Date.now() }, theme).render(width);
     expect(lines.every(line => visibleWidth(line) <= width)).toBe(true);
-    if (width >= 40) {
+    if (width > 40) {
       const plain = lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
       expect(plain.indexOf("@you")).toBeLessThan(plain.indexOf("quiet 2"));
       expect(plain).toContain("+2 more");
@@ -44,6 +44,12 @@ describe("owner timeline", () => {
       expect(plain).not.toContain("muster://");
       expect(plain).not.toContain("line four");
       expect(plain).not.toContain("quiet 0");
+    } else if (width >= 32) {
+      const plain = lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
+      expect(plain).toContain("question sender");
+      expect(plain).toContain("blocked reader");
+      expect(plain).not.toContain("muster://");
+      expect(lines).toHaveLength(data.items.length + 1);
     }
   });
   it("expands text, refs and all quiet posts, with the full footer", () => {

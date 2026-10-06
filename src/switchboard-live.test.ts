@@ -151,6 +151,8 @@ describe("live extension opt-in", () => {
     const tools = new Map<string, { execute: Function }>();
     const widgetRender = vi.fn();
     const overlayRender = vi.fn();
+    const setStatus = vi.fn();
+    const matches = vi.fn((data: string, action: string) => data === "fixture.cancel" && action === "tui.select.cancel");
     let closeOverlay: (() => void) | undefined;
     let browse: ((ctx: unknown) => Promise<void>) | undefined;
     let widget: { render: (width: number) => string[] } | undefined;
@@ -163,10 +165,12 @@ describe("live extension opt-in", () => {
     const ctx = {
       sessionManager: { getSessionId: () => "inbox-session" },
       ui: {
+        setStatus,
         setWidget: (_: string, factory?: Function) => { widget = factory?.({ requestRender: widgetRender }, plain); },
         custom: (factory: Function) => new Promise((resolve) => {
-          factory({ requestRender: overlayRender }, plain, {}, resolve);
-          closeOverlay = () => resolve({ type: "close" });
+          const overlay = factory({ requestRender: overlayRender, terminal: { rows: 10 } }, plain, { matches, getKeys: () => [] }, resolve);
+          expect(overlay.render(40).length).toBeLessThanOrEqual(8);
+          closeOverlay = () => overlay.handleInput("fixture.cancel");
         }),
       },
     };
@@ -182,16 +186,20 @@ describe("live extension opt-in", () => {
       const text = await tools.get("desk_inbox")!.execute("id", { subscribe: true }, undefined, undefined, ctx);
       expect(text).toContain("probe (0) · quiet");
       expect(widget?.render(100).join("\n")).toContain("inbox clear");
+      expect(setStatus).toHaveBeenLastCalledWith("muster-switchboard", expect.stringContaining("inbox clear"));
       const browsing = browse!(ctx);
       await vi.waitFor(() => expect(closeOverlay).toBeDefined());
       await runWith(h, deskPost(dir, { kind: "decision", title: "Fresh question" }));
       expect(h.sent.at(-1)?.to).toBe("inbox-session");
       await vi.waitFor(() => expect(widget?.render(100).join("\n")).toContain("1 open"), { timeout: 2500 });
+      expect(setStatus).toHaveBeenLastCalledWith("muster-switchboard", expect.stringContaining("1 open"));
       expect(widgetRender).toHaveBeenCalled();
       expect(overlayRender).toHaveBeenCalled();
       closeOverlay!();
       await browsing;
+      expect(matches).toHaveBeenCalledWith("fixture.cancel", "tui.select.cancel");
     } finally { handlers.get("session_shutdown")!(); }
+    expect(setStatus).toHaveBeenLastCalledWith("muster-switchboard", undefined);
     h.sent.length = 0;
     await runWith(h, nudgeSwitchboards("probe", ask));
     expect(h.sent).toEqual([]);
@@ -208,7 +216,7 @@ describe("live extension opt-in", () => {
       registerTool: (tool: { name: string; execute: Function }) => tools.set(tool.name, tool),
       getFlag: () => false,
     };
-    const ctx = { sessionManager: { getSessionId: () => "desk-session" }, ui: { setWidget: () => {}, notify: (text: string) => notes.push(text) } };
+    const ctx = { sessionManager: { getSessionId: () => "desk-session" }, ui: { setStatus() {}, setWidget: () => {}, notify: (text: string) => notes.push(text) } };
     registerSwitchboard(pi as never, { env: { HOME: h.home, MUSTER_ROLE: "desk" }, layer: () => h.layer, run: async (_ctx, _signal, program, render) => render(await runWith(h, program)) });
     await handlers.get("session_start")!(null, ctx);
     try {

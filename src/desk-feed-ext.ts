@@ -1,3 +1,5 @@
+// Pi TUI patterns: column-gauge, message-fold. Phone rows drop the Box;
+// desktop cards keep expanded detail, with styles closed after wrapping.
 import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
@@ -11,6 +13,8 @@ import { FEED_CLAIM, NOTE, NOTE_GLYPH, deskFeed, summaryText } from "./desk-feed
 import type { InboxSummary, NoteMessage } from "./desk-feed.ts";
 import type { DeskItem } from "./domain.ts";
 import { readRegistry } from "./registry.ts";
+import { compactWords, mobileOwnerRow } from "./owner-view.ts";
+import { formatAge } from "./switchboard.ts";
 
 const DEBOUNCE_MS = 150;
 /** fs.watch can miss events on some filesystems; the poll is the floor. */
@@ -114,13 +118,27 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
   pi.registerMessageRenderer(NOTE, (message, options, theme) => {
     const details = message.details as { project?: string; items?: readonly DeskItem[]; inbox?: InboxSummary; flow?: string; pull?: string } | undefined;
     if (!details?.items || !details.inbox) return undefined;
+    const { items, inbox } = details;
     const box = new Box((options as { outputPad?: number }).outputPad ?? 1, 1, (text: string) => theme.bg("customMessageBg", text));
     if (details.flow) {
       const flow = details.flow;
       box.addChild({ invalidate() {}, render: width => [theme.fg(flow.startsWith("⚠") ? "warning" : "dim", truncateToWidth(flow, width))] });
     }
     if (details.pull) box.addChild(new Text(theme.fg("accent", details.pull), 0, 0));
-    if (!details.items.length && (details.flow || details.pull)) return box;
+    // Close wrapped Text/Box styles after padding, including flow-only cards.
+    const view = { invalidate: () => box.invalidate(), render: (width: number) => {
+      if (width <= 0) return [];
+      if (width <= 40) {
+        const rows: string[] = [];
+        if (details.flow) rows.push(theme.fg("dim", compactWords(details.flow, width)));
+        if (details.pull) rows.push(theme.fg("accent", compactWords(details.pull, width)));
+        for (const item of items) rows.push(theme.fg((KIND_COLOR[item.kind] ?? "muted") as never, mobileOwnerRow(item.kind, item.title, formatAge(Math.max(0, message.timestamp - Date.parse(item.ts))), width)));
+        rows.push(theme.fg("muted", compactWords(`desk ${inbox.open} open`, width)));
+        return rows.map(line => `${line}\x1b[0m`);
+      }
+      return box.render(width).map(line => line.includes("\x1b[") ? `${line}\x1b[0m` : line);
+    } };
+    if (!details.items.length && (details.flow || details.pull)) return view;
     details.items.forEach((item, index) => {
       if (index > 0) box.addChild(new Spacer(1));
       const kind = theme.fg((KIND_COLOR[item.kind] ?? "muted") as never, theme.bold(item.kind));
@@ -136,7 +154,7 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
     });
     box.addChild(new Spacer(1));
     box.addChild(new Text(theme.fg("muted", `📥 ${details.project ?? "desk"} desk · ${summaryText(details.inbox)}`), 0, 0));
-    return box;
+    return view;
   });
 }
 

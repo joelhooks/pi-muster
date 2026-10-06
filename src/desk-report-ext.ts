@@ -1,3 +1,5 @@
+// No Pi TUI pattern applies: these tools build HTML and return plain receipts.
+// Keep Pi's stock renderer; shared-shell/status-ribbon would add unrelated UI.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 

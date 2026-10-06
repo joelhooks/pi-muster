@@ -114,7 +114,8 @@ describe("switchboard view", () => {
     const narrow = renderWidget(s, 70, plain)[0] ?? "";
     expect(narrow).toContain("│ 🐑 2 projects");
     expect(narrow).not.toContain("oldest");
-    expect(renderWidget(s, 30, plain)[0]).toMatch(/^☎️ 4 open ⛔1 ❓3 +alt\+s$/);
+    expect(renderWidget(s, 30, plain)[0]).toBe("4 open · /switchboard");
+    expect(renderWidget(s, 30, plain)[1]).toBe("2 open drovr 1d");
   });
 
   it("buckets posts into a heat strip, newest hour on the right", () => {
