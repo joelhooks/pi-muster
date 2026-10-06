@@ -11,6 +11,12 @@ import { IllegalTransition } from "./errors.ts";
  * transition is a pure function of (state, event).
  */
 
+/** Job finalization has no waiting, admission or timers. */
+export const heavyJobMachine = setup({ types: { events: {} as { type: "FINISH" | "LOSE" } } }).createMachine({
+  initial: "running",
+  states: { running: { on: { FINISH: "finished", LOSE: "lost" } }, finished: { type: "final" }, lost: { type: "final" } },
+});
+
 /** Owner feeds hold arrivals while a turn runs; polls never wake silent items. */
 export const ownerFeedMachine = setup({ types: { events: {} as { type: "START" | "END" } } }).createMachine({
   initial: "idle",

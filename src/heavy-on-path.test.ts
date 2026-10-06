@@ -106,7 +106,7 @@ describe("Muster CLI launch PATH", () => {
     const environment = { ...process.env, PATH: `${join(packed, "bin")}${delimiter}${process.env.PATH}` };
     const heavy = spawnSync("muster-heavy", ["status"], { env: environment, encoding: "utf8" });
     expect(heavy.status, heavy.stderr).toBe(0);
-    expect(heavy.stdout).toContain("heavy slots:");
+    expect(heavy.stdout).toContain("jobs:");
     const digest = spawnSync("muster-digest", [dir], { env: environment, encoding: "utf8" });
     expect(digest.status, digest.stderr).toBe(0);
     expect(digest.stdout).toContain("probe ");
@@ -115,13 +115,13 @@ describe("Muster CLI launch PATH", () => {
     symlinkSync("package/bin/muster-heavy", link);
     const linked = spawnSync(link, ["status"], { encoding: "utf8" });
     expect(linked.status, linked.stderr).toBe(0);
-    expect(linked.stdout).toContain("heavy slots:");
+    expect(linked.stdout).toContain("jobs:");
   }, 30_000);
 
   it("runs muster-heavy status by bare name", () => {
     const result = spawnSync("muster-heavy", ["status"], { env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH}` }, encoding: "utf8" });
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain("heavy slots:");
+    expect(result.stdout).toContain("jobs:");
   });
 });

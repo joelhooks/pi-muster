@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSy
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { Effect, Schema } from "effect";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
@@ -23,8 +24,7 @@ import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
 import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
-import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
-import { tryAcquireHeavy } from "./heavy-lock.ts";
+import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
 import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
 import {
@@ -2490,7 +2490,7 @@ const runGate = (source: string, gate: string, context: {
             Effect.map((status) => busyQueue(status, project.slug, basename(source), env.now().getTime())),
             Effect.catch(() => Effect.succeed(null)),
           );
-          return yield* new HeavyJobBusy({ holder: "fleet-compute", message: `fleet-compute gate admission busy (wait 1200 expired)${queue ? `; ${queue}` : ""}` });
+          return yield* new GuardFailed({ guard: "busy", message: `fleet-compute gate admission busy (wait 1200 expired)${queue ? `; ${queue}` : ""}` });
         }
         return yield* new GuardFailed({ guard: "gate-runner", message: `gate runner exited ${result.code} without a receipt:\n${(result.stdout + result.stderr).trim().slice(-1500)}` });
       }
@@ -2507,11 +2507,10 @@ const runGate = (source: string, gate: string, context: {
       if (receipt.exit === null) return yield* new GuardFailed({ guard: "gate-runner", message: `gate run lost: ${receipt.lostReason ?? "unknown reason"}` });
       return { ...result, code: receipt.exit, receipt };
     }
-    const held = tryAcquireHeavy({ home: env.home }, `muster gate: ${gate}`);
-    if (!held.ok) {
-      return yield* new HeavyJobBusy({ holder: held.reason, message: `heavy gate admission busy: ${held.reason}` });
-    }
-    const result = yield* proc.run("sh", ["-c", gate], { cwd: source, timeoutMs: GATE_TIMEOUT_MS }).pipe(Effect.ensuring(Effect.sync(held.release)));
+    // The CLI owns registration and sampling. Pi gets no timer or admission loop.
+    const result = yield* proc.run(process.execPath, [fileURLToPath(new URL("../bin/muster-heavy.ts", import.meta.url)), "--", "sh", "-c", gate], {
+      cwd: source, timeoutMs: GATE_TIMEOUT_MS, env: { HOME: env.home },
+    });
     return { ...result, receipt: null };
   });
 
