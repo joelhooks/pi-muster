@@ -22,6 +22,33 @@ const manifests = ["lexicon", "envelope", "mailbox-client"].map(name => {
   return { name, directory, manifest };
 });
 
+const DeskManifest = Schema.Struct({ repo: Schema.String, commit: Schema.String, fileRoot: Schema.Literal(".."),
+  files: Schema.Record(Schema.String, Schema.Struct({ source: Schema.String, sha256: Schema.String })),
+});
+const desk = (group: "lexicon" | "fixtures") => Schema.decodeUnknownSync(DeskManifest)(
+  JSON.parse(readFileSync(new URL(`./vendor/rat-king-${group}/desk/VENDOR.json`, import.meta.url), "utf8")),
+);
+const deskLexicon = desk("lexicon");
+const deskFixtures = desk("fixtures");
+function leafFiles(directory: URL, prefix = ""): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory()
+    ? leafFiles(new URL(`${entry.name}/`, directory), `${prefix}${entry.name}/`)
+    : [`${prefix}${entry.name}`]);
+}
+interface Claim { readonly file: string; readonly hash: string; readonly commit: string; readonly manifest: string }
+function checkInventory(actual: ReadonlyMap<string, string>, claims: readonly Claim[], metadata: readonly string[]): void {
+  const seen = new Set<string>(metadata);
+  for (const claim of claims) {
+    if (seen.has(claim.file)) throw new Error(`Multiple owners: ${claim.file}`);
+    seen.add(claim.file);
+    if (!claim.commit || !claim.manifest || !/^[a-f0-9]{64}$/.test(claim.hash)) throw new Error(`Invalid provenance: ${claim.file}`);
+    if (!actual.has(claim.file)) throw new Error(`Missing file: ${claim.file}`);
+    if (actual.get(claim.file) !== claim.hash) throw new Error(`Hash mismatch: ${claim.file}`);
+  }
+  for (const file of actual.keys()) if (!seen.has(file)) throw new Error(`Unlisted file: ${file}`);
+  for (const file of metadata) if (!actual.has(file)) throw new Error(`Missing manifest: ${file}`);
+}
+
 // Pinned from rat-king 0e895a3, independent of the new manifests.
 const originalFixtures = {
   "ack.input.json": "5ae3c6912e14f90a8fe64c331133ce7d75c2925c1b4c2cacbe2c46bf9f26b1b6",
@@ -44,7 +71,10 @@ describe("Rat King c49a733 vendor integrity", () => {
       expect(manifest.commit).toBe("c49a733");
       expect(manifest.sourcePath).toBe(`packages/${name}/src`);
       expect(manifest.review).toBe("unreviewed");
-      expect(readdirSync(directory).sort()).toEqual([...Object.keys(manifest.files), "VENDOR.json"].sort());
+      expect(leafFiles(directory).sort()).toEqual([
+        ...Object.keys(manifest.files), "VENDOR.json",
+        ...(name === "lexicon" ? [...Object.keys(deskLexicon.files), "desk/VENDOR.json"] : []),
+      ].sort());
       expect(Object.keys(manifest.upstreamFiles).sort()).toEqual(Object.keys(manifest.files).sort());
       for (const [file, hash] of Object.entries(manifest.files)) {
         const bytes = readFileSync(new URL(file, directory));
@@ -61,7 +91,7 @@ describe("Rat King c49a733 vendor integrity", () => {
       const fixtures = new URL(manifest.fixturePath, directory);
       const hashes = { ...manifest.fixtures, ...manifest.newFixtures };
       expect(Object.keys(hashes)).toHaveLength(28);
-      expect(readdirSync(fixtures).sort()).toEqual(Object.keys(hashes).sort());
+      expect(leafFiles(fixtures).sort()).toEqual([...Object.keys(hashes), ...Object.keys(deskFixtures.files), "desk/VENDOR.json"].sort());
       for (const [file, hash] of Object.entries(hashes)) {
         expect(sha256(readFileSync(new URL(file, fixtures))), file).toBe(hash);
       }
@@ -83,8 +113,64 @@ describe("Rat King c49a733 vendor integrity", () => {
         expect(pkg.files).toContain(`src/vendor/rat-king-${name}/${file}`);
       }
     }
-    for (const file of readdirSync(new URL("./vendor/rat-king-fixtures/", import.meta.url))) {
+    for (const file of leafFiles(new URL("./vendor/rat-king-fixtures/", import.meta.url))) {
       expect(pkg.files).toContain(`src/vendor/rat-king-fixtures/${file}`);
     }
+    for (const file of [...Object.keys(deskLexicon.files), "desk/VENDOR.json"]) {
+      expect(pkg.files).toContain(`src/vendor/rat-king-lexicon/${file}`);
+    }
+  });
+  it("pins the exact desk additions to 6f82c8b without changing the legacy inventory", () => {
+    const expected = {
+      lexicon: {
+        ...Object.fromEntries(["item", "answer", "update"].map(name => [`desk.${name}.ts`, `packages/lexicon/src/desk.${name}.ts`])),
+        ...Object.fromEntries(["item", "answer", "update", "theme"].map(name => [`desk/${name}.json`, `lexicons/sh/mschf/ratking/desk/${name}.json`])),
+      },
+      fixtures: Object.fromEntries(["item", "answer", "update"].map(name => [`desk-${name}.json`, `packages/lexicon/test/fixtures/desk-${name}.json`])),
+    };
+    for (const group of ["lexicon", "fixtures"] as const) {
+      const manifest = desk(group);
+      expect(manifest.repo).toBe("https://github.com/joelhooks/rat-king");
+      expect(manifest.commit).toBe("6f82c8b29ff21989426d0247ee26c8bf637358d8");
+      expect(Object.fromEntries(Object.entries(manifest.files).map(([file, entry]) => [file, entry.source]))).toEqual(expected[group]);
+      for (const [file, entry] of Object.entries(manifest.files)) {
+        expect(sha256(readFileSync(new URL(`./vendor/rat-king-${group}/${file}`, import.meta.url))), file).toBe(entry.sha256);
+      }
+    }
+  });
+  it("assigns each payload leaf exactly one owning manifest; keeps shared legacy fixture references", () => {
+    const claims: Claim[] = [];
+    const metadata: string[] = [];
+    for (const { name, manifest } of manifests) {
+      const prefix = `rat-king-${name}/`;
+      const owner = `${prefix}VENDOR.json`;
+      metadata.push(owner);
+      for (const [file, hash] of Object.entries(manifest.files)) claims.push({ file: prefix + file, hash, commit: manifest.commit, manifest: owner });
+      // Lexicon owns the shared fixture inventory. The other two legacy manifests
+      // reference the same bytes; their unchanged 28-fixture assertions remain above.
+      if (name === "lexicon") for (const [file, hash] of Object.entries({ ...manifest.fixtures, ...manifest.newFixtures })) {
+        claims.push({ file: `rat-king-fixtures/${file}`, hash, commit: manifest.commit, manifest: owner });
+      }
+    }
+    for (const group of ["lexicon", "fixtures"] as const) {
+      const manifest = desk(group);
+      const prefix = `rat-king-${group}/`;
+      const owner = `${prefix}desk/VENDOR.json`;
+      metadata.push(owner);
+      for (const [file, entry] of Object.entries(manifest.files)) claims.push({ file: prefix + file, hash: entry.sha256, commit: manifest.commit, manifest: owner });
+    }
+    const root = new URL("./vendor/", import.meta.url);
+    const actual = new Map(leafFiles(root).map(file => [file, sha256(readFileSync(new URL(file, root)))]));
+    checkInventory(actual, claims, metadata);
+    const first = claims[0];
+    if (!first) throw new Error("Missing inventory");
+    expect(() => checkInventory(new Map([...actual, ["rat-king-lexicon/unlisted.ts", "0".repeat(64)]]), claims, metadata)).toThrow("Unlisted file");
+    const missing = new Map(actual); missing.delete(first.file);
+    expect(() => checkInventory(missing, claims, metadata)).toThrow("Missing file");
+    expect(() => checkInventory(new Map([...actual, [first.file, "0".repeat(64)]]), claims, metadata)).toThrow("Hash mismatch");
+    expect(() => checkInventory(actual, [...claims, first], metadata)).toThrow("Multiple owners");
+    expect(() => checkInventory(actual, claims.map(claim => claim === first ? { ...claim, commit: "" } : claim), metadata)).toThrow("Invalid provenance");
+    const noManifest = new Map(actual); noManifest.delete(metadata[0] ?? "");
+    expect(() => checkInventory(noManifest, claims, metadata)).toThrow("Missing manifest");
   });
 });

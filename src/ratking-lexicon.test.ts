@@ -19,6 +19,14 @@ const Hashes = Schema.Record(Schema.String, Schema.String);
 const VendorManifest = Schema.Struct({ repo: Schema.String, commit: Schema.String, sourcePath: Schema.String, files: Hashes, fixtures: Hashes });
 const manifest = Schema.decodeUnknownSync(VendorManifest)(JSON.parse(readFileSync(new URL("VENDOR.json", vendor), "utf8")));
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+const deskManifest = Schema.decodeUnknownSync(Schema.Struct({
+  commit: Schema.String, files: Schema.Record(Schema.String, Schema.Struct({ source: Schema.String, sha256: Schema.String })),
+}))(JSON.parse(readFileSync(new URL("desk/VENDOR.json", vendor), "utf8")));
+function leafFiles(directory: URL, prefix = ""): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory()
+    ? leafFiles(new URL(`${entry.name}/`, directory), `${prefix}${entry.name}/`)
+    : [`${prefix}${entry.name}`]);
+}
 const fixtures = new URL("./__fixtures__/ratking-v0/", import.meta.url);
 const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(name, fixtures), "utf8"));
 const cases = [
@@ -36,7 +44,14 @@ describe("Rat King v0 generated fixture contract (c49a733)", () => {
     expect(manifest.commit).toBe("c49a733");
     expect(manifest.sourcePath).toBe("packages/lexicon/src");
     // VENDOR.json is the hash inventory, not a self-hashing payload.
-    expect(readdirSync(vendor).sort()).toEqual([...Object.keys(manifest.files), "VENDOR.json"].sort());
+    expect(leafFiles(vendor).sort()).toEqual([
+      ...Object.keys(manifest.files), ...Object.keys(deskManifest.files), "VENDOR.json", "desk/VENDOR.json",
+    ].sort());
+    expect(deskManifest.commit).toBe("6f82c8b29ff21989426d0247ee26c8bf637358d8");
+    expect(Object.keys(deskManifest.files).some(file => file in manifest.files)).toBe(false);
+    for (const [name, entry] of Object.entries(deskManifest.files)) {
+      expect(sha256(readFileSync(new URL(name, vendor))), name).toBe(entry.sha256);
+    }
     for (const [name, hash] of Object.entries(manifest.files)) {
       expect(sha256(readFileSync(new URL(name, vendor))), name).toBe(hash);
     }
