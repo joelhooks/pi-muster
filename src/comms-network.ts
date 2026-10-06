@@ -477,7 +477,7 @@ export function createNetworkComms(options: {
       const service = yield* mailbox;
       return yield* consumeNetworkMailbox({ home: options.home, agent: sender.agent, session: sender.session, mailbox: service,
         senderAgent: author => options.recipient(author), receive,
-        deskRecord: options.deskRecord ? input => options.deskRecord!({ ...input, mailbox: service }) : undefined,
+        deskRecord: sender.agent === "switchboard" && options.deskRecord ? input => options.deskRecord!({ ...input, mailbox: service }) : undefined,
         // Static client documents are snapshots. New workers provision after the desk starts.
         open: envelope => mailbox.pipe(Effect.flatMap(fresh => fresh.open(envelope))),
       });
