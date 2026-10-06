@@ -128,8 +128,10 @@ const sessionSlice = (path: string, offset: number, skipEntries = 0, timeoutMs =
 });
 
 /** Only the newly appended user and its first assistant can prove this submission. */
-export function firstTurnDetail(journal: string, prompt: string, exactPrompt = false): { state: "waiting" | "proven" | "unproven"; detail: string; failureKind?: FirstTurnFailure } {
+export function firstTurnDetail(journal: string, prompt: string, exactPrompt = false, network = false): { state: "waiting" | "proven" | "unproven"; detail: string; failureKind?: FirstTurnFailure } {
   const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+  // The network consumer appends exactly one attribution line after the brief body.
+  const unattributed = (text: string) => network ? text.replace(/\n\n\[Authenticated agent message from [^\]\n]+, not Joel\.\]\s*$/u, "") : text;
   let matched = false;
   for (const line of journal.split("\n").slice(0, -1)) {
     if (!line.trim()) continue;
@@ -142,7 +144,7 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
       if (matched) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message after intended prompt: no verified bridge provenance; first assistant refused" };
       const text = typeof message.content === "string" ? message.content : (message.content ?? []).filter(block => block.type === "text").map(block => block.text ?? "").join(" ");
       if (/^\[paste #\d+(?: (?:\+\d+ lines|\d+ chars))?\]$/.test(text.trim())) return { state: "unproven", failureKind: "substituted_message", detail: "user entry is only a paste marker" };
-      if (exactPrompt ? normalize(text) !== normalize(prompt) : !normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message does not match the intended prompt: no verified bridge provenance; substituted message refused" };
+      if (exactPrompt ? normalize(unattributed(text)) !== normalize(prompt) : !normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message does not match the intended prompt: no verified bridge provenance; substituted message refused" };
       matched = true;
     } else if (message.role === "assistant") {
       if (!matched) return { state: "unproven", failureKind: "wrong_boundary", detail: "wrong boundary: assistant precedes intended prompt" };
@@ -153,7 +155,7 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
   return { state: "waiting", failureKind: matched ? "assistant_timeout" : "missing_prompt", detail: matched ? "no first turn within 90 s" : "no matching user entry within 90 s" };
 }
 
-const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false) => Effect.gen(function* () {
+const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false, network = false) => Effect.gen(function* () {
   if (proof.state !== "proven") return proof;
   const env = yield* MusterEnv;
   const started = env.now().getTime();
@@ -163,7 +165,7 @@ const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Pro
     if (read._tag === "Failure") return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: read.failure.code === "wrong_boundary" ? "wrong_boundary" : "unreadable_slice", detail: read.failure.message } satisfies Proof;
     const slice = read.success;
     if (slice.size < offset) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: "wrong_boundary", detail: "wrong boundary: session journal truncated" } satisfies Proof;
-    const result = firstTurnDetail(slice.text, prompt, exactPrompt);
+    const result = firstTurnDetail(slice.text, prompt, exactPrompt, network);
     if (result.state === "proven") return proof;
     if (result.state === "unproven" || Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: result.detail } satisfies Proof;
     const delay = Math.min(1000, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started));
@@ -200,10 +202,10 @@ const startBoundary = (path: string, inheritedEntries: number) => Effect.gen(fun
 });
 
 /** The start argv is already submitted. Only new journal entries can prove it. */
-export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt) =>
+export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt, network = false) =>
   startBoundary(path, inheritedEntries).pipe(
     Effect.flatMap(slice => slice
-      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, { state: "proven", via: "argv" }, true)
+      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, network ? { state: "proven", via: "network" } : { state: "proven", via: "argv" }, true, network)
       : Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: "discovery_timeout", detail: "discovery timeout: no session journal entries within 90 s" })),
     Effect.catch(error => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: error.code === "wrong_boundary" ? "wrong_boundary" : error.code === "journal_missing" ? "discovery_timeout" : "unreadable_slice", detail: error.message })),
     Effect.map(proof => proof.state === "unproven" ? { ...proof, repairPrompt } : proof),
