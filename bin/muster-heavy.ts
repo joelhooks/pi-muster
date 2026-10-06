@@ -5,9 +5,6 @@ import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { createHeavyGrant, listHeavyGrants, revokeHeavyGrant, GrantRefused, grantRequest, logExclusive, enqueueHeavy, ExclusiveRefused, exclusiveRequest, priorityRequest, heavyQueueState, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy, waitAge } from "../src/heavy-lock.ts";
 import type { HeavyOptions } from "../src/heavy-lock.ts";
-import { Effect } from "effect";
-import { Proc, liveProc } from "../src/runtime.ts";
-import { parseHeavyGate, runFleetGate, streamingGateProc } from "../src/fleet-gate.ts";
 
 const usage = "usage: muster-heavy grant <label> [--ttl <duration>] | grant --list | grant --revoke <id> | muster-heavy status [--json] [--reap] | muster-heavy gate [--wait <seconds>] [--tree <sha>] [--host auto|flagg|pennywise] -- <command> [args...] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
 
@@ -15,6 +12,10 @@ const usage = "usage: muster-heavy grant <label> [--ttl <duration>] | grant --li
 export async function runHeavy(args: string[], options: HeavyOptions, timers = { setTimeout, clearTimeout }) {
   if (args[0] === "gate") {
     try {
+      // Keep non-gate jobs on the existing lightweight startup path.
+      const [{ Effect }, { Proc, liveProc }, { parseHeavyGate, runFleetGate, streamingGateProc }] = await Promise.all([
+        import("effect"), import("../src/runtime.ts"), import("../src/fleet-gate.ts"),
+      ]);
       const gate = parseHeavyGate(args.slice(1));
       if (options.window !== undefined || options.grant !== undefined) throw new Error("gate cannot use deploy windows or local grants; unset MUSTER_DEPLOY_WINDOW and MUSTER_HEAVY_GRANT");
       const result = await Effect.runPromise(runFleetGate({ ...gate, cwd: process.cwd(), home: options.home }).pipe(Effect.provideService(Proc, streamingGateProc(liveProc))));
