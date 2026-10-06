@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
@@ -188,6 +189,19 @@ export function writeReader(owner: string, home = homedir(), now = Date.now(), p
   const temp = `${path}.${pid}.tmp`;
   writeFileSync(temp, JSON.stringify({ pid, startedAt, heartbeatAt: new Date(now).toISOString() }), { mode: 0o600 }); renameSync(temp, path);
 }
+/** Timer heartbeat. A rename can stall for a minute in an APFS metadata stall, so it
+ * must never block the event loop (Pi Freeze, 2026-10-06). Its own temp name keeps it
+ * apart from the sync retire write. */
+export async function writeReaderAsync(owner: string, home = homedir(), now = Date.now(), pid = process.pid, startedAt = new Date(now).toISOString()) {
+  const path = readerPath(owner, home);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = `${path}.${pid}.${randomBytes(4).toString("hex")}.tmp`;
+  try {
+    await writeFile(temp, JSON.stringify({ pid, startedAt, heartbeatAt: new Date(now).toISOString() }), { mode: 0o600 });
+    await rename(temp, path);
+  } catch (error) { await unlink(temp).catch(() => undefined); throw error; }
+}
+/** Sync on purpose: it runs once at shutdown or session switch, and must finish before exit. */
 export function retireReader(owner: string, home: string, startedAt: string) {
   try {
     const reader = decodeOwnerReader(JSON.parse(readFileSync(readerPath(owner, home), "utf8")));

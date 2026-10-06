@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { ownerFeed, ownerTimeline, OWNER_CURSOR } from "./owner-feed.ts";
-import { appendOwnerItem, ownerPath, deliverOwnerItem, readerFresh, writeReader, mentions, readOwnerQueue, canonicalJson, forwardOwner, resolveOwner } from "./owner-queue.ts";
+import { appendOwnerItem, ownerPath, deliverOwnerItem, readerFresh, writeReader, writeReaderAsync, mentions, readOwnerQueue, canonicalJson, forwardOwner, resolveOwner } from "./owner-queue.ts";
 import { OwnerTimelineView, ownerInboxText, readOwnerTimelineData } from "./owner-view.ts";
 import type { OwnerItem } from "./domain.ts";
 
@@ -17,6 +17,15 @@ const fixture = () => {
   return { home, entries, sent, feed, post: (kind: OwnerItem["kind"], title: string = kind) => appendOwnerItem("owner", { author: "probe", lane: "lane", kind, title }, home) };
 };
 describe("owner queue", () => {
+  it("writes the timer heartbeat asynchronously, atomically and without leftover temp files", async () => {
+    const f = fixture();
+    const pending = writeReaderAsync("owner", f.home);
+    expect(pending).toBeInstanceOf(Promise);
+    await pending;
+    expect(readerFresh("owner", f.home)).toBe(true);
+    const { readdirSync } = await import("node:fs");
+    expect(readdirSync(dirname(ownerPath("owner", f.home))).filter(name => name.endsWith(".tmp"))).toEqual([]);
+  });
   it("forwards project-tagged direct appends and unread history once across reload", () => {
     const f = fixture();
     const old = appendOwnerItem("old", { author: "probe", project: "p", kind: "question", title: "history" }, f.home);

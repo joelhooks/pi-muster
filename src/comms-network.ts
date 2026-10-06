@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Effect, Layer, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
@@ -225,10 +226,11 @@ export function consumeNetworkMailbox(options: {
         yield* options.mailbox.deliver(delivery).pipe(Effect.mapError(failure));
         yield* options.mailbox.ack(delivery).pipe(Effect.mapError(failure));
       }
-      yield* Effect.try({ try: () => {
-        mkdirSync(dirname(cursorPath), { recursive: true, mode: 0o700 });
+      // The consumer runs off a poll: never block the event loop on a stalled rename (Pi Freeze, 2026-10-06).
+      yield* Effect.tryPromise({ try: async () => {
+        await mkdir(dirname(cursorPath), { recursive: true, mode: 0o700 });
         const temp = `${cursorPath}.${process.pid}.tmp`;
-        writeFileSync(temp, JSON.stringify({ [options.agent]: batch.throughSeq }), { mode: 0o600 }); renameSync(temp, cursorPath);
+        await writeFile(temp, JSON.stringify({ [options.agent]: batch.throughSeq }), { mode: 0o600 }); await rename(temp, cursorPath);
       }, catch: failure });
     })), Effect.mapError(error => "error" in error && error.error === "AuthRequired" ? new CommsError("NetworkComms authentication failed; consumer stopped") : error instanceof CommsError ? error : failure()));
     return yield* Effect.ensuring(run, Effect.suspend(() => fence ? options.mailbox.lease.release(fence).pipe(Effect.timeout("5 seconds"), Effect.ignore) : Effect.void));
