@@ -344,7 +344,9 @@ const latestCloneEvent = (row: AgentRow) => [...(row.events ?? [])].reverse().fi
 
 /** Runs through the same Proc on the clone's machine. Force is only automatic
  * after harvest proof AND classification of every dirty path. */
-const cloneReapAssessment = (project: Project, row: AgentRow, source: string) => Effect.gen(function* () {
+type ReapSources = Map<string, { readonly origin: boolean; readonly fetched: boolean }>;
+
+const cloneReapAssessment = (project: Project, row: AgentRow, source: string, sources?: ReapSources) => Effect.gen(function* () {
   const proc = yield* Proc;
   const run = (cwd: string, ...args: string[]) => proc.run("git", args, { cwd, timeoutMs: 30_000 });
   const head = (yield* git(row.cwd, "rev-parse", "HEAD")).trim();
@@ -362,14 +364,20 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string) =>
   const generated = [...DEFAULT_GENERATED, ...(lane?.generated ?? []), ".wzrrd/"];
   const other = dirty.filter(path => !isGenerated(path, generated) && !/^\.brain\/data\/[^/]+-status\.json$/.test(path));
   if (other.length) return { safe: false, force: false, detail: `dirty: ${row.cwd}; non-harness paths ${other.map(path => JSON.stringify(path)).sort().join(", ")}; HEAD ${head}` };
-  const origin = yield* run(source, "remote", "get-url", "origin");
-  if (origin.code === 0) {
-    const fetch = yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*");
-    if (fetch.code !== 0) return { safe: false, force: false, detail: `unreachable: ${row.cwd}; HEAD ${head}; origin fetch failed` };
+  // One refresh per source/machine per status pass, including failed refreshes.
+  // Individual clone-object fetches below remain necessary for reachability proof.
+  const key = JSON.stringify([row.machine, source]);
+  let refreshed = sources?.get(key);
+  if (!refreshed) {
+    const origin = (yield* run(source, "remote", "get-url", "origin")).code === 0;
+    const fetched = !origin || (yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")).code === 0;
+    refreshed = { origin, fetched };
+    sources?.set(key, refreshed);
   }
+  if (!refreshed.fetched) return { safe: false, force: false, detail: `unreachable: ${row.cwd}; HEAD ${head}; origin fetch failed` };
   let ref = lane?.base ?? row.clone?.base?.ref ?? "HEAD";
   if (ref === "default branch") ref = "HEAD";
-  if (origin.code === 0 && !ref.startsWith("origin/")) {
+  if (refreshed.origin && !ref.startsWith("origin/")) {
     const remote = yield* run(source, "rev-parse", "--verify", `origin/${ref}^{commit}`);
     if (remote.code === 0) ref = `origin/${ref}`;
   }
@@ -415,7 +423,7 @@ const clonePresent = (row: AgentRow) => cloneOnMachine(row, () => Effect.gen(fun
   return (yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 })).code === 0;
 }));
 
-const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = false) => Effect.gen(function* () {
+const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = false, sources?: ReapSources) => Effect.gen(function* () {
   if (!row.clone) return { cloneError: null, notes: [] as string[] };
   const project = yield* load(dir);
   const env = yield* MusterEnv;
@@ -427,7 +435,7 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
     const kept = yield* cloneRetirementNotes(row);
     notes.push(...kept.notes);
     if (kept.keep) return { removed: false, detail: kept.notes.join("; ") };
-    const assessment = yield* cloneReapAssessment(project, row, source);
+    const assessment = yield* cloneReapAssessment(project, row, source, sources);
     if (!force && !assessment.safe) return { removed: false, detail: assessment.detail };
     const removal = yield* must(script, ["remove", ...(force || assessment.force ? ["--force"] : []), row.cwd], { cwd: source, timeoutMs: 120_000 }).pipe(Effect.result);
     if (removal._tag === "Failure") return { removed: false, detail: `${assessment.detail}; removal failed: ${removal.failure.message}` };
@@ -3249,6 +3257,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
 
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
+    const reapSources: ReapSources = new Map();
     for (const row of project.agents) {
       if (row.state === "closed") {
         if (!row.clone || latestCloneEvent(row)?.type === "CLONE_REMOVED") continue;
@@ -3259,10 +3268,10 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         if (!present) continue;
         const prior = latestCloneEvent(row);
         if (act && row.owner === env.sessionId && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
-          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source)).pipe(Effect.orElseSucceed(() => null));
+          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source, reapSources)).pipe(Effect.orElseSucceed(() => null));
           // Unchanged proof plus a script failure must not retry every pass.
           if (assessment?.safe && !prior.detail.startsWith(assessment.detail)) {
-            yield* retireClone(dir, row, false);
+            yield* retireClone(dir, row, false, false, reapSources);
             if (!(yield* clonePresent(row))) continue;
           }
         }

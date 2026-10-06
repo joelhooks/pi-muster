@@ -138,6 +138,37 @@ it("does not use an older landed packet as proof for newer unharvested work", as
   expect(existsSync(f.row.cwd)).toBe(true);
 });
 
+it.each(["unharvested", "harvested", "offline"])("refreshes each source once per status pass (%s), including retirement reassessment", async kind => {
+  const f = await fixture();
+  const origin = makeRepo(join(f.h.root, "origin"));
+  sh(f.dir, "remote", "add", "origin", origin);
+  const { row: second } = await runWith(f.h, agentLaunchForeground(f.dir, { action: "launch", name: "second", lane: "reap", role: "worker", label: "second", clone: true, prompt: "test" }));
+  for (const row of [f.row, second]) {
+    f.commit(row.cwd, `${row.name}.txt`, row.name);
+    expect((await runWith(f.h, agentClose(f.dir, { name: row.name }))).cloneError).toContain("unreachable");
+    if (kind === "harvested") {
+      sh(origin, "fetch", "-q", row.cwd, "HEAD"); sh(origin, "cherry-pick", "FETCH_HEAD");
+    }
+  }
+  const proc = f.h.proc;
+  let fetches = 0;
+  f.h.proc = { run: (command, args, options) => {
+    if (command === "git" && args[0] === "fetch" && args.includes("origin")) {
+      fetches++;
+      if (kind === "offline") return Effect.succeed({ code: 1, stdout: "", stderr: "offline" });
+    }
+    return proc.run(command, args, options);
+  } };
+  await f.status(true);
+  expect(fetches).toBe(1);
+  expect(existsSync(f.row.cwd)).toBe(kind !== "harvested");
+  expect(existsSync(second.cwd)).toBe(kind !== "harvested");
+  if (kind !== "harvested") {
+    await f.status(true);
+    expect(fetches).toBe(2); // Cache never survives the pass.
+  }
+});
+
 it("records SSH removal failures and retries an already-closed remote row through the same path", async () => {
   const f = await fixture();
   const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: f.h.workerWorktree, env: {}, wrap: [] } });
