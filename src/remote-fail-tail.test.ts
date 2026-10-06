@@ -117,7 +117,7 @@ describe("remote launch failure evidence", () => {
     expect(launched.row.events?.some(event => event.type === "LAUNCH_FAILED")).not.toBe(true);
     expect(s.command()).toMatch(/^exec sh '/);
     s.remote.panes.delete(launched.row.pane!.paneId);
-    await s.run(projectStatus(s.dir, { act: false })); expect((await s.row()).state).toBe("interrupted");
+    await s.run(projectStatus(s.dir, { act: true })); expect((await s.row()).state).toBe("interrupted");
   });
 
   it("preserves the remote pending result after its startup budget", async () => {

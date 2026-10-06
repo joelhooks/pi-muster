@@ -170,7 +170,7 @@ describe("remote owner operations", () => {
     expect(s.remote.calls.filter(call => call.method === "pane.split")).toHaveLength(1);
     // Simulate a lost pane, preserving the clone so restore can reuse it.
     s.remote.panes.delete(fork.row.pane!.paneId);
-    await s.run(projectStatus(s.dir, { act: false }));
+    await s.run(projectStatus(s.dir, { act: true }));
     const restored = await s.run(agentLaunch(s.dir, { action: "restore", name: "remote-fork" }));
     expect(restored.row.machine).toBe("remote"); expect(restored.argv).toContain("--session");
     expect(s.calls.filter(call => call.command === "ssh").every(call => (call.timeoutMs ?? Infinity) <= 300000)).toBe(true);
@@ -313,8 +313,8 @@ describe("remote owner operations", () => {
       ? Effect.fail(new ProcError({ command: "ssh remote", code: 255, stderr: "offline", message: "machine remote: offline" })) : original(command, args, options));
     const status = await s.run(projectStatus(s.dir, { act: false }));
     expect(status.agents.find(row => row.name === local.row.name)?.state).toBe("running");
-    expect(status.board).toContain("machine remote: ingest skipped for remote-w");
-    expect(status.notes.join("\n")).toContain("machine unavailable earlier in this pass");
+    expect(status.board).toContain("machine remote: session stats skipped");
+    expect(status.notes.join("\n")).toContain("machine remote: offline");
     expect((await s.run(load(s.dir))).agents.filter(row => row.machine === "remote").every(row => row.state === "running")).toBe(true);
     expect(vi.mocked(s.proc.run).mock.calls.filter(([command]) => command === "ssh")).toHaveLength(1);
   });

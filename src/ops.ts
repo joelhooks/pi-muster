@@ -552,6 +552,19 @@ const findRebinding = (project: Project, row: AgentRow, bound: PaneInfo | null |
   if (holder) return { kind: "refused", note: `rebind refused ${row.name}: pane ${pane.pane_id} already bound to ${holder.name}` } as const;
   return { kind: "match", pane, session: { sessionFile: row.sessionFile, sessionId: row.sessionId } } as const;
 });
+/** The saved launcher environment certifies capability only on its original terminal.
+ * A session path survives Herdr resume; launcher provenance does not. */
+const statusEvidence = (row: AgentRow, pane: PaneInfo | null | undefined) => {
+  if (pane?.agent !== "pi" || pane.agent_session?.kind !== "path" || pane.agent_session.value !== row.sessionFile) return {};
+  const launched = row.pane?.terminalId === pane.terminal_id && row.pane.openedByMuster &&
+    row.restore?.env.MUSTER_AGENT === row.name && !!row.restore.env.MUSTER_PROJECT && !!row.restore.env.MUSTER_OWNER;
+  return {
+    identity: "proven (session path match)",
+    capability: launched ? "launch-profile receipt (Muster launcher, bound terminal)" : "unknown (resumed outside Muster)",
+    ...(!launched && ["running", "silent", "nudged", "restarted", "reported", "verified", "landed"].includes(row.state)
+      ? { recovery: `agent_launch action:\"restart\" name:${row.name}; re-check until list and herdr_watch list and re-arm still-needed watches` } : {}),
+  };
+};
 const reboundNote = (row: AgentRow, pane: PaneInfo) => `rebound ${row.name} → ${pane.pane_id} (identity: session path match)`;
 
 const findReadoption = (project: Project, row: AgentRow) => Effect.gen(function* () {
@@ -585,9 +598,9 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
       current = yield* readoptRow(dir, row, reAdoption.pane, reAdoption.session);
       pane = reAdoption.pane;
       action = `re-adopted ${pane.pane_id}`;
-    } else if (!pane && row.pane && PROCESS_STATES.includes(row.state)) {
+    } else if (act && mine && !pane && row.pane && PROCESS_STATES.includes(row.state)) {
       current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: null }); action = "remote pane gone: interrupted";
-    } else if (pane && !pane.agent && PROCESS_STATES.includes(row.state)) {
+    } else if (act && mine && pane && !pane.agent && PROCESS_STATES.includes(row.state)) {
       current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }]); action = "remote agent exited: interrupted";
     } else if (pane && row.pane && row.state !== "interrupted") {
       const file = pane.agent_session?.kind === "path" ? pane.agent_session.value : null;
@@ -595,7 +608,7 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
       const failedModel = row.state === "failed" && row.events?.some(event => event.type === "MODEL_ERROR");
       const adopt = !failedModel && matches && ["launching", "failed"].includes(row.state);
       if (adopt && act && mine) current = yield* patchRow(dir, row.name, row.state, [{ type: "ADOPT" }], { sessionFile: file });
-      if (pane.pane_id !== row.pane.paneId || (file && file !== current.sessionFile && !["launching", "failed"].includes(current.state))) current = yield* patchRow(dir, row.name, current.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id }, ...(file ? { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId } : {}) });
+      if (act && mine && (pane.pane_id !== row.pane.paneId || (file && file !== current.sessionFile && !["launching", "failed"].includes(current.state)))) current = yield* patchRow(dir, row.name, current.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id }, ...(file ? { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId } : {}) });
     }
     const mtime = current.sessionFile ? mtimes.get(`${row.machine}:${current.sessionFile}`) ?? null : null;
     const silent = mtime === null ? null : Math.max(0, env.now().getTime() - mtime);
@@ -617,7 +630,7 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
         }
       }
     }
-    return { name: row.name, role: row.role, lane: row.lane, state: current.state, pane: pane?.pane_id ?? null, silentMin: silent === null ? null : Math.floor(silent/60_000), cache: null, cost: null, intercom: "unknown" as const, sessionId: row.intercomAddress ?? `${row.name}@${machine.herdr}`, action } satisfies AgentLine;
+    return { ...statusEvidence(current, pane), name: row.name, role: row.role, lane: row.lane, state: current.state, pane: pane?.pane_id ?? null, silentMin: silent === null ? null : Math.floor(silent/60_000), cache: null, cost: null, intercom: "unknown" as const, sessionId: row.intercomAddress ?? `${row.name}@${machine.herdr}`, action } satisfies AgentLine;
   }));
 });
 
@@ -1539,13 +1552,14 @@ const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?:
   });
 
 /** Tail text is UNTRUSTED: it can buy time, never prove a session or prompt delivery. */
-const piStarting = (tail: string) => tail.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line =>
+const piStarting = (tail: string, launchCommand?: string) => tail.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line =>
+  (!!launchCommand && line.includes(launchCommand)) ||
   /^(?:pi\s*[:·-]\s*)?creating a new session(?:\s|[.…]|$)/i.test(line.trim()) ||
   /^Warning: No project session found with id '[^'\r\n]+'; creating a new session with that id\.$/.test(line.trim()) ||
   /^pi v\d+\.\d+\.\d+(?:\s|$)/i.test(line.trim()));
 
 /** Shared launch/restart wait: budget → evidenced extension → ready, missing or pending. */
-const waitForSession = (paneId: string, previous: string | null, fallback: () => string | null = () => null) =>
+const waitForSession = (paneId: string, previous: string | null, fallback: () => string | null = () => null, launchCommand?: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const sample = env.startupLoad?.() ?? { load: loadavg()[0] ?? 0, cpus: availableParallelism() };
@@ -1564,7 +1578,7 @@ const waitForSession = (paneId: string, previous: string | null, fallback: () =>
       if (sessionFile) return { state: "ready" as const, sessionFile, elapsed, load, slow: extended || elapsed > 10_000 };
       if (elapsed >= nextTail) {
         const tail = yield* paneRead(paneId, 12).pipe(Effect.orElseSucceed(() => "(pane unreadable)"));
-        if (modelOutputIssue(tail)?.severity === "error" || !piStarting(tail)) {
+        if (modelOutputIssue(tail)?.severity === "error" || !piStarting(tail, launchCommand)) {
           return { state: "missing" as const, tail, elapsed, load };
         }
         if (elapsed >= 120_000) return { state: "pending" as const, tail, elapsed, load };
@@ -1714,10 +1728,55 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     return { row: adopted, argv: [] as string[], readiness: "not checked (catalog adoption)", proof: null, sessionIdMatched: null, notes: ["adopted without touching the pane", `Parent desk: deliver this fence on the next conversation turn: ${sideDeskFence(parent.name)}`] };
   });
 
+/** Rename lifecycle: attempt → bounded wait → renamed | pending. Old Pi name release is asynchronous. */
+const renameRestart = (pane: PaneBinding, name: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const live = yield* paneGet(pane.paneId);
+    if (!live || live.terminal_id !== pane.terminalId || live.agent !== "pi") return `rename pending: replacement ${pane.paneId}/${pane.terminalId} is no longer the same live Pi`;
+    const renamed = yield* agentRename(pane.paneId, name).pipe(Effect.result);
+    if (renamed._tag === "Success") return `renamed ${pane.paneId} to ${name}`;
+    if (attempt === 11) return `rename pending: ${renamed.failure.message}`;
+    yield* env.sleep(250);
+  }
+  return "rename pending";
+});
+
+/** Retirement lifecycle: identity → quit requested → waiting → shell closed | safely left open.
+ * The exception to openedByMuster is deliberately confined to restart: we quit this exact Pi,
+ * and close only its now-agentless shell while its original terminal identity still holds. */
+const closeRestartShell = (dir: string, old: PaneBinding, quitRequested: boolean, machine = "local") => Effect.gen(function* () {
+  if (old.openedByMuster) return yield* closeOwnedPane(old, dir, "restart old pane");
+  const env = yield* MusterEnv;
+  const left = (why: string) => `left adopted shell ${old.paneId}/${old.terminalId} open: ${why}`;
+  if (!quitRequested) return left("old Pi quit not confirmed");
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const pane = yield* paneGet(old.paneId);
+    if (!pane) return `old adopted pane ${old.paneId} already gone`;
+    if (pane.terminal_id !== old.terminalId) return left("terminal changed; refusing close");
+    if (!pane.agent) {
+      const project = yield* load(dir);
+      const holder = project.agents.find(row => row.state !== "closed" && row.machine === machine && sharesPane(old, row.pane));
+      if (holder) return left(`now bound to ${holder.name}`);
+      // This synthetic close authority exists only after the exact shutdown/shell checks above.
+      return yield* closeOwnedPane({ ...old, openedByMuster: true }, dir, "restart agentless adopted shell");
+    }
+    if (attempt < 11) yield* env.sleep(250);
+  }
+  return left("agent still present; close only after it exits and the terminal still matches");
+});
+
+const adoptedSelfNote = (pane: PaneBinding) => `adopted shell ${pane.paneId}/${pane.terminalId}: close after its agent is gone: herdr_pane close ${pane.paneId} once herdr pane get shows no agent on terminal ${pane.terminalId}`;
+
 /** Called only at session_shutdown after the old caller's agent_end. */
 export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; replacementPane: PaneBinding; name: string }) => Effect.gen(function* () {
-  yield* closeOwnedPane(restart.oldPane, dir, `self restart ${restart.name}`);
-  yield* agentRename(restart.replacementPane.paneId, restart.name).pipe(Effect.catch(() => Effect.void));
+  // This awaited hook cannot observe its own Pi's exit. The replacement is Muster-owned;
+  // its next restart closes normally. Never invent close authority for this one adopted shell.
+  const closed = restart.oldPane.openedByMuster
+    ? yield* closeOwnedPane(restart.oldPane, dir, `self restart ${restart.name}`)
+    : adoptedSelfNote(restart.oldPane);
+  const renamed = yield* renameRestart(restart.replacementPane, restart.name);
+  return { notes: [closed, renamed] };
 });
 
 /** Replacement is provisional until fresh fork evidence is proven. No catalog launch reservation
@@ -1761,7 +1820,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       const binding: PaneBinding = { paneId: fresh.pane_id, terminalId: fresh.terminal_id, tabId: fresh.tab_id, openedByMuster: true };
       yield* guardLaunchShell(binding.paneId);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
-      const wait = yield* waitForSession(binding.paneId, null, remote ? undefined : () => findSessionFile(row.cwd, row.sessionId, env.home));
+      const wait = yield* waitForSession(binding.paneId, null, remote ? undefined : () => findSessionFile(row.cwd, row.sessionId, env.home), `exec sh ${shellQuote(script)}`);
       if (wait.state !== "ready") return yield* input(`restart failed before rebind: replacement session ${wait.state}; old agent untouched`);
       const id = sessionIdFromFile(wait.sessionFile);
       if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed: replacement did not prove a new session");
@@ -1793,15 +1852,20 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       phase = "rebound";
       // The catalog is authoritative. Never forward before its atomic write succeeds.
       yield* recordOwnerForward(old.sessionId, id, project.slug, env).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`catalog rebound; scoped owner forward needs repair: ${error.message}`); })));
-      if (self) notes.push("Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place.");
+      if (self) notes.push(`Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place.${oldPane.openedByMuster ? "" : ` ${adoptedSelfNote(oldPane)}`}`);
       else {
+        let quitRequested = false;
         if (!oldPane.openedByMuster) {
           const retiring = yield* locatePane(oldPane);
-          if (retiring?.agent_session?.kind === "path" && retiring.agent_session.value === old.sessionFile) yield* paneRun(retiring.pane_id, "/quit").pipe(Effect.catch(error => Effect.sync(() => { notes.push(`old Pi quit failed: ${error.message}`); })));
+          if (retiring?.agent_session?.kind === "path" && retiring.agent_session.value === old.sessionFile) {
+            const quit = yield* paneRun(retiring.pane_id, "/quit").pipe(Effect.result);
+            quitRequested = quit._tag === "Success";
+            if (quit._tag === "Failure") notes.push(`old Pi quit failed: ${quit.failure.message}`);
+          }
         }
-        notes.push(yield* closeOwnedPane(oldPane, dir, `restart ${old.name}`).pipe(Effect.catch(error => Effect.succeed(`old pane close failed: ${error.message}; close only ${oldPane.paneId}/${oldPane.terminalId}`))));
+        notes.push(yield* closeRestartShell(dir, oldPane, quitRequested, old.machine).pipe(Effect.catch(error => Effect.succeed(`old pane close failed: ${error.message}; close only ${oldPane.paneId}/${oldPane.terminalId}`))));
+        notes.push(yield* renameRestart(binding, old.name));
       }
-      yield* agentRename(binding.paneId, old.name).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`rename pending: ${error.message}`); })));
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
       return { row, argv, readiness: "proven", proof, sessionIdMatched: argv.includes(id), notes, ...(self ? { endSession: { oldPane, replacementPane: binding, name: old.name } } : {}) };
     }),
@@ -2779,6 +2843,9 @@ export interface AgentLine {
   /** The live session id; address intercom by this, never by the catalog name. */
   readonly sessionId?: string;
   readonly action: string | null;
+  readonly identity?: string;
+  readonly capability?: string;
+  readonly recovery?: string;
 }
 
 export interface StatusInput {
@@ -2792,7 +2859,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const env = yield* MusterEnv;
     const intercom = yield* Comms;
     const act = params.act !== false;
-    const ingestion = yield* ingestRemotePackets(dir);
+    const ingestion = act ? yield* ingestRemotePackets(dir) : { notes: [] as string[], failedMachines: new Set<string>() };
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.gen(function* () {
@@ -2802,9 +2869,31 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           return [next, next] as const;
         }))
       : yield* load(dir);
+    const spaces = yield* workspaceList();
+    const missingSpace = project.spaceId && !spaces.some(space => space.workspace_id === project.spaceId)
+      ? `project ${project.slug}: workspace ${project.spaceId} is missing; space not rebuilt` : null;
+    const recoveryNotes: string[] = missingSpace ? [missingSpace] : [];
     const panes = yield* paneList();
     const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
     const byTerminal = new Map(panes.map((pane) => [pane.terminal_id, pane]));
+    if (!missingSpace) for (const lane of project.lanes) {
+      const root = lane.root;
+      if (!root || lane.state === "closed" || !project.agents.some(row => row.lane === lane.slug && row.owner === env.sessionId && row.state !== "closed")) continue;
+      const pane = byId.get(root.paneId);
+      if (!pane || pane.workspace_id !== project.spaceId || pane.tab_id !== lane.tabId || pane.terminal_id === root.terminalId) continue;
+      // A reused pane id with an unrelated shell is not evidence of a restored root.
+      if (pane.agent !== "pi" || pane.agent_session?.kind !== "path" || !project.agents.some(row =>
+        row.lane === lane.slug && row.owner === env.sessionId && row.state !== "closed" && row.sessionFile === pane.agent_session?.value)) continue;
+      const note = `rebound lane ${lane.slug} root → ${pane.pane_id} (same pane and tab; close authority released)`;
+      recoveryNotes.push(`${note}${act ? "" : " (preview; act: false)"}`);
+      if (act) yield* mutate(dir, current => Effect.gen(function* () {
+        const latest = yield* findLane(current, lane.slug);
+        if (!current.agents.some(row => row.lane === lane.slug && row.owner === env.sessionId && row.state !== "closed")) return yield* input("lane ownership changed during reconciliation; retry");
+        if (latest.root?.terminalId !== root.terminalId || latest.root.paneId !== root.paneId || latest.tabId !== lane.tabId) return yield* input("lane root changed during reconciliation; retry");
+        const next = { ...latest, root: { ...root, terminalId: pane.terminal_id, openedByMuster: false }, updatedAt: iso(env) };
+        return [withLane(current, next), undefined] as const;
+      }));
+    }
     const live = yield* intercom.sessions();
     const now = env.now().getTime();
     const limits = silenceLimits(project.policy);
@@ -2822,6 +2911,10 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           ingestion.notes.push(`machine ${row.machine}: status skipped for ${row.name}: ${error.message}`);
           return unavailable;
         }))));
+        continue;
+      }
+      if (missingSpace) {
+        lines.push({ name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action: null });
         continue;
       }
       let pane: PaneInfo | undefined;
@@ -2887,19 +2980,19 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
             }
           }
         }
-      } else if (row.pane && !pane) {
+      } else if (act && row.owner === env.sessionId && row.pane && !pane) {
         if (PROCESS_STATES.includes(row.state)) {
           current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: null }).pipe(Effect.catch(() => Effect.succeed(row)));
           action = "pane gone: interrupted";
         } else {
           current = yield* patchRow(dir, row.name, row.state, [], { pane: null }).pipe(Effect.catch(() => Effect.succeed(row)));
         }
-      } else if (pane && !pane.agent && PROCESS_STATES.includes(row.state) && row.state !== "restoring") {
+      } else if (act && row.owner === env.sessionId && pane && !pane.agent && PROCESS_STATES.includes(row.state) && row.state !== "restoring") {
         current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: { ...(row.pane as PaneBinding), paneId: pane.pane_id } }).pipe(
           Effect.catch(() => Effect.succeed(row)),
         );
         action = "agent exited to its shell: interrupted";
-      } else if (row.pane && pane && pane.pane_id !== row.pane.paneId) {
+      } else if (act && row.owner === env.sessionId && row.pane && pane && pane.pane_id !== row.pane.paneId) {
         current = yield* patchRow(dir, row.name, row.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id } }).pipe(
           Effect.catch(() => Effect.succeed(row)),
         );
@@ -2907,7 +3000,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       }
       if (rebinding.kind === "none" && !reAdoption && !modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
       const herdrFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
-      if (!adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
+      if (act && row.owner === env.sessionId && !adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
         current = yield* patchRow(dir, row.name, current.state, [], {
           sessionFile: herdrFile,
           sessionId: sessionIdFromFile(herdrFile) ?? current.sessionId,
@@ -2965,6 +3058,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       const latest = current.sessionFile;
       if (latest !== file) cost = latest && existsSync(latest) ? yield* Effect.promise(() => readSessionCost(latest, CAPTURE_REFRESH_MARK)) : null;
       lines.push({
+        ...statusEvidence(current, pane),
         name: current.name,
         role: current.role,
         lane: current.lane,
@@ -3010,8 +3104,8 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     }
     const final = yield* load(dir);
     const label = yield* keepSpaceLabel(final, act);
-    const tokens = yield* publishTokens(final, { stuck });
-    const brain = yield* writeBrain(final);
+    const tokens = act && !missingSpace ? yield* publishTokens(final, { stuck }) : "sidebar: preview (unchanged)";
+    const brain = act ? yield* writeBrain(final) : "preview (unchanged)";
     const desk = openDeskItems(readDesk(queuePath(final.slug, env.home)));
     const fleet = yield* Effect.gen(function* () {
       const runner = yield* fleetRunner(dir);
@@ -3020,7 +3114,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
-    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes].join("\n"), notes: [...ingestion.notes, tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes, tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
@@ -3062,7 +3156,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
       (agent) => {
         const row = rows.get(agent.name);
         const name = row?.side ? `  ${row.profile.label.split(" ")[0]} ${agent.name} ↳ ${row.side.parent}` : agent.name;
-        return `- ${name} ${agent.role}/${agent.lane} ${agent.state} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}`;
+        return `- ${name} ${agent.role}/${agent.lane} ${agent.state} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}${agent.identity ? ` · identity: ${agent.identity}` : ""}${agent.capability ? ` · capability: ${agent.capability}` : ""}${agent.recovery ? ` · recovery: ${agent.recovery}` : ""}`;
       },
     ),
   ];
