@@ -25,7 +25,8 @@ import type { AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packe
 import { GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
 import { GuardFailed, HeavyJobBusy, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { tryAcquireHeavy } from "./heavy-lock.ts";
-import { FleetStatus, busyQueue, gatesLine } from "./fleet.ts";
+import { busyQueue, gatesLine } from "./fleet.ts";
+import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
 import {
   agentRename,
   agentGet,
@@ -2455,26 +2456,6 @@ export interface PacketLandInput {
   readonly evidence?: string | undefined;
   readonly message?: string | undefined;
 }
-
-/** Resolve at call time: installing the runner needs no extension restart. `MUSTER_FLEET_COMPUTE=off` turns it off. */
-const fleetRunner = (source: string) => Effect.gen(function* () {
-  const proc = yield* Proc;
-  const configured = process.env.MUSTER_FLEET_COMPUTE;
-  if (configured === "off") return null;
-  const explicit = configured && isAbsolute(configured) && existsSync(configured) ? configured : null;
-  const onPath = explicit ? null : (yield* proc.run("sh", ["-c", "command -v fleet-compute"], { cwd: source, timeoutMs: 10_000 })).stdout.trim();
-  return explicit ? { command: "node", prefix: [explicit] } : onPath ? { command: onPath, prefix: [] } : null;
-});
-
-const fleetStatus = (source: string, runner: { command: string; prefix: string[] }) => Effect.gen(function* () {
-  const proc = yield* Proc;
-  const result = yield* proc.run(runner.command, [...runner.prefix, "status", "--json"], { cwd: source, timeoutMs: 10_000 });
-  if (result.code !== 0) return yield* input(`fleet-compute status exited ${result.code}`);
-  return yield* Effect.try({
-    try: () => Schema.decodeUnknownSync(FleetStatus)(JSON.parse(result.stdout)),
-    catch: (error) => input(`fleet-compute status invalid JSON/schema: ${String(error)}`),
-  });
-});
 
 const runGate = (source: string, gate: string, context: {
   readonly project: Project;
