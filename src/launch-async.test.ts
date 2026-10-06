@@ -15,9 +15,11 @@ vi.mock("node:child_process", async importOriginal => ({
     return child;
   },
 }));
-import { agentLaunch, agentLaunchForeground, laneOpen, launchResultText, projectOpen, projectStatus, runLaunchJob } from "./ops.ts";
+import { agentLaunch as launch, agentLaunchForeground, laneOpen, launchResultText, projectOpen, projectStatus, runLaunchJob } from "./ops.ts";
 import { load, mutate } from "./store.ts";
-import { ownerPath, readOwnerItems } from "./owner-queue.ts";
+import { ownerPath, readOwnerQueue } from "./owner-queue.ts";
+const readOwnerItems = (path: string) => { const match = path.match(/^(.*)\/\.local\/state\/muster\/owner-queue\/([^/]+)\.jsonl$/); if (!match) throw new Error("invalid test queue path"); return readOwnerQueue(match[2]!, match[1]!).items.map(entry => entry.item); };
+const agentLaunch = (...args: Parameters<typeof launch>) => launch(...args).pipe(Effect.map(result => { if (!("jobId" in result)) throw new Error("expected asynchronous admission"); return result; }));
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 
 async function setup() {
@@ -119,7 +121,7 @@ describe("asynchronous launch admission", () => {
     const { h, dir, request } = await setup();
     const result = await runWith(h, agentLaunchForeground(dir, request));
     const renderer = readFileSync(new URL("./extension-main.ts", import.meta.url), "utf8");
-    expect(renderer).toContain('`delivery: ${result.proof.state}');
+    expect(renderer).toContain("return launchResultText(result);");
     expect(launchResultText(result)).toContain("delivery: proven");
   });
 });

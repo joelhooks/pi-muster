@@ -1933,10 +1933,10 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const priorState = existing?.state ?? "planned";
     const state = yield* stepAgent(params.name, priorState, { type: params.action === "restore" ? "QUEUE_RESTORE" : "LAUNCH" });
     const launchJob = { id, pid: null, log, startedAt: iso(env), priorState, owner: env.sessionId, request: params };
-    const reserved: AgentRow = { machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
-      cwd, clone: existing?.clone ?? null, profile, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()),
+    const reserved: AgentRow = { ...existing, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
+      cwd, clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()),
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
-      owner: existing?.owner === existing?.sessionId ? existing.owner : env.sessionId, brief, state, delivery: "none",
+      owner: existing && existing.owner === existing.sessionId ? existing.owner : env.sessionId, brief, state, delivery: "none",
       restarts: existing?.restarts ?? 0, restore: existing?.restore ?? null, createdAt: existing?.createdAt ?? iso(env), updatedAt: iso(env), launchJob };
     // Spawn while holding the catalog lock; the child claims that same lock before reading its job.
     const pid = yield* Effect.callback<number, InputError>(resume => {
@@ -1946,7 +1946,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
         fd = openSync(log, "a", 0o600);
         const child = spawn(process.execPath, [join(env.musterRoot, "bin/muster-launch.ts"), dir, id], {
           detached: true, stdio: ["ignore", fd, fd],
-          env: { ...process.env, HOME: env.home, MUSTER_OWNER: env.sessionId, MUSTER_LAUNCH_PANE: env.paneId ?? "", MUSTER_WORKER_WORKTREE: env.workerWorktree },
+          env: { ...process.env, HOME: env.home, MUSTER_MACHINE: "local", MUSTER_OWNER: env.sessionId, MUSTER_LAUNCH_PANE: env.paneId ?? "", MUSTER_WORKER_WORKTREE: env.workerWorktree },
         });
         child.once("error", error => resume(Effect.fail(new InputError({ message: `launch spawn failed: ${error.message}` }))));
         child.once("spawn", () => { child.unref(); resume(child.pid ? Effect.succeed(child.pid) : input("launch process has no pid")); });
@@ -3033,7 +3033,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           try { process.kill(row.launchJob.pid, 0); alive = true; }
           catch (error) { alive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
         }
-        let state = row.state;
+        let state: AgentRow["state"] = row.state;
         const action = alive ? `launch job ${row.launchJob.id} running; log: ${row.launchJob.log}` : `launch job ${row.launchJob.id} died without an outcome; log: ${row.launchJob.log}; no automatic re-spawn`;
         if (!alive && act && row.owner === env.sessionId) state = yield* mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findRow(current, row.name);
