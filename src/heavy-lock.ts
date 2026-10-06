@@ -6,8 +6,8 @@ import { createActor, createMachine } from "xstate";
 import { randomBytes } from "node:crypto";
 
 /**
- * Bounded full gates per machine, with load/memory admission. Eight parallel
- * replay gates once drove load to 350. Atomic mkdir slots retain dead-holder
+ * Bounded full gates per machine: slots and a memory floor admit; load is reported, never
+ * a gate (Joel, 2026-10-06: "let the machine fuckin cook"). Atomic mkdir slots retain dead-holder
  * takeover; exclusive deploy holds drain every slot and take the legacy lock.
  */
 export function heavyLockPath(home: string): string {
@@ -457,17 +457,15 @@ function settings(options: HeavyOptions) {
   };
 }
 
-export function admissionReason(sample: MachineSample, minFreeGB: number, bypassLoad = false): string | null {
+/** Only memory refuses admission; slots bound concurrency. Load stays in status as information. */
+export function admissionReason(sample: MachineSample, minFreeGB: number): string | null {
   if (![sample.cores, sample.load, sample.freeGB].every(Number.isFinite) || sample.cores <= 0 || sample.load < 0 || sample.freeGB < 0) return "machine load/memory unavailable";
-  const reasons: string[] = [];
-  if (!bypassLoad && sample.load > sample.cores * 2.5) reasons.push(`load ${sample.load.toFixed(1)} above ${sample.cores * 2.5}`);
-  if (sample.freeGB < minFreeGB) reasons.push(`available memory ${sample.freeGB.toFixed(1)} GB below ${minFreeGB} GB`);
-  return reasons.length ? reasons.join("; ") : null;
+  return sample.freeGB < minFreeGB ? `available memory ${sample.freeGB.toFixed(1)} GB below ${minFreeGB} GB` : null;
 }
 
-function pressureReason(adapter: HeavyAdapter, minFreeGB: number, bypassLoad = false): string | null {
+function pressureReason(adapter: HeavyAdapter, minFreeGB: number): string | null {
   try {
-    return admissionReason(adapter.sample(), minFreeGB, bypassLoad);
+    return admissionReason(adapter.sample(), minFreeGB);
   } catch (error) {
     return `machine load/memory unavailable: ${error instanceof Error ? error.message : String(error)}`;
   }
@@ -609,7 +607,7 @@ function acquireHeavy(options: HeavyOptions, command: string, ticket?: string, p
   reapExclusive(options);
   const blocked = blocker(exclusivePendingPath(options.home)) ?? blocker(lock, true);
   if (blocked) return { ok: false, reason: blocked };
-  const pressure = pressureReason(adapter, minFreeGB, priority);
+  const pressure = pressureReason(adapter, minFreeGB);
   if (pressure) return { ok: false, reason: pressure };
   const queue = heavyQueueState(options, ticket, true);
   if (priority) {
@@ -892,7 +890,7 @@ export function heavySnapshot(options: HeavyOptions, now = Date.now()): HeavySna
 
 export function heavyStatus(options: HeavyOptions, now = Date.now()): string {
   const snap = heavySnapshot(options, now);
-  const lines = [`heavy slots: ${snap.slots} + 1 deploy`, `grants: ${snap.grants.length}/4 live`, `load: ${snap.load.toFixed(1)} (limit ${snap.loadLimit}); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
+  const lines = [`heavy slots: ${snap.slots} + 1 deploy`, `grants: ${snap.grants.length}/4 live`, `load: ${snap.load.toFixed(1)} (not an admission rule); available memory: ${snap.availableGB.toFixed(1)} GB (minimum ${snap.minFreeGB} GB)`];
   for (const slot of [...snap.holders, snap.deploySlot, snap.exclusivePending]) {
     if (slot.name === "deploy-0" && slot.held && slot.holder?.mode === "priority") {
       lines.push(`${slot.name}: ⚡ window ${slot.window}; ${describeHolder(slot.holder, now, slot.health ?? "unknown")}${slot.stale ? "; stale" : ""}; hold age ${slot.exclusiveAgeSeconds}s; left ${slot.remainingSeconds}s`);

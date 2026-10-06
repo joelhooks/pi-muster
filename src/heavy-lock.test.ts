@@ -144,7 +144,7 @@ describe("desk heavy grants", () => {
     expect(request.attempt().ok).toBe(false);
     expect(existsSync(`${heavyLockPath(options.home)}.deploy-0`)).toBe(false);
     if (held.ok) held.release();
-    for (const sample of [{ cores: 16, load: 41, freeGB: 64 }, { cores: 16, load: 20, freeGB: 15 }]) {
+    for (const sample of [{ cores: 16, load: 20, freeGB: 15 }]) {
       const pressure = heavy.grantRequest({ ...granted, adapter: { ...adapter, sample: () => sample } }, "pressure");
       expect(pressure.attempt()).toMatchObject({ ok: false, reason: expect.stringMatching(/load|memory/) });
       pressure.release();
@@ -307,7 +307,7 @@ describe("heavy FIFO queue", () => {
     for (const older of [0, 2]) {
       const options = setup();
       for (let n = 0; n < older; n++) ticket(options, n + 1);
-      const result = cli(options, ["--wait", "6", "--", "true", "x".repeat(300)], "({ cores: 16, load: 41, freeGB: 64 })", true, null, preload);
+      const result = cli(options, ["--wait", "6", "--", "true", "x".repeat(300)], "({ cores: 16, load: 20, freeGB: 15 })", true, null, preload);
       expect(result.status).toBe(75);
       expect(result.stderr).toContain(`POLL:${older === 0 ? 1000 : 5000}`);
       const payload = JSON.parse(result.stderr.split('\n').find((line) => line.startsWith('TICKET:'))!.slice(7));
@@ -321,7 +321,7 @@ describe("heavy FIFO queue", () => {
 
   it("a --wait 0 refusal never creates a ticket", () => {
     const options = setup();
-    expect(cli(options, ["--wait", "0", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })").status).toBe(75);
+    expect(cli(options, ["--wait", "0", "--", "true"], "({ cores: 16, load: 20, freeGB: 15 })").status).toBe(75);
     expect(existsSync(join(options.home, ".local/state/muster/heavy-queue"))).toBe(false);
   });
 
@@ -329,14 +329,14 @@ describe("heavy FIFO queue", () => {
     const options = setup();
     const flags = exclusive ? ["--exclusive"] : [];
     const dir = join(options.home, ".local/state/muster/heavy-queue");
-    const success = cli(options, [...flags, "--wait", "2", "--", "true"], "calls === 1 ? { cores: 16, load: 41, freeGB: 64 } : { cores: 16, load: 20, freeGB: 64 }", true);
+    const success = cli(options, [...flags, "--wait", "2", "--", "true"], "calls === 1 ? { cores: 16, load: 20, freeGB: 15 } : { cores: 16, load: 20, freeGB: 64 }", true);
     expect(success.status, success.stderr).toBe(0);
     expect(success.stderr).toContain("waiting: position 1 of 1");
     expect(readdirSync(dir)).toEqual([]);
-    const timeout = cli(options, [...flags, "--wait", "1", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })", true);
+    const timeout = cli(options, [...flags, "--wait", "1", "--", "true"], "({ cores: 16, load: 20, freeGB: 15 })", true);
     expect(timeout.status).toBe(75);
     expect(readdirSync(dir)).toEqual([]);
-    const signal = cli(options, [...flags, "--wait", "10", "--", "true"], "({ cores: 16, load: 41, freeGB: 64 })", false, exclusive ? "test-deploy" : null, "const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => realTimer(() => process.emit('SIGTERM'), 0);");
+    const signal = cli(options, [...flags, "--wait", "10", "--", "true"], "({ cores: 16, load: 20, freeGB: 15 })", false, exclusive ? "test-deploy" : null, "const realTimer = globalThis.setTimeout; globalThis.setTimeout = (fn, ms) => realTimer(() => process.emit('SIGTERM'), 0);");
     expect(signal.status).toBe(128);
     expect(readdirSync(dir)).toEqual([]);
   });
@@ -919,8 +919,11 @@ describe("machine pressure admission", () => {
     expect(() => parseMemInfo("MemFree: 20 kB")).toThrow();
   });
 
-  it("refuses high load or low memory without creating slots", () => {
-    for (const sample of [{ cores: 16, load: 41, freeGB: 64 }, { cores: 16, load: 20, freeGB: 15 }]) {
+  it("admits high load and refuses low memory without creating slots", () => {
+    const busy = tryAcquireHeavy({ ...setup(), adapter: { ...adapter, sample: () => ({ cores: 16, load: 99, freeGB: 64 }) } }, "gate");
+    expect(busy.ok).toBe(true);
+    if (busy.ok) busy.release();
+    for (const sample of [{ cores: 16, load: 20, freeGB: 15 }]) {
       const options = setup();
       const result = tryAcquireHeavy({ ...options, adapter: { ...adapter, sample: () => sample } }, "gate");
       expect(result.ok).toBe(false);
@@ -936,7 +939,7 @@ describe("machine pressure admission", () => {
   });
 
   it("does not reserve an exclusive fence under pressure; slots can run when pressure clears", () => {
-    for (const sample of [{ cores: 16, load: 41, freeGB: 64 }, { cores: 16, load: 20, freeGB: 15 }]) {
+    for (const sample of [{ cores: 16, load: 20, freeGB: 15 }]) {
       const options = setup();
       let current = sample;
       const pressured = { ...options, adapter: { ...adapter, sample: () => current } };
@@ -957,13 +960,13 @@ describe("machine pressure admission", () => {
     }
   });
 
-  it("CLI waits and prints why under fake high load or low memory, then starts", () => {
-    for (const pressure of ["{ cores: 16, load: 41, freeGB: 64 }", "{ cores: 16, load: 20, freeGB: 15 }"]) {
+  it("CLI waits and prints why under fake low memory, then starts", () => {
+    for (const pressure of ["{ cores: 16, load: 20, freeGB: 15 }"]) {
       for (const flags of [[], ["--exclusive"]]) {
         const options = setup();
         const result = cli(options, [...flags, "--wait", "0.05", "--", process.execPath, "-e", "console.log('started')"], `calls === 1 ? ${pressure} : { cores: 16, load: 20, freeGB: 64 }`, true);
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stderr).toMatch(/waiting: position 1 of 1, .*; (load|available memory)/);
+        expect(result.stderr).toMatch(/waiting: position 1 of 1, .*; available memory/);
         expect(result.stdout).toContain("started");
         expect(existsSync(heavyLockPath(options.home))).toBe(false);
         expect(existsSync(exclusivePendingPath(options.home))).toBe(false);
