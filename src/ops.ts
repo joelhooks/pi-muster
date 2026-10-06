@@ -1949,7 +1949,8 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
       if (!readable) return yield* input(`cwd ${cwd} does not exist`);
     }
     if (!params.cwd && !parent?.cwd && !existing?.cwd && !params.clone) return yield* input("a new agent needs cwd or clone: true");
-    if (params.clone && !lane.repo) return yield* input("clone: true needs a lane repo");
+    // Clones come from the lane repo or, as in the launch path itself, the project dir.
+    if (params.clone && !(lane.repo ?? project.dir)) return yield* input("clone: true needs a lane repo or project dir");
     const brief = params.brief ?? existing?.brief ?? null;
     if (brief && (machine === "local" || params.brief)) {
       yield* requireAbsolute("brief", brief);

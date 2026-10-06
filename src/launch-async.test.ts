@@ -150,6 +150,14 @@ describe("asynchronous launch admission", () => {
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
   });
 
+  it("admits clone: true on a lane without its own repo, falling back to the project dir", async () => {
+    const { h, dir, request } = await setup();
+    const { cwd: _cwd, ...rest } = request;
+    const result = await runWith(h, agentLaunch(dir, { ...rest, clone: true }));
+    expect(result.jobId).toBeTruthy();
+    expect(spawned.calls).toHaveLength(1);
+  });
+
   it("refuses closed lanes before recording or spawning", async () => {
     const { h, dir, request } = await setup();
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, lanes: project.lanes.map(lane => ({ ...lane, state: "closed" as const })) }, null] as const)));
