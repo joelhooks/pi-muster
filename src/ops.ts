@@ -1296,6 +1296,23 @@ export interface LaneOpenInput {
   readonly deployRule?: string | undefined;
 }
 
+const guardLaneRepo = (project: Project, slug: string, repo: string | undefined) => {
+  const lane = project.lanes.find(lane => lane.slug === slug);
+  if (repo === undefined || repo === (lane?.repo ?? project.dir)) return Effect.void;
+  const active = project.agents.filter(row => row.lane === slug && row.state !== "closed" &&
+    (row.clone || row.state === "launching" || row.state === "restoring"));
+  return active.length ? input(`lane ${slug} repo change refused: active clone or launch (${active.map(row => row.name).join(", ")}); close those workers before changing the source`) : Effect.void;
+};
+
+const laneFieldChanges = (latest: Lane, next: Lane) => {
+  const changes: string[] = [];
+  if (next.repo !== latest.repo) changes.push("repo updated");
+  if (next.base !== latest.base) changes.push("base updated");
+  if (next.deployLevel !== latest.deployLevel) changes.push("deployLevel updated");
+  if (next.deployRule !== latest.deployRule) changes.push("deployRule updated");
+  return changes;
+};
+
 export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: number | undefined }) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -1321,17 +1338,20 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const goal = params.goal ?? existing?.goal;
     if (label === undefined || goal === undefined) return yield* input(`new lane ${slug} requires goal and label`);
     if (wantOpen && existing?.state === "proposed" && params.goal === undefined) return yield* input(`first opening lane ${slug} requires goal`);
+    yield* guardLaneRepo(project, slug, params.repo);
     if (existing?.state === "open" && existing.root) {
       const live = yield* locatePane(existing.root);
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
         const requestedBase = params.base;
         // An open lane is never archived; this also repairs a lane reopened before reopening cleared the flag.
-        const lane = requestedBase === undefined && params.deployLevel === undefined && !existing.archived ? existing : yield* mutate(dir, (current) => {
-          const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
-          const next = { ...latest, ...deployPatch, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
-          return Effect.succeed([withLane(current, next), next] as const);
-        });
-        return { lane, created: false, note: null, outcome: project.outcome };
+        const { lane, note } = requestedBase === undefined && params.repo === undefined && params.deployLevel === undefined && !existing.archived
+          ? { lane: existing, note: null } : yield* mutate(dir, current => Effect.gen(function* () {
+            yield* guardLaneRepo(current, slug, params.repo);
+            const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
+            const next = { ...latest, ...deployPatch, repo: params.repo ?? latest.repo, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
+            return [withLane(current, next), { lane: next, note: `changed: ${laneFieldChanges(latest, next).join(", ") || "none"}` }] as const;
+          }));
+        return { lane, created: false, note, outcome: project.outcome };
       }
     }
     if (wantOpen && !project.spaceId) return yield* input("the project has no space; run project_open with space or createSpace first");
@@ -1358,13 +1378,15 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       updatedAt: iso(env),
     };
     if (!wantOpen) {
-      const { lane, note } = yield* mutate(dir, (current) => {
+      const { lane, note } = yield* mutate(dir, current => Effect.gen(function* () {
+        yield* guardLaneRepo(current, slug, params.repo);
         const stored = current.lanes.find((candidate) => candidate.slug === slug);
         const latest = stored ?? base;
         const next = {
           ...latest,
           ...deployPatch,
           ...(rank !== undefined ? { rank } : {}),
+          repo: params.repo ?? latest.repo,
           base: params.base ?? latest.base,
           goal: latest.state === "proposed" ? params.goal ?? latest.goal : latest.goal,
           label: latest.state === "proposed" ? params.label ?? latest.label : latest.label,
@@ -1373,22 +1395,21 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         if (next.rank !== latest.rank) changes.push(`rank ${latest.rank ?? "unset"}→${next.rank}`);
         if (next.goal !== latest.goal) changes.push("goal updated");
         if (next.label !== latest.label) changes.push("label updated");
-        if (next.base !== latest.base) changes.push("base updated");
-        if (next.deployLevel !== latest.deployLevel) changes.push("deployLevel updated");
-        if (next.deployRule !== latest.deployRule) changes.push("deployRule updated");
+        changes.push(...laneFieldChanges(latest, next));
         // A pure re-rank preserves the brief timestamp; amendments share one locked write.
         const rankOnly = stored?.state === "proposed" && rank !== undefined && changes.every(change => change.startsWith("rank "));
         const lane = rankOnly ? next : { ...next, updatedAt: iso(env) };
         const note = lane.state === "proposed"
           ? `changed: ${stored ? changes.join(", ") || "none" : "created"}; stored goal: ${lane.goal.slice(0, 200)}`
           : null;
-        return Effect.succeed([withLane(current, lane), { lane, note }] as const);
-      });
+        return [withLane(current, lane), { lane, note }] as const;
+      }));
       return { lane, created: !existing, note, outcome: project.outcome };
     }
     const event = base.state === "open" ? null : base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
     // Reserve WIP under the catalog lock before opening any pane. Other callers see it immediately.
     yield* mutate(dir, current => Effect.gen(function* () {
+      yield* guardLaneRepo(current, slug, params.repo);
       const latest = current.lanes.find(lane => lane.slug === slug) ?? base;
       if (params.kind === "retro" && latest.kind !== "retro") return yield* input(`lane ${slug} is kind ${latest.kind}, not retro; choose a fresh slug for the retro lane`);
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
@@ -1402,7 +1423,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const liveRoot = root ? yield* locatePane(root) : null;
     let note: string | null = null;
     if (!liveRoot) {
-      const tab = yield* tabCreate(project.spaceId as string, base.repo ?? project.dir, base.label).pipe(Effect.tapError(() =>
+      const tab = yield* tabCreate(project.spaceId as string, params.repo ?? base.repo ?? project.dir, base.label).pipe(Effect.tapError(() =>
         mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findLane(current, slug);
           const state = base.state === "open" ? latest.state : yield* stepLane(slug, latest.state, { type: "OPEN_FAILED", prior: base.state });
@@ -1417,6 +1438,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     }
     const lane = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
+        yield* guardLaneRepo(current, slug, params.repo);
         const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
         const state = latest.state;
         const next: Lane = {
