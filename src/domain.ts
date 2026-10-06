@@ -226,6 +226,7 @@ export const AgentLaunchRequest = Schema.Struct({
   name: AgentName,
   machine: Schema.optional(Schema.String), role: Schema.optional(Role), lane: Schema.optional(Schema.String),
   label: Schema.optional(Schema.String), cwd: Schema.optional(Schema.String), clone: Schema.optional(Schema.Boolean),
+  hydrate: Schema.optional(Schema.Boolean),
   from: Schema.optional(Schema.String), side: Schema.optional(Schema.Boolean), at: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String), thinking: Schema.optional(Thinking),
   appendSystemPrompt: Schema.optional(Schema.Array(Schema.String)), skills: Schema.optional(Schema.Array(Schema.String)),

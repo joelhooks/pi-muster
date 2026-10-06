@@ -184,7 +184,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const cloneNotes: string[] = [];
     if (params.clone && params.action !== "restore") {
       // onRemote supplies the remote Proc, so branch selection reads the remote source.
-      const allocated = yield* cloneFor(remoteSource, name, lane, project.mode, machine.workerWorktree);
+      const allocated = yield* cloneFor(remoteSource, name, lane, project.mode, machine.workerWorktree, params.hydrate === true);
       cwd = yield* requireAbsolute("remote clone", allocated.path);
       clone = { source, branch: allocated.branch, base: allocated.base };
       cloneNotes.push(...allocated.notes);
@@ -1670,6 +1670,7 @@ export interface AgentLaunchInput {
   readonly label?: string | undefined;
   readonly cwd?: string | undefined;
   readonly clone?: boolean | undefined;
+  readonly hydrate?: boolean | undefined;
   readonly from?: string | undefined;
   readonly at?: string | undefined;
   readonly model?: string | undefined;
@@ -1696,7 +1697,7 @@ const warmForkSource = (dir: string, parent: AgentRow | null, at: string | undef
     catch: error => input(String(error instanceof Error ? error.message : error)),
   });
 
-const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?: string) =>
+const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?: string, hydrate = false) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const proc = yield* Proc;
@@ -1716,7 +1717,8 @@ const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?:
         return yield* input(`cannot resolve source local branch in ${source}: ${branch.stderr.trim()}`);
       }
     }
-    const out = yield* must(workerWorktree, ["create", source, slug, ...(requestedBase !== null ? ["--base", requestedBase] : [])], { cwd: source, timeoutMs: 300_000 });
+    // --hydrate runs one locked offline install under the heavy lock, so it may queue.
+    const out = yield* must(workerWorktree, ["create", source, slug, ...(requestedBase !== null ? ["--base", requestedBase] : []), ...(hydrate ? ["--hydrate"] : [])], { cwd: source, timeoutMs: hydrate ? 1_800_000 : 300_000 });
     const path = /^worktree:\s+(.+)$/m.exec(out)?.[1]?.trim();
     const branch = /^branch:\s+(.+)$/m.exec(out)?.[1]?.trim();
     if (!path || !branch) return yield* input(`worker-worktree.sh create printed no worktree/branch:\n${out}`);
@@ -2135,6 +2137,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     if (!params.cwd && !parent?.cwd && !existing?.cwd && !params.clone) return yield* input("a new agent needs cwd or clone: true");
     // Clones come from the lane repo or, as in the launch path itself, the project dir.
     if (params.clone && !(lane.repo ?? project.dir)) return yield* input("clone: true needs a lane repo or project dir");
+    if (params.hydrate && !params.clone) return yield* input("hydrate: true needs clone: true");
     const brief = params.brief ?? existing?.brief ?? null;
     if (brief && (machine === "local" || params.brief)) {
       yield* requireAbsolute("brief", brief);
@@ -2338,7 +2341,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         cwd = existing?.cwd ?? cwd;
       } else if (params.clone) {
         const source = lane.repo ?? project.dir;
-        const allocated = yield* cloneFor(source, name, lane, project.mode);
+        const allocated = yield* cloneFor(source, name, lane, project.mode, undefined, params.hydrate === true);
         skillNotes.push(...allocated.notes);
         cwd = allocated.path;
         clone = { source, branch: allocated.branch, base: allocated.base };

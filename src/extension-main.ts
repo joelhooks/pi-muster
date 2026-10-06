@@ -418,6 +418,7 @@ export default function muster(host: ExtensionAPI) {
       label: Type.Optional(Type.String({ description: "Pane and session name: an emoji plus the role" })),
       cwd: Type.Optional(Type.String()),
       clone: Type.Optional(Type.Boolean({ description: "Allocate a rift clone of the lane repo as cwd" })),
+      hydrate: Type.Optional(Type.Boolean({ description: "With clone: run worker-worktree.sh create --hydrate (one locked offline pnpm install) for clones that will commit" })),
       from: Type.Optional(Type.String({ description: "fork or side-desk adopt: the parent row" })),
       side: Type.Optional(Type.Boolean({ description: "fork: split a design-only side desk from its desk parent in the same tab. adopt: re-point an existing running desk to its side parent and lane after checking the live pane tab; never touches the pane." })),
       at: Type.Optional(Type.String({ description: "fork: context label or entry id in the parent session; omitted forks the full session" })),

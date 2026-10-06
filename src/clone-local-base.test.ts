@@ -38,6 +38,7 @@ printf 'worktree: %s\\nbranch: worker/%s\\nbase: %s %s\\n' "$target" "$3" "$base
     // SSH is simulated by executing its quoted command against separate source paths.
     if (command === "ssh") {
       const script = args.at(-1)!;
+      if (script.includes(h.workerWorktree)) calls.push(["ssh", script]);
       if (script.includes("muster-prerequisites")) return Effect.succeed({ code: 0, stdout: "", stderr: "" });
       return proc.run("sh", ["-c", script], { ...options, cwd: h.home });
     }
@@ -65,7 +66,7 @@ printf 'worktree: %s\\nbranch: worker/%s\\nbase: %s %s\\n' "$target" "$3" "$base
   })) : program);
   await run(projectOpen({ dir, slug: "probe", outcome: "test", reviewTrigger: "weekly", nextAction: "test", criticalPath: [], space: "w1", ephemeral: true, mode }));
   await run(laneOpen(dir, { slug: "work", label: "work", goal: "test", ...(base ? { base } : {}) }));
-  const launch = () => run(agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", clone: true, noSkills: true, ...(remote ? { machine: "remote" } : {}) }));
+  const launch = (extra: { hydrate?: boolean } = {}) => run(agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", clone: true, noSkills: true, ...extra, ...(remote ? { machine: "remote" } : {}) }));
   const commit = (repo: string) => {
     writeFileSync(join(repo, "landed"), "landed locally\n");
     sh(repo, "add", "landed"); sh(repo, "commit", "-qm", "owner lands locally");
@@ -82,6 +83,16 @@ describe.each([false, true])("clone local base (remote=%s)", remote => {
     expect(sh(result.row.cwd, "rev-parse", "HEAD").trim()).toBe(head);
     expect(result.row.clone?.base).toEqual({ ref: "main", sha: head });
     expect(result.notes).toContain(`base: main ${head.slice(0, 7)} (local, rift-merge)`);
+  });
+  it("passes --hydrate to worker-worktree.sh create only when asked", async () => {
+    const plain = await fixture("rift-merge", undefined, remote);
+    const create = (calls: Array<readonly string[]>) => calls.map(args => args.join(" ")).find(line => /\bcreate\b/.test(line));
+    await plain.launch();
+    expect(create(plain.calls)).toBeDefined();
+    expect(create(plain.calls)).not.toContain("--hydrate");
+    const hydrated = await fixture("rift-merge", undefined, remote);
+    await hydrated.launch({ hydrate: true });
+    expect(create(hydrated.calls)).toMatch(/--hydrate'?\s*$|--hydrate'? /);
   });
   it("lets an explicit lane base win", async () => {
     const s = await fixture("rift-merge", "origin/main", remote);
