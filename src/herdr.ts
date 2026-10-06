@@ -142,7 +142,7 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
       if (matched) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message after intended prompt: no verified bridge provenance; first assistant refused" };
       const text = typeof message.content === "string" ? message.content : (message.content ?? []).filter(block => block.type === "text").map(block => block.text ?? "").join(" ");
       if (/^\[paste #\d+(?: (?:\+\d+ lines|\d+ chars))?\]$/.test(text.trim())) return { state: "unproven", failureKind: "substituted_message", detail: "user entry is only a paste marker" };
-      if (exactPrompt ? normalize(text) !== normalize(prompt) : !normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message instead of intended prompt: no verified bridge provenance; substituted message refused" };
+      if (exactPrompt ? normalize(text) !== normalize(prompt) : !normalize(text).startsWith(normalize(prompt).slice(0, 80))) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message does not match the intended prompt: no verified bridge provenance; substituted message refused" };
       matched = true;
     } else if (message.role === "assistant") {
       if (!matched) return { state: "unproven", failureKind: "wrong_boundary", detail: "wrong boundary: assistant precedes intended prompt" };
@@ -150,7 +150,7 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
       return { state: "proven", detail: "matching user entry and clean first assistant" };
     }
   }
-  return { state: "waiting", failureKind: matched ? "assistant_timeout" : "missing_prompt", detail: matched ? "no first turn within 90 s" : "intended prompt missing: no matching user entry within 90 s" };
+  return { state: "waiting", failureKind: matched ? "assistant_timeout" : "missing_prompt", detail: matched ? "no first turn within 90 s" : "no matching user entry within 90 s" };
 }
 
 const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false) => Effect.gen(function* () {
@@ -191,11 +191,11 @@ const startBoundary = (path: string, inheritedEntries: number) => Effect.gen(fun
     if (slice._tag === "Success") return slice.success;
     if (slice.failure.code !== "journal_missing" && slice.failure.code !== "wrong_boundary") return yield* slice.failure;
     const elapsed = Math.max(slept, env.now().getTime() - started);
-    if (elapsed >= FIRST_TURN_MS) return yield* new HerdrFailure({ operation: "first-turn", code: slice.failure.code, message: slice.failure.code === "wrong_boundary" ? slice.failure.message : "discovery timeout: no session journal within 90 s" });
+    if (elapsed >= FIRST_TURN_MS) return yield* new HerdrFailure({ operation: "first-turn", code: slice.failure.code, message: slice.failure.code === "wrong_boundary" ? slice.failure.message : "no session journal entries within 90 s" });
     const delay = Math.min(1000, FIRST_TURN_MS - elapsed);
     yield* env.sleep(delay);
     slept += delay;
-    if (Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return yield* new HerdrFailure({ operation: "first-turn", code: slice.failure.code, message: slice.failure.code === "wrong_boundary" ? slice.failure.message : "discovery timeout: no session journal within 90 s" });
+    if (Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return yield* new HerdrFailure({ operation: "first-turn", code: slice.failure.code, message: slice.failure.code === "wrong_boundary" ? slice.failure.message : "no session journal entries within 90 s" });
   }
 });
 

@@ -36,7 +36,10 @@ describe("restart's own first message", () => {
   });
   it("names a missing intended prompt", async () => {
     const { h, file } = fixture("");
-    expect(await runWith(h, proveStartedPrompt(file, prompt, 1))).toMatchObject({ state: "unproven", detail: expect.stringContaining("intended prompt missing") });
+    // Replay an empty fresh slice: exercise the existing deadline without 90
+    // subprocess launches whose wall time depends on fleet load.
+    const proc = { run: () => Effect.succeed({ code: 0, stdout: JSON.stringify({ size: 19, text: "" }), stderr: "" }) };
+    expect(await runWith(h, proveStartedPrompt(file, prompt, 1).pipe(Effect.provideService(Proc, proc)))).toMatchObject({ state: "unproven", failureKind: "missing_prompt", detail: "no matching user entry within 90 s" });
   });
   it("reads a 33 MiB inherited fork using the first-turn budget, not a 10 s subprocess cap", async () => {
     const { h, file } = fixture("");
@@ -52,7 +55,13 @@ describe("restart's own first message", () => {
     const { h, file } = fixture(user(prompt) + assistant());
     const proc = { run: () => Effect.succeed({ code: 1, stdout: "", stderr: "private output withheld" }) };
     expect(await runWith(h, proveStartedPrompt(file, prompt, 1).pipe(Effect.provideService(Proc, proc)))).toMatchObject({ state: "unproven", detail: expect.stringContaining("unreadable slice") });
-    expect(await runWith(h, proveStartedPrompt(file, prompt, 20))).toMatchObject({ state: "unproven", detail: expect.stringContaining("wrong boundary") });
+    const missingBoundary = { run: () => Effect.succeed({ code: 3, stdout: "", stderr: "" }) };
+    expect(await runWith(h, proveStartedPrompt(file, prompt, 20).pipe(Effect.provideService(Proc, missingBoundary)))).toMatchObject({ state: "unproven", failureKind: "wrong_boundary", detail: expect.stringContaining("wrong boundary") });
+  });
+  it("distinguishes journal discovery timeout without leaking subprocess output", async () => {
+    const { h, file } = fixture("");
+    const proc = { run: () => Effect.succeed({ code: 2, stdout: "", stderr: "private sentinel" }) };
+    expect(await runWith(h, proveStartedPrompt(file, prompt, 1).pipe(Effect.provideService(Proc, proc)))).toMatchObject({ state: "unproven", failureKind: "discovery_timeout", detail: "no session journal entries within 90 s" });
   });
   it("proves only the complete intended prompt and its clean first assistant", async () => {
     const { h, file } = fixture(user(prompt) + assistant());
