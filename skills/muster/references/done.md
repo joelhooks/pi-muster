@@ -24,7 +24,7 @@ After proving or closing a lane, pull the top ranked lane when its WIP slot open
 - **Caller map:** before changing an entry point's contract, name its callers and what each expects.
 - **Acceptance:** check the rendered output and name the renderer's file. For launch changes, the rendered output is the exact line typed into the pane.
 - **Consistency:** the owner rereads acceptance lines for contradictions, such as "messages byte-identical" plus "add a hint to the messages".
-- **Checks:** regression tests, a red proof, and the full gate.
+- **Checks:** regression tests, a red proof, and the full gate via `muster-heavy gate --wait 1200 -- <cmd>`. Use `--host flagg` for host-bound checks. Keep light `pack:check` and `smoke` local. Commit first, or pass `--tree <git write-tree SHA>` for an uncommitted merge.
 - **Deploy level:** effective level (0 locked, 1 prove, 2 ship-and-watch, 3 jfdi), its source, and any rubric rule lowering it.
 - **Deploy:** how it goes live, the flag state, and the rollback. Level 0 cites a resolved approval desk item. Levels 2 and 3 include `Rollback: ...`; level 2 also includes `Watch: ...` in delivery evidence.
 - **Proof:** the live check the owner should run and where its evidence will be recorded.

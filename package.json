@@ -128,6 +128,7 @@
     "src/domain.ts",
     "src/errors.ts",
     "src/fleet.ts",
+    "src/fleet-gate.ts",
     "src/heavy-lock.ts",
     "src/herdr.ts",
     "src/intercom.ts",

@@ -6,10 +6,28 @@ import { resolve } from "node:path";
 import { createHeavyGrant, listHeavyGrants, revokeHeavyGrant, GrantRefused, grantRequest, logExclusive, enqueueHeavy, ExclusiveRefused, exclusiveRequest, priorityRequest, heavyQueueState, heavySnapshot, heavyStatus, reapExclusive, tryAcquireHeavy, waitAge } from "../src/heavy-lock.ts";
 import type { HeavyOptions } from "../src/heavy-lock.ts";
 
-const usage = "usage: muster-heavy grant <label> [--ttl <duration>] | grant --list | grant --revoke <id> | muster-heavy status [--json] [--reap] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
+const usage = "usage: muster-heavy grant <label> [--ttl <duration>] | grant --list | grant --revoke <id> | muster-heavy status [--json] [--reap] | muster-heavy gate [--wait <seconds>] [--tree <sha>] [--host auto|flagg|pennywise] -- <command> [args...] | muster-heavy [--exclusive] [--wait <seconds>] -- <command> [args...]";
 
 /** Explicit timer and cap options let tests exercise deadlines without long sleeps. */
 export async function runHeavy(args: string[], options: HeavyOptions, timers = { setTimeout, clearTimeout }) {
+  if (args[0] === "gate") {
+    try {
+      // Keep non-gate jobs on the existing lightweight startup path.
+      const [{ Effect }, { Proc, liveProc }, { parseHeavyGate, runFleetGate, streamingGateProc }] = await Promise.all([
+        import("effect"), import("../src/runtime.ts"), import("../src/fleet-gate.ts"),
+      ]);
+      const gate = parseHeavyGate(args.slice(1));
+      if (options.window !== undefined || options.grant !== undefined) throw new Error("gate cannot use deploy windows or local grants; unset MUSTER_DEPLOY_WINDOW and MUSTER_HEAVY_GRANT");
+      const result = await Effect.runPromise(runFleetGate({ ...gate, cwd: process.cwd(), home: options.home }).pipe(Effect.provideService(Proc, streamingGateProc(liveProc))));
+      console.error(result.note);
+      if (result.kind === "fleet") process.exit(result.code);
+      // Only missing/off runners use the existing local admission and signal handling.
+      return runHeavy(["--wait", String(gate.wait), "--", ...gate.command], options, timers);
+    } catch (error) {
+      console.error(`muster-heavy gate: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(2);
+    }
+  }
   if (args[0] === "grant") {
     try {
       if (args.length === 2 && args[1] === "--list") console.log(JSON.stringify(listHeavyGrants(options), null, 2));
