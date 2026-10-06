@@ -4,9 +4,9 @@ import { Effect, Schema, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { catalogCommsSender, createComms, NetworkComms } from "./comms.ts";
 import { consumeNetworkMailbox, networkConfigPath, networkIdentityPath, networkProvisionName, networkRecipient, provisionNetworkAgent } from "./comms-network.ts";
-import { decodeDeskRouteReceipt } from "./domain.ts";
+import { decodeDeskRouteReceipt, decodeNetworkPeers } from "./domain.ts";
 import { networkCatalogPeers, resolveDeskRoute, sendDesk } from "./desk-route.ts";
-import { projectOpen } from "./ops.ts";
+import { laneOpen, projectOpen } from "./ops.ts";
 import { deliverOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { registryPath } from "./registry.ts";
@@ -67,6 +67,15 @@ describe("qualified desk routing", () => {
       await expect(Effect.runPromise(adapter!.recipient("foreign/desk"))).rejects.toThrow();
       expect(await Effect.runPromise(createComms({ ...options, adapterEnv: () => "intercom" }).mode!())).toBe("intercom");
       service.dispose();
+      const remote = createComms({ ...options, projectDir: join(h.home, "no-local-catalog"), adapterEnv: () => "network",
+        networkSender: () => ({ agent: "worker", session: "worker-session" }),
+        networkPeers: () => decodeNetworkPeers({ "worker-session": "worker", "alpha-session": "alpha/desk" }),
+      });
+      await Effect.runPromise(remote.mode!());
+      expect(adapter?.sender()).toEqual({ agent: "worker", session: "worker-session" });
+      expect(await Effect.runPromise(adapter!.recipient("worker-session"))).toBe("worker");
+      expect(await Effect.runPromise(adapter!.recipient("alpha-session"))).toBe("alpha/desk");
+      remote.dispose();
     } finally { vi.doUnmock("./comms-network.ts"); }
   });
   it("uses only an exact provision-name DID override and ignores unrelated keys", async () => {
@@ -105,6 +114,10 @@ describe("qualified desk routing", () => {
     expect(() => resolveDeskRoute(h.home, dir, "beta-session")).toThrow();
     await runWith(h, mutate(peer, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, role: "worker" as const })) }, undefined] as const)));
     expect(() => resolveDeskRoute(h.home, dir, "beta/desk")).toThrow("desk or role");
+    await runWith(h, laneOpen(peer, { slug: "desk", label: "Desk role", goal: "role", kind: "role" }));
+    expect(() => resolveDeskRoute(h.home, dir, "beta/desk")).toThrow("desk or role"); // Role lanes do not grant workers desk authority.
+    await runWith(h, mutate(peer, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, role: "judge" as const })) }, undefined] as const)));
+    expect(resolveDeskRoute(h.home, dir, "beta/desk").row.role).toBe("judge");
     writeFileSync(registryPath(h.home), `${JSON.stringify({ slug: "foreign", dir: peer })}\n`);
     expect(() => resolveDeskRoute(h.home, dir, "foreign/desk")).toThrow("foreign");
   });

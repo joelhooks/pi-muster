@@ -17,7 +17,7 @@ export function resolveDeskRoute(home: string, dir: string, to: string) {
   const project = decodeProject(JSON.parse(readFileSync(projectPath(known?.dir ?? dir), "utf8")));
   if (project.slug !== address.project) throw new CommsError("desk_send unknown or foreign project alias");
   const row = project.agents.find(row => row.name === address.row && row.state !== "closed");
-  if (!row || (row.role !== "desk" && project.lanes.find(lane => lane.slug === row.lane)?.kind !== "role")) throw new CommsError("desk_send target must be a live desk or role row");
+  if (!row || row.role === "worker" || (row.role !== "desk" && project.lanes.find(lane => lane.slug === row.lane)?.kind !== "role")) throw new CommsError("desk_send target must be a live desk or role row");
   return { project, row, identity: networkRowIdentity(project, row) };
 }
 
