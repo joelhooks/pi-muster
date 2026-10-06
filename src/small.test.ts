@@ -183,7 +183,7 @@ describe("heavy-job lock", () => {
     const lock = join(mkdtempSync(join(tmpdir(), "lock-")), "heavy.lock");
     const cores = vi.spyOn(machineAdapter, "performanceCores").mockReturnValue(12);
     try {
-      expect(heavySlots({})).toBe(4);
+      expect(heavySlots({})).toBe(8);
       expect(heavySlots({ MUSTER_HEAVY_SLOTS: "2" })).toBe(2);
     } finally { cores.mockRestore(); }
     const held = [tryAcquireSlot(lock, "a", 2), tryAcquireSlot(lock, "b", 2)];
