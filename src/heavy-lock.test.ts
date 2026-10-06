@@ -4,11 +4,11 @@ import { hostname, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { decodeHeavyJob } from "./domain.ts";
-import { finishJob, heavyReport, heavySnapshot, jobsPath, parseCpuTime, parseProcessSamples, parseSince, readJobs, registerJob, sampleJobs, treeSample } from "./heavy-lock.ts";
+import { finishJob, heavyReport, heavySnapshot, jobsPath, machineAdapter, parseMemInfo, parseVmStat, parseCpuTime, parseProcessSamples, parseSince, readJobs, registerJob, sampleJobs, treeSample } from "./heavy-lock.ts";
 
 const homes: string[] = [];
 function setup() { const home = mkdtempSync(join(tmpdir(), "heavy-jobs-test-")); homes.push(home); return { home }; }
-afterEach(() => { vi.unstubAllEnvs(); for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 function cli(home: string, args: string[], env: Record<string, string> = {}) {
   return spawnSync(process.execPath, [resolve("bin/muster-heavy.ts"), ...args], { encoding: "utf8", timeout: 20000, env: { ...process.env, HOME: home, ...env } });
 }
@@ -54,6 +54,26 @@ describe("job registry", () => {
       expect(holder.holder.mode).toBe("job"); expect(holder.held).toBe(true);
     }
     expect(snapshot.holders.map((row: { holder: { command: string } }) => row.holder.command)).toContain("sh -c fc-contract sleep 20");
+  });
+});
+
+describe("available memory compatibility", () => {
+  it("includes large inactive and speculative vm_stat pages in the status contract", () => {
+    const fixture = "Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 16384.\nPages inactive: 2818048.\nPages speculative: 131072.\n";
+    const freeGB = parseVmStat(fixture);
+    expect(freeGB).toBe(45.25); // 0.25 GB free + 43 GB inactive + 2 GB speculative.
+    vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 16, load: 20, freeGB });
+    expect(heavySnapshot(setup()).availableGB).toBe(45.25);
+  });
+  it("uses Linux MemAvailable rather than MemFree", () => {
+    const freeGB = parseMemInfo("MemFree: 1048576 kB\nMemAvailable: 47185920 kB\n");
+    expect(freeGB).toBe(45);
+    vi.spyOn(machineAdapter, "sample").mockReturnValue({ cores: 16, load: 20, freeGB });
+    expect(heavySnapshot(setup()).availableGB).toBe(45);
+  });
+  it("rejects missing memory data rather than falling back to raw free memory", () => {
+    expect(() => parseVmStat("unreadable")).toThrow("cannot read available memory");
+    expect(() => parseMemInfo("MemFree: 1048576 kB\n")).toThrow("cannot read MemAvailable");
   });
 });
 

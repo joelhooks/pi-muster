@@ -1,4 +1,4 @@
-import { freemem, hostname, loadavg } from "node:os";
+import { availableParallelism, freemem, hostname, loadavg, platform } from "node:os";
 import { basename, join } from "node:path";
 import { mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -6,6 +6,36 @@ import { randomUUID } from "node:crypto";
 import { transition } from "xstate";
 import { decodeHeavyJob, decodeHeavySampleCache, type HeavyJob } from "./domain.ts";
 import { heavyJobMachine } from "./machines.ts";
+
+/** Host telemetry only: never consulted by local job execution. */
+export interface MachineSample {
+  readonly cores: number;
+  readonly load: number;
+  readonly freeGB: number;
+}
+
+export function parseVmStat(text: string): number {
+  const pageSize = Number(/page size of (\d+) bytes/.exec(text)?.[1]);
+  const pages = ["Pages free", "Pages inactive", "Pages speculative"].map((label) => Number(new RegExp(`${label}:\\s+(\\d+)`).exec(text)?.[1]));
+  if (!pageSize || pages.some((value) => !Number.isFinite(value))) throw new Error("cannot read available memory from vm_stat");
+  return pages.reduce((sum, value) => sum + value, 0) * pageSize / 1024 ** 3;
+}
+
+export function parseMemInfo(text: string): number {
+  const kb = Number(/^MemAvailable:\s+(\d+)\s+kB$/m.exec(text)?.[1]);
+  if (!Number.isFinite(kb)) throw new Error("cannot read MemAvailable from /proc/meminfo");
+  return kb * 1024 / 1024 ** 3;
+}
+
+export const machineAdapter: { readonly sample: () => MachineSample } = {
+  sample: () => ({
+    cores: availableParallelism(),
+    load: loadavg()[0] ?? 0,
+    freeGB: platform() === "darwin"
+      ? parseVmStat(execFileSync("vm_stat", [], { encoding: "utf8", timeout: 2000 }))
+      : platform() === "linux" ? parseMemInfo(readFileSync("/proc/meminfo", "utf8")) : freemem() / 1024 ** 3,
+  }),
+};
 
 export interface HeavyOptions {
   readonly home: string;
@@ -168,8 +198,9 @@ function configuredMemoryFloor(value = process.env.MUSTER_HEAVY_MIN_FREE_GB): nu
 }
 export function heavySnapshot(options: HeavyOptions, now = (options.now ?? Date.now)()) {
   const jobs = liveJobs(options, now);
-  return { slots: jobs.length + 1, load: loadavg()[0] ?? 0, loadLimit: Number.MAX_SAFE_INTEGER,
-    availableGB: freemem() / 1024 ** 3, minFreeGB: configuredMemoryFloor(),
+  const sample = machineAdapter.sample();
+  return { slots: jobs.length + 1, load: sample.load, loadLimit: Number.MAX_SAFE_INTEGER,
+    availableGB: sample.freeGB, minFreeGB: configuredMemoryFloor(),
     holders: jobs.map((job, index) => ({ name: `slot-${index}`, held: true, holder: { pid: job.pid, host: job.host, command: job.command, startedAt: job.startedAt, mode: "job" as const }, ageSeconds: Math.max(0, Math.floor((now - Date.parse(job.startedAt)) / 1000)), stale: false })),
     exclusivePending: { name: "exclusive-pending", held: false, holder: null, ageSeconds: null, stale: false } satisfies HeavySlotView,
     jobs };
