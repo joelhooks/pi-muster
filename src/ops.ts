@@ -1180,7 +1180,9 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         // A pure re-rank preserves the brief timestamp; amendments share one locked write.
         const rankOnly = stored?.state === "proposed" && rank !== undefined && changes.every(change => change.startsWith("rank "));
         const lane = rankOnly ? next : { ...next, updatedAt: iso(env) };
-        const note = `changed: ${stored ? changes.join(", ") || "none" : "created"}; stored goal: ${lane.goal.slice(0, 200)}`;
+        const note = lane.state === "proposed"
+          ? `changed: ${stored ? changes.join(", ") || "none" : "created"}; stored goal: ${lane.goal.slice(0, 200)}`
+          : null;
         return Effect.succeed([withLane(current, lane), { lane, note }] as const);
       });
       return { lane, created: !existing, note, outcome: project.outcome };
