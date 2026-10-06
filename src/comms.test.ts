@@ -124,7 +124,7 @@ describe("Comms port", () => {
     expect(await Effect.runPromise(comms.send("live", "opaque"))).toMatchObject({ status: "failed", detail: expect.stringContaining("NetworkComms") });
     const operations: readonly Effect.Effect<unknown, CommsError>[] = [comms.ask("live", "opaque", { timeoutMs: 10 }), comms.reply("record", "opaque"), comms.resolve("live"), comms.wake("live"), comms.sessions()];
     for (const operation of operations) {
-      await expect(Effect.runPromise(operation.pipe(Effect.asVoid))).rejects.toBeInstanceOf(Unsupported);
+      await expect(Effect.runPromise(operation.pipe(Effect.asVoid))).rejects.toThrow(/NetworkComms missing or invalid config: .*network.json/);
     }
     expect(events.requests).toEqual([]); expect(events.listeners.size).toBe(0);
     expect(await Effect.runPromise(NetworkComms.send("live", "opaque"))).toMatchObject({ status: "failed" });

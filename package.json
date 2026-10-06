@@ -56,6 +56,7 @@
     "src/autoland.ts",
     "src/compact.ts",
     "src/comms.ts",
+    "src/comms-network.ts",
     "src/vendor/rat-king-envelope/canonical.ts",
     "src/vendor/rat-king-envelope/envelope.ts",
     "src/vendor/rat-king-envelope/es256.ts",
