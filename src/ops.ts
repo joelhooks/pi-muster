@@ -357,7 +357,22 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
   }
   const lane = project.lanes.find(lane => lane.slug === row.lane);
   const generated = [...DEFAULT_GENERATED, ...(lane?.generated ?? []), ".wzrrd/"];
-  const other = dirty.filter(path => !isGenerated(path, generated) && !/^\.brain\/data\/[^/]+-status\.json$/.test(path));
+  // Lane declarations and the small runtime-junk list are disposable even
+  // when the source differs. Everything else needs a byte comparison.
+  const candidates = dirty.filter(path => !isGenerated(path, lane?.generated ?? []) &&
+    !isGenerated(path, [".pi/notes-bridge/", ".rift"]) && !/\.(log|pid)$/.test(path));
+  const comparable = candidates.filter(path => isGenerated(path, generated));
+  // Run on the row's machine, not the desk's filesystem. Missing paths,
+  // directories, symlinks and read failures do not establish byte equality.
+  const identical = comparable.length ? yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.String)),
+    yield* must("node", ["-e", `const fs=require('node:fs'), {join}=require('node:path');
+const [clone,source,json]=process.argv.slice(1);
+const same=JSON.parse(json).filter(path=>{try{
+  const a=join(clone,path), b=join(source,path);
+  return fs.lstatSync(a).isFile() && fs.lstatSync(b).isFile() && fs.readFileSync(a).equals(fs.readFileSync(b));
+}catch{return false}});
+process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(comparable)], { cwd: source, timeoutMs: 10_000 })) : [];
+  const other = candidates.filter(path => !identical.includes(path));
   if (other.length) return { safe: false, force: false, detail: `dirty: ${row.cwd}; non-harness paths ${other.map(path => JSON.stringify(path)).sort().join(", ")}; HEAD ${head}` };
   // Immutable per-HEAD refs keep earlier rescues when a restored worker advances.
   const rescueRef = `refs/muster/rescue/${row.name}-${head}`;
@@ -3545,7 +3560,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
-    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes, tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
