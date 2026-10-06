@@ -105,6 +105,9 @@ describe("schemas", () => {
     expect(isTempPath("/private/var/folders/ab/T/x")).toBe(true);
     expect(isTempPath("/Users/me/Code/x")).toBe(false);
     expect(isTempPath("/tmpfoo")).toBe(false);
+    expect(isTempPath("/Volumes/gate-tmp")).toBe(true);
+    expect(isTempPath("/Volumes/gate-tmp/run-123-abc/project")).toBe(true);
+    expect(isTempPath("/Volumes/gate-tmpx")).toBe(false);
   });
 });
 

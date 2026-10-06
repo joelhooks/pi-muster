@@ -658,7 +658,7 @@ export const decodeDeskItem = Schema.decodeUnknownSync(DeskItem);
 export const decodeAgentName = Schema.decodeUnknownSync(AgentName);
 export const decodeSlug = Schema.decodeUnknownSync(Slug);
 
-const TEMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"];
+const TEMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/", "/Volumes/gate-tmp/"];
 
 /** `/tmp` dies on reboot; a pilot project lost every handoff and runner there. */
 export function isTempPath(path: string): boolean {
