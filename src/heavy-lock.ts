@@ -843,7 +843,9 @@ export interface HeavySlotView {
 
 /** `muster-heavy status --json` is a contract: fleet-compute placement reads slots, load, loadLimit,
  * availableGB, minFreeGB, holders[] (name, held, holder{pid,host,command,startedAt,mode}, ageSeconds, stale)
- * and exclusivePending. Adding fields is safe; ping the fleet desk before renaming or removing these. */
+ * and exclusivePending. Adding fields is safe; ping the fleet desk before renaming or removing these.
+ * holder.mode is a free string (slot, grant, exclusive, ...): placement treats only "exclusive" as exclusive.
+ * Ping the fleet desk before adding a mode that should block placement (fleet-compute 7dd8cc8). */
 export interface HeavySnapshot {
   readonly slots: number;
   readonly load: number;
