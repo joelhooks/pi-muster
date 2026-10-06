@@ -9,6 +9,8 @@ import { ownerTimelineData, projectFlowLine } from "./owner-view.ts";
 
 export const OWNER_CURSOR = "muster-owner-queue-cursor";
 export const OWNER_NOTE = "muster-owner-note";
+// A persisted policy key would require a catalog writer-schema bump.
+const QUIET_WAKE_MS = 15 * 60_000;
 type Entry = { type?: string; customType?: string; data?: unknown };
 export interface OwnerInboxInput { since?: string; kinds?: readonly OwnerKind[]; limit?: number; ack?: boolean }
 /** Feed-generator seam: mentions first, latest progress, then all other posts by author. */
@@ -64,7 +66,13 @@ export function ownerFeed(deps: { session: string; home: string; project?: strin
         deps.sendMessage(message([item], deps.session, false, deps.home, deps.project, via, mentioned), { triggerTurn: true });
         delivered.add(item.uri); save();
       }
-      return items.length;
+      if (items.length) return items.length;
+      // Mentions keep priority; quiet posts get at most one wake on the existing poll.
+      if (!records.some(({ item }) => Date.now() - Date.parse(item.createdAt) >= QUIET_WAKE_MS)) return 0;
+      deps.sendMessage(message(records.map(r => r.item), deps.session, true, deps.home, deps.project, via, mentioned), { triggerTurn: true });
+      for (const { item } of records) delivered.add(item.uri);
+      save();
+      return 1;
     },
     beforeTurn() {
       lifecycle.send({ type: "START" });
