@@ -333,6 +333,22 @@ export const Packet = Schema.Struct({
   updatedAt: Iso,
 });
 export type Packet = typeof Packet.Type;
+
+/** Append-only correction sidecar; not part of the versioned catalog. */
+const LandingOutcome = Schema.Literals(["committed", "rejected", "no_changes"]);
+export const PacketCorrection = Schema.Struct({
+  packetId: Schema.String,
+  at: Iso,
+  by: Schema.String,
+  from: Schema.Struct({
+    state: LandingOutcome,
+    outcome: LandingOutcome,
+    landedAs: Schema.NullOr(Schema.String),
+    evidence: Schema.NullOr(Schema.String),
+  }),
+  reason: Schema.String.check(Schema.isMinLength(1)),
+});
+export const decodePacketCorrection = Schema.decodeUnknownSync(PacketCorrection);
 export const RemotePacket = Schema.Struct({ project: Slug, machine: Schema.String, packet: Packet, reportText: Schema.String });
 export const decodeRemotePacket = Schema.decodeUnknownSync(RemotePacket);
 export const decodeAgentRow = Schema.decodeUnknownSync(AgentRow);
