@@ -17,6 +17,7 @@ import { createComms } from "./comms.ts";
 import {
   agentClose,
   agentLaunch,
+  finishRestart,
   deskPost,
   laneClose,
   laneOpen,
@@ -76,12 +77,36 @@ function unreadable(fields: readonly (string | undefined)[]) {
   return { ...text(message, { ok: false, samples: samples.slice(0, 3) }), isError: true as const };
 }
 
+type RestartExit = { sessionId: string; dir: string; restart: Parameters<typeof finishRestart>[1] };
+
+/** No durable flag: only a proven self-restart in this process can arm its exit. */
+export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>) {
+  let ending: RestartExit | undefined;
+  let closing: RestartExit | undefined;
+  pi.on("agent_end", (_event, ctx) => {
+    if (!ending || ending.sessionId !== ctx.sessionManager.getSessionId()) return;
+    closing = ending;
+    ending = undefined;
+    ctx.shutdown();
+  });
+  pi.on("session_shutdown", async (_event, ctx) => {
+    const pending = closing;
+    closing = undefined;
+    if (!pending || pending.sessionId !== ctx.sessionManager.getSessionId()) return;
+    await close(pending, ctx);
+  });
+  return (pending: RestartExit) => { ending ??= pending; };
+}
+
 export default function muster(host: ExtensionAPI) {
   const pi = withDeskWrites(withVersionSkew(host, createVersionSkew({ root: MUSTER_ROOT })));
   const env = process.env;
   const role = env.MUSTER_ROLE;
   const worker = role === "worker";
   const comms = new Map<string, ReturnType<typeof createComms>>();
+  const armRestartExit = registerRestartExit(pi, async (pending, ctx) => {
+    await Effect.runPromise(finishRestart(pending.dir, pending.restart).pipe(Effect.provide(layer(ctx))));
+  });
 
   registerCompaction(pi, env);
 
@@ -371,11 +396,11 @@ export default function muster(host: ExtensionAPI) {
     name: "agent_launch",
     label: "Muster agent launch",
     description:
-      "Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with name and pane re-binds an existing owned row to its live Pi session or direct fork without starting a process or sending input. adopt with side: true, from and lane keeps the side-desk path: re-point a running desk already moved into the parent's tab.",
+      "restart with name forks an owned row onto current code in a new pane, proves its first turn, rebinds the row and owned rows, then retires the old Pi (self-restart quits at agent_end). Never reload or restart in place. Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with name and pane re-binds an existing owned row to its live Pi session or direct fork without starting a process or sending input. adopt with side: true, from and lane keeps the side-desk path: re-point a running desk already moved into the parent's tab.",
     promptSnippet: "agent_launch: launch, fork, restore, or adopt a live lane agent",
     parameters: Type.Object({
       project: ProjectParam,
-      action: StringEnum(["launch", "fork", "restore", "adopt"] as const),
+      action: StringEnum(["launch", "fork", "restore", "adopt", "restart"] as const),
       machine: Type.Optional(Type.String({ description: "Saved Muster machine; default local. Fork and restore reuse the row machine." })),
       name: Type.String({ description: "Catalog and Herdr agent name, [a-z][a-z0-9_-]{0,31}" }),
       role: Type.Optional(StringEnum(["desk", "hawk", "boss", "worker", "judge"] as const)),
@@ -401,16 +426,17 @@ export default function muster(host: ExtensionAPI) {
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;
-      return run(ctx, signal, agentLaunch(projectDir(ctx, project), rest), (result) =>
-        [
+      return run(ctx, signal, agentLaunch(projectDir(ctx, project), rest), (result) => {
+        if ("endSession" in result && result.endSession) armRestartExit({ sessionId: ctx.sessionManager.getSessionId(), dir: projectDir(ctx, project), restart: result.endSession });
+        return [
           `${result.row.name} ${result.row.state} in pane ${result.row.pane?.paneId} (${result.row.pane?.openedByMuster ? "opened by Muster" : "caller's pane"}), readiness ${result.readiness}.`,
           `session ${result.row.sessionId}${result.sessionIdMatched === false ? " (differs from the minted id; Herdr's is recorded)" : ""}: ${result.row.sessionFile ?? "file not found yet"}`,
           result.proof ? `delivery: ${result.proof.state}${result.proof.state === "unproven" ? ` — ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent",
           ...(result.row.clone ? [`clone base: ${result.row.clone.base ? `${result.row.clone.base.ref} ${result.row.clone.base.sha}` : "unproven (old catalog)"}`] : []),
           `argv: pi ${result.argv.join(" ")}`,
           ...result.notes,
-        ].join("\n"),
-      );
+        ].join("\n");
+      });
     },
   });
 
@@ -525,7 +551,10 @@ export default function muster(host: ExtensionAPI) {
       takeover: Type.Optional(Type.Boolean({ description: "Adopt all non-closed catalog rows into this owner session without restarting or closing their panes. Explicit handover; works with act: false." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      return run(ctx, signal, projectStatus(projectDir(ctx, params.project), { act: params.act, takeover: params.takeover }), (result) => [result.board, ...result.notes].join("\n"));
+      return run(ctx, signal, projectStatus(projectDir(ctx, params.project), { act: params.act, takeover: params.takeover }), (result) => {
+        if (result.endSession) armRestartExit({ sessionId: ctx.sessionManager.getSessionId(), dir: projectDir(ctx, params.project), restart: result.endSession });
+        return [result.board, ...result.notes].join("\n");
+      });
     },
   });
 

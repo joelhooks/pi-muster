@@ -57,7 +57,7 @@ assert.ok(tool, "Muster tool survives the stale reload");
 const context = { sessionManager: { getSessionFile: () => join(root, "session.jsonl") } };
 const result = await tool.definition.execute("proof", {}, undefined, undefined, context as never);
 const text = result.content.find(item => item.type === "text");
-assert.ok(text?.type === "text" && text.text.includes("dependencies changed") && text.text.includes("pi --session"));
+assert.ok(text?.type === "text" && text.text.includes("dependencies changed") && text.text.includes('agent_launch action: "restart"'));
 
 if (process.argv[2]) {
   const version: unknown = JSON.parse(readFileSync(join(oldEffect, "package.json"), "utf8"));
