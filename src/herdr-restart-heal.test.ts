@@ -124,6 +124,19 @@ it.each([false, true])("reconciles a same-pane lane root conservatively (act=%s)
   s.untouched();
 });
 
+it("explicit takeover with preview changes only owners, not bindings or lifecycle", async () => {
+  const s = await setup("running", true);
+  await s.patch({ owner: "former-owner" });
+  const before = await runWith(s.h, load(s.dir));
+  await runWith(s.h, projectStatus(s.dir, { act: false, takeover: true }));
+  const after = await runWith(s.h, load(s.dir));
+  expect(after.agents).toEqual(before.agents.map(row => ({ ...row, owner: s.h.sessionId })));
+  expect(after.lanes).toEqual(before.lanes);
+  expect(after.packets).toEqual(before.packets);
+  expect(s.h.herdr.calls.some(call => call.method === "workspace.report_metadata")).toBe(false);
+  s.untouched();
+});
+
 it("preview does not interrupt a missing pane or write the catalog", async () => {
   const s = await setup("running", true);
   s.h.herdr.panes.delete(s.pane.pane_id);

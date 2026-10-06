@@ -2787,7 +2787,6 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const intercom = yield* Comms;
     const act = params.act !== false;
     const ingestion = act ? yield* ingestRemotePackets(dir) : { notes: [] as string[], failedMachines: new Set<string>() };
-    if (!act && params.takeover) return yield* input("takeover requires act: true");
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.gen(function* () {
@@ -2809,6 +2808,9 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       if (!root || lane.state === "closed" || !project.agents.some(row => row.lane === lane.slug && row.owner === env.sessionId && row.state !== "closed")) continue;
       const pane = byId.get(root.paneId);
       if (!pane || pane.workspace_id !== project.spaceId || pane.tab_id !== lane.tabId || pane.terminal_id === root.terminalId) continue;
+      // A reused pane id with an unrelated shell is not evidence of a restored root.
+      if (pane.agent !== "pi" || pane.agent_session?.kind !== "path" || !project.agents.some(row =>
+        row.lane === lane.slug && row.owner === env.sessionId && row.state !== "closed" && row.sessionFile === pane.agent_session?.value)) continue;
       const note = `rebound lane ${lane.slug} root → ${pane.pane_id} (same pane and tab; close authority released)`;
       recoveryNotes.push(`${note}${act ? "" : " (preview; act: false)"}`);
       if (act) yield* mutate(dir, current => Effect.gen(function* () {
