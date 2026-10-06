@@ -1,10 +1,10 @@
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { ownerFeed, ownerTimeline, OWNER_CURSOR } from "./owner-feed.ts";
-import { appendOwnerItem, ownerPath, deliverOwnerItem, readerFresh, writeReader, writeReaderAsync, mentions, readOwnerQueue, canonicalJson, forwardOwner, resolveOwner } from "./owner-queue.ts";
+import { appendOwnerItem, ownerPath, deliverOwnerItem, readerFresh, writeReader, writeReaderAsync, mentions, readOwnerQueue, canonicalJson, forwardOwner, ownerRoute, resolveOwner } from "./owner-queue.ts";
 import { OwnerTimelineView, ownerInboxText, readOwnerTimelineData } from "./owner-view.ts";
 import type { OwnerItem } from "./domain.ts";
 
@@ -64,9 +64,38 @@ describe("owner queue", () => {
     const result = await Effect.runPromise(deliverOwnerItem({ owner: "old", home: f.home, session: "probe", project: "p", item: { author: "probe", kind: "question", title: "wake", mention: "old" }, send: to => { calls.push(to); return Effect.succeed({ status: "delivered" as const }); } }));
     expect(calls).toEqual(["owner"]); expect(result.woke).toBe(true);
     expect(mentions(readOwnerQueue("owner", f.home).items[0]!.item, "owner")).toBe(true);
-    expect(() => forwardOwner({ from: "owner", to: "old", project: "p", home: f.home })).toThrow(/cycle/);
+    forwardOwner({ from: "a", to: "b", project: "p", home: f.home });
+    forwardOwner({ from: "b", to: "owner", project: "p", home: f.home });
+    expect(() => forwardOwner({ from: "owner", to: "a", project: "p", home: f.home })).toThrow("owner forward cycle");
     for (let n = 3; n >= 0; n--) forwardOwner({ from: "a" + n, to: n === 3 ? "owner" : "a" + (n + 1), project: "p", home: f.home });
     expect(() => forwardOwner({ from: "extra", to: "a0", project: "p", home: f.home })).toThrow(/depth/);
+  });
+  it("reclaims a direct reverse forward, preserves its file and leaves other projects and sessions alone", () => {
+    const f = fixture();
+    forwardOwner({ from: "owner", to: "old", project: "p", home: f.home });
+    forwardOwner({ from: "owner", to: "other", project: "q", home: f.home });
+    forwardOwner({ from: "third", to: "other", project: "p", home: f.home });
+    const directory = dirname(ownerPath("owner", f.home));
+    const before = new Map(readdirSync(directory).map(name => [name, readFileSync(join(directory, name), "utf8")]));
+    const reverseName = [...before.keys()].find(name => name.startsWith("owner.") && JSON.parse(before.get(name)!).project === "p")!;
+    expect(forwardOwner({ from: "old", to: "owner", project: "p", home: f.home })).toBe("retired reverse forward owner → old for p");
+    const retired = readdirSync(directory).filter(name => name.startsWith(`${reverseName}.retired-`));
+    expect(retired).toHaveLength(1);
+    expect(readFileSync(join(directory, retired[0]!), "utf8")).toBe(before.get(reverseName));
+    for (const [name, text] of before) if (name !== reverseName) expect(readFileSync(join(directory, name), "utf8")).toBe(text);
+    expect(ownerRoute("old", f.home, "p").owner).toBe("owner");
+    expect(ownerRoute("owner", f.home, "q").owner).toBe("other");
+    forwardOwner({ from: "old", to: "owner", project: "p", home: f.home });
+    expect(readdirSync(directory).filter(name => name.includes(".retired-"))).toHaveLength(1);
+  });
+  it("does not retire an indirect three-session cycle", () => {
+    const f = fixture();
+    forwardOwner({ from: "a", to: "b", project: "p", home: f.home });
+    forwardOwner({ from: "b", to: "c", project: "p", home: f.home });
+    const directory = dirname(ownerPath("a", f.home));
+    const before = readdirSync(directory).map(name => [name, readFileSync(join(directory, name), "utf8")]);
+    expect(() => forwardOwner({ from: "c", to: "a", project: "p", home: f.home })).toThrow("owner forward cycle");
+    expect(readdirSync(directory).map(name => [name, readFileSync(join(directory, name), "utf8")])).toEqual(before);
   });
   it("catalog resolution falls back visibly when unavailable", () => {
     const f = fixture();

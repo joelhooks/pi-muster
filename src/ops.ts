@@ -1944,7 +1944,8 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
         catch: error => input(`restore skills: ${String(error)}`),
       });
       skillNotes.push(...restoredSkills.notes);
-      row = { ...existing, profile: { ...restoredProfile, skills: restoredSkills.paths }, cwd, sessionFile, owner: env.sessionId, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
+      if (existing.owner !== existing.sessionId && existing.owner !== env.sessionId) skillNotes.push(`restore moved external owner ${existing.owner} → ${env.sessionId} for ${project.slug}`);
+      row = { ...existing, profile: { ...restoredProfile, skills: restoredSkills.paths }, cwd, sessionFile, owner: existing.owner === existing.sessionId ? existing.sessionId : env.sessionId, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
     } else {
       const relaunchable = existing?.state === "planned" || existing?.state === "failed" || (existing?.state === "interrupted" && !existing.sessionFile);
       if (existing && !relaunchable) {
@@ -2072,7 +2073,10 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const piReceiptId = env.createId();
     yield* mutate(dir, (current) => Effect.gen(function* () {
       const previous = current.agents.find(agent => agent.name === row.name);
-      if (previous) yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
+      if (previous && !(params.action === "restore" && previous.owner === previous.sessionId)) {
+        const note = yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
+        if (note) skillNotes.push(note);
+      }
       return [withRow(current, row), row] as const;
     }));
 
@@ -2145,6 +2149,7 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       pane: launched.binding,
       sessionFile: launched.sessionFile,
       sessionId: actualId ?? row.sessionId,
+      ...(params.action === "restore" && existing?.owner === existing?.sessionId ? { owner: actualId ?? row.sessionId } : {}),
       restore,
     });
 
@@ -2861,9 +2866,13 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const act = params.act !== false;
     const ingestion = act ? yield* ingestRemotePackets(dir) : { notes: [] as string[], failedMachines: new Set<string>() };
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
+    const handoverNotes: string[] = [];
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.gen(function* () {
-          for (const row of current.agents) if (row.state !== "closed") yield* recordOwnerForward(row.owner, env.sessionId, current.slug, env);
+          for (const row of current.agents) if (row.state !== "closed") {
+            const note = yield* recordOwnerForward(row.owner, env.sessionId, current.slug, env);
+            if (note) handoverNotes.push(note);
+          }
           const next = { ...current, agents: current.agents.map((row) =>
             row.state === "closed" ? row : { ...row, owner: env.sessionId, updatedAt: iso(env) }) };
           return [next, next] as const;
@@ -2872,7 +2881,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const spaces = yield* workspaceList();
     const missingSpace = project.spaceId && !spaces.some(space => space.workspace_id === project.spaceId)
       ? `project ${project.slug}: workspace ${project.spaceId} is missing; space not rebuilt` : null;
-    const recoveryNotes: string[] = missingSpace ? [missingSpace] : [];
+    const recoveryNotes: string[] = [...handoverNotes, ...(missingSpace ? [missingSpace] : [])];
     const panes = yield* paneList();
     const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
     const byTerminal = new Map(panes.map((pane) => [pane.terminal_id, pane]));

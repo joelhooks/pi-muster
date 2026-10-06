@@ -62,11 +62,22 @@ export function ownerRoute(owner: string, home = homedir(), project?: string) {
 }
 export function forwardOwner(params: { from: string; to: string; project: string; home: string; at?: string }) {
   if (params.from === params.to) return;
+  decodeOwnerSession(params.from); decodeOwnerSession(params.to);
+  const reversePath = forwardPath(params.to, params.home, params.project);
+  let retired: string | undefined;
+  try {
+    const reverse = decodeOwnerForward(JSON.parse(readFileSync(reversePath, "utf8")));
+    if (reverse.project !== params.project) throw new Error("owner forward project mismatch");
+    if (reverse.to === params.from) {
+      renameSync(reversePath, `${reversePath}.retired-${new Date().toISOString()}`);
+      retired = `retired reverse forward ${params.to} → ${params.from} for ${params.project}`;
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
   const route = ownerRoute(params.to, params.home, params.project);
   if (route.owner === params.from || route.sources.some(s => s.owner === params.from)) throw new Error("owner forward cycle");
   if (route.sources.length >= 4) throw new Error("owner forward depth exceeds 4");
   const existing = readForward(params.from, params.home, params.project);
-  if (existing?.to === params.to) return; // Never move the history boundary on a repeated takeover.
+  if (existing?.to === params.to) return retired; // Never move the history boundary on a repeated takeover.
   let heartbeatAt: string | undefined;
   try { heartbeatAt = decodeOwnerReader(JSON.parse(readFileSync(readerPath(params.from, params.home), "utf8"))).heartbeatAt; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -76,6 +87,7 @@ export function forwardOwner(params: { from: string; to: string; project: string
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const temp = `${path}.${process.pid}.tmp`;
   writeFileSync(temp, JSON.stringify(record), { mode: 0o600 }); renameSync(temp, path);
+  return retired;
 }
 /** The original records stay intact; source aliases carry routing and display context. */
 export function readOwnerSources(owner: string, home = homedir()) {
