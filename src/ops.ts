@@ -62,7 +62,7 @@ import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtim
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
-import { deliverOwnerItem, forwardOwner, ingestOwnerItem } from "./owner-queue.ts";
+import { deliverOwnerItem, forwardOwner, ingestOwnerItem, ownerRoute } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { retroCadence, retroJudgeModel } from "./retro-cadence.ts";
@@ -444,7 +444,7 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
   })).pipe(Effect.catch(error => Effect.succeed({ removed: false, detail: `clone kept: ${row.cwd}; ${error.message}` })));
   yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
-    yield* requireOwner(latest, env.sessionId, takeover);
+    yield* requireOwner(latest, env.sessionId, takeover, project.slug);
     if (latest.cwd !== row.cwd || latest.state !== "closed") return yield* input("clone row changed during retirement");
     const type = result.removed ? "CLONE_REMOVED" : "CLONE_KEPT";
     const prior = latestCloneEvent(latest);
@@ -487,7 +487,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
   }));
   const closed = yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
-    yield* requireOwner(latest, env.sessionId, params.takeover);
+    yield* requireOwner(latest, env.sessionId, params.takeover, project.slug);
     if (latest.sessionId !== row.sessionId || latest.pane?.terminalId !== row.pane?.terminalId) return yield* input("remote row changed during close; re-read it");
     const next = { ...latest, restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
     return [withRow(current, next), next] as const;
@@ -626,7 +626,7 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
   const env = yield* MusterEnv;
   return yield* mutate(dir, project => Effect.gen(function* () {
     const latest = yield* findRow(project, row.name);
-    yield* requireOwner(latest, env.sessionId, false);
+    yield* requireOwner(latest, env.sessionId, false, project.slug);
     if (latest.state !== row.state || latest.sessionId !== row.sessionId || latest.sessionFile !== row.sessionFile ||
         latest.pane?.terminalId !== row.pane?.terminalId || latest.machine !== row.machine) return yield* input("row changed during adoption; retry");
     const holder = adoptionHolder(project, latest, pane);
@@ -1837,7 +1837,7 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     if (params.side !== true) return yield* input("adopt requires side: true and from: the parent desk");
     const parent = yield* sideParent(project, params.from, env.sessionId);
     const row = yield* findRow(project, params.name);
-    yield* requireOwner(row, env.sessionId, false);
+    yield* requireOwner(row, env.sessionId, false, project.slug);
     if (row.name === parent.name || row.state !== "running" || !row.pane) return yield* input("adopt needs an existing running row with its own pane");
     const lane = yield* findLane(project, params.lane ?? parent.lane);
     if (lane.slug !== parent.lane || lane.state !== "open") return yield* input("adopt lane must be the parent desk's open lane");
@@ -1850,7 +1850,7 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     yield* guardPaneBinding(project, row, binding);
     const adopted = yield* mutate(dir, current => Effect.gen(function* () {
       const latest = yield* findRow(current, row.name);
-      yield* requireOwner(latest, env.sessionId, false);
+      yield* requireOwner(latest, env.sessionId, false, project.slug);
       if (latest.state !== "running" || latest.lane !== row.lane || !latest.pane || !sharesPane(binding, latest.pane)) return yield* input("row changed during adoption; retry");
       const latestParent = yield* sideParent(current, parent.name, env.sessionId);
       const latestLane = yield* findLane(current, lane.slug);
@@ -1919,7 +1919,7 @@ export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; repl
 const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(`restart-${old.name.slice(0, 23)}`, Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
-  if (!self) yield* requireOwner(old, env.sessionId, false);
+  if (!self) yield* requireOwner(old, env.sessionId, false, project.slug);
   if (!old.pane || !old.sessionFile) return yield* input("restart needs a live pane and current session file");
   const oldPane = old.pane;
   const state = yield* stepAgent(old.name, old.state, { type: "RESTARTED" });
@@ -1969,7 +1969,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       row = yield* mutate(dir, current => Effect.gen(function* () {
         const latest = yield* findRow(current, old.name);
         if (latest.sessionId !== old.sessionId || latest.sessionFile !== old.sessionFile || latest.owner !== old.owner || latest.state !== old.state || latest.pane?.terminalId !== oldPane.terminalId) return yield* input("row changed during restart; old agent untouched, retry");
-        if (!self) yield* requireOwner(latest, env.sessionId, false);
+        if (!self) yield* requireOwner(latest, env.sessionId, false, project.slug);
         yield* guardPaneBinding(current, latest, binding);
         const next = withRow(current, row);
         const agents = next.agents.map(other => other.owner === old.sessionId ? { ...other, owner: id, restore: other.restore ? { ...other.restore, env: { ...other.restore.env, MUSTER_OWNER: id } } : null, updatedAt: iso(env) } : other);
@@ -2211,7 +2211,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         return yield* adoptSideDesk(dir, project, params);
       }
       const row = yield* findRow(project, name);
-      yield* requireOwner(row, env.sessionId, false);
+      yield* requireOwner(row, env.sessionId, false, project.slug);
       if (!params.pane) return yield* input("adopt requires name and pane");
       if (row.state === "closed") return yield* input(`cannot adopt a ${row.state} row`);
       const adopt = Effect.gen(function* () {
@@ -2503,15 +2503,24 @@ export interface AgentCloseInput {
   readonly takeover?: boolean | undefined;
 }
 
-const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined) =>
-  row.owner === sessionId || takeover
-    ? Effect.void
-    : Effect.fail(
-        new GuardFailed({
-          guard: "owner",
-          message: `${row.name} belongs to owner session ${row.owner}. Only its owner acts on its pane; pass takeover: true to adopt it.`,
-        }),
-      );
+const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined, project: string) =>
+  Effect.gen(function* () {
+    if (row.owner === sessionId || takeover) return;
+    // Closed rows retain their historical owner. A project-scoped forward gives
+    // its replacement authority without rewriting the catalog or live-pane rules.
+    if (row.state === "closed") {
+      const env = yield* MusterEnv;
+      const owner = yield* Effect.try({
+        try: () => ownerRoute(row.owner, env.home, project).owner,
+        catch: error => new GuardFailed({ guard: "owner", message: `cannot resolve ${row.name}'s owner: ${String(error)}` }),
+      });
+      if (owner === sessionId) return;
+    }
+    return yield* new GuardFailed({
+      guard: "owner",
+      message: `${row.name} belongs to owner session ${row.owner}. Only its owner acts on its pane; pass takeover: true to adopt it.`,
+    });
+  });
 
 export const agentClose = (dir: string, params: AgentCloseInput) =>
   Effect.gen(function* () {
@@ -2519,7 +2528,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     const project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "agent_close");
     const row = yield* findRow(project, params.name);
-    yield* requireOwner(row, env.sessionId, params.takeover);
+    yield* requireOwner(row, env.sessionId, params.takeover, project.slug);
     if (row.state === "closed") {
       if (params.force && !forceCloseAllowed(project, row.name)) return yield* input("force close requires a verified packet or one recorded as landed");
       const retirement = yield* retireClone(dir, row, params.force === true, params.takeover);
@@ -2567,7 +2576,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     // current row, not the snapshot read before closing the pane.
     const closed = yield* mutate(dir, (current) => Effect.gen(function* () {
       const latest = yield* findRow(current, row.name);
-      yield* requireOwner(latest, env.sessionId, params.takeover);
+      yield* requireOwner(latest, env.sessionId, params.takeover, project.slug);
       if (latest.state === "closed") return [current, latest] as const;
       if (latest.sessionId !== row.sessionId || latest.cwd !== row.cwd || latest.pane?.terminalId !== row.pane?.terminalId) {
         return yield* new GuardFailed({ guard: "close-binding", message: `${row.name} changed session or pane during close; re-read its row before closing the replacement` });
@@ -2973,7 +2982,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const corrected = yield* mutate(dir, current => Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
         const owner = yield* findRow(current, latest.agent);
-        yield* requireOwner(owner, env.sessionId, params.takeover);
+        yield* requireOwner(owner, env.sessionId, params.takeover, project.slug);
         const state = yield* stepPacket(latest.id, latest.state, { type: "CORRECT" });
         const path = join(dataDir(dir), "corrections.jsonl");
         yield* Effect.try({
@@ -3267,7 +3276,8 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         })));
         if (!present) continue;
         const prior = latestCloneEvent(row);
-        if (act && row.owner === env.sessionId && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
+        const owned = act && (yield* requireOwner(row, env.sessionId, false, project.slug).pipe(Effect.result))._tag === "Success";
+        if (owned && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
           const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source, reapSources)).pipe(Effect.orElseSucceed(() => null));
           // Unchanged proof plus a script failure must not retry every pass.
           if (assessment?.safe && !prior.detail.startsWith(assessment.detail)) {

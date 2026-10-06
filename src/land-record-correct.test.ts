@@ -4,7 +4,8 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { decodePacketCorrection } from "./domain.ts";
 import { findLanding } from "./autoland.ts";
-import { agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen } from "./ops.ts";
+import { agentClose, agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen, projectStatus } from "./ops.ts";
+import { forwardOwner } from "./owner-queue.ts";
 import { stepPacket } from "./machines.ts";
 import { dataDir, load, mutate, projectPath } from "./store.ts";
 import { liveProc } from "./runtime.ts";
@@ -79,6 +80,37 @@ describe("landing record fence and correction", () => {
     await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "no_changes", corrects: "second correction" }));
     expect(audits(s)).toHaveLength(2);
     expect(audits(s)[1]?.from.evidence).toBe("confirmed merged SHA");
+  });
+
+  it("follows the taken-over owner chain for a closed worker correction and clone retry without rewriting its owner", async () => {
+    const s = await fixture();
+    await runWith(s.h, agentLaunch(s.dir, { action: "launch", name: "observer", role: "worker", lane: "probe", label: "observer", cwd: s.dir, prompt: "Observe." }));
+    await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "no_changes" }));
+    expect((await runWith(s.h, agentClose(s.dir, { name: "worker" }))).row.state).toBe("closed");
+    s.h.sessionId = "replacement-owner";
+    await runWith(s.h, projectStatus(s.dir, { act: false, takeover: true }));
+    s.h.sessionId = "latest-owner";
+    await runWith(s.h, projectStatus(s.dir, { act: false, takeover: true }));
+    const old = (await runWith(s.h, load(s.dir))).agents.find(row => row.name === "worker")!;
+    expect(old.owner).toBe("owner-session");
+    const result = await runWith(s.h, packetLand(s.dir, { id: s.id, corrects: "wrong outcome" }));
+    expect(result.packet.state).toBe("verified");
+    expect(audits(s)[0]?.by).toBe("latest-owner");
+    // Retry is allowed through the same route, but unharvested work stays safe.
+    expect((await runWith(s.h, agentClose(s.dir, { name: "worker" }))).cloneError).toContain("unreachable");
+    expect((await runWith(s.h, load(s.dir))).agents.find(row => row.name === "worker")!.owner).toBe(old.owner);
+  });
+
+  it("does not grant a closed row's authority through another project's forward", async () => {
+    const s = await fixture();
+    await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "no_changes" }));
+    await runWith(s.h, agentClose(s.dir, { name: "worker" }));
+    forwardOwner({ from: s.h.sessionId, to: "unrelated-owner", project: "other-project", home: s.h.home });
+    s.h.sessionId = "unrelated-owner";
+    const before = await runWith(s.h, load(s.dir));
+    expect((await failWith(s.h, packetLand(s.dir, { id: s.id, corrects: "wrong outcome" })))._tag).toBe("GuardFailed");
+    expect(await runWith(s.h, load(s.dir))).toEqual(before);
+    expect(existsSync(join(dataDir(s.dir), "corrections.jsonl"))).toBe(false);
   });
 
   it("refuses non-owner corrections; takeover permits them", async () => {
