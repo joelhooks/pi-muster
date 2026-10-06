@@ -340,6 +340,112 @@ const cloneRetirementNotes = (row: AgentRow) => Effect.gen(function* () {
   return { keep, notes };
 }).pipe(Effect.catch(error => Effect.succeed({ keep: true, notes: [`clone kept: cannot establish pane safety: ${error.message}; close any panes in ${row.cwd}, then agent_close again to retire the clone`] })));
 
+const latestCloneEvent = (row: AgentRow) => [...(row.events ?? [])].reverse().find(event => event.type === "CLONE_KEPT" || event.type === "CLONE_REMOVED");
+
+/** Runs through the same Proc on the clone's machine. Force is only automatic
+ * after harvest proof AND classification of every dirty path. */
+const cloneReapAssessment = (project: Project, row: AgentRow, source: string) => Effect.gen(function* () {
+  const proc = yield* Proc;
+  const run = (cwd: string, ...args: string[]) => proc.run("git", args, { cwd, timeoutMs: 30_000 });
+  const head = (yield* git(row.cwd, "rev-parse", "HEAD")).trim();
+  const dirtyOutput = yield* git(row.cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all");
+  // Include both sides of renames: moving user work into a harness path is not safe.
+  const fields = dirtyOutput.split("\0");
+  const dirty: string[] = [];
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i]!;
+    if (field.length < 4) continue;
+    dirty.push(field.slice(3));
+    if (/[RC]/.test(field.slice(0, 2))) dirty.push(fields[++i]!);
+  }
+  const lane = project.lanes.find(lane => lane.slug === row.lane);
+  const generated = [...DEFAULT_GENERATED, ...(lane?.generated ?? []), ".wzrrd/"];
+  const other = dirty.filter(path => !isGenerated(path, generated) && !/^\.brain\/data\/[^/]+-status\.json$/.test(path));
+  if (other.length) return { safe: false, force: false, detail: `dirty: ${row.cwd}; non-harness paths ${other.map(path => JSON.stringify(path)).sort().join(", ")}; HEAD ${head}` };
+  const origin = yield* run(source, "remote", "get-url", "origin");
+  if (origin.code === 0) {
+    const fetch = yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*");
+    if (fetch.code !== 0) return { safe: false, force: false, detail: `unreachable: ${row.cwd}; HEAD ${head}; origin fetch failed` };
+  }
+  let ref = lane?.base ?? row.clone?.base?.ref ?? "HEAD";
+  if (ref === "default branch") ref = "HEAD";
+  if (origin.code === 0 && !ref.startsWith("origin/")) {
+    const remote = yield* run(source, "rev-parse", "--verify", `origin/${ref}^{commit}`);
+    if (remote.code === 0) ref = `origin/${ref}`;
+  }
+  const base = (yield* git(source, "rev-parse", "--verify", `${ref}^{commit}`)).trim();
+  // Bring only the base object into the clone, never change its checkout or refs.
+  yield* must("git", ["fetch", "--no-write-fetch-head", "-q", "--", source, base], { cwd: row.cwd, timeoutMs: 30_000 });
+  let proof: string | null = null;
+  for (const packet of project.packets.filter(packet => packet.agent === row.name && (packet.state === "committed" || packet.state === "no_changes") && packet.landedAs)) {
+    // A landed packet does not license deleting newer commits from the worker.
+    if ((yield* run(row.cwd, "merge-base", "--is-ancestor", head, packet.id)).code === 0 &&
+        (yield* run(source, "merge-base", "--is-ancestor", packet.landedAs!, base)).code === 0) { proof = `landedAs ${packet.landedAs}`; break; }
+  }
+  if (!proof) {
+    const contained = yield* run(source, "for-each-ref", "--contains", head, "--format=%(refname)", "refs/heads/", "refs/remotes/origin/");
+    if (contained.code === 0 && contained.stdout.trim()) proof = `reachable from ${contained.stdout.trim().split("\n").sort().join(", ")}`;
+  }
+  if (!proof && (yield* run(row.cwd, "merge-base", "--is-ancestor", head, base)).code === 0) proof = `reachable on ${base}`;
+  if (!proof) {
+    const cherry = yield* run(row.cwd, "cherry", base, head);
+    if (cherry.code === 0 && !cherry.stdout.split("\n").some(line => line.startsWith("+"))) proof = `patch-equivalent on ${base}`;
+  }
+  if (!proof) {
+    const mergeBase = yield* run(row.cwd, "merge-base", base, head);
+    if (mergeBase.code === 0) {
+      const paths = (yield* git(row.cwd, "diff", "--name-only", "--no-renames", "-z", mergeBase.stdout.trim(), head)).split("\0").filter(Boolean);
+      const diff = paths.length ? yield* run(row.cwd, "--literal-pathspecs", "diff", "--quiet", "--no-ext-diff", "--no-textconv", head, base, "--", ...paths) : { code: 0 };
+      if (diff.code === 0) proof = `squash-equivalent on ${base}`;
+    }
+  }
+  const dirt = dirty.length ? `; harness-only paths ${dirty.map(path => JSON.stringify(path)).sort().join(", ")}` : "";
+  return { safe: proof !== null, force: proof !== null, detail: `${proof ? `harvested: ${proof}` : "unreachable"}: ${row.cwd}; HEAD ${head}${dirt}` };
+});
+
+const cloneOnMachine = <A, E, R>(row: AgentRow, operation: (source: string, script: string) => Effect.Effect<A, E, R>) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  if (row.machine === "local") return yield* operation(row.clone!.source, env.workerWorktree);
+  const machine = yield* machineConfig(row.machine);
+  return yield* onRemote(row.machine, machine, operation(mapPath(row.clone!.source, machine), machine.workerWorktree));
+});
+
+const clonePresent = (row: AgentRow) => cloneOnMachine(row, () => Effect.gen(function* () {
+  const proc = yield* Proc;
+  return (yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 })).code === 0;
+}));
+
+const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = false) => Effect.gen(function* () {
+  if (!row.clone) return { cloneError: null, notes: [] as string[] };
+  const project = yield* load(dir);
+  const env = yield* MusterEnv;
+  const notes: string[] = [];
+  const result = yield* cloneOnMachine(row, (source, script) => Effect.gen(function* () {
+    const proc = yield* Proc;
+    const present = () => proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.map(result => result.code === 0));
+    if (!(yield* present())) return { removed: true, detail: `clone absent: ${row.cwd}` };
+    const kept = yield* cloneRetirementNotes(row);
+    notes.push(...kept.notes);
+    if (kept.keep) return { removed: false, detail: kept.notes.join("; ") };
+    const assessment = yield* cloneReapAssessment(project, row, source);
+    if (!force && !assessment.safe) return { removed: false, detail: assessment.detail };
+    const removal = yield* must(script, ["remove", ...(force || assessment.force ? ["--force"] : []), row.cwd], { cwd: source, timeoutMs: 120_000 }).pipe(Effect.result);
+    if (removal._tag === "Failure") return { removed: false, detail: `${assessment.detail}; removal failed: ${removal.failure.message}` };
+    if (yield* present()) return { removed: false, detail: `${assessment.detail}; removal left clone on disk` };
+    return { removed: true, detail: `clone removed: ${row.cwd}; ${assessment.detail}` };
+  })).pipe(Effect.catch(error => Effect.succeed({ removed: false, detail: `clone kept: ${row.cwd}; ${error.message}` })));
+  yield* mutate(dir, current => Effect.gen(function* () {
+    const latest = yield* findRow(current, row.name);
+    yield* requireOwner(latest, env.sessionId, takeover);
+    if (latest.cwd !== row.cwd || latest.state !== "closed") return yield* input("clone row changed during retirement");
+    const type = result.removed ? "CLONE_REMOVED" : "CLONE_KEPT";
+    const prior = latestCloneEvent(latest);
+    if (prior?.type === type && prior.detail === result.detail) return [current, undefined] as const;
+    return [withRow(current, { ...latest, events: [...(latest.events ?? []), { type, detail: result.detail, at: iso(env) }] }), undefined] as const;
+  }));
+  return { cloneError: result.removed ? null : result.detail, notes: [...notes, ...(result.removed ? [result.detail] : [])] };
+});
+
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(row.machine);
@@ -369,15 +475,6 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
         }
       }
     }
-    if (row.clone) {
-      const proc = yield* Proc;
-      const present = yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 });
-      if (present.code === 0) {
-        const kept = yield* cloneRetirementNotes(row);
-        notes.push(...kept.notes);
-        if (!kept.keep) notes.push((yield* must(machine.workerWorktree, ["remove", ...(params.force ? ["--force"] : []), row.cwd], { cwd: mapPath(row.clone.source, machine), timeoutMs: 120_000 })).trim());
-      }
-    }
     return restore;
   }));
   const closed = yield* mutate(dir, current => Effect.gen(function* () {
@@ -387,7 +484,8 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     const next = { ...latest, restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
     return [withRow(current, next), next] as const;
   }));
-  return { row: closed, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: null, notes };
+  const retirement = yield* retireClone(dir, closed, params.force === true, params.takeover);
+  return { row: (yield* load(dir)).agents.find(agent => agent.name === row.name)!, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...notes, ...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
 });
 
 const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
@@ -2392,6 +2490,12 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
     yield* guardSideDesk(project, env.sessionId, "agent_close");
     const row = yield* findRow(project, params.name);
     yield* requireOwner(row, env.sessionId, params.takeover);
+    if (row.state === "closed") {
+      if (params.force && !forceCloseAllowed(project, row.name)) return yield* input("force close requires a verified packet or one recorded as landed");
+      const retirement = yield* retireClone(dir, row, params.force === true, params.takeover);
+      const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;
+      return { row: latest, restore: latest.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
+    }
     if (row.machine !== "local") return yield* remoteClose(dir, project, row, params);
     if (params.force && !forceCloseAllowed(project, row.name)) {
       return yield* new GuardFailed({ guard: "force-after-verify", message: `--force removes unharvested work; ${row.name} has no packet that passed packet_verify or was recorded as landed` });
@@ -2406,7 +2510,7 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       argv: buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile, parentSessionFile: null, profile, musterExtension: project.musterExtension }),
       env: agentEnv(project, row),
     };
-    if (row.state !== "closed") {
+    {
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       if (row.pane) {
         const binding = row.pane;
@@ -2442,22 +2546,12 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       return [withRow(current, next), next] as const;
     }));
 
-    let cloneError: string | null = null;
-    const kept = row.clone && existsSync(row.cwd) ? yield* cloneRetirementNotes(row) : { keep: false, notes: [] };
-    notes.push(...kept.notes);
-    if (row.clone && existsSync(row.cwd) && !kept.keep) {
-      const args = params.force ? ["remove", "--force", row.cwd] : ["remove", row.cwd];
-      const removal = yield* must(env.workerWorktree, args, { cwd: row.clone.source, timeoutMs: 120_000 }).pipe(
-        Effect.match({
-          onFailure: (error: ProcError) => ({ removed: false as const, text: error.message }),
-          onSuccess: (out) => ({ removed: true as const, text: out.trim() }),
-        }),
-      );
-      if (removal.removed) notes.push(removal.text);
-      else cloneError = removal.text;
-    }
-    notes.push(yield* publishTokens(yield* load(dir)));
-    return { row: closed, restore, cloneError, notes };
+    const retirement = yield* retireClone(dir, closed, params.force === true, params.takeover);
+    notes.push(...retirement.notes);
+    if (retirement.cloneError) notes.push(retirement.cloneError);
+    const final = yield* load(dir);
+    notes.push(yield* publishTokens(final));
+    return { row: final.agents.find(agent => agent.name === row.name)!, restore, cloneError: retirement.cloneError, notes };
   });
 
 // ---------- packets ----------
@@ -3134,7 +3228,26 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
     for (const row of project.agents) {
-      if (row.state === "closed") continue;
+      if (row.state === "closed") {
+        if (!row.clone || latestCloneEvent(row)?.type === "CLONE_REMOVED") continue;
+        const present = yield* clonePresent(row).pipe(Effect.catch(error => Effect.sync(() => {
+          recoveryNotes.push(`clone kept: ${row.name} ${row.cwd}; cannot inspect: ${error.message}; retry: agent_close name:${row.name}`);
+          return false;
+        })));
+        if (!present) continue;
+        const prior = latestCloneEvent(row);
+        if (act && row.owner === env.sessionId && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
+          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source)).pipe(Effect.orElseSucceed(() => null));
+          // Unchanged proof plus a script failure must not retry every pass.
+          if (assessment?.safe && !prior.detail.startsWith(assessment.detail)) {
+            yield* retireClone(dir, row, false);
+            if (!(yield* clonePresent(row))) continue;
+          }
+        }
+        const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;
+        recoveryNotes.push(`clone kept: ${row.name} ${row.cwd}; ${latestCloneEvent(latest)?.detail ?? "cause unknown; retry to classify"}; retry: agent_close name:${row.name}`);
+        continue;
+      }
       const job = findLaunchJob(launchJobs, project.slug, row);
       if (job) {
         let alive = job.pid === null && env.now().getTime() - Date.parse(job.startedAt) < 30_000;
