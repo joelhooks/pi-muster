@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
+import { homedir, platform } from "node:os";
 import { readFileSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -90,15 +90,19 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   };
   // time's wait4 accounting preserves CPU for short jobs and exited children
   // between ps samples. -o keeps command stderr streaming and unchanged.
+  // GNU -p suppresses signal diagnostics and returns 128 + signal, indistinguishable
+  // from an intentional exit 143. Its %x is the child exit field (zero on signal).
   const accountingPath = join(jobsPath(options.home), `${job.id}.time`);
-  child = spawn("/usr/bin/time", ["-p", "-o", accountingPath, "--", ...command], { stdio: "inherit", detached: true });
+  const format = platform() === "linux" ? ["-f", "real %e\nuser %U\nsys %S\nexit %x"] : ["-p"];
+  child = spawn("/usr/bin/time", [...format, "-o", accountingPath, "--", ...command], { stdio: "inherit", detached: true });
   telemetry(() => refreshJob(options, job));
   timer = setInterval(() => telemetry(() => refreshJob(options, job)), 5000);
   child.on("close", (code, signal) => {
     let accounting = "";
     telemetry(() => { accounting = readFileSync(accountingPath, "utf8"); rmSync(accountingPath, { force: true }); });
-    const match = /real\s+([\d.]+)\nuser\s+([\d.]+)\nsys\s+([\d.]+)\n?$/.exec(accounting);
-    const commandSignaled = /(?:Command terminated by signal \d+|time: command terminated abnormally)/.test(accounting);
+    const match = /real\s+([\d.]+)\nuser\s+([\d.]+)\nsys\s+([\d.]+)(?:\nexit (\d+))?\n?$/.exec(accounting);
+    const commandSignaled = /(?:Command terminated by signal \d+|time: command terminated abnormally)/.test(accounting)
+      || (match?.[4] !== undefined && code !== null && code !== Number(match[4]));
     finish(signal || commandSignaled ? 128 : code ?? 1, match ? Number(match[2]) + Number(match[3]) : undefined);
   });
   child.on("error", error => { console.error(`muster-heavy: ${error.message}`); finish(127); });
