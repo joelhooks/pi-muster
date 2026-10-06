@@ -360,7 +360,8 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
   // Lane declarations and the small runtime-junk list are disposable even
   // when the source differs. Everything else needs a byte comparison.
   const candidates = dirty.filter(path => !isGenerated(path, lane?.generated ?? []) &&
-    !isGenerated(path, [".pi/notes-bridge/", ".rift"]) && !/\.(log|pid)$/.test(path));
+    !isGenerated(path, [".pi/notes-bridge/", ".rift", ".wzrrd/"]) && !/\.(log|pid)$/.test(path) &&
+    !/^\.brain\/data\/[^/]+-status\.json$/.test(path));
   const comparable = candidates.filter(path => isGenerated(path, generated));
   // Run on the row's machine, not the desk's filesystem. Missing paths,
   // directories, symlinks and read failures do not establish byte equality.

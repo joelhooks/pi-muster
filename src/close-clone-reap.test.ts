@@ -15,7 +15,7 @@ async function fixture() {
   const h = harness();
   const dir = makeRepo(join(h.root, "repo"));
   await runWith(h, projectOpen({ dir, slug: "reap", outcome: "retire clones safely", nextAction: "test", reviewTrigger: "weekly", space: "w1", ephemeral: true, cadenceMinutes: null, musterExtension: "/muster", deskExtension: null }));
-  await runWith(h, laneOpen(dir, { slug: "reap", label: "🧹 reap", goal: "retire clones safely", generated: [".wzrrd/"] }));
+  await runWith(h, laneOpen(dir, { slug: "reap", label: "🧹 reap", goal: "retire clones safely" }));
   const brief = join(h.root, "brief.md");
   writeFileSync(brief, "retire clones\n");
   const { row } = await runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", lane: "reap", role: "worker", label: "🧹 worker", clone: true, brief }));
@@ -27,7 +27,7 @@ async function fixture() {
   return { h, dir, row, commit, close: () => runWith(h, agentClose(dir, { name: row.name })), status: (act = false) => runWith(h, projectStatus(dir, { act })) };
 }
 
-it.each([".wzrrd/output.json", ".pi/notes-bridge/output.json", "worker.log", "worker.pid", ".rift"])("force-removes harness-only dirt %s after harvest proof", async path => {
+it.each([".wzrrd/output.json", ".pi/notes-bridge/output.json", "worker.log", "worker.pid", ".rift", ".brain/data/reap-status.json"])("force-removes harness-only dirt %s after harvest proof", async path => {
   const f = await fixture();
   mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
   writeFileSync(join(f.row.cwd, path), "{}");
@@ -35,10 +35,12 @@ it.each([".wzrrd/output.json", ".pi/notes-bridge/output.json", "worker.log", "wo
   expect(existsSync(f.row.cwd)).toBe(false);
 });
 
-it.each([".brain/clone-only.svx", "BRAIN.md", "AGENTS.md", "CLAUDE.md", ".claude/work.md", ".agents/work.md", ".pi/generated.json", ".brain/data/reap-status.json"])("keeps clone-only or differing generated work %s and names it", async path => {
+it.each([".brain/clone-only.svx", "BRAIN.md", "AGENTS.md", "CLAUDE.md", ".claude/work.md", ".agents/work.md", ".pi/generated.json", ".brain/projects/x.svx"])("keeps clone-only or differing generated work %s and names it", async path => {
   const f = await fixture();
   mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
   writeFileSync(join(f.row.cwd, path), "clone work");
+  mkdirSync(join(f.row.cwd, ".wzrrd"), { recursive: true });
+  writeFileSync(join(f.row.cwd, ".wzrrd/output.json"), "{}");
   const result = await f.close();
   expect(result.cloneError).toContain(JSON.stringify(path));
   expect(existsSync(f.row.cwd)).toBe(true);
