@@ -1,4 +1,6 @@
 import { appendFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -23,7 +25,14 @@ async function setup() {
   await runWith(h, laneOpen(dir, { slug: "probe", label: "probe", goal: "test" }));
   const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "probe", label: "worker", cwd: dir, model: "sol", thinking: "high", prompt: "start" }));
   const file = launched.row.sessionFile!;
-  const append = (...entries: unknown[]) => appendFileSync(file, "\n" + entries.map(entry => JSON.stringify(entry)).join("\n") + "\n");
+  const append = (...entries: object[]) => {
+    let parentId = SessionManager.open(file).getLeafId();
+    appendFileSync(file, "\n" + entries.map(entry => {
+      const linked = { id: randomUUID().slice(0, 8), parentId, ...entry };
+      parentId = linked.id;
+      return JSON.stringify(linked);
+    }).join("\n") + "\n");
+  };
   return { h, dir, launched, append };
 }
 const switched = { type: "model_change", provider: "claude-bridge", modelId: "claude-opus-5-5", timestamp: "2026-10-05T17:40:09.345Z" };
@@ -37,6 +46,16 @@ it("close prints the switched route and restore persists the live profile and so
   expect(restored.argv).toContain("claude-bridge/claude-opus-5-5:medium");
   expect(restored.row.profile).toMatchObject({ model: "claude-bridge/claude-opus-5-5", thinking: "medium" });
   expect(restored.notes.join("\n")).toContain("from session");
+});
+it("restore argv follows the active journal branch rather than discarded settings", async () => {
+  const { h, dir, append, launched } = await setup();
+  const active = SessionManager.open(launched.row.sessionFile!).getLeafId();
+  append(switched, { type: "thinking_level_change", thinkingLevel: "medium" },
+    { type: "label", parentId: active, targetId: active, label: "selected" });
+  await runWith(h, agentClose(dir, { name: "worker" }));
+  const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "worker" }));
+  expect(restored.argv).toContain("openai-codex/gpt-6.1-sol:high");
+  expect(restored.row.restore?.argv).toContain("openai-codex/gpt-6.1-sol:high");
 });
 it("explicit restore model and thinking beat the session, including stored restore argv", async () => {
   const { h, dir, append } = await setup();
