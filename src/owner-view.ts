@@ -1,9 +1,11 @@
+// Pi TUI patterns: column-gauge, message-fold, detail-fold, snapshot-lens.
+// Narrow rows are compact projections; the queue and delivery snapshot stay intact.
 import { flowLine } from "./tokens.ts";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { Box, Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Component } from "@earendil-works/pi-tui";
 import { decodeOwnerItem, decodeOwnerRouting, decodeProject } from "./domain.ts";
 import type { OwnerItem, OwnerKind } from "./domain.ts";
@@ -29,6 +31,25 @@ const GLYPH: Record<OwnerKind, string> = { question: "❓", blocked: "⛔", acti
 const COLOR: Record<OwnerKind, "warning" | "error" | "accent" | "success" | "dim"> = { question: "warning", blocked: "error", action: "accent", progress: "dim", done: "success", fyi: "dim" };
 const clean = (s: string) => stripVTControlCharacters(s).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 const oneLine = (s: string) => clean(s).replace(/\s+/g, " ").trim();
+/** Collapse at word boundaries on phone terminals; do not cut an emoji or name. */
+export function compactWords(text: string, width: number): string {
+  if (width <= 0) return "";
+  const plain = oneLine(text);
+  if (visibleWidth(plain) <= width) return plain;
+  let shown = "";
+  for (const word of plain.split(/\s+/)) {
+    const next = shown ? `${shown} ${word}` : word;
+    if (visibleWidth(`${next}…`) > width) break;
+    shown = next;
+  }
+  return `${shown}…`;
+}
+export function mobileOwnerRow(kind: string, name: string, age: string, width: number): string {
+  const tail = ` ${age}`;
+  const lead = `${kind} `;
+  if (visibleWidth(lead + tail) >= width) return compactWords(kind, width);
+  return `${lead}${compactWords(name, width - visibleWidth(lead + tail))}${tail}`;
+}
 const hideUris = (s: string) => s.replace(/muster:\/\/\S+/g, "[record]");
 export const ownerDisplayName = (author: string, authors: Readonly<Record<string, string>>) => authors[author] ?? clean(truncateToWidth(author, 11, "…"));
 export function ownerPostText(item: OwnerItem): string {
@@ -109,6 +130,14 @@ export class OwnerTimelineView implements Component {
     // Never the wall clock: a line that changes once rendered into scrollback makes Pi wipe and redraw the whole screen.
     // Older persisted cards lack `at`; their newest item time keeps them stable too.
     const now = this.options.now ?? this.data.at ?? Math.max(0, ...this.data.items.map(item => Date.parse(item.createdAt)).filter(Number.isFinite));
+    if (width <= 40) {
+      const mentioned = (item: OwnerItem) => mentions(item, this.data.reader) || (this.data.routing?.mentioned.includes(item.uri) ?? false);
+      const items = [...this.data.items.filter(mentioned), ...this.data.items.filter(item => !mentioned(item))];
+      const rows = items.map(item => fg(COLOR[item.kind], mobileOwnerRow(item.kind, name(item.author), age(item.createdAt, now), width)));
+      if (this.data.flow) rows.unshift(fg("dim", compactWords(this.data.flow, width)));
+      rows.push(fg("dim", compactWords(`timeline ${items.filter(mentioned).length} mentions · ${items.filter(item => !mentioned(item)).length} quiet`, width)));
+      return rows.map(line => plain ? clean(line) : `${line}\x1b[0m`);
+    }
     const root = new Container();
     if (this.data.flow) {
       const flow = this.data.flow;
@@ -157,7 +186,8 @@ export class OwnerTimelineView implements Component {
     root.addChild(new Text(fg("dim", `🐦 timeline · ${mentioned.length} mentions · ${quiet.length} quiet · owner_inbox for full records`), 0, 0));
     return root.render(width).map(line => {
       const fitted = truncateToWidth(plain ? clean(line) : line, width);
-      return plain ? clean(fitted) : fitted;
+      // Wrapping/padding can leave a continuation style open at the right edge.
+      return plain ? clean(fitted) : `${fitted}\x1b[0m`;
     });
   }
 }
@@ -166,19 +196,21 @@ export function ownerLine(text: string, theme: OwnerTheme): Component {
     if (width <= 0) return [];
     const plain = process.env.NO_COLOR !== undefined;
     const summary = hideUris(oneLine(text));
-    const fitted = truncateToWidth(plain ? summary : theme.fg("toolTitle", summary), width);
-    return [plain ? clean(fitted) : fitted];
+    const shown = width <= 40 ? compactWords(summary, width) : summary;
+    const fitted = truncateToWidth(plain ? shown : theme.fg("toolTitle", shown), width);
+    return [plain ? clean(fitted) : `${fitted}\x1b[0m`];
   } };
 }
 export function ownerToolResult(text: string, expanded: boolean, theme: OwnerTheme): Component {
   if (!expanded) return ownerLine(hideUris(text.split("\n")[0] ?? ""), theme);
   return { invalidate() {}, render(width) {
     if (width <= 0) return [];
+    if (width <= 40) return ownerLine(text.split("\n")[0] ?? "", theme).render(width);
     const plain = process.env.NO_COLOR !== undefined;
     const body = new Text(plain ? clean(text) : theme.fg("dim", clean(text)), 0, 0);
     return body.render(width).map(line => {
       const fitted = truncateToWidth(line, width);
-      return plain ? clean(fitted) : fitted;
+      return plain ? clean(fitted) : `${fitted}\x1b[0m`;
     });
   } };
 }

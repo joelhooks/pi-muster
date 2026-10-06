@@ -1,3 +1,5 @@
+// Pi TUI patterns: elastic-overlay, keyed-slot, signal-pair, widget-dock,
+// render-funnel (Pi's scheduler), refresh-lease. Cache data, paint at render.
 import { mkdirSync, statSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
@@ -60,7 +62,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   let active = false;
   // Only requestRender is needed; a structural type avoids pi-tui version skew with the host.
   let tui: { requestRender(): void } | undefined;
-  let widgetInvalidate: (() => void) | undefined;
+  let setSignal: ((text: string | undefined) => void) | undefined;
   let stopInput: (() => void) | undefined;
   let animation: ActivityClock | undefined;
   let overlayOpen = false;
@@ -109,7 +111,13 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     ).catch(failed);
   };
 
-  const repaint = () => { widgetInvalidate?.(); tui?.requestRender(); overlayTui?.requestRender(); };
+  const repaint = () => {
+    const count = state.groups.reduce((total, group) => total + group.items.length, 0);
+    setSignal?.(`☎️ ${count ? `${count} open` : "inbox clear"} · ${OPEN_HINT}`);
+    // Pi coalesces these requests; widget and overlay often share the same TUI.
+    tui?.requestRender();
+    if (overlayTui !== tui) overlayTui?.requestRender();
+  };
   const refresh = (): Promise<void> => {
     if (!active) return Promise.resolve();
     const home = deps.env.HOME ?? homedir();
@@ -176,6 +184,13 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     // the fleet locally but never registers for every tenant's pages.
     if (deps.env.MUSTER_ROLE) ctx.ui.notify(`☎️ ${deps.env.MUSTER_ROLE} sessions browse the Switchboard but are not paged; only a non-project session registers`, "info");
     else unregister = registerSwitchboardSession(home, ctx.sessionManager.getSessionId());
+    const ui = ctx.ui;
+    let signal: string | undefined;
+    setSignal = text => {
+      if (text === signal) return;
+      signal = text;
+      ui.setStatus(WIDGET, text);
+    };
     ctx.ui.setWidget(WIDGET, (widgetTui, theme) => {
       tui = widgetTui;
       animation?.dispose(); stopInput?.();
@@ -183,15 +198,14 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       animation = widgetAnimation;
       const removeInput = widgetTui.addInputListener?.((data) => { widgetAnimation.input(data); });
       stopInput = removeInput;
-      let cache: { width: number; lines: string[] } | undefined;
-      widgetInvalidate = () => { cache = undefined; };
+      // The activity data is already cached without ANSI. Colour it at render
+      // time so invalidation never revives a palette from an earlier theme.
       return {
         render: (width: number) => {
-          animation?.show(active && !overlayOpen && activityEnabled(width, theme, deps.env));
-          if (!cache || cache.width !== width) cache = { width, lines: renderWidget(state, width, theme, deps.env, Date.now()) };
-          return cache.lines;
+          animation?.show(active && !overlayOpen && width > 40 && activityEnabled(width, theme, deps.env));
+          return renderWidget(state, width, theme, deps.env, Date.now());
         },
-        invalidate: widgetInvalidate,
+        invalidate() {},
         dispose: () => { widgetAnimation.dispose(); removeInput?.(); },
       };
     });
@@ -205,13 +219,13 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     liveLayer = undefined;
     animation?.dispose(); animation = undefined;
     stopInput?.(); stopInput = undefined;
-    widgetInvalidate = undefined;
     stopWatch?.();
     stopWatch = undefined;
     unregister?.();
     unregister = undefined;
     if (pending) clearTimeout(pending);
     pending = undefined;
+    setSignal?.(undefined); setSignal = undefined;
     ctx?.ui.setWidget(WIDGET, undefined);
     tui = undefined;
     overlayTui = undefined;
@@ -235,11 +249,11 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       overlayOpen = true;
       animation?.show(false);
       const intent = await ctx.ui.custom<Intent>(
-        (screen, theme, _keys, done) => {
+        (screen, theme, keys, done) => {
           overlayTui = screen;
-          return new SwitchboardOverlay(state, theme, () => Math.max(12, Math.floor((process.stdout.rows ?? 30) * 0.8)), done, () => screen.requestRender());
+          return new SwitchboardOverlay(state, theme, () => Math.max(1, Math.floor(screen.terminal.rows * 0.8)), done, () => screen.requestRender(), keys);
         },
-        { overlay: true, overlayOptions: { anchor: "center", width: "80%", minWidth: 60, maxHeight: "80%" } },
+        { overlay: true, overlayOptions: { anchor: "center", width: "80%", minWidth: 20, maxHeight: "80%" } },
       ).finally(() => {
         overlayTui = undefined;
         overlayOpen = false;

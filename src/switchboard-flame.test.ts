@@ -114,7 +114,7 @@ describe("bucket clock lifecycle", () => {
     const handlers = new Map<string, Function>(); const commands = new Map<string, Function>();
     const render = vi.fn(); const removeInput = vi.fn();
     let widget: { render(width: number): string[] } | undefined;
-    const ctx = { sessionManager: { getSessionId: () => "activity-test" }, ui: { setWidget: (_: string, factory?: Function) => { widget = factory?.({ requestRender: render, addInputListener: () => removeInput }, ansi); }, notify() {} } };
+    const ctx = { sessionManager: { getSessionId: () => "activity-test" }, ui: { setStatus() {}, setWidget: (_: string, factory?: Function) => { widget = factory?.({ requestRender: render, addInputListener: () => removeInput }, ansi); }, notify() {} } };
     registerSwitchboard({ registerFlag() {}, registerShortcut() {}, registerCommand: (name: string, opts: { handler: Function }) => commands.set(name, opts.handler), registerTool() {}, getFlag: () => true, on: (name: string, fn: Function) => handlers.set(name, fn) } as never, { env: { HOME: h.home }, layer: () => h.layer, run: async () => { throw new Error("no model turn"); } });
     try {
       await handlers.get("session_start")!(null, ctx); widget?.render(80);

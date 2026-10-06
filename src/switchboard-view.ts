@@ -1,7 +1,10 @@
+// Pi TUI patterns: column-gauge, row-window, detail-lens, action-compass,
+// section-loom, identity-anchor. Mobile rows reserve controls before detail.
 import { stripVTControlCharacters } from "node:util";
-import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import type { Component, Focusable } from "@earendil-works/pi-tui";
+import { getKeybindings, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import type { Component, Focusable, KeybindingsManager } from "@earendil-works/pi-tui";
 
+import { compactWords, mobileOwnerRow } from "./owner-view.ts";
 import { ActivityState, activityEnabled, activitySummary, renderActivity } from "./switchboard-flame.ts";
 import { KIND_GLYPH, KIND_RANK, TICKER_WINDOW_MS, eventText, formatAge, itemRef, openCount } from "./switchboard.ts";
 import type { FleetStats, InboxGroup, InboxItem, LatestPost, QueueEvent, SystemView, UnregisteredSpace } from "./switchboard.ts";
@@ -11,6 +14,18 @@ export interface ViewTheme {
   fg(color: string, text: string): string;
   bold(text: string): string;
 }
+
+type SelectionAction = Extract<Parameters<KeybindingsManager["matches"]>[1], "tui.select.up" | "tui.select.down" | "tui.select.confirm" | "tui.select.cancel">;
+// Narrow structural contract bridges host/package pi-tui version skew.
+interface SelectionKeys {
+  matches(data: string, action: SelectionAction): boolean;
+  getKeys(action: SelectionAction): ReturnType<KeybindingsManager["getKeys"]>;
+}
+// Reset after fitting: truncate/pad may otherwise carry the last SGR into the next cell.
+const fitLine = (line: string, width: number) => {
+  const fitted = truncateToWidth(line, width);
+  return fitted.includes("\x1b[") ? `${fitted}\x1b[0m` : fitted;
+};
 
 export type Row = { readonly type: "group"; readonly group: InboxGroup } | { readonly type: "item"; readonly item: InboxItem } | { readonly type: "unregistered"; readonly space: UnregisteredSpace };
 
@@ -202,15 +217,22 @@ export function systemLine(state: SwitchboardState, theme: ViewTheme, room = Num
 
 /** Collapsed ambient display; plain terminals get only the summary. */
 export function renderWidget(state: SwitchboardState, width: number, theme: ViewTheme, env: Readonly<Record<string, string | undefined>> = process.env, now = state.now): string[] {
+  if (width <= 0) return [];
+  if (width <= 40) {
+    const lines = [compactWords(`${openCount(state.groups)} open · /switchboard`, width), ...state.groups.slice(0, 3).map(group => mobileOwnerRow(`${group.items.length} open`, group.project, formatAge(group.oldestMs), width))];
+    if (state.groups.length > 3) lines.push(`+${state.groups.length - 3} projects`);
+    return lines.map(line => env.NO_COLOR !== undefined || env.TERM === "dumb" ? line : fitLine(theme.fg("muted", line), width));
+  }
   if (!activityEnabled(width, theme, env)) {
     const oldest = openCount(state.groups) ? ` · oldest ${formatAge(Math.max(0, ...state.groups.map((g) => g.oldestMs)))}` : "";
     return [stripVTControlCharacters(truncateToWidth(`☎️ ${activitySummary(state.groups, state.activity, now)}${oldest} · ${OPEN_HINT}`, width))];
   }
-  return renderActivity(state.groups, state.activity, width, theme, now);
+  return renderActivity(state.groups, state.activity, width, theme, now).map(line => fitLine(line, width));
 }
 
 /** Expanded header: globally ranked asks and recent queue activity. */
 export function renderRankedSummary(state: SwitchboardState, width: number, theme: ViewTheme): string[] {
+  if (width <= 40) return renderWidget(state, width, theme);
   const hint = theme.fg("dim", OPEN_HINT);
   const lines = [spread(systemLine(state, theme, width - visibleWidth(hint) - 1), hint, width)];
   const actions = state.groups.flatMap((group) => group.items.map((item) => ({ item, group })))
@@ -225,16 +247,44 @@ export function renderRankedSummary(state: SwitchboardState, width: number, them
   const events = state.events.filter((event) => state.now - event.ts < TICKER_WINDOW_MS && event.ts <= state.now).slice(0, 5);
   for (const event of events.slice(0, 10 - lines.length - (quiet ? 1 : 0))) lines.push(theme.fg("muted", eventText(event, state.now)));
   if (quiet) lines.push(theme.fg("dim", `+${quiet} quiet`));
-  return lines.map((line) => truncateToWidth(line, width));
+  return lines.map((line) => fitLine(line, width));
 }
 
-const HELP = "↑↓ · space/c fold · enter desk · e discuss here · a answer · d done · esc";
+function help(keys: SelectionKeys, width: number): string {
+  const label = (action: "up" | "down" | "confirm" | "cancel") => {
+    const key = keys.getKeys(`tui.select.${action}`)[0] ?? "unbound";
+    return key === "up" ? "↑" : key === "down" ? "↓" : key === "escape" ? "esc" : key;
+  };
+  const navigation = `${label("up")}/${label("down")}`;
+  return width < 60
+    ? `${navigation} · c fold · ${label("confirm")} · ${label("cancel")}`
+    : `${navigation} · space/c fold · ${label("confirm")} desk · e/a/d · ${label("cancel")}`;
+}
 
 /** The overlay body: the same rows with a cursor, then the selected item's detail. */
-export function renderOverlay(state: SwitchboardState, width: number, height: number, theme: ViewTheme): string[] {
-  const inner = Math.max(20, width - 4);
+export function renderOverlay(state: SwitchboardState, width: number, height: number, theme: ViewTheme, keys: SelectionKeys = getKeybindings()): string[] {
+  if (width <= 0 || height <= 0) return [];
+  if (width <= 40) {
+    const hints = wrapTextWithAnsi("j/k move f fold c all\no desk e discuss a answer\nd done q quit", width).slice(0, Math.max(1, height - 1));
+    const room = Math.max(1, height - hints.length - (height > hints.length + 1 ? 1 : 0));
+    const rows = state.rows();
+    const start = Math.max(0, Math.min(state.cursor - Math.floor(room / 2), rows.length - room));
+    const list = rows.slice(start, start + room).map((row, index) => {
+      const cursor = start + index === state.cursor ? "▶ " : "  ";
+      const text = row.type === "item" ? mobileOwnerRow(row.item.kind, `${row.item.id} ${row.item.title}`, formatAge(row.item.ageMs), width - 2)
+        : row.type === "group" ? mobileOwnerRow(`${row.group.items.length} open`, row.group.project, formatAge(row.group.oldestMs), width - 2)
+        : compactWords(`unregistered ${row.space.label}`, width - 2);
+      return fitLine(theme.fg(start + index === state.cursor ? "accent" : "muted", cursor + text), width);
+    });
+    if (!list.length) list.push(fitLine(theme.fg("muted", compactWords("Nothing waits on you.", width)), width));
+    const selected = state.current();
+    const project = selected?.type === "item" ? selected.item.project : selected?.type === "group" ? selected.group.project : "Switchboard";
+    const head = compactWords(`${openCount(state.groups)} open ${project} · ${state.cursor + 1}/${rows.length}`, width);
+    return [...(height > hints.length + 1 ? [head] : []), ...list, ...hints].slice(0, height);
+  }
+  const inner = Math.max(1, width - 4);
   const border = (text: string) => theme.fg("border", text);
-  const frame = (content: string) => `${border("│")} ${truncateToWidth(content, inner)}${" ".repeat(Math.max(0, inner - visibleWidth(truncateToWidth(content, inner))))} ${border("│")}`;
+  const frame = (content: string) => `${border("│")} ${fitLine(content, inner)}${" ".repeat(Math.max(0, inner - visibleWidth(truncateToWidth(content, inner))))} ${border("│")}`;
   const title = ` ${headline(state.groups, theme)} `;
   const top = `${border("╭─")}${title}${border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(title)))}╮`)}`;
   const bottom = border(`╰${"─".repeat(Math.max(0, width - 2))}╯`);
@@ -242,11 +292,18 @@ export function renderOverlay(state: SwitchboardState, width: number, height: nu
   const rows = state.rows();
   const current = state.current();
   const group = current?.type === "group" ? current.group : current?.type === "item" ? state.groups.find((group) => group.project === current.item.project) : undefined;
-  const detail = current?.type === "item" ? detailLines(current.item, inner, theme) : [];
-  if (group?.outsideSpace) detail.push(theme.fg("warning", "↗ owner/desk outside space"));
-  // Reserve at least three navigable rows. Header yields on short terminals.
-  const header = renderRankedSummary(state, inner, theme).slice(0, Math.max(1, Math.min(10, height - 7 - (detail.length ? detail.length + 1 : 0))));
-  const listRoom = Math.max(3, height - 4 - header.length - (detail.length ? detail.length + 1 : 0));
+  const fullDetail = current?.type === "item" ? detailLines(current.item, inner, theme) : [];
+  if (group?.outsideSpace) fullDetail.push(theme.fg("warning", "↗ owner/desk outside space"));
+  const hints = wrapTextWithAnsi(help(keys, inner), inner).slice(0, Math.max(1, height - 3)).map(line => theme.fg("dim", line));
+  const fixedRows = 2 + hints.length;
+  // Every list entry is exactly one fitted row. Budget physical rows for the
+  // frame, hint and separator first; details/header yield before the selection.
+  if (height < 4) return [current ? `▶ ${current.type === "item" ? current.item.title : current.type === "group" ? current.group.project : current.space.label}` : "Nothing waits on you.", ...hints].slice(0, height).map(line => fitLine(line, width));
+  const listReserve = Math.min(3, height - fixedRows);
+  const detail = fullDetail.slice(0, Math.max(0, height - fixedRows - listReserve - 2));
+  const detailRows = detail.length ? detail.length + 1 : 0;
+  const header = renderRankedSummary(state, inner, theme).slice(0, Math.max(0, Math.min(10, height - fixedRows - listReserve - detailRows)));
+  const listRoom = height - fixedRows - header.length - detailRows;
   const start = Math.max(0, Math.min(state.cursor - Math.floor(listRoom / 2), rows.length - listRoom));
   const list = rows.slice(start, start + listRoom).map((row, offset) => {
     const selected = start + offset === state.cursor;
@@ -259,8 +316,8 @@ export function renderOverlay(state: SwitchboardState, width: number, height: nu
 
   const out = [top, ...header.map(frame), ...list.map(frame)];
   if (detail.length) out.push(frame(theme.fg("border", "─".repeat(inner))), ...detail.map(frame));
-  out.push(frame(theme.fg("dim", HELP)), bottom);
-  return out.map((line) => truncateToWidth(line, width));
+  out.push(...hints.map(frame), bottom);
+  return out.map((line) => fitLine(line, width));
 }
 
 function detailLines(item: InboxItem, width: number, theme: ViewTheme): string[] {
@@ -271,18 +328,18 @@ function detailLines(item: InboxItem, width: number, theme: ViewTheme): string[]
 }
 
 /** Map one keypress to a state change or an intent for the caller. */
-export function handleKey(state: SwitchboardState, data: string): Intent | null {
-  if (matchesKey(data, "escape") || data === "q") return { type: "close" };
-  if (matchesKey(data, "up") || data === "k") state.move(-1);
-  else if (matchesKey(data, "down") || data === "j") state.move(1);
-  else if (matchesKey(data, "space") || matchesKey(data, "tab")) state.toggle();
+export function handleKey(state: SwitchboardState, data: string, keys: SelectionKeys = getKeybindings()): Intent | null {
+  if (keys.matches(data, "tui.select.cancel") || data === "q") return { type: "close" };
+  if (keys.matches(data, "tui.select.up") || data === "k") state.move(-1);
+  else if (keys.matches(data, "tui.select.down") || data === "j") state.move(1);
+  else if (matchesKey(data, "space") || matchesKey(data, "tab") || data === "f") state.toggle();
   else if (matchesKey(data, "left") || data === "h") state.toggle(false);
   else if (matchesKey(data, "right") || data === "l") state.toggle(true);
   else if (data === "c") state.toggleAll();
   else {
     const row = state.current();
     if (!row) return null;
-    if (matchesKey(data, "enter") && row.type !== "unregistered") {
+    if ((keys.matches(data, "tui.select.confirm") || data === "o") && row.type !== "unregistered") {
       return row.type === "group" ? { type: "desk", project: row.group.project } : { type: "desk", project: row.item.project, item: row.item };
     } else if (row.type === "item" && data === "e") return { type: "discuss", item: row.item };
     else if (row.type === "item" && data === "a") return { type: "answer", item: row.item };
@@ -301,16 +358,17 @@ export class SwitchboardOverlay implements Component, Focusable {
     private readonly rows: () => number,
     private readonly done: (intent: Intent) => void,
     private readonly redraw: () => void,
+    private readonly keys: SelectionKeys = getKeybindings(),
   ) {}
 
   handleInput(data: string): void {
-    const intent = handleKey(this.state, data);
+    const intent = handleKey(this.state, data, this.keys);
     if (intent) this.done(intent);
     else this.redraw();
   }
 
   render(width: number): string[] {
-    return renderOverlay(this.state, width, this.rows(), this.theme);
+    return renderOverlay(this.state, width, this.rows(), this.theme, this.keys);
   }
 
   invalidate(): void {}

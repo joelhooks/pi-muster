@@ -96,7 +96,7 @@ describe("idle refresh regression", () => {
     let widget: { render(width: number): string[] } | undefined;
     const render = vi.fn();
     let stale = false;
-    const ctx = { get sessionManager() { if (stale) throw new Error("This extension ctx is stale after session replacement or reload."); return { getSessionId: () => "probe" }; }, ui: { setWidget: (_key: string, factory: Function) => { widget = factory?.({ requestRender: render }, plain); } } };
+    const ctx = { get sessionManager() { if (stale) throw new Error("This extension ctx is stale after session replacement or reload."); return { getSessionId: () => "probe" }; }, ui: { setStatus() {}, setWidget: (_key: string, factory: Function) => { widget = factory?.({ requestRender: render }, plain); } } };
     const layer = vi.fn((context: typeof ctx) => { context.sessionManager.getSessionId(); return h.layer; });
     registerSwitchboard({ registerFlag() {}, registerShortcut() {}, registerCommand() {}, registerTool() {}, getFlag: () => true, on: (name: string, fn: Function) => handlers.set(name, fn) } as never, { env: { HOME: h.home }, layer: layer as never, run: async () => { throw new Error("model/tool runner must not run"); } });
     try {

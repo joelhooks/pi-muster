@@ -1,3 +1,5 @@
+// Pi TUI pattern: snapshot-lens (plain digest projection).
+// No custom terminal component: Pi owns the tool's transcript rendering.
 import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";

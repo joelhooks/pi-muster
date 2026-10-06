@@ -1,3 +1,5 @@
+// Pi TUI pattern: message-fold. This file projects message data;
+// desk-feed-ext owns presentation, not queue/delivery behavior.
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";

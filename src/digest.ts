@@ -1,3 +1,5 @@
+// Pi TUI patterns: column-gauge, snapshot-lens. Fit whole telemetry parts
+// before dropping detail; a narrow header collapses at word boundaries.
 import { execFile } from "node:child_process";
 import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -206,6 +208,10 @@ export function digestLine(header: string, parts: DigestResult["parts"], width: 
   line = chunks.join(" · ");
   if (visibleWidth(line) <= cap) return line;
   let shortened = "";
-  for (const char of line) { if (visibleWidth(shortened + char + "…") > cap) break; shortened += char; }
+  for (const word of line.split(/\s+/)) {
+    const next = shortened ? `${shortened} ${word}` : word;
+    if (visibleWidth(next + "…") > cap) break;
+    shortened = next;
+  }
   return shortened + "…";
 }
