@@ -214,7 +214,7 @@ describe("remote launch argv delivery", () => {
     s.remote.lazyJournal = true;
     const result = await s.launch();
     expect(result.proof).toMatchObject({ state: "unproven", detail: "no session journal entries within 90 s" });
-  });
+  }, 30_000); // 90 simulated seconds: one real journal read per second, about 3.5 s unloaded.
 
   it.each(["local", "remote"] as const)("executes the %s launcher end to end with exact env, cwd and argv", async machine => {
     const s = await setup();
