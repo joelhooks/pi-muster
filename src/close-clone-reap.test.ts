@@ -27,10 +27,62 @@ async function fixture() {
   return { h, dir, row, commit, close: () => runWith(h, agentClose(dir, { name: row.name })), status: (act = false) => runWith(h, projectStatus(dir, { act })) };
 }
 
-it.each([".wzrrd/output.json", ".brain/data/reap-status.json", ".pi/generated.json"])("force-removes harness-only dirt %s after harvest proof", async path => {
+it.each([".wzrrd/output.json", ".pi/notes-bridge/output.json", "worker.log", "worker.pid", ".rift", ".brain/data/reap-status.json"])("force-removes harness-only dirt %s after harvest proof", async path => {
   const f = await fixture();
   mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
   writeFileSync(join(f.row.cwd, path), "{}");
+  expect((await f.close()).cloneError).toBeNull();
+  expect(existsSync(f.row.cwd)).toBe(false);
+});
+
+it.each([".brain/clone-only.svx", "BRAIN.md", "AGENTS.md", "CLAUDE.md", ".claude/work.md", ".agents/work.md", ".pi/generated.json", ".brain/projects/x.svx"])("keeps clone-only or differing generated work %s and names it", async path => {
+  const f = await fixture();
+  mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
+  writeFileSync(join(f.row.cwd, path), "clone work");
+  mkdirSync(join(f.row.cwd, ".wzrrd"), { recursive: true });
+  writeFileSync(join(f.row.cwd, ".wzrrd/output.json"), "{}");
+  const result = await f.close();
+  expect(result.cloneError).toContain(JSON.stringify(path));
+  expect(existsSync(f.row.cwd)).toBe(true);
+  const status = await f.status(true);
+  expect([status.board, ...status.notes].join("\n").split("\n").filter(line => line.startsWith("clone kept: worker "))).toHaveLength(1);
+  expect(existsSync(f.row.cwd)).toBe(true);
+});
+
+it.each(["missing", "identical", "different"])("removes identical Brain dirt and runtime logs with %s source logs", async kind => {
+  const f = await fixture();
+  for (const root of [f.dir, f.row.cwd]) {
+    mkdirSync(join(root, ".brain"), { recursive: true });
+    writeFileSync(join(root, ".brain/note.svx"), "same note");
+  }
+  const path = ".pi/notes-bridge/events.jsonl";
+  mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
+  writeFileSync(join(f.row.cwd, path), "clone runtime");
+  if (kind !== "missing") {
+    mkdirSync(join(f.dir, path, ".."), { recursive: true });
+    writeFileSync(join(f.dir, path), kind === "identical" ? "clone runtime" : "source runtime");
+  }
+  expect((await f.close()).cloneError).toBeNull();
+  expect(existsSync(f.row.cwd)).toBe(false);
+});
+
+it("keeps differing Brain dirt even with force", async () => {
+  const f = await fixture();
+  for (const root of [f.dir, f.row.cwd]) mkdirSync(join(root, ".brain"), { recursive: true });
+  writeFileSync(join(f.dir, ".brain/note.svx"), "source");
+  writeFileSync(join(f.row.cwd, ".brain/note.svx"), "clone");
+  const result = await runWith(f.h, agentClose(f.dir, { name: f.row.name, force: true }));
+  expect(result.cloneError).toContain('".brain/note.svx"');
+  expect(existsSync(f.row.cwd)).toBe(true);
+});
+
+it("honours the lane's explicit generated paths despite differing source bytes", async () => {
+  const f = await fixture();
+  await runWith(f.h, mutate(f.dir, p => Effect.succeed([{ ...p, lanes: p.lanes.map(lane => ({ ...lane, generated: [...lane.generated, ".brain/output.svx"] })) }, undefined] as const)));
+  for (const root of [f.dir, f.row.cwd]) {
+    mkdirSync(join(root, ".brain"), { recursive: true });
+    writeFileSync(join(root, ".brain/output.svx"), root);
+  }
   expect((await f.close()).cloneError).toBeNull();
   expect(existsSync(f.row.cwd)).toBe(false);
 });
@@ -171,6 +223,10 @@ it.each(["unharvested", "harvested", "offline"])("refreshes each source once per
 
 it("records SSH removal failures and retries an already-closed remote row through the same path", async () => {
   const f = await fixture();
+  for (const root of [f.dir, f.row.cwd]) {
+    mkdirSync(join(root, ".brain"), { recursive: true });
+    writeFileSync(join(root, ".brain/note.svx"), "same remote note");
+  }
   const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: f.h.workerWorktree, env: {}, wrap: [] } });
   await runWith(f.h, mutate(f.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, machine: "remote" })) }, undefined] as const)));
   let refuse = true;
