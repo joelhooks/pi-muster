@@ -380,6 +380,10 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string) =>
     if ((yield* run(row.cwd, "merge-base", "--is-ancestor", head, packet.id)).code === 0 &&
         (yield* run(source, "merge-base", "--is-ancestor", packet.landedAs!, base)).code === 0) { proof = `landedAs ${packet.landedAs}`; break; }
   }
+  if (!proof) {
+    const contained = yield* run(source, "for-each-ref", "--contains", head, "--format=%(refname)", "refs/heads/", "refs/remotes/origin/");
+    if (contained.code === 0 && contained.stdout.trim()) proof = `reachable from ${contained.stdout.trim().split("\n").sort().join(", ")}`;
+  }
   if (!proof && (yield* run(row.cwd, "merge-base", "--is-ancestor", head, base)).code === 0) proof = `reachable on ${base}`;
   if (!proof) {
     const cherry = yield* run(row.cwd, "cherry", base, head);
@@ -413,11 +417,13 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
   if (!row.clone) return { cloneError: null, notes: [] as string[] };
   const project = yield* load(dir);
   const env = yield* MusterEnv;
+  const notes: string[] = [];
   const result = yield* cloneOnMachine(row, (source, script) => Effect.gen(function* () {
     const proc = yield* Proc;
     const present = () => proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.map(result => result.code === 0));
     if (!(yield* present())) return { removed: true, detail: `clone absent: ${row.cwd}` };
     const kept = yield* cloneRetirementNotes(row);
+    notes.push(...kept.notes);
     if (kept.keep) return { removed: false, detail: kept.notes.join("; ") };
     const assessment = yield* cloneReapAssessment(project, row, source);
     if (!force && !assessment.safe) return { removed: false, detail: assessment.detail };
@@ -435,7 +441,7 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
     if (prior?.type === type && prior.detail === result.detail) return [current, undefined] as const;
     return [withRow(current, { ...latest, events: [...(latest.events ?? []), { type, detail: result.detail, at: iso(env) }] }), undefined] as const;
   }));
-  return { cloneError: result.removed ? null : result.detail, notes: result.removed ? [result.detail] : [] };
+  return { cloneError: result.removed ? null : result.detail, notes: [...notes, ...(result.removed ? [result.detail] : [])] };
 });
 
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
@@ -477,7 +483,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     return [withRow(current, next), next] as const;
   }));
   const retirement = yield* retireClone(dir, closed, params.force === true, params.takeover);
-  return { row: (yield* load(dir)).agents.find(agent => agent.name === row.name)!, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...notes, ...retirement.notes] };
+  return { row: (yield* load(dir)).agents.find(agent => agent.name === row.name)!, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...notes, ...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
 });
 
 const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
@@ -3176,7 +3182,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         })));
         if (!present) continue;
         const prior = latestCloneEvent(row);
-        if (act && row.owner === env.sessionId && prior?.type === "CLONE_KEPT") {
+        if (act && row.owner === env.sessionId && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
           const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source)).pipe(Effect.orElseSucceed(() => null));
           // Unchanged proof plus a script failure must not retry every pass.
           if (assessment?.safe && !prior.detail.startsWith(assessment.detail)) {

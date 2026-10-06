@@ -111,6 +111,21 @@ it("surfaces legacy closed rows with unknown cause without auto-removing them", 
   expect(existsSync(f.row.cwd)).toBe(false);
 });
 
+it("status retries unreachable closed work after a new landedAs is recorded on base", async () => {
+  const f = await fixture();
+  const id = f.commit(f.row.cwd, "work.txt", "first");
+  const head = f.commit(f.row.cwd, "work.txt", "second");
+  expect(head).not.toBe(id);
+  await runWith(f.h, packetReport({ dir: f.dir, agent: f.row.name, owner: f.h.sessionId, cwd: f.row.cwd, commit: head, summary: "land later", checks: [] }));
+  await runWith(f.h, packetVerify(f.dir, head));
+  expect((await f.close()).cloneError).toContain("unreachable");
+  const landedAs = f.commit(f.dir, "work.txt", "second");
+  await runWith(f.h, packetLand(f.dir, { id: head, outcome: "committed", landedAs }));
+  f.commit(f.dir, "work.txt", "later base edit");
+  expect((await f.status(true)).board).not.toContain("clone kept:");
+  expect(existsSync(f.row.cwd)).toBe(false);
+});
+
 it("does not use an older landed packet as proof for newer unharvested work", async () => {
   const f = await fixture();
   const id = f.commit(f.row.cwd, "work.txt", "landed");
