@@ -72,7 +72,8 @@ describe("explicit re-prompt delivery proof", () => {
   it("never retries a typed prompt when proof stays unproven", async () => {
     const { h } = await setup();
     const pane = h.herdr.addPane("w1", "t", "/repo");
-    pane.agent = "proof";
+    pane.agent = "pi";
+    pane.name = "proof";
     h.herdr.promptWorking = false;
     expect((await runWith(h, promptWithProof(pane.pane_id, "once"))).state).toBe("unproven");
     expect(h.herdr.typedPrompts).toEqual(["once"]);

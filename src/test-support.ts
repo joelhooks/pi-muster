@@ -24,6 +24,7 @@ export interface FakePane {
   cwd: string;
   label?: string;
   agent?: string;
+  agent_status?: "idle" | "working" | "blocked" | "done" | "unknown";
   name?: string | null;
   agent_session?: { source: string; agent: string; kind: string; value: string };
 }
@@ -87,7 +88,7 @@ export class FakeHerdr {
       focused: false,
       cwd: pane.cwd,
       foreground_cwd: pane.cwd,
-      agent_status: pane.agent ? ("idle" as const) : ("unknown" as const),
+      agent_status: pane.agent_status ?? (pane.agent ? "idle" : "unknown"),
       revision: 1,
       ...(pane.label ? { label: pane.label } : {}),
       ...(pane.agent ? { agent: pane.agent } : {}),
@@ -95,8 +96,8 @@ export class FakeHerdr {
     };
   }
 
-  private agentInfo(pane: FakePane, status: "idle" | "working") {
-    return { ...this.paneInfo(pane), ...(pane.name === null ? {} : { name: pane.name ?? pane.agent ?? "agent" }), agent_status: status, interactive_ready: true };
+  private agentInfo(pane: FakePane, status = pane.agent_status ?? (pane.agent ? "idle" : "unknown")) {
+    return { ...this.paneInfo(pane), ...(pane.name ? { name: pane.name } : {}), agent_status: status, interactive_ready: true };
   }
 
   private startSession(pane: FakePane, sessionId: string, file?: string, parent?: string) {
@@ -218,13 +219,13 @@ export class FakeHerdr {
         const holder = [...this.panes.values()].find(other => other !== pane && (other.name === null ? undefined : other.name ?? other.agent) === name);
         if (holder) throw new HerdrApiError({ operation: method, code: "agent_name_taken", message: `agent name ${name} is already used; candidates: terminal_id=${holder.terminal_id} pane_id=${holder.pane_id} workspace_id=${holder.workspace_id} tab_id=${holder.tab_id}` });
         pane.name = name;
-        return { type: "agent_info", agent: this.agentInfo(pane, "idle") };
+        return { type: "agent_info", agent: this.agentInfo(pane) };
       }
       case "agent.get": {
         const pane = this.pane(method, params.target);
         const pending = this.readinessPending > 0;
         if (pending) this.readinessPending -= 1;
-        return { type: "agent_info", agent: { ...this.agentInfo(pane, "idle"), agent: "pi", launch_pending: pending, interactive_ready: !pending } };
+        return { type: "agent_info", agent: { ...this.agentInfo(pane), launch_pending: pending, interactive_ready: !pending } };
       }
       case "agent.prompt":
         if (this.promptFails) throw new HerdrApiError({ operation: method, code: "agent_not_found", message: "agent gone" });
@@ -235,8 +236,10 @@ export class FakeHerdr {
         this.typedPrompts.push(String(params.text));
         this.appendTurn(this.pane(method, params.target), String(params.text));
         return { type: "agent_prompted", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
-      case "agent.wait":
-        return { type: "agent_info", agent: this.agentInfo(this.pane(method, params.target), this.promptWorking ? "working" : "idle") };
+      case "agent.wait": {
+        const pane = this.pane(method, params.target);
+        return { type: "agent_info", agent: this.agentInfo(pane, pane.agent_status ?? (this.promptWorking ? "working" : "idle")) };
+      }
       case "workspace.rename": {
         const space = this.workspaces.get(String(params.workspace_id));
         if (!space) throw new HerdrApiError({ operation: method, code: "workspace_not_found", message: "no workspace" });
