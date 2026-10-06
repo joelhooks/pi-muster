@@ -64,6 +64,7 @@ afterEach(() => {
 });
 
 const OWNER_TOOLS = [
+  "desk_send",
   "thinking_set",
   "desk_inbox",
   "desk_answer",

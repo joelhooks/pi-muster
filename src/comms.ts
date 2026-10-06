@@ -1,6 +1,7 @@
 import { Effect, Layer, Schema } from "effect";
 import { readFileSync } from "node:fs";
 import { decodeAgentName, decodeSlug, decodeProject, type Policy } from "./domain.ts";
+import { networkCatalogPeers, networkRowIdentity } from "./desk-route.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
 import { exists, load, projectPath } from "./store.ts";
@@ -13,12 +14,12 @@ export function catalogCommsSender(dir: string, session: string) {
   try {
     const project = decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8")));
     const row = project.agents.find(row => row.sessionId === session);
-    return row ? { agent: row.name, session } : undefined;
+    return row ? { agent: networkRowIdentity(project, row), session } : undefined;
   } catch { return undefined; }
 }
 export function catalogNetworkPeers(dir: string) {
   const project = decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8")));
-  return Object.fromEntries(project.agents.map(row => [row.sessionId, row.name]));
+  return Object.fromEntries(project.agents.map(row => [row.sessionId, networkRowIdentity(project, row)]));
 }
 
 export function remoteCommsEnvironment(project: Pick<import("./domain.ts").Project, "policy">, machine: Pick<import("./domain.ts").MachineConfig, "comms">): Record<string, string> {
@@ -151,7 +152,7 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
     // An explicit override must not depend on a readable project catalog.
     const follow = env === "network" && options.followProjectPolicy && exists(options.projectDir);
     const policy = (env === undefined || follow) && exists(options.projectDir) ? (yield* project(options.projectDir)).policy : undefined;
-    const selected = yield* Effect.try({ try: () => selectComms(follow ? undefined : env, policy), catch: error => new CommsError(String(error)) });
+    const selected = yield* Effect.try({ try: () => selectComms(follow ? undefined : env, policy?.comms === undefined && options.networkSender?.()?.agent.includes("/") ? { ...policy, comms: "network" } : policy), catch: error => new CommsError(String(error)) });
     return selected;
   });
   const adapter = Effect.gen(function* () {
@@ -180,13 +181,27 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
           }
           return yield* Effect.fail(new Unsupported("NetworkComms direct DID send needs a recipient session"));
         }),
-        sender: options.networkSender ?? (() => undefined),
+        sender: () => {
+          const sender = options.networkSender?.();
+          if (!sender) return undefined;
+          // Catalog binding wins over a launch environment's legacy bare name.
+          return catalogCommsSender(options.projectDir, sender.session) ?? sender;
+        },
         recipient: to => Effect.gen(function* () {
           const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
           if (address.kind === "alias") {
-            // Validate the project and row before trusting a globally cached catalog name.
+            // Validate project ownership before trusting a qualified cache key.
             yield* lookup(address);
-            return address.row;
+            const known = readRegistry(options.home).get(address.project);
+            const catalog = yield* project(known?.dir ?? options.projectDir);
+            const row = catalog.agents.find(row => row.name === address.row);
+            if (!row) return yield* Effect.fail(new CommsError("NetworkComms unknown alias"));
+            const identity = networkRowIdentity(catalog, row);
+            if (row.role === "desk") {
+              if (row.machine === "local") yield* network.provisionNetworkAgent({ home: options.home, agent: identity, configPath: options.networkConfig?.() });
+              // Remote desks are provisioned by desk_send through prepareRemoteNetworkAgent.
+            }
+            return identity;
           }
           if (address.kind === "did") {
             const cache = yield* Effect.try({ try: () => network.readNetworkIdentities(options.home), catch: () => new CommsError("NetworkComms identity cache invalid") });
@@ -194,12 +209,14 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
             if (!agent) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.did}`));
             return agent;
           }
-          const peer = options.networkPeers?.()[address.id];
-          if (peer) return decodeAgentName(peer);
+          const peer = yield* Effect.try({ try: () => exists(options.projectDir) ? networkCatalogPeers(options.home, options.projectDir)[address.id] : undefined, catch: () => new CommsError("NetworkComms peer catalogs invalid") });
+          if (peer) return peer;
+          const configuredPeer = options.networkPeers?.()[address.id];
+          if (configuredPeer) return configuredPeer;
           const catalog = yield* project(options.projectDir);
           const row = catalog.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id);
           if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.id}`));
-          return row.name;
+          return networkRowIdentity(catalog, row);
         }),
       });
     }

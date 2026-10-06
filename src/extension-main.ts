@@ -13,6 +13,7 @@ import { Type } from "typebox";
 import { registerCompaction } from "./compact.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
 import { MAX_CADENCE_MINUTES, decodeNetworkPeers } from "./domain.ts";
+import { sendDesk } from "./desk-route.ts";
 import { createComms, catalogCommsSender, catalogNetworkPeers } from "./comms.ts";
 import {
   agentClose,
@@ -138,7 +139,14 @@ export default function muster(host: ExtensionAPI) {
               try { return catalogNetworkPeers(dir); }
               catch { return decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")); }
             },
-            networkSender: () => env.MUSTER_AGENT ? { agent: env.MUSTER_AGENT, session: ctx.sessionManager.getSessionId() } : catalogCommsSender(dir, ctx.sessionManager.getSessionId()),
+            networkSender: () => {
+              const session = ctx.sessionManager.getSessionId();
+              const local = catalogCommsSender(dir, session);
+              if (local) return local;
+              if (!env.MUSTER_AGENT) return undefined;
+              const peers = decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}"));
+              return { agent: peers[session] ?? env.MUSTER_AGENT, session };
+            },
           });
           comms.set(key, service);
         }
@@ -265,6 +273,25 @@ export default function muster(host: ExtensionAPI) {
   registerWorkerNavigation(pi, worker);
 
   if (worker) return;
+
+  pi.registerTool({
+    name: "desk_send", label: "Fleet desk send",
+    description: "Send to a registered project/row desk or role over the fleet mailbox. Any intercom fallback is reported with a private receipt. Accepted is not acked.",
+    parameters: Type.Object({ to: Type.String(), text: Type.String() }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const error = unreadable([params.text]); if (error) return error;
+      const dir = resolve(env.MUSTER_PROJECT ?? ctx.cwd);
+      const service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir,
+        adapterEnv: () => "network", networkConfig: () => env.MUSTER_NETWORK_CONFIG,
+        networkSender: () => catalogCommsSender(dir, ctx.sessionManager.getSessionId()),
+      });
+      try {
+        return await run(ctx, signal, sendDesk({ home: homedir(), dir, to: params.to, text: params.text,
+          sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms: service,
+        }), result => `delivery: ${result.path} · network: ${result.network.status}${result.network.detail ? ` (${result.network.detail})` : ""}${result.fallback ? ` · FALLBACK intercom: ${result.fallback.status}${result.fallback.detail ? ` (${result.fallback.detail})` : ""}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`);
+      } finally { service.dispose(); }
+    },
+  });
 
   pi.registerTool({
     name: "thinking_set",

@@ -11,6 +11,7 @@ import type { OwnerItem, OwnerKind } from "./domain.ts";
 import { projectPath } from "./store.ts";
 import { StoreError } from "./errors.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
+import { reportedNetworkSend } from "./comms-fallback.ts";
 import { relayEvent } from "./relay-events.ts";
 import type { CommsDelivery, CommsShape } from "./runtime.ts";
 import { writeRemoteOwnerItem } from "./remote.ts";
@@ -350,15 +351,31 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   const route = yield* Effect.try({ try: () => ownerRoute(resolved.owner, params.home, project), catch: error => new StoreError({ path: ownerPath(resolved.owner, params.home), message: String(error) }) });
   const owner = route.owner;
   const note = params.item.mention === params.owner ? { ...params.item, mention: owner } : params.item;
-  const mode = params.comms?.mode ? yield* params.comms.mode() : "intercom";
+  const mode = params.comms?.mode ? yield* params.comms.mode().pipe(Effect.catch(() => Effect.succeed("network" as const))) : "intercom";
   if (mode === "network") {
     // Local readers must not see a post until authenticated mailbox ingestion.
     const item = yield* Effect.try({ try: () => appendOwnerItem(owner, { ...note, project }, params.home, false), catch: () => new StoreError({ path: "owner network record", message: "owner network record refused" }) });
-    const delivery = params.comms?.postOwner ? yield* params.comms.postOwner(owner, item) : { status: "failed" as const, detail: "NetworkComms owner transport unavailable" };
+    const result = yield* reportedNetworkSend({ home: params.home, sender: params.session, to: owner, id: item.uri, at: new Date().toISOString(),
+      network: params.comms?.postOwner ? params.comms.postOwner(owner, item) : Effect.succeed({ status: "failed" as const, detail: "NetworkComms owner transport unavailable" }),
+      fallback: () => Effect.gen(function* () {
+        if (!params.comms?.relay) return { status: "failed" as const, detail: "intercom fallback unavailable" };
+        // Make the same record visible, not a duplicate post. Remote owners pull its sidecar.
+        const recorded = yield* Effect.try({ try: () => {
+          ingestOwnerItem(owner, item, params.home);
+          if (process.env.MUSTER_MACHINE && process.env.MUSTER_MACHINE !== "local") writeRemoteOwnerItem(owner, item, params.session);
+          return true;
+        }, catch: () => new StoreError({ path: "owner fallback record", message: "owner fallback record could not be queued" }) }).pipe(Effect.catch(() => Effect.succeed(false)));
+        const message = params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`;
+        const sent = yield* params.comms.relay(owner, message);
+        return recorded ? sent : { ...sent, detail: `${sent.detail ? `${sent.detail}; ` : ""}fallback queue write failed; notice only` };
+      }),
+    });
+    const delivery = result.delivery;
     const queued = ["accepted", "queued", "delivered", "acked"].includes(delivery.status);
     const woke = ["delivered", "acked"].includes(delivery.status) && mentions(item, owner);
-    relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path: "network", itemId: item.uri }, params.home);
-    return { id: item.uri, uri: item.uri, queued, woke, path: "network" as const, delivery, owner, resolution: resolved.resolution, pendingPull: false };
+    const path = result.fallback ? "intercom" as const : "network" as const;
+    relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path, itemId: item.uri }, params.home);
+    return { id: item.uri, uri: item.uri, queued, woke, path, delivery, owner, resolution: resolved.resolution, pendingPull: false };
   }
   let item: OwnerItem | undefined;
   let queueError: unknown;

@@ -55,6 +55,7 @@ import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
+import { networkRowIdentity } from "./desk-route.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
@@ -140,7 +141,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (parent && !parent.sessionFile) return yield* input("fork needs a parent session file");
   if (project.policy?.comms === "network") {
     const helper = yield* Effect.promise(() => import("./comms-network.ts"));
-    yield* helper.prepareRemoteNetworkAgent({ home: env.home, agent: name, machineName: nameOfMachine, machine }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
+    yield* helper.prepareRemoteNetworkAgent({ home: env.home, agent: role === "desk" ? `${project.slug}/${name}` : name, machineName: nameOfMachine, machine }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
   }
   const source = lane.repo ?? project.dir;
   const remoteSource = mapPath(source, machine);
@@ -220,7 +221,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(params.action === "fork" ? parentSessionFile : params.action === "restore" ? sessionFile : existing?.cwd === cwd ? existing.sessionFile : null) : 1;
     const networkBrief = project.policy?.comms === "network" && project.agents.some(agent => agent.sessionId === env.sessionId);
     const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...(networkBrief ? {} : message) });
-    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), ...(project.policy?.comms === "network" ? { MUSTER_NETWORK_PEERS: JSON.stringify(Object.fromEntries([...project.agents.filter(agent => agent.name !== row.name), row].map(agent => [agent.sessionId, agent.name]))) } : {}), MUSTER_REMOTE_ROW: JSON.stringify(row) };
+    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), ...(project.policy?.comms === "network" ? { MUSTER_NETWORK_PEERS: JSON.stringify(Object.fromEntries([...project.agents.filter(agent => agent.name !== row.name), row].map(agent => [agent.sessionId, networkRowIdentity(project, agent)]))) } : {}), MUSTER_REMOTE_ROW: JSON.stringify(row) };
     // Read the remote environment, never transplant the owner's machine-specific PATH.
     const remotePath = agentEnvironment.PATH ?? (yield* must("printenv", ["PATH"], { cwd, timeoutMs: 10_000 })).trim();
     agentEnvironment.PATH = [join(machine.musterExtension, "bin"), remotePath].filter(Boolean).join(":");
@@ -2425,7 +2426,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     const networkBrief = network && project.agents.some(agent => agent.sessionId === env.sessionId);
     if (network) {
       const helper = yield* Effect.promise(() => import("./comms-network.ts"));
-      yield* helper.provisionNetworkAgent({ home: env.home, agent: row.name }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
+      yield* helper.provisionNetworkAgent({ home: env.home, agent: networkRowIdentity(project, row) }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
     }
     const argv = buildArgv({
       kind,
@@ -2436,7 +2437,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       musterExtension: project.musterExtension,
       ...(networkBrief ? {} : message),
     });
-    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...(network ? { MUSTER_COMMS: "network", MUSTER_NETWORK_PEERS: JSON.stringify(Object.fromEntries([...project.agents.filter(agent => agent.name !== row.name), row].map(agent => [agent.sessionId, agent.name]))) } : {}) };
+    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...(network ? { MUSTER_COMMS: "network", MUSTER_NETWORK_PEERS: JSON.stringify(Object.fromEntries([...project.agents.filter(agent => agent.name !== row.name), row].map(agent => [agent.sessionId, networkRowIdentity(project, agent)]))) } : {}) };
     const musterBin = join(env.musterRoot, "bin");
     // A profile PATH is typed literally. Otherwise only the prepend is typed: a ~1 KB
     // owner PATH overflows the pane's input line and leaves the quote open.
