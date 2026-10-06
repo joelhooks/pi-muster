@@ -325,7 +325,7 @@ export default function muster(host: ExtensionAPI) {
       repo: Type.Optional(Type.String({ description: "Source repo for this lane's clones and landings; default the project dir" })),
       base: Type.Optional(Type.String({ description: "Ref or sha worker clones start from; default the repo default branch" })),
       generated: Type.Optional(Type.Array(Type.String({ description: "Path prefix a clone may leave dirty" }))),
-      rank: Type.Optional(Type.Integer({ description: "Backlog order, lower first; open: false with rank re-ranks proposed work without other changes" })),
+      rank: Type.Optional(Type.Integer({ description: "Backlog order, lower first; open: false applies rank, goal, label and base together to proposed work and returns a changed-fields receipt" })),
       open: Type.Optional(Type.Boolean()),
       deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Lower the project's deploy level on the 0 locked to 3 jfdi scale." })),
       deployRule: Type.Optional(StringEnum(["customer-facing", "money", "outbound-sends", "irreversible", "shared-infra", "slow-rollback"] as const, { description: "Name the rubric rule lowering permission on the 0 locked to 3 jfdi scale." })),

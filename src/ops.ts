@@ -1118,16 +1118,6 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const deployPatch = requestedLevel !== undefined ? { deployLevel: requestedLevel, deployRule: requestedRule } : {};
     const rank = params.rank;
     if (rank !== undefined && !Number.isSafeInteger(rank)) return yield* input("rank must be a safe integer");
-    // Re-ranking parked work is intentionally rank-only, including its timestamps and brief.
-    if (params.open === false && rank !== undefined) {
-      const lane = yield* mutate(dir, current => {
-        const latest = current.lanes.find(lane => lane.slug === slug);
-        if (!latest || latest.state !== "proposed") return Effect.succeed([current, null] as const);
-        const next = { ...latest, rank };
-        return Effect.succeed([withLane(current, next), next] as const);
-      });
-      if (lane) return { lane, created: false, note: null, outcome: project.outcome };
-    }
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
     if (params.kind === "retro" && existing && existing.kind !== "retro") return yield* input(`lane ${slug} is kind ${existing.kind}, not retro; choose a fresh slug for the retro lane`);
@@ -1169,18 +1159,31 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       updatedAt: iso(env),
     };
     if (!wantOpen) {
-      const lane = yield* mutate(dir, (current) => {
-        const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? base;
+      const { lane, note } = yield* mutate(dir, (current) => {
+        const stored = current.lanes.find((candidate) => candidate.slug === slug);
+        const latest = stored ?? base;
         const next = {
           ...latest,
           ...deployPatch,
+          ...(rank !== undefined ? { rank } : {}),
           base: params.base ?? latest.base,
           goal: latest.state === "proposed" ? params.goal : latest.goal,
-          updatedAt: iso(env),
+          label: latest.state === "proposed" ? params.label : latest.label,
         };
-        return Effect.succeed([withLane(current, next), next] as const);
+        const changes: string[] = [];
+        if (next.rank !== latest.rank) changes.push(`rank ${latest.rank ?? "unset"}→${next.rank}`);
+        if (next.goal !== latest.goal) changes.push("goal updated");
+        if (next.label !== latest.label) changes.push("label updated");
+        if (next.base !== latest.base) changes.push("base updated");
+        if (next.deployLevel !== latest.deployLevel) changes.push("deployLevel updated");
+        if (next.deployRule !== latest.deployRule) changes.push("deployRule updated");
+        // A pure re-rank preserves the brief timestamp; amendments share one locked write.
+        const rankOnly = stored?.state === "proposed" && rank !== undefined && changes.every(change => change.startsWith("rank "));
+        const lane = rankOnly ? next : { ...next, updatedAt: iso(env) };
+        const note = `changed: ${stored ? changes.join(", ") || "none" : "created"}; stored goal: ${lane.goal.slice(0, 200)}`;
+        return Effect.succeed([withLane(current, lane), { lane, note }] as const);
       });
-      return { lane, created: !existing, note: null, outcome: project.outcome };
+      return { lane, created: !existing, note, outcome: project.outcome };
     }
     const event = base.state === "open" ? null : base.state === "proposed" ? ({ type: "OPEN" } as const) : ({ type: "REOPEN" } as const);
     // Reserve WIP under the catalog lock before opening any pane. Other callers see it immediately.

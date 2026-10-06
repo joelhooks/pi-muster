@@ -70,15 +70,16 @@ describe("pull flow", () => {
     feed.turnEnded();
     expect(feed.beforeTurn()).toBeUndefined();
   });
-  it("re-ranks a proposed lane without changing its brief or opening a tab", async () => {
+  it("re-ranks and amends a proposed lane together without opening a tab", async () => {
     const { h, dir } = await setup();
     const parked = { slug: "parked", label: "original", goal: "original", open: false, rank: 10 };
     const first = await runWith(h, laneOpen(dir, parked));
     const tabs = h.herdr.tabs.size;
     h.now = new Date(h.now.getTime() + 60_000);
-    const rerank = { ...parked, rank: -1, label: "ignored", goal: "ignored", base: "ignored" };
+    const rerank = { ...parked, rank: -1, label: "amended", goal: "amended", base: "release" };
     const second = await runWith(h, laneOpen(dir, rerank));
-    expect(second.lane).toEqual({ ...first.lane, rank: -1 });
+    expect(second.lane).toEqual({ ...first.lane, rank: -1, label: "amended", goal: "amended", base: "release", updatedAt: h.now.toISOString() });
+    expect(second.note).toBe("changed: rank 10→-1, goal updated, label updated, base updated; stored goal: amended");
     expect(h.herdr.tabs.size).toBe(tabs);
     expect((await runWith(h, load(dir))).lanes.find(l => l.slug === "parked")?.rank).toBe(-1);
     const invalid = { ...parked, rank: 1.5 };
