@@ -1,0 +1,36 @@
+{
+  "repo": "https://github.com/joelhooks/rat-king",
+  "commit": "6f82c8b29ff21989426d0247ee26c8bf637358d8",
+  "fileRoot": "..",
+  "note": "Desk contract additions only; earlier vendored runtime files retain their own manifest and pin.",
+  "files": {
+    "desk.item.ts": {
+      "source": "packages/lexicon/src/desk.item.ts",
+      "sha256": "cff4834073bd89a4f04371eb296d8bc096fd7aea3e61966fc2b39e5643116308"
+    },
+    "desk.answer.ts": {
+      "source": "packages/lexicon/src/desk.answer.ts",
+      "sha256": "ddd710bf59d7507f6a21927aea7a3390a383e0c3d6dff361a826c164850146d7"
+    },
+    "desk.update.ts": {
+      "source": "packages/lexicon/src/desk.update.ts",
+      "sha256": "c5318eb2abb2da7c23ee6c9a0de5f0e4dd23f65520d3a473c28c97938044c9cd"
+    },
+    "desk/item.json": {
+      "source": "lexicons/sh/mschf/ratking/desk/item.json",
+      "sha256": "520befd579f3477f4d72823d30c4fd892d9e04dff755f73c47a772295e0527e9"
+    },
+    "desk/answer.json": {
+      "source": "lexicons/sh/mschf/ratking/desk/answer.json",
+      "sha256": "f6f39c085a8a02c469f3753e947f77ff188d39267162a2c8e05286c12068df2e"
+    },
+    "desk/update.json": {
+      "source": "lexicons/sh/mschf/ratking/desk/update.json",
+      "sha256": "6c278b7990886b95b844ca1d9d66dca992cfdbf1f62d72f4b46cee54d5048096"
+    },
+    "desk/theme.json": {
+      "source": "lexicons/sh/mschf/ratking/desk/theme.json",
+      "sha256": "0e86b836c72db651ec5cb9c14e934a01c88fb795df2f602ff47e27dc4893f2e3"
+    }
+  }
+}

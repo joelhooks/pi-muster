@@ -1,0 +1,19 @@
+{
+  "repo": "https://github.com/joelhooks/rat-king",
+  "commit": "6f82c8b29ff21989426d0247ee26c8bf637358d8",
+  "fileRoot": "..",
+  "files": {
+    "desk-item.json": {
+      "source": "packages/lexicon/test/fixtures/desk-item.json",
+      "sha256": "932006d741aedf95d7770627e8ef5c867112d7c78a847ad327be27e4512f987e"
+    },
+    "desk-answer.json": {
+      "source": "packages/lexicon/test/fixtures/desk-answer.json",
+      "sha256": "4bbeece3a12394687cc9558382db16e8b19e3f0534fed7f24ce78936ee4f12ec"
+    },
+    "desk-update.json": {
+      "source": "packages/lexicon/test/fixtures/desk-update.json",
+      "sha256": "878e4fa45950cc0b2a83fb4243cf319bf9a8c8533e3a2e07cfaea69557612727"
+    }
+  }
+}
