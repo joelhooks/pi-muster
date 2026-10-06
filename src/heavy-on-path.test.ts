@@ -12,6 +12,7 @@ import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const bin = join(root, "bin");
+const hasGitIndex = spawnSync("git", ["rev-parse", "--git-dir"], { cwd: root, encoding: "utf8" }).status === 0;
 afterEach(() => { vi.unstubAllEnvs(); });
 
 async function open(h: ReturnType<typeof harness>) {
@@ -88,7 +89,8 @@ describe("Muster CLI launch PATH", () => {
     expect(output.trim()).toBe(`${bin}${delimiter}/usr/bin:/bin`);
   });
 
-  it.each(["muster-heavy", "muster-digest", "muster-heavy.ts", "muster-digest.ts"])("%s is executable in Git's index", file => {
+  // Fleet ships a tree, not a checkout. Local checkouts and CI still enforce Git modes.
+  it.skipIf(!hasGitIndex).each(["muster-heavy", "muster-digest", "muster-heavy.ts", "muster-digest.ts"])("%s is executable in Git's index", file => {
     const entry = execFileSync("git", ["ls-files", "-s", `bin/${file}`], { cwd: root, encoding: "utf8" });
     expect(entry.startsWith("100755 ")).toBe(true);
   });
