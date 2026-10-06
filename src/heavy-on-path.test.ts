@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { join, delimiter } from "node:path";
-import { mkdtempSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
@@ -89,8 +89,13 @@ describe("Muster CLI launch PATH", () => {
   });
 
   it.each(["muster-heavy", "muster-digest", "muster-heavy.ts", "muster-digest.ts"])("%s is executable in Git's index", file => {
-    const entry = execFileSync("git", ["ls-files", "-s", `bin/${file}`], { cwd: root, encoding: "utf8" });
-    expect(entry.startsWith("100755 ")).toBe(true);
+    // Fleet ships an exact tree without .git; retain the index assertion in checkouts.
+    if (existsSync(join(root, ".git"))) {
+      const entry = execFileSync("git", ["ls-files", "-s", `bin/${file}`], { cwd: root, encoding: "utf8" });
+      expect(entry.startsWith("100755 ")).toBe(true);
+    } else {
+      expect(statSync(join(bin, file)).mode & 0o111).toBe(0o111);
+    }
   });
 
   it("runs packed commands bare and through an npm-style symlink", async () => {

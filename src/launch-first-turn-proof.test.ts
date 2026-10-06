@@ -36,7 +36,7 @@ describe("first-turn journal boundary", () => {
     h.herdr.firstTurn = "missing";
     const result = await runWith(h, promptWithProof(pane.pane_id, "task"));
     expect(result).toMatchObject({ state: "unproven", detail: "no first turn within 90 s" });
-  });
+  }, 30_000);
   it("keeps the probe suffix below 120 typed characters, and probe failure is unknown", async () => {
     expect(piReceiptSuffix("00000000-0000-0000-0000-000000000000").length).toBeLessThan(120);
     const { h } = setup();

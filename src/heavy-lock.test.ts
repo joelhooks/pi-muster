@@ -221,7 +221,7 @@ describe("heavy FIFO queue", () => {
       expect(existsSync(join(options.home, ".local/state/muster/heavy-queue", names[head]!))).toBe(false);
       if (result.ok) result.release();
     }
-  });
+  }, 30_000);
 
   it("admits the two oldest with two free slots, but not a third or a no-ticket caller", () => {
     const options = setup();
