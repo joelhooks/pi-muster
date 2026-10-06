@@ -6,8 +6,11 @@ import type { Socket } from "effect/socket";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { createComms } from "./comms.ts";
-import { createNetworkComms, networkConfigPath, networkIdentityPath, networkRecipient, openNetworkMailbox, provisionNetworkAgent, readNetworkConfig, readNetworkIdentities, watchCloseAction, watchNetworkMailbox } from "./comms-network.ts";
-import { decodeCommsIdentityReference } from "./domain.ts";
+import { createNetworkComms, networkConfigPath, networkIdentityPath, networkRecipient, openNetworkMailbox, provisionNetworkAgent, readNetworkConfig, readNetworkIdentities, watchCloseAction, watchNetworkMailbox, consumeNetworkMailbox, prepareRemoteNetworkAgent } from "./comms-network.ts";
+import { decodeCommsIdentityReference, decodeMachines } from "./domain.ts";
+import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue, writeReader } from "./owner-queue.ts";
+import { CommsError, Proc, MusterEnv } from "./runtime.ts";
+import { harness } from "./test-support.ts";
 
 const config = { endpoint: "https://mailbox.example.invalid", serviceDid: "did:web:mailbox.example.invalid", provisionWrapper: "/private/pilot-wrapper", didTemplate: "did:web:{agent}.example.invalid", secretsCommand: "/private/secrets" };
 function home() { return mkdtempSync(join(tmpdir(), "muster-network-")); }
@@ -42,6 +45,13 @@ describe("private network configuration and provisioning", () => {
     visit(resolve("src/extension-main.ts"));
     expect([...visited].some(path => path.endsWith("comms.ts"))).toBe(true);
     expect([...visited].some(path => path.endsWith("comms-network.ts"))).toBe(false);
+  });
+  it("intercom mode checks remain inert and never register a bus channel", async () => {
+    const emit = vi.fn(); const on = vi.fn();
+    const service = createComms({ home: home(), projectDir: "/missing", events: { emit, on }, createId: () => "id", adapterEnv: () => "intercom" });
+    if (!service.mode) throw new Error("mode seam missing");
+    expect(await Effect.runPromise(service.mode())).toBe("intercom");
+    expect(emit).not.toHaveBeenCalled(); expect(on).not.toHaveBeenCalled();
   });
   it("fails at call time with the config file name and zero intercom events", async () => {
     const root = home(); const emit = vi.fn(); const on = vi.fn();
@@ -115,8 +125,78 @@ describe("private network configuration and provisioning", () => {
   });
 });
 
+describe("network owner routing and consumption", () => {
+  it.each(["fyi", "question", "action"] as const)("routes %s through Comms even with a fresh local reader, without locally appending the owner's queue", async kind => {
+    const root = home(); writeReader("desk-session", root);
+    const postOwner = vi.fn(() => Effect.succeed({ status: "accepted" as const })); const send = vi.fn(() => Effect.succeed({ status: "delivered" as const }));
+    const comms = { ...createNetworkComms({ home: root, sender: () => ({ agent: "worker", session: "worker-session" }), recipient: () => Effect.succeed("desk") }), postOwner };
+    const result = await Effect.runPromise(deliverOwnerItem({ home: root, project: "pilot", session: "worker-session", owner: "desk-session", item: { author: "worker-session", kind, title: "mailbox only" }, comms, send }));
+    expect(result.path).toBe("network"); expect(result.delivery.status).toBe("accepted"); expect(postOwner).toHaveBeenCalledTimes(1); expect(send).not.toHaveBeenCalled();
+    expect(readOwnerQueue("desk-session", root).items).toHaveLength(0);
+    expect(postOwner.mock.calls[0]).toMatchObject(["desk-session", { author: "worker-session", text: expect.stringContaining("mailbox only") }]);
+  });
+  it("threads owner replies over Comms and keeps failed sends out of the receiver queue", async () => {
+    const root = home(); const parent = appendOwnerItem("desk-session", { author: "worker-session", project: "pilot", kind: "question", title: "question" }, root);
+    const postOwner = vi.fn(() => Effect.succeed({ status: "failed" as const }));
+    const comms = { ...createNetworkComms({ home: root, sender: () => ({ agent: "desk", session: "desk-session" }), recipient: () => Effect.succeed("worker") }), postOwner };
+    const result = await Effect.runPromise(deliverOwnerItem({ home: root, project: "pilot", session: "desk-session", owner: "worker-session", item: { author: "desk-session", kind: "fyi", title: "answer", replyTo: parent.uri, mention: "worker-session" }, comms, send: () => Effect.die("intercom forbidden") }));
+    expect(result.queued).toBe(false); expect(readOwnerQueue("worker-session", root).items).toHaveLength(0);
+    expect(postOwner.mock.calls[0]).toMatchObject(["worker-session", { reply: { parent: { uri: parent.uri, cid: parent.cid } } }]);
+  });
+  it("authenticates payload author, ingests before ack, checkpoints privately, and releases the fence", async () => {
+    const root = home(); privateFile(networkIdentityPath(root), { desk: provision(), worker: provision("worker") });
+    const { Output } = await import("./vendor/rat-king-lexicon/mailbox.list.ts");
+    const { Main } = await import("./vendor/rat-king-lexicon/runtime.lease.ts");
+    const raw = JSON.parse(readFileSync(new URL("./vendor/rat-king-fixtures/list.output.json", import.meta.url), "utf8").replaceAll("did:plc:aaaaaaaaaaaaaaaaaaaaaaaa", provision("worker").did));
+    const events = Schema.decodeUnknownSync(Output)(raw).events;
+    const defs = await import("./vendor/rat-king-lexicon/defs.ts");
+    const receipt = Schema.decodeUnknownSync(Schema.toType(defs.Receipt))(events[0]?.receipt);
+    const workerDid = Schema.decodeUnknownSync(Main.schema.fields.did)(provision("worker").did);
+    const tid = Schema.decodeUnknownSync(Main.schema.fields.leaseId)("3jzfcijpj2z2a");
+    const lease = Schema.decodeUnknownSync(Main)({ did: provision().did, leaseId: "3jzfcijpj2z2b", generation: 1, expiresAt: "2026-10-07T00:00:00.000Z", harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: "desk-session" } });
+    const item = appendOwnerItem("desk-session", { author: "worker-session", project: "pilot", kind: "action", title: "packet" }, root, false);
+    const order: string[] = []; const release = vi.fn(() => Effect.void); const seen = vi.fn();
+    const mailbox = {
+      lease: { acquire: () => Effect.succeed(lease), renew: () => Effect.succeed(lease), resolve: () => Effect.succeed(lease), release },
+      watch: (after: number) => { seen(after); return after ? Stream.empty : Stream.succeed({ events, throughSeq: 2 }); },
+      open: () => Effect.succeed({ body: JSON.stringify({ type: "owner", recipient: "desk-session", item }), senderDid: workerDid, tid, verified: true as const }),
+      deliver: () => Effect.sync(() => { order.push("deliver"); return { receipt }; }),
+      ack: () => Effect.sync(() => { order.push("ack"); return { receipt }; }),
+    };
+    const options = { home: root, agent: "desk", session: "desk-session", mailbox, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.sync(() => { order.push("ingest"); ingestOwnerItem("desk-session", item, root); }) };
+    await Effect.runPromise(consumeNetworkMailbox(options));
+    expect(order).toEqual(["ingest", "deliver", "ack"]); expect(release).toHaveBeenCalledOnce();
+    expect(readOwnerQueue("desk-session", root).items).toHaveLength(1);
+    const path = join(root, ".local/state/muster/network-cursors/desk.json"); expect(statSync(path).mode & 0o777).toBe(0o600);
+    await Effect.runPromise(consumeNetworkMailbox(options)); expect(seen.mock.calls).toEqual([[0], [2]]); expect(order).toHaveLength(3);
+    privateFile(path, { desk: 0 });
+    const failed = consumeNetworkMailbox({ ...options, senderAgent: () => Effect.succeed("desk") });
+    await expect(Effect.runPromise(failed)).rejects.toThrow("authenticated sender differs"); expect(order).toHaveLength(3);
+  });
+  it("remote provisioning exchanges only public references and keeps the configured path on that machine", async () => {
+    const h = harness(); const machine = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/package", workerWorktree: "/worker", env: {}, comms: { config: "/private/network.json" } } }).remote!;
+    const captured: Array<readonly string[]> = [];
+    const proc = { run: (_file: string, args: readonly string[]) => { captured.push(args); return Effect.succeed({ code: 0, stdout: captured.length === 1 ? JSON.stringify(provision("worker")) : "", stderr: "" }); } };
+    const env = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/package", workerWorktree: h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: () => undefined };
+    await Effect.runPromise(prepareRemoteNetworkAgent({ home: h.home, agent: "worker", machineName: "remote", machine }).pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc)));
+    expect(networkRecipient(h.home, "worker")).toEqual(provision("worker"));
+    expect(captured).toHaveLength(2);
+    expect(captured[0]?.at(-1)).toContain("/private/network.json");
+    expect(captured[1]?.at(-1)).toContain("seedNetworkIdentities");
+    expect(JSON.stringify(captured)).not.toContain('\\\"d\\\"');
+  });
+  it("remote network requires an explicit config block and refuses a failed probe without fallback", async () => {
+    const h = harness(); const machine = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/package", workerWorktree: "/worker", env: {} } }).remote!;
+    const run = (config: typeof machine) => Effect.runPromise(prepareRemoteNetworkAgent({ home: h.home, agent: "worker", machineName: "remote", machine: config }).pipe(Effect.provideService(MusterEnv, { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/package", workerWorktree: h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: () => {} }), Effect.provideService(Proc, { run: () => Effect.succeed({ code: 1, stdout: "", stderr: "PRIVATE_SENTINEL" }) })));
+    await expect(run(machine)).rejects.toThrow("requires a comms config block");
+    await expect(run({ ...machine, comms: { config: "/private/network.json" } })).rejects.toThrow("network config/provision probe failed");
+    expect(decodeMachines({ remote: { ...machine, comms: { config: "/private/network.json" } } }).remote?.comms?.config).toBe("/private/network.json");
+  });
+});
+
 class FakeSocket implements Socket.WebSocketLike {
   readonly readyState = 1;
+  noticeSent = false;
   readonly listeners = new Map<string, Set<(event: Socket.WebSocketEvent) => void>>();
   constructor(readonly code: number) {}
   addEventListener(type: string, listener: (event: Socket.WebSocketEvent) => void) { const set = this.listeners.get(type) ?? new Set(); set.add(listener); this.listeners.set(type, set); }
@@ -125,6 +205,11 @@ class FakeSocket implements Socket.WebSocketLike {
   close() {}
   send(data: string | Uint8Array<ArrayBuffer>) {
     expect(typeof data === "string" && JSON.parse(data).$type).toBe("sh.mschf.ratking.mailbox.subscribe#auth");
+    if (typeof data === "string") {
+      const claims = JSON.parse(Buffer.from(JSON.parse(data).token.split(".")[1], "base64url").toString("utf8"));
+      expect(claims.aud).toBe(`${config.serviceDid}#mailbox`);
+    }
+    queueMicrotask(() => { this.noticeSent = true; this.emit("message", { data: JSON.stringify({ $type: "sh.mschf.ratking.mailbox.subscribe#notice", seq: 2 }) }); });
     setTimeout(() => this.emit("close", { code: this.code, reason: "test close" }), 0);
   }
 }
@@ -139,7 +224,7 @@ describe("network watch close handling through a fake WebSocketPort", () => {
     const connections: FakeSocket[] = [];
     const port = { connect: () => { const socket = new FakeSocket(connections.length === 0 ? code : 4401); connections.push(socket); return socket; } };
     const acquire = vi.fn(() => Effect.succeed({ did: identity.did, leaseId: "3jzfcijpj2z2b", generation: 1 }));
-    const stream = watchNetworkMailbox({ mailbox: { watch: (seq, fence) => watch({ ...config, identity, documents: [] }, () => Effect.succeed({ events: [], throughSeq: seq }), seq, fence) }, acquire, afterSeq: 0 });
+    const stream = watchNetworkMailbox({ mailbox: { watch: (seq, fence) => watch({ ...config, identity, documents: [] }, () => Effect.sync(() => { expect(connections.at(-1)?.noticeSent).toBe(true); return { events: [], throughSeq: seq }; }), seq, fence) }, acquire, afterSeq: 0 });
     const result = await Effect.runPromiseExit(Stream.runDrain(stream).pipe(Effect.provideService(WebSocketPort, port), Effect.timeout("3 seconds")));
     expect(JSON.stringify(result)).toContain("AuthRequired");
     expect(connections).toHaveLength(code === 4401 ? 1 : 2);

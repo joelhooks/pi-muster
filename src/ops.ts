@@ -54,6 +54,7 @@ import { PROCESS_STATES, stepAgent, stepDelivery, stepLane, stepProject } from "
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeAgentRow, decodeRemotePacket } from "./domain.ts";
+import { remoteCommsEnvironment } from "./comms.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
@@ -133,6 +134,10 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
   if (params.action === "restore" && !existing) return yield* input(`no row ${name} to restore`);
   if (params.action !== "restore" && existing && !["planned", "failed"].includes(existing.state)) return yield* input(`row ${name} is ${existing.state}; restore it or choose another name`);
   if (parent && !parent.sessionFile) return yield* input("fork needs a parent session file");
+  if (project.policy?.comms === "network") {
+    const helper = yield* Effect.promise(() => import("./comms-network.ts"));
+    yield* helper.prepareRemoteNetworkAgent({ home: env.home, agent: name, machineName: nameOfMachine, machine }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
+  }
   const source = lane.repo ?? project.dir;
   const remoteSource = mapPath(source, machine);
   yield* prerequisites(nameOfMachine, machine, remoteSource);
@@ -203,8 +208,9 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
     const message = params.action === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, promptDir);
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(params.action === "fork" ? parentSessionFile : params.action === "restore" ? sessionFile : existing?.cwd === cwd ? existing.sessionFile : null) : 1;
-    const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...message });
-    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, MUSTER_COMMS: "intercom", MUSTER_REMOTE_ROW: JSON.stringify(row) };
+    const networkBrief = project.policy?.comms === "network" && project.agents.some(agent => agent.sessionId === env.sessionId);
+    const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...(networkBrief ? {} : message) });
+    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), ...(project.policy?.comms === "network" ? { MUSTER_NETWORK_PEERS: JSON.stringify(Object.fromEntries([...project.agents.filter(agent => agent.name !== row.name), row].map(agent => [agent.sessionId, agent.name]))) } : {}), MUSTER_REMOTE_ROW: JSON.stringify(row) };
     // Read the remote environment, never transplant the owner's machine-specific PATH.
     const remotePath = agentEnvironment.PATH ?? (yield* must("printenv", ["PATH"], { cwd, timeoutMs: 10_000 })).trim();
     agentEnvironment.PATH = [join(machine.musterExtension, "bin"), remotePath].filter(Boolean).join(":");
@@ -230,6 +236,11 @@ const remoteLaunch = (dir: string, project: Project, params: AgentLaunchInput, n
       yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(logDir, `#!/bin/sh\nset -e\n${shellPrelude(cwd, agentEnvironment)}${piReceiptSuffix(piReceiptId)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
+      if (networkBrief && message.expected) {
+        const comms = yield* Comms;
+        const sent = yield* comms.send(row.sessionId, message.expected);
+        if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms brief send refused for ${row.name}: ${sent.detail ?? sent.status}`);
+      }
       const wait = yield* waitForSession(binding.paneId, null);
       if (wait.state !== "ready") {
         const logTail = yield* must("tail", ["-n", "12", launchLog], { cwd, timeoutMs: 10_000 }).pipe(Effect.orElseSucceed(() => ""));
@@ -341,7 +352,7 @@ const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
   writeFileSync(temporary, JSON.stringify(sidecar));
   renameSync(temporary, join(root, "packet.json"));
   const message = `Packet ${id.slice(0, 12)} from ${row.intercomAddress}: ${params.summary.trim().split("\n")[0]}. Remote sidecar: ${root}/packet.json. Run project_status to ingest it.`;
-  const notice = yield* deliverOwnerItem({ owner: params.owner, home: env.home, session: env.sessionId, project: sidecar.project, item: { author: env.sessionId, lane: row.lane, kind: "action", title: `Packet ${id.slice(0,12)} from ${row.name}`, refs: [report], body: message }, send: comms.send, message });
+  const notice = yield* deliverOwnerItem({ owner: params.owner, home: env.home, session: env.sessionId, project: sidecar.project, item: { author: env.sessionId, lane: row.lane, kind: "action", title: `Packet ${id.slice(0,12)} from ${row.name}`, refs: [report], body: message }, comms, send: comms.send, message });
   return { packet, delivery: notice.delivery, notice };
 });
 
@@ -1786,6 +1797,12 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
     const launchProfile = extensionsFor(project, row);
     const message = kind === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, join(env.home, ".pi/agent"));
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(kind === "fork" ? row.parentSessionFile : kind === "restore" ? row.sessionFile : existing?.cwd === row.cwd ? existing.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home) : null) : 1;
+    const network = project.policy?.comms === "network";
+    const networkBrief = network && project.agents.some(agent => agent.sessionId === env.sessionId);
+    if (network) {
+      const helper = yield* Effect.promise(() => import("./comms-network.ts"));
+      yield* helper.provisionNetworkAgent({ home: env.home, agent: row.name }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
+    }
     const argv = buildArgv({
       kind,
       sessionId: row.sessionId,
@@ -1793,9 +1810,9 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       parentSessionFile: row.parentSessionFile,
       profile: launchProfile,
       musterExtension: project.musterExtension,
-      ...message,
+      ...(networkBrief ? {} : message),
     });
-    const agentEnvironment = agentEnv(project, row);
+    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...(network ? { MUSTER_COMMS: "network", MUSTER_NETWORK_PEERS: JSON.stringify(Object.fromEntries([...project.agents.filter(agent => agent.name !== row.name), row].map(agent => [agent.sessionId, agent.name]))) } : {}) };
     const musterBin = join(env.musterRoot, "bin");
     // A profile PATH is typed literally. Otherwise only the prepend is typed: a ~1 KB
     // owner PATH overflows the pane's input line and leaves the quote open.
@@ -1827,6 +1844,11 @@ export const agentLaunch = (dir: string, params: AgentLaunchInput) =>
       yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(join(env.home, ".pi/agent"), `#!/bin/sh\nset -e\n${shellPrelude(row.cwd, agentEnvironment, pathPrepend)}${piReceiptSuffix(piReceiptId)}\nexec ${["pi", ...argv].map(shellQuote).join(" ")}`);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
+      if (networkBrief && message.expected) {
+        const comms = yield* Comms;
+        const sent = yield* comms.send(row.sessionId, message.expected);
+        if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms brief send refused for ${row.name}: ${sent.detail ?? sent.status}`);
+      }
       const wait = yield* waitForSession(binding.paneId, null, () => findSessionFile(row.cwd, row.sessionId, env.home));
       const sessionFile = wait.state === "ready" ? wait.sessionFile : null;
       if (wait.state === "ready" && wait.slow) skillNotes.push(slowStartNote(wait));
@@ -2118,7 +2140,7 @@ export const packetReport = (params: PacketReportInput) =>
     relayEvent({ ts: iso(env), session: env.sessionId, kind: "packet_report", project: project.slug, packetId: id }, env.home);
     const notice = yield* deliverOwnerItem({ owner: saved.owner, home: env.home, session: env.sessionId, project: project.slug,
       item: { author: env.sessionId, lane: row.lane, kind: "action", title: `Packet ${id.slice(0, 12)} from ${row.name}: ${params.summary.trim().split("\n")[0] ?? ""}`, refs: [report], body: message },
-      send: intercom.send, message });
+      comms: intercom, send: intercom.send, message });
     return { packet: saved.packet, delivery: notice.delivery, notice };
   });
 

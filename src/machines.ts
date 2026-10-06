@@ -17,6 +17,18 @@ export const ownerFeedMachine = setup({ types: { events: {} as { type: "START" |
   states: { idle: { on: { START: "busy" } }, busy: { on: { END: "idle" } } },
 });
 
+/** Session-scoped transport ownership, separate from the feed's idle/busy lifecycle. */
+export const networkConsumerMachine = setup({ types: { events: {} as { type: "NETWORK" | "INTERCOM" | "FAILURE" | "STOP" } } }).createMachine({
+  initial: "off",
+  on: { STOP: ".stopped" },
+  states: {
+    off: { on: { NETWORK: "running", FAILURE: "failed" } },
+    running: { on: { INTERCOM: "off", FAILURE: "failed" } },
+    failed: { on: { INTERCOM: "off" } },
+    stopped: { type: "final" },
+  },
+});
+
 export type AgentEvent =
   | { type: "LAUNCH" }
   | { type: "STARTED" }

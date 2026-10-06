@@ -14,7 +14,7 @@ export interface RelayEvent {
   readonly itemId?: string;
   readonly noteKind?: string;
   readonly woke?: boolean;
-  readonly path?: "queue" | "intercom";
+  readonly path?: "queue" | "intercom" | "network";
   readonly itemCount?: number;
 }
 

@@ -10,7 +10,7 @@ import { projectPath } from "./store.ts";
 import { StoreError } from "./errors.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
 import { relayEvent } from "./relay-events.ts";
-import type { CommsDelivery } from "./runtime.ts";
+import type { CommsDelivery, CommsShape } from "./runtime.ts";
 import { writeRemoteOwnerItem } from "./remote.ts";
 
 export interface OwnerNoteInput { author: string; project?: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string; signed?: unknown }
@@ -123,7 +123,7 @@ export function findOwnerPost(session: string, uri: string, home = homedir()) {
   if (!post) throw new Error(`post not found in this session's queue: ${uri}`);
   return post;
 }
-export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = homedir()): OwnerItem {
+export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = homedir(), persist = true): OwnerItem {
   const originalOwner = owner;
   owner = ownerRoute(owner, home, input.project).owner;
   const author = decodeOwnerSession(input.author);
@@ -141,9 +141,11 @@ export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = hom
     ...(mention ? { facets: [{ index: { byteStart: 0, byteEnd: Buffer.byteLength(prefix.trimEnd()) }, features: [{ $type: MENTION_NSID, did: mention }] }] } : {}),
   };
   const item = decodeOwnerItem({ ...record, cid: createHash("sha256").update(canonicalJson(record)).digest("hex").slice(0, 32), ...(input.signed === undefined ? {} : { signed: input.signed }) });
-  const path = ownerPath(owner, home);
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  appendFileSync(path, `${JSON.stringify(item)}\n`, { mode: 0o600 });
+  if (persist) {
+    const path = ownerPath(owner, home);
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    appendFileSync(path, `${JSON.stringify(item)}\n`, { mode: 0o600 });
+  }
   return item;
 }
 /** Pull preserves the full post and CID. Forwarded source queues also count for dedupe. */
@@ -193,12 +195,22 @@ export function retireReader(owner: string, home: string, startedAt: string) {
   } catch { /* missing or replaced presence is not ours */ }
 }
 /** Queue first. Missing readers and any queue/telemetry failure keep the old outbox path. */
-export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; home: string; session: string; project: string; item: OwnerNoteInput; send: (to: string, message: string) => Effect.Effect<CommsDelivery, never, R>; message?: string }) => Effect.gen(function* () {
+export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; home: string; session: string; project: string; item: OwnerNoteInput; comms?: CommsShape; send: (to: string, message: string) => Effect.Effect<CommsDelivery, never, R>; message?: string }) => Effect.gen(function* () {
   const resolved = resolveOwner(params);
   const project = ownerProject(params.project);
   const route = yield* Effect.try({ try: () => ownerRoute(resolved.owner, params.home, project), catch: error => new StoreError({ path: ownerPath(resolved.owner, params.home), message: String(error) }) });
   const owner = route.owner;
   const note = params.item.mention === params.owner ? { ...params.item, mention: owner } : params.item;
+  const mode = params.comms?.mode ? yield* params.comms.mode() : "intercom";
+  if (mode === "network") {
+    // Local readers must not see a post until authenticated mailbox ingestion.
+    const item = yield* Effect.try({ try: () => appendOwnerItem(owner, { ...note, project }, params.home, false), catch: () => new StoreError({ path: "owner network record", message: "owner network record refused" }) });
+    const delivery = params.comms?.postOwner ? yield* params.comms.postOwner(owner, item) : { status: "failed" as const, detail: "NetworkComms owner transport unavailable" };
+    const queued = ["accepted", "queued", "delivered", "acked"].includes(delivery.status);
+    const woke = ["delivered", "acked"].includes(delivery.status) && mentions(item, owner);
+    relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path: "network", itemId: item.uri }, params.home);
+    return { id: item.uri, uri: item.uri, queued, woke, path: "network" as const, delivery, owner, resolution: resolved.resolution, pendingPull: false };
+  }
   let item: OwnerItem | undefined;
   let queueError: unknown;
   try { item = appendOwnerItem(owner, { ...note, project }, params.home); } catch (error) { queueError = error; }
