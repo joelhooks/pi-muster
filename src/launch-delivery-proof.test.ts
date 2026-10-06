@@ -3,7 +3,7 @@ import { Effect } from "effect";
 import { readFileSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { promptWithProof } from "./herdr.ts";
 import { load } from "./store.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";

@@ -58,6 +58,10 @@ Defaults fit most work. Role models come from the fleet roster (`~/.config/muste
 
 Roster skills are a role's standing set; name extras at launch; workers pull the rest with `skill_find` and read matching `SKILL.md` files.
 
+## Asynchronous launches
+
+`agent_launch` with `launch`, `fork`, or `restore` returns a job receipt, not a live agent. Wait for its owner-queue action before arming `herdr_watch` on the returned pane. A `blocked` result names the failure and log; inspect it before retrying. `adopt` and `restart` keep their existing behavior.
+
 ## Warm forks and rewind
 
 After a dependency upgrade, restart Pi with `pi --session <session file>`, not `/reload`; the running process keeps the old dependency modules cached.

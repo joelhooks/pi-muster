@@ -29,7 +29,8 @@
   },
   "bin": {
     "muster-heavy": "./bin/muster-heavy.ts",
-    "muster-digest": "./bin/muster-digest.ts"
+    "muster-digest": "./bin/muster-digest.ts",
+    "muster-launch": "./bin/muster-launch"
   },
   "files": [
     "AGENTS.md",
@@ -37,6 +38,8 @@
     "bin/muster-heavy",
     "bin/muster-digest",
     "bin/muster-heavy.ts",
+    "bin/muster-launch.ts",
+    "bin/muster-launch",
     "bin/muster-digest.ts",
     "src/digest.ts",
     "src/digest-ext.ts",
@@ -187,7 +190,6 @@
     "@earendil-works/pi-coding-agent": "0.79.10",
     "@earendil-works/pi-tui": "0.84.3",
     "@types/node": "24.13.3",
-    "tsx": "^4.23.15",
     "typebox": "1.3.0",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
@@ -198,6 +200,7 @@
     "@hpke/core": "1.9.0",
     "@ipld/dag-cbor": "10.0.2",
     "@joelhooks/pi-bellwether": "github:joelhooks/pi-bellwether#af41815ae849fab4c41bb72c0289af9bb23b7d0e",
+    "tsx": "^4.23.15",
     "effect": "4.0.1",
     "xstate": "5.32.5"
   }

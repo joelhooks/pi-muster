@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { expect, it } from "vitest";
-import { agentClose, agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
+import { agentClose, agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
 import { appendOwnerItem, forwardOwner, ownerPath, ownerRoute, readOwnerQueue } from "./owner-queue.ts";
 import { load, mutate } from "./store.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";

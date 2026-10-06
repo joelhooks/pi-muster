@@ -17,6 +17,7 @@ import { createComms, catalogCommsSender, catalogNetworkPeers } from "./comms.ts
 import {
   agentClose,
   agentLaunch,
+  launchResultText,
   finishRestart,
   deskPost,
   laneClose,
@@ -405,8 +406,8 @@ export default function muster(host: ExtensionAPI) {
     name: "agent_launch",
     label: "Muster agent launch",
     description:
-      "restart with name forks an owned row onto current code in a new pane, proves its first turn, rebinds the row and owned rows, then retires the old Pi (self-restart quits at agent_end). Never reload or restart in place. Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with name and pane re-binds an existing owned row to its live Pi session or direct fork without starting a process or sending input. adopt with side: true, from and lane keeps the side-desk path: re-point a running desk already moved into the parent's tab.",
-    promptSnippet: "agent_launch: launch, fork, restore, or adopt a live lane agent",
+      "launch, fork and restore validate immediately and launch in a detached background process. The immediate receipt names the job and log, not delivery proof. The full result arrives as a waking owner-queue action (blocked on failure); arm herdr_watch after that result arrives. restart with name forks an owned row onto current code in a new pane, proves its first turn, rebinds the row and owned rows, then retires the old Pi (self-restart quits at agent_end). Never reload or restart in place. Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; never tool allowlists), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with name and pane re-binds an existing owned row to its live Pi session or direct fork without starting a process or sending input. adopt with side: true, from and lane keeps the side-desk path: re-point a running desk already moved into the parent's tab.",
+    promptSnippet: "agent_launch: asynchronously launch, fork, or restore; result arrives in owner queue",
     parameters: Type.Object({
       project: ProjectParam,
       action: StringEnum(["launch", "fork", "restore", "adopt", "restart"] as const),
@@ -437,14 +438,8 @@ export default function muster(host: ExtensionAPI) {
       const { project, ...rest } = params;
       return run(ctx, signal, agentLaunch(projectDir(ctx, project), rest), (result) => {
         if ("endSession" in result && result.endSession) armRestartExit({ sessionId: ctx.sessionManager.getSessionId(), dir: projectDir(ctx, project), restart: result.endSession });
-        return [
-          `${result.row.name} ${result.row.state} in pane ${result.row.pane?.paneId} (${result.row.pane?.openedByMuster ? "opened by Muster" : "caller's pane"}), readiness ${result.readiness}.`,
-          `session ${result.row.sessionId}${result.sessionIdMatched === false ? " (differs from the minted id; Herdr's is recorded)" : ""}: ${result.row.sessionFile ?? "file not found yet"}`,
-          result.proof ? `delivery: ${result.proof.state}${result.proof.state === "unproven" ? ` — ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent",
-          ...(result.row.clone ? [`clone base: ${result.row.clone.base ? `${result.row.clone.base.ref} ${result.row.clone.base.sha}` : "unproven (old catalog)"}`] : []),
-          `argv: pi ${result.argv.join(" ")}`,
-          ...result.notes,
-        ].join("\n");
+        if ("jobId" in result) return [`${result.row.name} launching; job ${result.jobId}; log: ${result.log}; lane tab: ${result.tab}; pane: ${result.row.pane?.paneId ?? "not allocated yet"}`, ...result.notes].join("\n");
+        return launchResultText(result);
       });
     },
   });

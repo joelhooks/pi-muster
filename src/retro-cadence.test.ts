@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { decodeProject } from "./domain.ts";
-import { agentLaunch, laneClose, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneClose, laneOpen, projectOpen } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { Effect } from "effect";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";

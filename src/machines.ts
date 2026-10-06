@@ -2,8 +2,8 @@ import { Effect } from "effect";
 import { setup, transition } from "xstate";
 import type { AnyStateMachine, EventObject } from "xstate";
 
-import type { AgentState, LaneState, LaneDelivery, ProjectState } from "./domain.ts";
-import { IllegalTransition } from "./errors.ts";
+import type { AgentState, LaneState, LaneDelivery, ProjectState, LaunchJobState } from "./domain.ts";
+import { IllegalTransition, InputError } from "./errors.ts";
 
 /**
  * Lifecycles. Each machine is context-free: the persisted snapshot is the state
@@ -36,6 +36,7 @@ export const networkConsumerMachine = setup({ types: { events: {} as { type: "NE
 });
 
 export type AgentEvent =
+  | { type: "QUEUE_RESTORE" }
   | { type: "LAUNCH" }
   | { type: "STARTED" }
   | { type: "ADOPT" }
@@ -82,10 +83,10 @@ export const agentMachine = setup({
     reported: { on: { REPORT: { target: "reported", guard: "paneLive" }, RESTARTED: "running", VERIFY: "verified", REWORK: "running", LAND: "landed", PANE_GONE: "interrupted", ...CLOSABLE } },
     verified: { on: { REPORT: { target: "reported", guard: "paneLive" }, LAND: "landed", RESTARTED: "running", REWORK: "running", ...CLOSABLE } },
     landed: { on: { REPORT: { target: "reported", guard: "paneLive" }, PANE_GONE: "interrupted", RESTARTED: "running", REWORK: "running", ...CLOSABLE } },
-    interrupted: { on: { ADOPT: "running", LAUNCH: "launching", RESTORE: "restoring", ...CLOSABLE } },
+    interrupted: { on: { QUEUE_RESTORE: "launching", ADOPT: "running", LAUNCH: "launching", RESTORE: "restoring", ...CLOSABLE } },
     restoring: { on: { STARTED: "running", LAUNCH_FAILED: "failed", PANE_GONE: "interrupted" } },
-    failed: { on: { LAUNCH: "launching", RESTORE: "restoring", ADOPT: "running", ...CLOSABLE } },
-    closed: { on: { RESTORE: "restoring" } },
+    failed: { on: { QUEUE_RESTORE: "launching", LAUNCH: "launching", RESTORE: "restoring", ADOPT: "running", ...CLOSABLE } },
+    closed: { on: { QUEUE_RESTORE: "launching", RESTORE: "restoring" } },
   },
 });
 
@@ -182,6 +183,22 @@ function step<S extends string, E extends EventObject>(
   const [next] = transition(machine, snapshot, event);
   return Effect.succeed(next.value as S);
 }
+
+export type LaunchJobEvent = { type: "RUN" } | { type: "SUCCEED" } | { type: "FAIL" };
+export const launchJobMachine = setup({ types: { events: {} as LaunchJobEvent } }).createMachine({
+  id: "launch-job", initial: "queued", states: {
+    queued: { on: { RUN: "running", FAIL: "failed" } },
+    running: { on: { SUCCEED: "succeeded", FAIL: "failed" } },
+    succeeded: {}, failed: {},
+  },
+});
+export const stepLaunchJob = (id: string, from: LaunchJobState, event: LaunchJobEvent) => {
+  const snapshot = launchJobMachine.resolveState({ value: from, context: {} });
+  if (!snapshot.can(event)) return Effect.fail(new InputError({ message: `launch job ${id}: ${event.type} is not allowed from ${from}` }));
+  const [next] = transition(launchJobMachine, snapshot, event);
+  // XState returns one of this machine's four schema-owned states.
+  return Effect.succeed(next.value as LaunchJobState);
+};
 
 export const stepAgent = (id: string, from: AgentState, event: AgentEvent) =>
   step(agentMachine, "agent", id, from, event);

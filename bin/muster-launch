@@ -1,0 +1,14 @@
+#!/bin/sh
+# Resolve npm's bin symlink before resolving the package-owned TypeScript loader.
+script=$0
+while [ -L "$script" ]; do
+  dir=$(CDPATH= cd -- "$(dirname -- "$script")" && pwd) || exit 1
+  target=$(readlink "$script") || exit 1
+  case "$target" in
+    /*) script=$target ;;
+    *) script=$dir/$target ;;
+  esac
+done
+dir=$(CDPATH= cd -P -- "$(dirname -- "$script")" && pwd -P) || exit 1
+loader=$(cd "$dir/.." && node --input-type=module -e 'process.stdout.write(import.meta.resolve("tsx"))') || exit 1
+exec node --import "$loader" "$dir/muster-launch.ts" "$@"

@@ -12,7 +12,7 @@ import { CommsError, Unsupported, type IntercomTransport } from "./runtime.ts";
 import { Policy, decodeOwnerItem, decodePolicy, mergePolicy } from "./domain.ts";
 import { OUTBOX_REQUEST_EVENT, OUTBOX_RESULT_EVENT } from "./intercom.ts";
 import { appendOwnerItem, canonicalJson, deliverOwnerItem, ownerPath, readOwnerQueue } from "./owner-queue.ts";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { load, projectPath } from "./store.ts";
 import { harness, runWith } from "./test-support.ts";
 

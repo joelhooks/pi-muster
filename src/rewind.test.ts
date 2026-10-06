@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 import { openSessionTree } from "./session-tree.ts";
 

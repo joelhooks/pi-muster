@@ -4,7 +4,7 @@ import { Effect, Layer } from "effect";
 import { describe, expect, it, vi } from "vitest";
 
 import { queuePath, readDesk } from "./desk.ts";
-import { deskPost, projectOpen, agentLaunch } from "./ops.ts";
+import { deskPost, projectOpen, agentLaunchForeground as agentLaunch } from "./ops.ts";
 import { NetworkComms } from "./comms.ts";
 import { Herdr, Comms } from "./runtime.ts";
 import { load } from "./store.ts";

@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { ProcError } from "./errors.ts";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { agentClose, agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
+import { agentClose, agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { liveProc } from "./runtime.ts";
 import { promptWithProof } from "./herdr.ts";
 import { load, mutate } from "./store.ts";

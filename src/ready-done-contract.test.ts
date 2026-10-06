@@ -3,7 +3,7 @@ import { Effect } from "effect";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { agentGet, promptWithProof } from "./herdr.ts";
-import { agentLaunch, laneOpen, projectOpen } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { agentRewind } from "./rewind.ts";
 import { machineConfig, onRemote } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc } from "./runtime.ts";

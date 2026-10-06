@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { decodeMachines, type AgentRow } from "./domain.ts";
-import { agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
 import { MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
 import { load, mutate } from "./store.ts";
 import { harness, makeRepo, runWith, type FakePane } from "./test-support.ts";

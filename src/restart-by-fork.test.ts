@@ -2,7 +2,7 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";

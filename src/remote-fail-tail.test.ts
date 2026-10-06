@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines } from "./domain.ts";
-import { agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
 import { load } from "./store.ts";
