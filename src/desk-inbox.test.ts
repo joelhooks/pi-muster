@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { Effect, Layer, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { describe, expect, it, vi } from "vitest";
-import { consumeDeskAnswer, deskInbox, deskInboxCard, deskInboxItem, deskInboxUpdate, PHONE_DID, SWITCHBOARD_DID } from "./desk-inbox.ts";
+import { consumeDeskAnswer, deskInbox, openDeskInbox, deskInboxCard, deskInboxItem, deskInboxUpdate } from "./desk-inbox.ts";
 import { networkFencePath } from "./comms-network.ts";
 import { Main as Item } from "./vendor/rat-king-lexicon/desk.item.ts";
 import { Main as Answer } from "./vendor/rat-king-lexicon/desk.answer.ts";
@@ -16,6 +16,9 @@ import { seal, suite } from "./vendor/rat-king-envelope/envelope.ts";
 import { Identity, layer, RatKingMailbox, type OpenedMessage } from "./vendor/rat-king-mailbox-client/index.ts";
 import type { ReportCard } from "./desk-report.ts";
 
+const SWITCHBOARD_DID = "did:web:switchboard.example.invalid";
+const PHONE_DID = "did:web:phone.example.invalid";
+const identities = { switchboard: SWITCHBOARD_DID, phone: PHONE_DID };
 const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`./vendor/rat-king-fixtures/${name}.json`, import.meta.url), "utf8"));
 const item = Schema.decodeUnknownSync(Item)(fixture("desk-item"));
 const answer = Schema.decodeUnknownSync(Answer)(fixture("desk-answer"));
@@ -38,11 +41,36 @@ const envelopeStub = { ...emptyEnvelope, enc: new Uint8Array(65), ciphertext: ne
 const opened = (body: unknown, senderDid = PHONE_DID): OpenedMessage => ({ body: JSON.stringify(body),
   senderDid: Schema.decodeUnknownSync(Schema.toType(SigningPayload))( { ...emptyEnvelope, aad: { ...emptyEnvelope.aad, senderDid } }).aad.senderDid,
   tid: emptyEnvelope.aad.messageId, verified: true });
-const consume = (body: unknown, senderDid = PHONE_DID) => Effect.runPromise(consumeDeskAnswer({
-  mailbox: { open: () => Effect.succeed(opened(body, senderDid)) }, envelope: envelopeStub, pending,
-}));
+const consume = (body: unknown, senderDid = PHONE_DID) => Effect.runPromise(consumeDeskAnswer({ identities, mailbox: { open: () => Effect.succeed(opened(body, senderDid)) }, envelope: envelopeStub, pending, }));
 
 describe("desk inbox contract edge", () => {
+  it("refuses missing identities at every entry point before mailbox use", async () => {
+    const mailbox = { send: vi.fn(() => Effect.succeed(output)), open: vi.fn(() => Effect.succeed(opened(answer))) };
+    // @ts-expect-error Required caller identities are also checked for JavaScript consumers.
+    expect(() => deskInbox({ home: "/unused", mailbox })).toThrow("identities are required");
+    // @ts-expect-error Required caller identities are also checked before network config is read.
+    await expect(Effect.runPromise(openDeskInbox({ home: "/unused" }))).rejects.toThrow("identities are required");
+    // @ts-expect-error Required caller identities are checked before opening an envelope.
+    await expect(Effect.runPromise(consumeDeskAnswer({ mailbox, envelope: envelopeStub, pending }))).rejects.toThrow("identities are required");
+    expect(mailbox.send).not.toHaveBeenCalled();
+    expect(mailbox.open).not.toHaveBeenCalled();
+  });
+  it.each(["", "phone.example.invalid", "https://phone.example.invalid", "did:", "did:web:", "did:web:phone example.invalid"])("refuses malformed caller identities: %s", async value => {
+    const mailbox = { send: vi.fn(() => Effect.succeed(output)), open: vi.fn(() => Effect.succeed(opened(answer))) };
+    for (const key of ["switchboard", "phone"] as const) {
+      const invalid = { ...identities, [key]: value };
+      expect(() => deskInbox({ home: "/unused", mailbox, identities: invalid })).toThrow("must be did:");
+      await expect(Effect.runPromise(openDeskInbox({ home: "/unused", identities: invalid }))).rejects.toThrow("must be did:");
+      await expect(Effect.runPromise(consumeDeskAnswer({ identities: invalid, mailbox, envelope: envelopeStub, pending }))).rejects.toThrow("must be did:");
+    }
+    expect(mailbox.open).not.toHaveBeenCalled();
+  });
+  it("compares sender and recipient against the supplied identities exactly", async () => {
+    const mailbox = { open: vi.fn(() => Effect.succeed(opened(answer))) };
+    await expect(Effect.runPromise(consumeDeskAnswer({ identities: { ...identities, switchboard: "did:web:other.example.invalid" }, mailbox, envelope: envelopeStub, pending }))).rejects.toThrow("Switchboard identity mismatch");
+    expect(mailbox.open).not.toHaveBeenCalled();
+    await expect(Effect.runPromise(consumeDeskAnswer({ identities: { ...identities, phone: "did:web:other.example.invalid" }, mailbox, envelope: envelopeStub, pending }))).rejects.toThrow("not allowlisted");
+  });
   it("vendors exact pinned bytes with per-file sha256, preserving earlier vendor pins", () => {
     for (const group of ["rat-king-lexicon", "rat-king-fixtures"]) {
       const manifest = Schema.decodeUnknownSync(Schema.Struct({ commit: Schema.String, files: Schema.Record(Schema.String,
@@ -92,7 +120,7 @@ describe("desk inbox contract edge", () => {
   it("supports note-only answers, absent rows, and refuses resolved items", async () => {
     const result = await consume({ ...answer, values: {}, rows: undefined, note: "Different call" });
     expect(result.feedback.items[item.itemId]).toEqual({ t: "Different call" });
-    await expect(Effect.runPromise(consumeDeskAnswer({ mailbox: { open: () => Effect.succeed(opened(answer)) }, envelope: envelopeStub, pending: [] }))).rejects.toThrow("Unknown or resolved");
+    await expect(Effect.runPromise(consumeDeskAnswer({ identities, mailbox: { open: () => Effect.succeed(opened(answer)) }, envelope: envelopeStub, pending: [] }))).rejects.toThrow("Unknown or resolved");
   });
   it("refuses ambiguous report cards and suggestions", () => {
     expect(() => deskInboxItem({ project: item.project, queueItem: queue, card: { ...card, extra_ids: ["other"] } })).toThrow("exactly one");
@@ -106,7 +134,7 @@ describe("desk inbox contract edge", () => {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(fence), { mode: 0o600 });
     const send = vi.fn(() => Effect.succeed(output));
-    const api = deskInbox({ home, mailbox: { send, open: () => Effect.succeed(opened(answer)) } });
+    const api = deskInbox({ home, identities, mailbox: { send, open: () => Effect.succeed(opened(answer)) } });
     await Effect.runPromise(api.sendItem({ project: item.project, queueItem: queue, card }));
     await Effect.runPromise(api.sendUpdate({ project: item.project, itemId: item.itemId, state: "resolved", text: update.text }));
     expect(send.mock.calls).toEqual([[PHONE_DID, JSON.stringify(item), { fence }], [PHONE_DID, JSON.stringify(update), { fence }]]);
@@ -133,19 +161,19 @@ async function cryptoMailbox() {
 describe("desk inbox authenticated envelopes", () => {
   it("accepts a sealed phone answer after real signature verification", async () => {
     const { mailbox, makeEnvelope } = await cryptoMailbox();
-    const result = await Effect.runPromise(consumeDeskAnswer({ mailbox, envelope: await makeEnvelope(), pending }));
+    const result = await Effect.runPromise(consumeDeskAnswer({ identities, mailbox, envelope: await makeEnvelope(), pending }));
     expect(result.feedback.items[item.itemId]?.path).toBe("hold");
   });
   it("rejects an envelope signed with a different key claiming the phone DID", async () => {
     const { mailbox, makeEnvelope } = await cryptoMailbox();
     const rogue = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, ["sign", "verify"]);
-    await expect(Effect.runPromise(consumeDeskAnswer({ mailbox, envelope: await makeEnvelope(rogue.privateKey), pending }))).rejects.toThrow();
+    await expect(Effect.runPromise(consumeDeskAnswer({ identities, mailbox, envelope: await makeEnvelope(rogue.privateKey), pending }))).rejects.toThrow();
   });
   it("rejects altered ciphertext before parsing feedback", async () => {
     const { mailbox, makeEnvelope } = await cryptoMailbox();
     const envelope = await makeEnvelope();
     const ciphertext = new Uint8Array(envelope.ciphertext);
     ciphertext[0] = (ciphertext[0] ?? 0) ^ 1;
-    await expect(Effect.runPromise(consumeDeskAnswer({ mailbox, envelope: { ...envelope, ciphertext }, pending }))).rejects.toThrow();
+    await expect(Effect.runPromise(consumeDeskAnswer({ identities, mailbox, envelope: { ...envelope, ciphertext }, pending }))).rejects.toThrow();
   });
 });

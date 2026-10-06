@@ -1,14 +1,13 @@
 import { Effect, Schema } from "effect";
 import { openNetworkMailbox, readNetworkIdentities, sendWithConsumerFence } from "./comms-network.ts";
-import { decodeDeskItem, decodeDeskOpenedMessage } from "./domain.ts";
+import { decodeDeskItem, decodeDeskOpenedMessage, decodeDeskInboxIdentities, type DeskInboxIdentities } from "./domain.ts";
 import { FEEDBACK_SCHEMA, rulingText, rulings, type Feedback, type FeedbackValue, type ReportCard } from "./desk-report.ts";
 import type { DeskAnswerInput } from "./switchboard-ops.ts";
 import * as Item from "./vendor/rat-king-lexicon/desk.item.ts";
 import * as Answer from "./vendor/rat-king-lexicon/desk.answer.ts";
 import * as Update from "./vendor/rat-king-lexicon/desk.update.ts";
 
-export const SWITCHBOARD_DID = "did:web:switchboard.ratking-fleet.invalid";
-export const PHONE_DID = "did:web:joel-iphone.ratking-fleet.invalid";
+export type { DeskInboxIdentities } from "./domain.ts";
 export type DeskInboxMailbox = Pick<Effect.Success<ReturnType<typeof openNetworkMailbox>>, "send" | "open">;
 export class DeskInboxError extends Error {
   readonly _tag = "DeskInboxError";
@@ -18,6 +17,10 @@ const boundary = <A>(f: () => A) => Effect.try({ try: f, catch: error => error i
 const decodeItem = Schema.decodeUnknownSync(Item.Main);
 const decodeAnswer = Schema.decodeUnknownSync(Answer.Main);
 const decodeUpdate = Schema.decodeUnknownSync(Update.Main);
+const identitiesFrom = (value: unknown): DeskInboxIdentities => {
+  try { return { ...decodeDeskInboxIdentities(value) }; }
+  catch { return refuse("Desk inbox identities are required and must be did: strings"); }
+};
 
 /** The only then/outcome translation lives at this edge. No report object is spread into a record. */
 export function deskInboxItem(options: { project: string; queueItem: unknown; card: ReportCard; supersedes?: string }): Item.MainValue {
@@ -76,15 +79,20 @@ export interface PendingDeskItem {
  * Refusals never write a resolving line or ack a message.
  */
 export function consumeDeskAnswer(options: {
+  identities: DeskInboxIdentities;
   mailbox: Pick<DeskInboxMailbox, "open">;
   envelope: Parameters<DeskInboxMailbox["open"]>[0];
   pending: readonly PendingDeskItem[];
 }) {
   return Effect.gen(function* () {
+    const identities = yield* boundary(() => identitiesFrom(options.identities));
+    yield* boundary(() => {
+      if (options.envelope.aad.recipientDid !== identities.switchboard) refuse("Switchboard identity mismatch");
+    });
     const opened = yield* options.mailbox.open(options.envelope);
     return yield* boundary(() => {
       const message = decodeDeskOpenedMessage(opened);
-      if (message.senderDid !== PHONE_DID) refuse("Desk answer sender is not allowlisted");
+      if (message.senderDid !== identities.phone) refuse("Desk answer sender is not allowlisted");
       const answer = decodeAnswer(JSON.parse(message.body));
       const pending = options.pending.find(entry => entry.item.project === answer.project && entry.item.itemId === answer.itemId);
       if (!pending) return refuse("Unknown or resolved desk item");
@@ -123,24 +131,26 @@ export function deskInboxUpdate(options: { project: string; itemId: string; stat
 /** Call once with the Switchboard's already-open mailbox, or load its existing network.json identity.
  * No poller, timer, cursor, lease acquisition, or tool registration belongs to this library.
  */
-export function openDeskInbox(options: { home: string; configPath?: string }) {
+export function openDeskInbox(options: { home: string; configPath?: string; identities: DeskInboxIdentities }) {
   return Effect.gen(function* () {
+    const identities = yield* boundary(() => identitiesFrom(options.identities));
     const mailbox = yield* openNetworkMailbox({ ...options, agent: "switchboard" });
     yield* boundary(() => {
-      if (readNetworkIdentities(options.home).switchboard?.did !== SWITCHBOARD_DID) refuse("Switchboard identity mismatch");
+      if (readNetworkIdentities(options.home).switchboard?.did !== identities.switchboard) refuse("Switchboard identity mismatch");
     });
-    return deskInbox({ home: options.home, mailbox });
+    return deskInbox({ home: options.home, mailbox, identities });
   });
 }
 
-export function deskInbox(options: { home: string; mailbox: DeskInboxMailbox }) {
+export function deskInbox(options: { home: string; mailbox: DeskInboxMailbox; identities: DeskInboxIdentities }) {
+  const identities = identitiesFrom(options.identities);
   const send = (record: Item.MainValue | Update.MainValue) => sendWithConsumerFence({
-    home: options.home, did: SWITCHBOARD_DID,
-    send: opts => options.mailbox.send(PHONE_DID, JSON.stringify(record), opts),
+    home: options.home, did: identities.switchboard,
+    send: opts => options.mailbox.send(identities.phone, JSON.stringify(record), opts),
   });
   return {
     sendItem: (input: Parameters<typeof deskInboxItem>[0]) => boundary(() => deskInboxItem(input)).pipe(Effect.flatMap(send)),
     sendUpdate: (input: Parameters<typeof deskInboxUpdate>[0]) => boundary(() => deskInboxUpdate(input)).pipe(Effect.flatMap(send)),
-    consumeAnswer: (input: Omit<Parameters<typeof consumeDeskAnswer>[0], "mailbox">) => consumeDeskAnswer({ ...input, mailbox: options.mailbox }),
+    consumeAnswer: (input: Omit<Parameters<typeof consumeDeskAnswer>[0], "mailbox" | "identities">) => consumeDeskAnswer({ ...input, mailbox: options.mailbox, identities }),
   };
 }
