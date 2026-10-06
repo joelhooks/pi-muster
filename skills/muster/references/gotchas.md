@@ -59,7 +59,7 @@ When a larger squash changes the same paths, a dirty clone fails verification, o
 - `shitrat push` can exit 0 on failure. It pushed only when its JSON says `ok:true`. Gate pushes with `if <gate>; then push; fi`, never `gate | grep && push`.
 - CI budgets in absolute milliseconds flake on runner variance. Compare against the parent build in the same run.
 
-- `packet_report` runs in the worker's own Pi, so the worker's loaded Muster decides what it may do. After a Muster fix to reporting, `/reload` the worker. Reloading the owner changes nothing for the worker.
+- `packet_report` runs in the worker's own Pi, so the worker's loaded Muster decides what it may do. After a Muster fix to reporting, restart the worker with `agent_launch action: "restart"`. Restarting the owner changes nothing for the worker.
 
 ## Restore
 

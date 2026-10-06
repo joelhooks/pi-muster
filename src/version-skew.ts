@@ -95,7 +95,7 @@ export function createVersionSkew({ root, now = Date.now }: { root: string; now?
       count = counts.get(disk.id);
     }
     const short = (version: Version) => version.kind === "git" ? version.id.slice(0, 7) : version.id;
-    return `⚠ Muster tools are stale: loaded ${short(loaded)}, on disk ${short(disk)}${count === undefined ? "" : ` (${count} commits)`}. Restart this session (or /reload) to load them.`;
+    return `⚠ Muster tools are stale: loaded ${short(loaded)}, on disk ${short(disk)}${count === undefined ? "" : ` (${count} commits)`}. Restart it onto current code with agent_launch action: "restart" (an owner, or a desk for itself); never /reload.`;
   };
   return {
     check() {

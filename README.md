@@ -21,7 +21,7 @@ Muster expects [Herdr](https://herdr.dev), pi-intercom, and pi-until in the same
 
 ## Long-lived sessions
 
-Muster records the package commit when the extension loads, without spawning Git. Every tool, including desk and Switchboard tools, checks for changes at most once per minute. A changed commit adds a stale-tools warning with both short SHAs and the commit count when Git can calculate it. `project_status` also marks its board header. After a dependency upgrade, restart Pi with `pi --session <session file>`, not `/reload`: stale reloads keep Muster tool names and return the restart command instead of silently losing them. Source-only changes can use `/reload`; Claude bridge sessions need a restart.
+Muster records the package commit when the extension loads, without spawning Git. Every tool, including desk and Switchboard tools, checks for changes at most once per minute. A changed commit adds a stale-tools warning with both short SHAs and the commit count when Git can calculate it. `project_status` also marks its board header. After a dependency upgrade, restart Pi with `pi --session <session file>`, not `/reload`: stale reloads keep Muster tool names and return the restart command instead of silently losing them. Muster-managed agents restart with `agent_launch action: "restart"`, never `/reload`.
 
 Outside a Git checkout, the check uses the package version and newest mtime of the extension's local source imports. Missing metadata or a failed check never blocks a tool. Startup reads version metadata only; it opens no socket or bus channel.
 
