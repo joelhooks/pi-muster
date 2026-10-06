@@ -3,6 +3,7 @@
 import { flowLine } from "./tokens.ts";
 import { homedir } from "node:os";
 import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -10,7 +11,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { decodeOwnerItem, decodeOwnerRouting, decodeProject } from "./domain.ts";
 import type { OwnerItem, OwnerKind } from "./domain.ts";
 import { findOwnerPost, mentions } from "./owner-queue.ts";
-import { readRegistry } from "./registry.ts";
+import { readRegistry, registryPath } from "./registry.ts";
 
 export interface OwnerTheme {
   fg(color: "accent" | "error" | "warning" | "success" | "dim" | "toolTitle", text: string): string;
@@ -76,25 +77,33 @@ function age(ts: string, now: number): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
   return `${Math.floor(seconds / 86400)}d ago`;
 }
-/** Snapshot names and thread context at delivery, never perform file IO in render(). */
-export function ownerTimelineData(input: { items: readonly OwnerItem[]; reader: string; home: string; project?: string; now?: number }): OwnerTimelineData {
-  const at = input.now ?? Date.now();
-  if (!input.items.length) return { items: input.items, reader: input.reader, authors: {}, parents: [], at };
+type TimelineInput = { items: readonly OwnerItem[]; reader: string; home: string; project?: string; now?: number };
+/** Pure delivery projection shared by synchronous turns/tools and asynchronous polls. */
+function timelineData(input: TimelineInput, projects: readonly ReturnType<typeof decodeProject>[], parents: readonly OwnerItem[]): OwnerTimelineData {
   const authors: Record<string, string> = {};
+  for (const project of projects) {
+    for (const row of project.agents) {
+      if (authors[row.sessionId]) continue;
+      const lane = project.lanes.find(l => l.slug === row.lane);
+      // Launch profile owns the agent emoji; older rows can borrow the lane's.
+      const emojiPattern = /^\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/u;
+      const emoji = row.profile.label.match(emojiPattern)?.[0] ?? lane?.label.match(emojiPattern)?.[0];
+      authors[row.sessionId] = `${emoji ? `${emoji} ` : ""}${row.name} · ${row.lane}`;
+    }
+  }
+  const visibleAuthors = new Set([...input.items, ...parents].map(item => item.author));
+  return { items: input.items, reader: input.reader, authors: Object.fromEntries(Object.entries(authors).filter(([session]) => visibleAuthors.has(session))), parents, at: input.now ?? Date.now() };
+}
+/** Snapshot names and thread context at delivery, never perform file IO in render(). */
+export function ownerTimelineData(input: TimelineInput): OwnerTimelineData {
+  input = { ...input, now: input.now ?? Date.now() };
+  if (!input.items.length) return timelineData(input, [], []);
   let dirs: string[] = input.project ? [input.project] : [];
   try { dirs = [...dirs, ...[...readRegistry(input.home).values()].map(entry => entry.dir)]; } catch { /* names are optional */ }
+  const projects: ReturnType<typeof decodeProject>[] = [];
   for (const dir of new Set(dirs)) {
-    try {
-      const project = decodeProject(JSON.parse(readFileSync(join(dir, ".brain/data/muster/project.json"), "utf8")));
-      for (const row of project.agents) {
-        if (authors[row.sessionId]) continue;
-        const lane = project.lanes.find(l => l.slug === row.lane);
-        // Launch profile owns the agent emoji; older rows can borrow the lane's.
-        const emojiPattern = /^\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*/u;
-        const emoji = row.profile.label.match(emojiPattern)?.[0] ?? lane?.label.match(emojiPattern)?.[0];
-        authors[row.sessionId] = `${emoji ? `${emoji} ` : ""}${row.name} · ${row.lane}`;
-      }
-    } catch { /* moved, absent or invalid catalogs use shortened ids */ }
+    try { projects.push(decodeProject(JSON.parse(readFileSync(join(dir, ".brain/data/muster/project.json"), "utf8")))); }
+    catch { /* moved, absent or invalid catalogs use shortened ids */ }
   }
   const parents: OwnerItem[] = [];
   for (const item of input.items) {
@@ -104,8 +113,40 @@ export function ownerTimelineData(input: { items: readonly OwnerItem[]; reader: 
       try { parents.push(findOwnerPost(session, reply.parent.uri, input.home)); break; } catch { /* parent may live in the other queue */ }
     }
   }
-  const visibleAuthors = new Set([...input.items, ...parents].map(item => item.author));
-  return { items: input.items, reader: input.reader, authors: Object.fromEntries(Object.entries(authors).filter(([session]) => visibleAuthors.has(session))), parents, at };
+  return timelineData(input, projects, parents);
+}
+/** Poll delivery only: every file read is asynchronous, including reply history. */
+export async function ownerTimelineDataAsync(input: TimelineInput, findPost: (session: string, uri: string) => Promise<OwnerItem | undefined>): Promise<OwnerTimelineData> {
+  input = { ...input, now: input.now ?? Date.now() };
+  if (!input.items.length) return timelineData(input, [], []);
+  const dirs = input.project ? [input.project] : [];
+  try {
+    const entries = new Map<string, string>();
+    for (const line of (await readFile(registryPath(input.home), "utf8")).split("\n")) {
+      try {
+        const value: unknown = JSON.parse(line);
+        if (typeof value === "object" && value !== null && "slug" in value && typeof value.slug === "string" && "dir" in value && typeof value.dir === "string") entries.set(value.slug, value.dir);
+      } catch { /* torn or blank registry line */ }
+    }
+    dirs.push(...entries.values());
+  } catch { /* names are optional */ }
+  const projects: ReturnType<typeof decodeProject>[] = [];
+  for (const dir of new Set(dirs)) {
+    try { projects.push(decodeProject(JSON.parse(await readFile(join(dir, ".brain/data/muster/project.json"), "utf8")))); }
+    catch { /* moved, absent or invalid catalogs use shortened ids */ }
+  }
+  const parents: OwnerItem[] = [];
+  for (const item of input.items) {
+    const reply = item.reply;
+    if (!reply || parents.some(parent => parent.uri === reply.parent.uri)) continue;
+    for (const session of new Set([input.reader, item.author])) {
+      try {
+        const parent = await findPost(session, reply.parent.uri);
+        if (parent) { parents.push(parent); break; }
+      } catch { /* parent may live in the other queue */ }
+    }
+  }
+  return timelineData(input, projects, parents);
 }
 /** Decode persisted renderer details too: old sessions need a safe plain-text fallback. */
 export function readOwnerTimelineData(value: unknown): OwnerTimelineData | undefined {

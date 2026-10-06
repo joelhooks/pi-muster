@@ -70,7 +70,9 @@ describe("owner feed lifecycle", () => {
       appendOwnerItem("reader", { author: "sender", kind: "progress", title: "silent" }, home);
       await vi.advanceTimersByTimeAsync(30000); expect(sent).toEqual([]);
       appendOwnerItem("reader", { author: "sender", kind: "question", title: "wake" }, home);
-      await vi.advanceTimersByTimeAsync(30000); expect(sent).toMatchObject([{ options: { triggerTurn: true } }]);
+      await vi.advanceTimersByTimeAsync(30000);
+      // Advancing fake time schedules a tick; real asynchronous file reads settle separately.
+      await vi.waitFor(() => expect(sent).toMatchObject([{ options: { triggerTurn: true } }]));
       handlers.get("agent_start")!({}, ctx); idle.mockReturnValue(false);
       appendOwnerItem("reader", { author: "sender", kind: "blocked", title: "held" }, home);
       await vi.advanceTimersByTimeAsync(30000); expect(sent).toHaveLength(1);

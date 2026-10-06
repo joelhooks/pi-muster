@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { appendOwnerItem } from "./owner-queue.ts";
-import { ownerTimelineData, OwnerTimelineView, readOwnerTimelineData, ownerDisplayName, ownerReceipt, ownerToolResult, ownerLine } from "./owner-view.ts";
+import { appendOwnerItem, ownerSourceReader } from "./owner-queue.ts";
+import { ownerTimelineData, ownerTimelineDataAsync, OwnerTimelineView, readOwnerTimelineData, ownerDisplayName, ownerReceipt, ownerToolResult, ownerLine } from "./owner-view.ts";
 
 const theme = { fg: (_: string, s: string) => `\x1b[36m${s}\x1b[0m`, bold: (s: string) => `\x1b[1m${s}\x1b[0m` };
 function fixture() {
@@ -16,6 +16,16 @@ function fixture() {
   return { data, mention };
 }
 describe("owner timeline", () => {
+  it("preserves thread context through the asynchronous delivery projection", async () => {
+    const home = mkdtempSync(join(tmpdir(), "owner-view-async-"));
+    const parent = appendOwnerItem("reader", { author: "sender", kind: "question", title: "Parent" }, home);
+    const reply = appendOwnerItem("reader", { author: "reader", kind: "blocked", title: "Reply", replyTo: parent.uri }, home);
+    const input = { items: [reply], reader: "reader", home, now: 42 };
+    const reader = ownerSourceReader("reader", home);
+    const result = await ownerTimelineDataAsync(input, async (_session, uri) => (await reader.read()).flatMap(source => source.items).find(record => record.item.uri === uri)?.item);
+    expect(result).toEqual(ownerTimelineData(input));
+    expect(result.parents).toEqual([parent]);
+  });
   it("renders the same bytes as the wall clock moves, so a card in scrollback never forces Pi to redraw", () => {
     vi.useFakeTimers();
     try {
@@ -70,7 +80,7 @@ describe("owner timeline", () => {
       expect(lines.every(line => visibleWidth(line) <= 40)).toBe(true);
     } finally { vi.unstubAllEnvs(); }
   });
-  it("snapshots catalog display names and profile label emojis, with safe fallback", () => {
+  it("snapshots catalog display names and profile label emojis, with safe fallback", async () => {
     const home = mkdtempSync(join(tmpdir(), "owner-catalog-"));
     const dir = join(home, "repo");
     mkdirSync(join(dir, ".brain/data/muster"), { recursive: true });
@@ -83,6 +93,7 @@ describe("owner timeline", () => {
     const item = appendOwnerItem("reader", { author: "writer-session", kind: "fyi", title: "catalog post" }, home);
     const data = ownerTimelineData({ home, project: dir, reader: "reader", items: [item] });
     expect(data.authors["writer-session"]).toBe("🔨 writer · lane");
+    expect(await ownerTimelineDataAsync({ home, project: dir, reader: "reader", items: [item], now: data.at }, async () => undefined)).toEqual(data);
     writeFileSync(join(dir, ".brain/data/muster/project.json"), "{}");
     expect(ownerTimelineData({ home, project: dir, reader: "reader", items: [item] }).authors).toEqual({});
   });

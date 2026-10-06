@@ -1,7 +1,8 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, readdirSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
@@ -90,21 +91,13 @@ export function forwardOwner(params: { from: string; to: string; project: string
   return retired;
 }
 /** The original records stay intact; source aliases carry routing and display context. */
-export function readOwnerSources(owner: string, home = homedir()) {
-  const names = new Set([owner]);
-  try {
-    for (const name of readdirSync(dirname(ownerPath(owner, home)))) {
-      if (!name.endsWith(".forward")) continue;
-      names.add(name.slice(0, -8).replace(/\.[a-f0-9]{64}$/, ""));
-    }
-  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
-  return [...names].map(source => {
-    const read = readOwnerQueue(source, home);
+function routeOwnerSources(owner: string, reads: Array<{ source: string; read: ReturnType<typeof readOwnerQueue> }>, routeFor: (source: string, project?: string) => ReturnType<typeof ownerRoute>) {
+  return reads.map(({ source, read }) => {
     const aliases = new Set<string>();
     const routes = new Map<string | undefined, ReturnType<typeof ownerRoute>>();
     const items = read.items.filter(({ item, line }) => {
       let route = routes.get(item.project);
-      if (!route) { route = ownerRoute(source, home, item.project); routes.set(item.project, route); }
+      if (!route) { route = routeFor(source, item.project); routes.set(item.project, route); }
       if (route.owner !== owner) return false;
       const boundary = source === owner ? undefined : route.sources[0]?.forward;
       if (boundary && line <= boundary.cursor && boundary.heartbeatAt && Date.parse(item.createdAt) <= Date.parse(boundary.heartbeatAt)) return false;
@@ -113,6 +106,122 @@ export function readOwnerSources(owner: string, home = homedir()) {
     });
     return { source, cursor: read.cursor, items, aliases: [...aliases] };
   }).filter(source => source.source === owner || source.items.length > 0);
+}
+export function readOwnerSources(owner: string, home = homedir()) {
+  const names = new Set([owner]);
+  try {
+    for (const name of readdirSync(dirname(ownerPath(owner, home)))) {
+      if (!name.endsWith(".forward")) continue;
+      names.add(name.slice(0, -8).replace(/\.[a-f0-9]{64}$/, ""));
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  return routeOwnerSources(owner, [...names].map(source => ({ source, read: readOwnerQueue(source, home) })), (source, project) => ownerRoute(source, home, project));
+}
+type QueueRead = ReturnType<typeof readOwnerQueue>;
+type Forward = ReturnType<typeof decodeOwnerForward>;
+const execAsync = promisify(execFile);
+async function readerFreshAsync(owner: string, home: string) {
+  try {
+    const reader = decodeOwnerReader(JSON.parse(await readFile(readerPath(owner, home), "utf8")));
+    const age = Date.now() - Date.parse(reader.heartbeatAt);
+    if (!Number.isInteger(reader.pid) || reader.pid <= 0 || !Number.isFinite(age) || age < 0 || age > 120000 || !Number.isFinite(Date.parse(reader.startedAt))) return false;
+    process.kill(reader.pid, 0);
+    try {
+      const { stdout } = await execAsync("ps", ["-o", "lstart=", "-p", String(reader.pid)], { timeout: 2000, env: { ...process.env, LC_ALL: "C" } });
+      const started = Date.parse(stdout.trim());
+      if (Number.isFinite(started) && started > Date.parse(reader.startedAt)) return false;
+    } catch { /* Live PID without metadata is not evidence of reuse. */ }
+    return true;
+  } catch { return false; }
+}
+/** Session-owned derived cache. Original histories and tool-call reads remain intact. */
+export function ownerSourceReader(owner: string, home = homedir(), observe?: (event: { path: string; bytes: number; lines: number }) => void) {
+  decodeOwnerSession(owner);
+  const directory = dirname(ownerPath(owner, home));
+  let revision = 1, indexed = 0;
+  let forwards = new Map<string, Forward>();
+  let names = new Set([owner]);
+  let relevant = new Set([owner]);
+  const queues = new Map<string, { ino: number; dev: number; size: number; tail: Buffer; read: QueueRead }>();
+  let running: Promise<ReturnType<typeof readOwnerSources>> | undefined;
+  const refresh = async () => {
+    if (indexed !== revision) {
+      const version = revision;
+      let files: string[];
+      try { files = await readdir(directory); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; files = []; }
+      const next = new Map<string, Forward>();
+      const nextNames = new Set([owner]);
+      for (const file of files) {
+        if (!file.endsWith(".forward")) continue;
+        try {
+          const record = decodeOwnerForward(JSON.parse(await readFile(join(directory, file), "utf8")));
+          const source = file.slice(0, -8).replace(/\.[a-f0-9]{64}$/, "");
+          decodeOwnerSession(source); nextNames.add(source); next.set(file, record);
+        } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      }
+      forwards = next; names = nextNames; indexed = version;
+    }
+    const fresh = new Set<string>();
+    for (const source of names) if (forwards.has(`${source}.forward`) && await readerFreshAsync(source, home)) fresh.add(source);
+    const routeFor = (source: string, project?: string): ReturnType<typeof ownerRoute> => {
+      const sources: ReturnType<typeof ownerRoute>["sources"] = [];
+      const seen = new Set<string>();
+      for (;;) {
+        if (seen.has(source)) throw new Error("owner forward cycle");
+        seen.add(source);
+        const scoped = project === undefined ? undefined : forwards.get(`${source}.${createHash("sha256").update(project).digest("hex")}.forward`);
+        if (scoped && scoped.project !== project) throw new Error("owner forward project mismatch");
+        const legacy = fresh.has(source) ? undefined : forwards.get(`${source}.forward`);
+        const forward = scoped ?? (legacy?.project === project && project !== undefined ? legacy : undefined);
+        if (!forward) return { owner: source, sources };
+        if (sources.length === 4) throw new Error("owner forward depth exceeds 4");
+        sources.push({ owner: source, forward }); source = forward.to;
+      }
+    };
+    const projects = new Set([...forwards.values()].map(record => record.project));
+    relevant = new Set([...names].filter(source => source === owner || [...projects].some(project => routeFor(source, project).owner === owner)));
+    for (const source of queues.keys()) if (!relevant.has(source)) queues.delete(source);
+    const reads: Array<{ source: string; read: QueueRead }> = [];
+    for (const source of names) {
+      if (!relevant.has(source)) continue;
+      const path = ownerPath(source, home);
+      let handle;
+      try { handle = await open(path, "r"); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; queues.delete(source); reads.push({ source, read: { items: [], cursor: 0 } }); continue; }
+      try {
+        const stat = await handle.stat();
+        let queue = queues.get(source);
+        if (!queue || queue.ino !== stat.ino || queue.dev !== stat.dev || stat.size < queue.size) queue = { ino: stat.ino, dev: stat.dev, size: 0, tail: Buffer.alloc(0), read: { items: [], cursor: 0 } };
+        const buffer = Buffer.alloc(stat.size - queue.size);
+        let bytes = 0;
+        while (bytes < buffer.length) {
+          const result = await handle.read(buffer, bytes, buffer.length - bytes, queue.size + bytes);
+          if (!result.bytesRead) break;
+          bytes += result.bytesRead;
+        }
+        const raw = Buffer.concat([queue.tail, buffer.subarray(0, bytes)]);
+        const end = raw.lastIndexOf(10);
+        const lines = end < 0 ? [] : raw.subarray(0, end).toString("utf8").split("\n");
+        for (const line of lines) {
+          queue.read.cursor++;
+          try { queue.read.items.push({ item: decodeOwnerItem(JSON.parse(line)), line: queue.read.cursor }); } catch { /* malformed complete lines still count */ }
+        }
+        queue.tail = raw.subarray(end + 1); queue.size += bytes;
+        queues.set(source, queue); reads.push({ source, read: queue.read });
+        observe?.({ path, bytes, lines: lines.length });
+      } finally { await handle.close(); }
+    }
+    return routeOwnerSources(owner, reads, routeFor);
+  };
+  return {
+    event(name: string | undefined) {
+      if (name === undefined || name.endsWith(".forward")) { revision++; return true; }
+      return name.endsWith(".jsonl") && relevant.has(name.slice(0, -6));
+    },
+    read() {
+      if (!running) running = refresh().finally(() => { running = undefined; });
+      return running;
+    },
+  };
 }
 /** Launches carry a directory; forwards and packet notices carry the catalog slug. */
 function ownerProject(project: string): string {

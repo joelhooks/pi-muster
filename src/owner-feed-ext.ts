@@ -90,19 +90,20 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
         })).then(() => { if (networkActor === actor && !controller.signal.aborted) actor.send({ type: "INTERCOM" }); }).catch(error => { if (!controller.signal.aborted) failed(error); });
       }).catch(failed);
     };
+    let ticking: Promise<void> | undefined;
     const tick = () => {
       refreshNetwork();
-      try {
-        // Do not advertise a reader that cannot read its queue, even when busy.
-        current.inbox({ limit: 1 });
-        if (ctx.isIdle()) current.flush();
+      if (ticking) return;
+      ticking = (async () => {
+        // One asynchronous snapshot for both queue validation and idle delivery.
+        await current.poll(() => ctx.isIdle(), () => feed === current && readerStartedAt === startedAt);
         // One heartbeat in flight; a stalled disk skips beats instead of freezing the TUI.
         if (!beating && readerStartedAt === startedAt) {
           beating = writeReaderAsync(id, home(), Date.now(), process.pid, startedAt)
             .catch(() => { /* no heartbeat means writers fall back to intercom */ })
             .finally(() => { beating = undefined; });
         }
-      } catch { /* no heartbeat means writers fall back to intercom */ }
+      })().catch(() => { /* no heartbeat means writers fall back to intercom */ }).finally(() => { ticking = undefined; });
     };
     const schedule = () => {
       if (pending) clearTimeout(pending);
@@ -111,7 +112,7 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     const path = ownerPath(id, home());
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      watcher = watch(dirname(path), (_event, name) => { if (!name || /\.(jsonl|forward)$/.test(String(name))) schedule(); });
+      watcher = watch(dirname(path), (_event, name) => { if (current.queueEvent(name === null ? undefined : String(name))) schedule(); });
       poll = setInterval(tick, 30000); poll.unref?.(); tick();
     } catch { stop(); /* unavailable reader: writers retain the outbox fallback */ }
   });
