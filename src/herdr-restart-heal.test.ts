@@ -81,6 +81,68 @@ it.each(["ambiguous", "held", "closed", "foreign", "preview", "different path", 
   s.untouched();
 });
 
+it("reports identity separately from unknown resumed capability and watch recovery", async () => {
+  const s = await setup("running");
+  const result = await runWith(s.h, projectStatus(s.dir, { act: true }));
+  expect(result.agents[0]).toMatchObject({ identity: "proven (session path match)", capability: "unknown (resumed outside Muster)" });
+  expect(result.agents[0]!.recovery).toContain('agent_launch action:"restart" name:worker');
+  expect(result.board).toContain("until list and herdr_watch list");
+  expect(result.board).not.toContain("healthy");
+});
+
+it("reports a launch-profile receipt only for its original Muster terminal", async () => {
+  const s = await setup("running");
+  await s.patch({ pane: { paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: s.pane.tab_id, openedByMuster: true } });
+  const result = await runWith(s.h, projectStatus(s.dir, { act: true }));
+  expect(result.agents[0]!.capability).toContain("launch-profile receipt");
+  expect(result.agents[0]!.recovery).toBeUndefined();
+  await s.patch({ restore: null });
+  const unknown = await runWith(s.h, projectStatus(s.dir, { act: false }));
+  expect(unknown.agents[0]!.capability).toBe("unknown (resumed outside Muster)");
+});
+
+it.each([false, true])("reconciles a same-pane lane root conservatively (act=%s)", async act => {
+  const s = await setup("running", true);
+  const before = await runWith(s.h, load(s.dir));
+  const lane = before.lanes.find(lane => lane.slug === "work")!;
+  const root = lane.root!;
+  s.h.herdr.panes.delete(s.pane.pane_id);
+  s.pane.pane_id = root.paneId;
+  s.pane.tab_id = lane.tabId!;
+  s.h.herdr.panes.set(s.pane.pane_id, s.pane);
+  const status = await runWith(s.h, projectStatus(s.dir, { act }));
+  expect(status.notes.join("\n")).toContain("rebound lane work root");
+  const saved = await runWith(s.h, load(s.dir));
+  if (act) {
+    expect(saved.lanes.find(lane => lane.slug === "work")!.root).toMatchObject({ terminalId: s.pane.terminal_id, openedByMuster: false });
+    await runWith(s.h, projectStatus(s.dir, { act: true }));
+    expect(await runWith(s.h, load(s.dir))).toEqual(saved);
+  } else {
+    expect(saved).toEqual(before);
+    expect(s.h.herdr.calls.some(call => call.method === "workspace.report_metadata")).toBe(false);
+  }
+  s.untouched();
+});
+
+it("preview does not interrupt a missing pane or write the catalog", async () => {
+  const s = await setup("running", true);
+  s.h.herdr.panes.delete(s.pane.pane_id);
+  const before = await runWith(s.h, load(s.dir));
+  await runWith(s.h, projectStatus(s.dir, { act: false }));
+  expect(await runWith(s.h, load(s.dir))).toEqual(before);
+  s.untouched();
+});
+
+it("a missing workspace gets one diagnostic and no rebuild or catalog mutation", async () => {
+  const s = await setup("running", true);
+  s.h.herdr.workspaces.delete("w1");
+  const before = await runWith(s.h, load(s.dir));
+  const result = await runWith(s.h, projectStatus(s.dir, { act: true }));
+  expect(result.notes.filter(note => note.includes("workspace w1 is missing"))).toEqual(["project probe: workspace w1 is missing; space not rebuilt"]);
+  expect(await runWith(s.h, load(s.dir))).toEqual(before);
+  expect(s.h.herdr.calls.some(call => ["workspace.create", "tab.create", "pane.split"].includes(call.method))).toBe(false);
+});
+
 it("keeps interrupted lifecycle recovery", async () => {
   const s = await setup("interrupted");
   await runWith(s.h, projectStatus(s.dir, { act: true }));
