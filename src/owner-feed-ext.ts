@@ -91,9 +91,11 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       }).catch(failed);
     };
     let ticking: Promise<void> | undefined;
+    // A tick during an in-flight snapshot reruns once after it, instead of waiting for the next 30 s poll.
+    let again = false;
     const tick = () => {
       refreshNetwork();
-      if (ticking) return;
+      if (ticking) { again = true; return; }
       ticking = (async () => {
         // One asynchronous snapshot for both queue validation and idle delivery.
         await current.poll(() => ctx.isIdle(), () => feed === current && readerStartedAt === startedAt);
@@ -103,7 +105,10 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
             .catch(() => { /* no heartbeat means writers fall back to intercom */ })
             .finally(() => { beating = undefined; });
         }
-      })().catch(() => { /* no heartbeat means writers fall back to intercom */ }).finally(() => { ticking = undefined; });
+      })().catch(() => { /* no heartbeat means writers fall back to intercom */ }).finally(() => {
+        ticking = undefined;
+        if (again && feed === current && readerStartedAt === startedAt) { again = false; tick(); }
+      });
     };
     const schedule = () => {
       if (pending) clearTimeout(pending);
