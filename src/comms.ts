@@ -136,7 +136,7 @@ export const IntercomCommsLayer = (transport: IntercomTransport, lookup: Paramet
 export const NetworkCommsLayer = Layer.succeed(Comms)(NetworkComms);
 
 /** Called by tools, never at extension startup. Re-read policy and catalog at operation time. */
-export function createComms(options: { events: Parameters<typeof createIntercom>[0]; createId: () => string; home: string; projectDir: string; adapterEnv: () => string | undefined; followProjectPolicy?: boolean; networkConfig?: () => string | undefined; networkPeers?: () => Readonly<Record<string, string>>; networkSender?: () => { agent: string; session: string } | undefined }) {
+export function createComms(options: { deskRecord?: import("./comms-network.ts").NetworkRecordHandler; events: Parameters<typeof createIntercom>[0]; createId: () => string; home: string; projectDir: string; adapterEnv: () => string | undefined; followProjectPolicy?: boolean; networkConfig?: () => string | undefined; networkPeers?: () => Readonly<Record<string, string>>; networkSender?: () => { agent: string; session: string } | undefined }) {
   let transport: ReturnType<typeof createIntercom> | undefined;
   const project = (dir: string) => load(dir).pipe(Effect.mapError(error => new CommsError(error.message)));
   const lookup: Parameters<typeof IntercomComms>[1] = address => Effect.gen(function* () {
@@ -165,6 +165,7 @@ export function createComms(options: { events: Parameters<typeof createIntercom>
       return network.createNetworkComms({
         home: options.home,
         configPath: options.networkConfig?.(),
+        deskRecord: options.deskRecord,
         session: to => Effect.gen(function* () {
           const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
           if (address.kind === "alias") {

@@ -325,6 +325,13 @@ export function seedNetworkIdentities(home: string, value: unknown) {
   }
 }
 
+export type NetworkRecordHandler = (input: {
+  ownDid: string;
+  envelope: Parameters<Effect.Success<ReturnType<typeof openNetworkMailbox>>["open"]>[0];
+  opened: import("./vendor/rat-king-mailbox-client/index.ts").OpenedMessage;
+  mailbox: Effect.Success<ReturnType<typeof openNetworkMailbox>>;
+}) => Effect.Effect<string, CommsError>;
+
 /** Scoped lifecycle: acquire → watch → authenticate/open → ingest → deliver/ack → checkpoint.
  * Cancellation releases the current fence. Auth failures stop; only the vendor owns socket backoff.
  */
@@ -332,6 +339,7 @@ export function consumeNetworkMailbox(options: {
   home: string; agent: string; session: string;
   mailbox: Pick<Effect.Success<ReturnType<typeof openNetworkMailbox>>, "watch" | "lease" | "open" | "deliver" | "ack">;
   open?: (envelope: Parameters<Effect.Success<ReturnType<typeof openNetworkMailbox>>["open"]>[0]) => Effect.Effect<import("./vendor/rat-king-mailbox-client/index.ts").OpenedMessage, CommsError | import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError>;
+  deskRecord?: (input: Omit<Parameters<NetworkRecordHandler>[0], "mailbox">) => Effect.Effect<string, CommsError>;
   senderAgent: (author: string) => Effect.Effect<string, CommsError>;
   receive: (payload: import("./domain.ts").NetworkPayload) => Effect.Effect<void, CommsError>;
 }) {
@@ -365,14 +373,37 @@ export function consumeNetworkMailbox(options: {
     const run = watchNetworkMailbox({ mailbox: options.mailbox, acquire, afterSeq }).pipe(Stream.runForEach(batch => Effect.gen(function* () {
       for (const event of batch.events) {
         if (event.$type !== "sh.mschf.ratking.defs#messageEvent" || !isMessage(event)) continue;
-        const opened = yield* (options.open ?? options.mailbox.open)(event.envelope).pipe(Effect.mapError(failure));
-        if (opened.tid !== event.receipt.message.messageId || opened.senderDid !== event.receipt.message.senderDid) return yield* Effect.fail(new CommsError("NetworkComms receipt differs from authenticated envelope"));
-        const payload = yield* Effect.try({ try: () => decodeNetworkPayload(JSON.parse(opened.body)), catch: failure });
-        if (payload.recipient !== options.session) return yield* Effect.fail(new CommsError("NetworkComms recipient session changed; refusing stale delivery"));
-        const author = payload.type === "owner" ? payload.item.author : payload.author;
-        const agent = yield* options.senderAgent(author);
-        if (networkRecipient(options.home, agent).did !== opened.senderDid) return yield* Effect.fail(new CommsError("NetworkComms authenticated sender differs from payload author"));
-        yield* options.receive(payload);
+        const authenticated = yield* (options.open ?? options.mailbox.open)(event.envelope).pipe(
+          Effect.map(opened => ({ kind: "opened" as const, opened })),
+          Effect.catch(error => {
+            // Ciphertext has no trustworthy record type before authentication. Preserve it before refusing delivery.
+            // Protocol auth/lease/fence errors must retain the existing stop behavior.
+            if (!options.deskRecord || !(error instanceof MailboxClientError) || error.error !== undefined || error.status !== undefined) return Effect.fail(failure());
+            return Effect.promise(() => import("./desk-phone-store.ts")).pipe(Effect.flatMap(store => store.quarantineDeskPhoneEnvelope(options.home, event, "Envelope verification or decryption failed")),
+              Effect.map(path => ({ kind: "quarantined" as const, path })), Effect.mapError(() => new CommsError("NetworkComms quarantine failed; envelope was not acked")));
+          }),
+        );
+        if (authenticated.kind === "quarantined") {
+          yield* options.receive({ type: "message", recipient: options.session, author: "desk_phone (local dispatch)",
+            body: `desk_phone refused envelope from claimed sender ${event.receipt.message.senderDid}: envelope verification or decryption failed. Saved before ack: ${authenticated.path}.` });
+        } else {
+          const opened = authenticated.opened;
+          if (opened.tid !== event.receipt.message.messageId || opened.senderDid !== event.receipt.message.senderDid) return yield* Effect.fail(new CommsError("NetworkComms receipt differs from authenticated envelope"));
+          const raw: unknown = yield* Effect.try({ try: () => JSON.parse(opened.body), catch: failure });
+          if (options.deskRecord && raw !== null && typeof raw === "object" && "$type" in raw && raw.$type === "sh.mschf.ratking.desk.answer") {
+            // This shares the authenticated consumer, lease and checkpoint with ordinary network messages.
+            // Record refusals become visible notices, never agent payload decoding failures.
+            const notice = yield* options.deskRecord({ ownDid, envelope: event.envelope, opened }).pipe(Effect.catch(() => Effect.succeed("desk_phone answer failed: record handler unavailable; inspect sidecar and retry sync")));
+            yield* options.receive({ type: "message", recipient: options.session, author: "desk_phone (local dispatch)", body: notice });
+          } else {
+            const payload = yield* Effect.try({ try: () => decodeNetworkPayload(raw), catch: failure });
+            if (payload.recipient !== options.session) return yield* Effect.fail(new CommsError("NetworkComms recipient session changed; refusing stale delivery"));
+            const author = payload.type === "owner" ? payload.item.author : payload.author;
+            const agent = yield* options.senderAgent(author);
+            if (networkRecipient(options.home, agent).did !== opened.senderDid) return yield* Effect.fail(new CommsError("NetworkComms authenticated sender differs from payload author"));
+            yield* options.receive(payload);
+          }
+        }
         if (!fence) return yield* Effect.fail(failure());
         const delivery = { message: event.receipt.message, leaseId: fence.leaseId, generation: fence.generation };
         yield* options.mailbox.deliver(delivery).pipe(Effect.mapError(failure));
@@ -405,6 +436,7 @@ export function createNetworkComms(options: {
   run?: PrivateCommand;
   configPath?: string;
   session?: (to: CommsTarget) => Effect.Effect<string, CommsError>;
+  deskRecord?: NetworkRecordHandler;
 }): CommsShape {
   const mailbox = Effect.suspend(() => {
     const sender = options.sender();
@@ -445,8 +477,9 @@ export function createNetworkComms(options: {
       const service = yield* mailbox;
       return yield* consumeNetworkMailbox({ home: options.home, agent: sender.agent, session: sender.session, mailbox: service,
         senderAgent: author => options.recipient(author), receive,
+        deskRecord: options.deskRecord ? input => options.deskRecord!({ ...input, mailbox: service }) : undefined,
         // Static client documents are snapshots. New workers provision after the desk starts.
-        open: envelope => mailbox.pipe(Effect.flatMap(fresh => fresh.open(envelope)), Effect.mapError(() => new CommsError("NetworkComms envelope authentication failed"))),
+        open: envelope => mailbox.pipe(Effect.flatMap(fresh => fresh.open(envelope))),
       });
     }),
     resolve: to => Effect.gen(function* () {

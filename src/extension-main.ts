@@ -41,6 +41,8 @@ import { capBody, deliverOwnerItem, findOwnerPost } from "./owner-queue.ts";
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
+import { deskPhone } from "./switchboard-ops.ts";
+import { CommsError } from "./runtime.ts";
 import { findSkills, skillIndex } from "./skills.ts";
 import { createVersionSkew, withVersionSkew } from "./version-skew.ts";
 import { squashed } from "./readable.ts";
@@ -134,6 +136,12 @@ export default function muster(host: ExtensionAPI) {
         if (!service) {
           service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir, adapterEnv: () => env.MUSTER_COMMS,
             followProjectPolicy: true,
+            deskRecord: input => Effect.tryPromise({
+              try: async () => {
+                const { dispatchDeskPhone } = await import("./desk-phone.ts");
+                return Effect.runPromise(dispatchDeskPhone({ ...input, home: homedir() }).pipe(Effect.provide(layer(ctx))));
+              }, catch: () => new CommsError("desk_phone record dispatch unavailable; inspect the private sidecar and retry sync"),
+            }),
             networkConfig: () => env.MUSTER_NETWORK_CONFIG,
             networkPeers: () => {
               try { return catalogNetworkPeers(dir); }
@@ -312,6 +320,12 @@ export default function muster(host: ExtensionAPI) {
 
   registerDeskFeed(pi, env);
   registerSwitchboard(pi, { env, layer, run });
+  pi.registerTool({
+    name: "desk_phone", label: "Desk phone",
+    description: "Route one open rats-nest desk card to Joel's allowlisted phone (send); inspect durable pending state (poll); retry recorded rulings and close resolved threads (sync). Uses this Switchboard session's existing network consumer and lease. Supply one desk-report card with marked suggestions; never decide for Joel.",
+    parameters: Type.Object({ action: StringEnum(["send", "poll", "sync"] as const), card: Type.Optional(Type.Unknown({ description: "One muster-desk-report.items.v1 card, including id, why, choices with suggest, and report context. Required for send." })), page: Type.Optional(Type.String()) }),
+    execute: (_id, params, signal, _onUpdate, ctx) => run(ctx, signal, deskPhone(params), result => JSON.stringify(result)),
+  });
   registerDeskReport(pi, { run });
   registerDigest(pi, env);
 

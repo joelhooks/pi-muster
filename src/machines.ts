@@ -35,6 +35,23 @@ export const networkConsumerMachine = setup({ types: { events: {} as { type: "NE
   },
 });
 
+/** Desk phone outbox: persist intent before send, feedback before resolution, and update receipts last. */
+export const deskPhoneMachine = setup({ types: { events: {} as { type: "SENT" | "ANSWER" | "RESOLVE" | "UPDATE" } } }).createMachine({
+  initial: "sending",
+  states: {
+    sending: { on: { SENT: "pending" } },
+    pending: { on: { ANSWER: "answered", RESOLVE: "resolved" } },
+    answered: { on: { RESOLVE: "resolved" } },
+    resolved: { on: { UPDATE: "closed" } },
+    closed: { type: "final" },
+  },
+});
+export const stepDeskPhone = (from: import("./domain.ts").DeskPhoneEntry["state"], event: { type: "SENT" | "ANSWER" | "RESOLVE" | "UPDATE" }, to: import("./domain.ts").DeskPhoneEntry["state"]) => {
+  const snapshot = deskPhoneMachine.resolveState({ value: from, context: {} });
+  if (!snapshot.can(event) || transition(deskPhoneMachine, snapshot, event)[0].value !== to) return Effect.fail(new InputError({ message: `desk phone: ${event.type} cannot move ${from} to ${to}` }));
+  return Effect.void;
+};
+
 export type AgentEvent =
   | { type: "QUEUE_RESTORE" }
   | { type: "LAUNCH" }

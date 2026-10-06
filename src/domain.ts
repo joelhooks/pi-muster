@@ -1,6 +1,7 @@
 import { Effect, Schema, SchemaTransformation } from "effect";
 import { modelAliases, resolveModel } from "./models.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
+import { DeskReport } from "./desk-report.ts";
 
 /**
  * Muster's domain values. Every file Muster reads or writes decodes through
@@ -713,6 +714,44 @@ const DeskInboxDid = Schema.String.check(Schema.isPattern(/^did:[a-z0-9]+:[^\s]+
 export const DeskInboxIdentities = Schema.Struct({ switchboard: DeskInboxDid, phone: DeskInboxDid });
 export type DeskInboxIdentities = typeof DeskInboxIdentities.Type;
 export const decodeDeskInboxIdentities = Schema.decodeUnknownSync(DeskInboxIdentities);
+export const decodeDeskPhoneCards = Schema.decodeUnknownSync(DeskReport.fields.items);
+/** Vendor validators load only at the private sidecar boundary, never at extension startup. */
+async function deskPhoneStateSchema() {
+  const [{ Main: Item }, { Output: Receipt }] = await Promise.all([
+    import("./vendor/rat-king-lexicon/desk.item.ts"), import("./vendor/rat-king-lexicon/mailbox.send.ts"),
+  ]);
+  const facts = { item: Item, page: Schema.String };
+  const sent = { ...facts, messageTid: Schema.String, receipt: Receipt };
+  const entry = Schema.Union([
+    Schema.Struct({ ...facts, state: Schema.Literal("sending") }),
+    Schema.Struct({ ...sent, state: Schema.Literal("pending") }),
+    Schema.Struct({ ...sent, state: Schema.Literal("answered"), answer: Schema.Struct({ tid: Schema.String, text: Schema.String }) }),
+    Schema.Struct({ ...sent, state: Schema.Literal("resolved") }),
+    Schema.Struct({ ...sent, state: Schema.Literal("closed"), updateReceipt: Receipt }),
+  ]);
+  return Schema.Struct({ identities: DeskInboxIdentities, entries: Schema.Record(Schema.String, entry) });
+}
+export async function decodeDeskPhoneState(value: unknown) {
+  return Schema.decodeUnknownSync(await deskPhoneStateSchema())(value);
+}
+export async function encodeDeskPhoneState(value: DeskPhoneState) {
+  const schema = await deskPhoneStateSchema();
+  const decoded = Schema.decodeUnknownSync(Schema.toType(schema))(value);
+  return Schema.encodeSync(schema)(decoded);
+}
+export type DeskPhoneState = Awaited<ReturnType<typeof decodeDeskPhoneState>>;
+export type DeskPhoneEntry = DeskPhoneState["entries"][string];
+async function deskPhoneQuarantineSchema() {
+  const { MessageEvent } = await import("./vendor/rat-king-lexicon/defs.ts");
+  return Schema.Struct({ event: MessageEvent, reason: Schema.String });
+}
+export async function decodeDeskPhoneQuarantine(value: unknown) {
+  return Schema.decodeUnknownSync(await deskPhoneQuarantineSchema())(value);
+}
+export async function encodeDeskPhoneQuarantine(value: unknown) {
+  const schema = await deskPhoneQuarantineSchema();
+  return Schema.encodeSync(schema)(Schema.decodeUnknownSync(Schema.toType(schema))(value));
+}
 /** Only the vendored mailbox's authenticated open path may supply this value. */
 export const decodeDeskOpenedMessage = Schema.decodeUnknownSync(Schema.Struct({
   senderDid: Schema.String, tid: Schema.String, body: Schema.String, verified: Schema.Literal(true),

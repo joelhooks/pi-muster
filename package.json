@@ -129,6 +129,8 @@
     "src/vendor/rat-king-mailbox-client/VENDOR.json",
     "src/vendor/rat-king-mailbox-client/watch.ts",
     "src/desk-inbox.ts",
+    "src/desk-phone.ts",
+    "src/desk-phone-store.ts",
     "src/vendor/rat-king-lexicon/desk.item.ts",
     "src/vendor/rat-king-lexicon/desk.answer.ts",
     "src/vendor/rat-king-lexicon/desk.update.ts",
