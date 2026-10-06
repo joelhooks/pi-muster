@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { Effect, Schema } from "effect";
 import { machineConfig, onRemote, remoteNode } from "./remote.ts";
 import { GuardFailed, InputError } from "./errors.ts";
-import { agentGet, call, paneGet, paneRun, paneSendKeys } from "./herdr.ts";
+import { agentGet, agentReadinessRefusal, agentReady, call, paneGet, paneRun, paneSendKeys } from "./herdr.ts";
 import { MusterEnv } from "./runtime.ts";
 import { load } from "./store.ts";
 import { navigationLeaf, openSessionTree, resolveSessionTarget, rewindEvidence } from "./session-tree.ts";
@@ -52,10 +52,12 @@ const remoteRewind = (row: import("./domain.ts").AgentRow, params: { to: string;
     const checkBinding = () => paneGet(binding.paneId).pipe(Effect.flatMap(pane => pane && pane.terminal_id === binding.terminalId && pane.agent_session?.value === row.sessionFile ? Effect.void : Effect.fail(new GuardFailed({ guard: "pane-binding", message: `${row.name}: remote terminal or session changed; nothing submitted` }))));
     yield* checkBinding();
     const state = yield* agentGet(binding.paneId);
+    yield* checkReadyIdentity(state, row.name);
     if (state.agent_status === "working") yield* paneSendKeys(binding.paneId, ["Escape"]);
-    if (state.agent_status !== "idle") {
-      const wait = yield* call({ method: "agent.wait", params: { target: binding.paneId, until: ["idle"], timeout_ms: 30_000 }, timeoutMs: 35_000 });
-      if (wait.agent.agent_status !== "idle") return yield* new GuardFailed({ guard: "rewind-idle", message: "remote session did not become idle; nothing submitted" });
+    if (!agentReady(state)) {
+      const wait = yield* call({ method: "agent.wait", params: { target: binding.paneId, until: ["idle", "done"], timeout_ms: 30_000 }, timeoutMs: 35_000 });
+      yield* checkReadyIdentity(wait.agent, row.name);
+      if (!agentReady(wait.agent)) return yield* new GuardFailed({ guard: "rewind-idle", message: "remote session did not become idle or done; nothing submitted" });
     }
     yield* checkBinding();
     yield* paneRun(binding.paneId, `/muster-rewind ${snapshot.entryId}${params.note ? ` ${params.note}` : ""}`);
@@ -74,7 +76,12 @@ const sessionIO = <A>(run: () => A) => Effect.try({
   try: run, catch: error => new InputError({ message: String(error instanceof Error ? error.message : error) }),
 });
 
-/** Linear protocol: ownership → binding → interrupt if working → idle → submit once → fresh file evidence.
+const checkReadyIdentity = (agent: Parameters<typeof agentReadinessRefusal>[0], name: string) => {
+  const reason = agentReadinessRefusal(agent, name);
+  return reason ? Effect.fail(new GuardFailed({ guard: `rewind-${reason}`, message: `${name}: readiness refused: ${reason}; nothing submitted` })) : Effect.void;
+};
+
+/** Linear protocol: ownership → binding → interrupt if working → idle/done → submit once → fresh file evidence.
  * No catalog lifecycle change: the row remains a running worker on a different Pi branch. */
 export const agentRewind = (dir: string, params: { name: string; to: string; note?: string | undefined }) =>
   Effect.gen(function* () {
@@ -97,10 +104,12 @@ export const agentRewind = (dir: string, params: { name: string; to: string; not
     const entryId = yield* sessionIO(() => resolveSessionTarget(snapshot, params.to));
     if (!/^[A-Za-z0-9_.-]+$/.test(entryId)) return yield* new InputError({ message: "session entry id is not safe for a command argument" });
     const state = yield* agentGet(row.pane.paneId);
+    yield* checkReadyIdentity(state, row.name);
     if (state.agent_status === "working") yield* paneSendKeys(row.pane.paneId, ["Escape"]);
-    if (state.agent_status !== "idle") {
-      const waited = yield* call({ method: "agent.wait", params: { target: row.pane.paneId, until: ["idle"], timeout_ms: 30_000 }, timeoutMs: 35_000 });
-      if (waited.agent.agent_status !== "idle") return yield* new GuardFailed({ guard: "rewind-idle", message: `${row.name} did not become idle within 30 seconds; nothing submitted` });
+    if (!agentReady(state)) {
+      const waited = yield* call({ method: "agent.wait", params: { target: row.pane.paneId, until: ["idle", "done"], timeout_ms: 30_000 }, timeoutMs: 35_000 });
+      yield* checkReadyIdentity(waited.agent, row.name);
+      if (!agentReady(waited.agent)) return yield* new GuardFailed({ guard: "rewind-idle", message: `${row.name} did not become idle or done within 30 seconds; nothing submitted` });
     }
     const currentPane = yield* paneGet(row.pane.paneId);
     if (!currentPane || currentPane.terminal_id !== row.pane.terminalId || currentPane.agent_session?.value !== row.sessionFile) {

@@ -236,6 +236,15 @@ const checkProof = (paneId: string, via: "prompt" | "enter") => Effect.gen(funct
   return { state: "proven", via, ...(warning ? { warning } : {}) } satisfies Proof;
 });
 
+export const agentReadinessRefusal = (agent: AgentInfo, expectedName?: string) => {
+  if (agent.launch_pending) return "pending";
+  if (agent.agent !== "pi" || !agent.name || (expectedName !== undefined && agent.name !== expectedName)) return "foreign";
+  if (agent.agent_status === "blocked" || agent.agent_status === "unknown") return agent.agent_status;
+  return null;
+};
+
+export const agentReady = (agent: AgentInfo) => agent.agent_status === "idle" || agent.agent_status === "done";
+
 export const promptWithProof = (paneId: string, text: string): Effect.Effect<Proof, HerdrFailure, Herdr | MusterEnv | Proc> =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -257,14 +266,19 @@ export const promptWithProof = (paneId: string, text: string): Effect.Effect<Pro
     const started = env.now().getTime();
     let slept = 0;
     const remaining = () => Math.max(0, PROOF_OF_LIFE_MS - Math.max(slept, env.now().getTime() - started));
-    // pending -> idle | working; only the latter two may send the recovery Enter.
+    // pending -> submitted (idle/done) | working; only accepted submissions may send recovery Enter.
     let submission: "pending" | "idle" | "working" = "pending";
+    let refusal: string | null = null;
     while (remaining() > 0) {
       const agent = yield* agentGet(paneId).pipe(Effect.catchIf(
         error => isCode(error, "agent_not_ready", "agent_not_found", "not_found"),
         () => Effect.succeed(null),
       ));
-      if (remaining() > 0 && agent?.name && agent.agent === "pi" && agent.agent_status === "idle" && !agent.launch_pending) {
+      refusal = agent ? agentReadinessRefusal(agent) : "unknown";
+      if (agent && refusal && refusal !== "pending") return yield* finish({
+        state: "unproven", submission: "uncertain", detail: `Herdr readiness refused: ${refusal}; no text was typed.`,
+      });
+      if (remaining() > 0 && agent && !refusal && agentReady(agent)) {
         // Herdr checks foreground identity again before typing. Only this rejection
         // is safe to retry: a successful or uncertain submission never repeats text.
         const outcome = yield* call({
@@ -286,7 +300,7 @@ export const promptWithProof = (paneId: string, text: string): Effect.Effect<Pro
     }
     if (submission === "pending") return yield* finish({
       state: "unproven", submission: "uncertain",
-      detail: `Herdr did not accept the prompt within ${PROOF_OF_LIFE_MS} ms; no text was typed.`,
+      detail: `Herdr did not accept the prompt within ${PROOF_OF_LIFE_MS} ms${refusal ? `: ${refusal}` : ""}; no text was typed.`,
     });
     if (submission === "working") return yield* finish(yield* checkProof(paneId, "prompt"));
     const recovered = yield* paneSendKeys(paneId, ["Enter"]).pipe(
