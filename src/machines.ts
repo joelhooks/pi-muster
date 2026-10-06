@@ -3,7 +3,7 @@ import { setup, transition } from "xstate";
 import type { AnyStateMachine, EventObject } from "xstate";
 
 import type { AgentState, LaneState, LaneDelivery, ProjectState, LaunchJobState } from "./domain.ts";
-import { IllegalTransition } from "./errors.ts";
+import { IllegalTransition, InputError } from "./errors.ts";
 
 /**
  * Lifecycles. Each machine is context-free: the persisted snapshot is the state
@@ -186,8 +186,13 @@ export const launchJobMachine = setup({ types: { events: {} as LaunchJobEvent } 
     succeeded: {}, failed: {},
   },
 });
-export const stepLaunchJob = (id: string, from: LaunchJobState, event: LaunchJobEvent) =>
-  step(launchJobMachine, "launch-job", id, from, event);
+export const stepLaunchJob = (id: string, from: LaunchJobState, event: LaunchJobEvent) => {
+  const snapshot = launchJobMachine.resolveState({ value: from, context: {} });
+  if (!snapshot.can(event)) return Effect.fail(new InputError({ message: `launch job ${id}: ${event.type} is not allowed from ${from}` }));
+  const [next] = transition(launchJobMachine, snapshot, event);
+  // XState returns one of this machine's four schema-owned states.
+  return Effect.succeed(next.value as LaunchJobState);
+};
 
 export const stepAgent = (id: string, from: AgentState, event: AgentEvent) =>
   step(agentMachine, "agent", id, from, event);

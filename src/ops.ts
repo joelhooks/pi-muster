@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { closeSync, openSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
@@ -1888,16 +1888,13 @@ const writeLaunchJob = (home: string, job: LaunchJob) => Effect.try({
   }, catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }),
 });
 const readJob = (home: string, id: string) => Effect.try({ try: () => readLaunchJob(home, id), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
-const findLaunchJob = (home: string, project: string, row: AgentRow): LaunchJob | undefined => {
+const readLaunchJobs = (home: string): LaunchJob[] => {
   const dir = join(home, ".local/state/muster/launches");
-  if (!existsSync(dir)) return undefined;
-  const jobs: LaunchJob[] = [];
-  for (const file of readdirSync(dir)) {
-    if (!file.endsWith(".json")) continue;
-    const job = readLaunchJob(home, file.slice(0, -5));
-    if (job.project === project && job.name === row.name && job.sessionId === row.sessionId) jobs.push(job);
-  }
-  const latest = jobs.sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+  if (!existsSync(dir)) return [];
+  return readdirSync(dir).filter(file => file.endsWith(".json")).map(file => readLaunchJob(home, file.slice(0, -5)));
+};
+const findLaunchJob = (jobs: readonly LaunchJob[], project: string, row: AgentRow): LaunchJob | undefined => {
+  const latest = jobs.filter(job => job.project === project && job.name === row.name && job.sessionId === row.sessionId).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
   return latest?.outcome ? undefined : latest;
 };
 
@@ -1940,14 +1937,17 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const cwd = params.cwd ?? parent?.cwd ?? existing?.cwd ?? lane.repo ?? project.dir;
     yield* requireAbsolute("cwd", cwd);
     yield* guardDurable(project, "cwd", cwd);
-    if (machine === "local" && !params.clone && (!existsSync(cwd) || !statSync(cwd).isDirectory())) return yield* input(`cwd ${cwd} does not exist`);
+    if (machine === "local" && !params.clone) {
+      const readable = yield* Effect.try({ try: () => existsSync(cwd) && statSync(cwd).isDirectory(), catch: error => new InputError({ message: `cwd ${cwd}: ${String(error)}` }) });
+      if (!readable) return yield* input(`cwd ${cwd} does not exist`);
+    }
     if (!params.cwd && !parent?.cwd && !existing?.cwd && !params.clone) return yield* input("a new agent needs cwd or clone: true");
     if (params.clone && !lane.repo) return yield* input("clone: true needs a lane repo");
     const brief = params.brief ?? existing?.brief ?? null;
     if (brief && (machine === "local" || params.brief)) {
       yield* requireAbsolute("brief", brief);
       yield* guardDurable(project, "brief", brief);
-      yield* Effect.try({ try: () => readFileSync(brief, "utf8"), catch: error => new InputError({ message: `brief is not readable: ${String(error)}` }) });
+      yield* Effect.try({ try: () => { const fd = openSync(brief, "r"); try { if (!fstatSync(fd).isFile()) throw new Error("brief is not a file"); } finally { closeSync(fd); } }, catch: error => new InputError({ message: `brief is not readable: ${String(error)}` }) });
     }
     for (const path of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", path);
     const choice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
@@ -1959,7 +1959,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const state = yield* stepAgent(params.name, priorState, { type: params.action === "restore" ? "QUEUE_RESTORE" : "LAUNCH" });
     const launchJob: LaunchJob = { id, project: project.slug, name: params.name, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()), pid: null, log, startedAt: iso(env), state: "queued", priorState, owner: env.sessionId, request: params };
     const reserved: AgentRow = { ...existing, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
-      cwd: machine === "local" ? cwd : mapPath(cwd, yield* machineConfig(machine)), clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()),
+      cwd: machine === "local" ? cwd : mapPath(cwd, yield* machineConfig(machine)), clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: launchJob.sessionId,
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
       owner: existing && existing.owner === existing.sessionId ? existing.owner : env.sessionId, brief, state, delivery: "none",
       restarts: existing?.restarts ?? 0, restore: existing?.restore ?? null, createdAt: existing?.createdAt ?? iso(env), updatedAt: iso(env) };
@@ -3070,9 +3070,10 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     let stuck = 0;
 
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
+    const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
     for (const row of project.agents) {
       if (row.state === "closed") continue;
-      const job = yield* Effect.try({ try: () => findLaunchJob(env.home, project.slug, row), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
+      const job = findLaunchJob(launchJobs, project.slug, row);
       if (job) {
         let alive = job.pid === null && env.now().getTime() - Date.parse(job.startedAt) < 30_000;
         if (job.pid !== null) {
