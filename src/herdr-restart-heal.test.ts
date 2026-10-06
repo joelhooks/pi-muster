@@ -1,13 +1,16 @@
+import { renameSync } from "node:fs";
 import { join } from "node:path";
+import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { AgentRow } from "./domain.ts";
-import { agentLaunch, laneOpen, packetReport, projectOpen, projectStatus } from "./ops.ts";
+import { agentLaunch, finishRestart, laneOpen, packetReport, projectOpen, projectStatus } from "./ops.ts";
 import { load, mutate } from "./store.ts";
+import { MusterEnv } from "./runtime.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";
 
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); vi.stubEnv("MUSTER_PROJECT", ""); });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
 async function setup(state: AgentRow["state"] = "landed", stale = false) {
   const h = harness();
@@ -154,6 +157,127 @@ it("a missing workspace gets one diagnostic and no rebuild or catalog mutation",
   expect(result.notes.filter(note => note.includes("workspace w1 is missing"))).toEqual(["project probe: workspace w1 is missing; space not rebuilt"]);
   expect(await runWith(s.h, load(s.dir))).toEqual(before);
   expect(s.h.herdr.calls.some(call => ["workspace.create", "tab.create", "pane.split"].includes(call.method))).toBe(false);
+});
+
+async function restartSetup() {
+  const s = await setup("running");
+  await runWith(s.h, projectStatus(s.dir, { act: true }));
+  const run = <A, E>(effect: Parameters<typeof runWith<A, E>>[1]) => runWith(s.h, effect.pipe(Effect.provideService(MusterEnv, {
+    home: s.h.home, now: () => s.h.now, sessionId: s.h.sessionId, paneId: undefined,
+    musterRoot: s.dir, workerWorktree: s.h.workerWorktree, createId: () => "restart-receipt",
+    sleep: ms => Effect.sync(() => s.h.sleep(ms)), startupLoad: () => ({ load: 0, cpus: 1 }), emitPaneClose: s.h.emitPaneClose,
+  })));
+  return { ...s, run };
+}
+
+it("retries a name collision after the old Pi quits", async () => {
+  const s = await restartSetup();
+  const handle = s.h.herdr.handle.bind(s.h.herdr);
+  let attempts = 0;
+  vi.spyOn(s.h.herdr, "handle").mockImplementation((method, params) => {
+    if (method === "pane.send_input" && params.text === "/quit") { delete s.pane.agent; s.pane.name = null; }
+    if (method === "agent.rename" && ++attempts < 3) throw new HerdrApiError({ operation: method, code: "agent_name_taken", message: "old Pi name not released" });
+    return handle(method, params);
+  });
+  const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+  expect(attempts).toBe(3);
+  expect(s.h.herdr.panes.has(s.pane.pane_id)).toBe(false);
+  expect(s.h.herdr.panes.get(result.row.pane!.paneId)!.name).toBe("worker");
+});
+
+it.each(["live agent", "changed terminal", "quit failed"])("does not close an adopted old pane with %s", async kind => {
+  const s = await restartSetup();
+  const handle = s.h.herdr.handle.bind(s.h.herdr);
+  vi.spyOn(s.h.herdr, "handle").mockImplementation((method, params) => {
+    if (method === "pane.send_input" && params.text === "/quit") {
+      if (kind === "quit failed") throw new HerdrApiError({ operation: method, code: "agent_not_ready", message: "quit refused" });
+      if (kind === "changed terminal") { delete s.pane.agent; s.pane.terminal_id = "replacement-terminal"; }
+    }
+    return handle(method, params);
+  });
+  const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+  expect(s.h.herdr.panes.has(s.pane.pane_id)).toBe(true);
+  expect(result.notes.join("\n")).toContain(`left adopted shell ${s.pane.pane_id}/`);
+  expect(s.h.herdr.calls.some(call => call.method === "pane.close" && call.params.pane_id === s.pane.pane_id)).toBe(false);
+});
+
+it("self restart defers rename until finishRestart closes the old pane", async () => {
+  const s = await restartSetup();
+  await s.patch({ sessionId: s.h.sessionId, pane: { paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: s.pane.tab_id, openedByMuster: true } });
+  const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+  expect(s.h.herdr.calls.some(call => call.method === "agent.rename")).toBe(false);
+  if (!("endSession" in result) || !result.endSession) throw Error("missing exit receipt");
+  await s.run(finishRestart(s.dir, result.endSession));
+  const close = s.h.herdr.calls.findIndex(call => call.method === "pane.close" && call.params.pane_id === s.pane.pane_id);
+  const rename = s.h.herdr.calls.findIndex(call => call.method === "agent.rename");
+  expect(close).toBeGreaterThanOrEqual(0);
+  expect(rename).toBeGreaterThan(close);
+});
+
+it("a self adopted restart leaves its shell with the exact guarded cleanup note", async () => {
+  const s = await restartSetup();
+  await s.patch({ sessionId: s.h.sessionId });
+  const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+  expect(result.notes.join("\n")).toContain(`close after its agent is gone: herdr_pane close ${s.pane.pane_id} once herdr pane get shows no agent on terminal ${s.pane.terminal_id}`);
+  expect(result.row.pane!.openedByMuster).toBe(true);
+  if (!("endSession" in result) || !result.endSession) throw Error("missing exit receipt");
+  await s.run(finishRestart(s.dir, result.endSession));
+  expect(s.h.herdr.panes.has(s.pane.pane_id)).toBe(true);
+  expect(s.h.herdr.calls.some(call => call.method === "pane.close" && call.params.pane_id === s.pane.pane_id)).toBe(false);
+});
+
+it("rename retries are bounded and leave the proven replacement intact", async () => {
+  const s = await restartSetup();
+  const handle = s.h.herdr.handle.bind(s.h.herdr);
+  let attempts = 0;
+  vi.spyOn(s.h.herdr, "handle").mockImplementation((method, params) => {
+    if (method === "agent.rename") { attempts++; throw new HerdrApiError({ operation: method, code: "agent_name_taken", message: "name still held" }); }
+    return handle(method, params);
+  });
+  const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+  expect(attempts).toBe(12);
+  expect(result.notes.join("\n")).toContain("rename pending: ");
+  expect(s.h.herdr.panes.has(result.row.pane!.paneId)).toBe(true);
+});
+
+it("an unrelated exec line cannot buy additional fork startup time", async () => {
+  const s = await restartSetup();
+  s.h.herdr.autoLaunch = false;
+  s.h.herdr.paneTail = "exec sh '/tmp/unrelated.sh'";
+  let elapsed = 0;
+  s.h.sleep = ms => { elapsed += ms; };
+  await expect(s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }))).rejects.toThrow("replacement session missing");
+  expect(elapsed).toBe(10_000);
+  expect(s.h.herdr.panes.has(s.pane.pane_id)).toBe(true);
+});
+
+it("a slow fork extends startup on its own launch exec line before Pi prints a banner", async () => {
+  const s = await restartSetup();
+  const handle = s.h.herdr.handle.bind(s.h.herdr);
+  let elapsed = 0;
+  let delayed: { file: string; pane: typeof s.pane } | undefined;
+  vi.spyOn(s.h.herdr, "handle").mockImplementation((method, params) => {
+    const result = handle(method, params);
+    if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) {
+      const pane = s.h.herdr.panes.get(String(params.pane_id))!;
+      delayed = { file: pane.agent_session!.value, pane };
+      renameSync(delayed.file, `${delayed.file}.pending`);
+      delete pane.agent_session;
+      s.h.herdr.paneTail = String(params.text);
+    }
+    return result;
+  });
+  s.h.sleep = ms => {
+    elapsed += ms;
+    if (elapsed >= 22_000 && delayed) {
+      renameSync(`${delayed.file}.pending`, delayed.file);
+      delayed.pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: delayed.file };
+      delayed = undefined;
+    }
+  };
+  const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+  expect(elapsed).toBeGreaterThanOrEqual(22_000);
+  expect(result.proof?.state).toBe("proven");
 });
 
 it("keeps interrupted lifecycle recovery", async () => {

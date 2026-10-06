@@ -1552,13 +1552,14 @@ const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?:
   });
 
 /** Tail text is UNTRUSTED: it can buy time, never prove a session or prompt delivery. */
-const piStarting = (tail: string) => tail.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line =>
+const piStarting = (tail: string, launchCommand?: string) => tail.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line =>
+  (!!launchCommand && line.includes(launchCommand)) ||
   /^(?:pi\s*[:·-]\s*)?creating a new session(?:\s|[.…]|$)/i.test(line.trim()) ||
   /^Warning: No project session found with id '[^'\r\n]+'; creating a new session with that id\.$/.test(line.trim()) ||
   /^pi v\d+\.\d+\.\d+(?:\s|$)/i.test(line.trim()));
 
 /** Shared launch/restart wait: budget → evidenced extension → ready, missing or pending. */
-const waitForSession = (paneId: string, previous: string | null, fallback: () => string | null = () => null) =>
+const waitForSession = (paneId: string, previous: string | null, fallback: () => string | null = () => null, launchCommand?: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const sample = env.startupLoad?.() ?? { load: loadavg()[0] ?? 0, cpus: availableParallelism() };
@@ -1577,7 +1578,7 @@ const waitForSession = (paneId: string, previous: string | null, fallback: () =>
       if (sessionFile) return { state: "ready" as const, sessionFile, elapsed, load, slow: extended || elapsed > 10_000 };
       if (elapsed >= nextTail) {
         const tail = yield* paneRead(paneId, 12).pipe(Effect.orElseSucceed(() => "(pane unreadable)"));
-        if (modelOutputIssue(tail)?.severity === "error" || !piStarting(tail)) {
+        if (modelOutputIssue(tail)?.severity === "error" || !piStarting(tail, launchCommand)) {
           return { state: "missing" as const, tail, elapsed, load };
         }
         if (elapsed >= 120_000) return { state: "pending" as const, tail, elapsed, load };
@@ -1727,10 +1728,55 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     return { row: adopted, argv: [] as string[], readiness: "not checked (catalog adoption)", proof: null, sessionIdMatched: null, notes: ["adopted without touching the pane", `Parent desk: deliver this fence on the next conversation turn: ${sideDeskFence(parent.name)}`] };
   });
 
+/** Rename lifecycle: attempt → bounded wait → renamed | pending. Old Pi name release is asynchronous. */
+const renameRestart = (pane: PaneBinding, name: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const live = yield* paneGet(pane.paneId);
+    if (!live || live.terminal_id !== pane.terminalId || live.agent !== "pi") return `rename pending: replacement ${pane.paneId}/${pane.terminalId} is no longer the same live Pi`;
+    const renamed = yield* agentRename(pane.paneId, name).pipe(Effect.result);
+    if (renamed._tag === "Success") return `renamed ${pane.paneId} to ${name}`;
+    if (attempt === 11) return `rename pending: ${renamed.failure.message}`;
+    yield* env.sleep(250);
+  }
+  return "rename pending";
+});
+
+/** Retirement lifecycle: identity → quit requested → waiting → shell closed | safely left open.
+ * The exception to openedByMuster is deliberately confined to restart: we quit this exact Pi,
+ * and close only its now-agentless shell while its original terminal identity still holds. */
+const closeRestartShell = (dir: string, old: PaneBinding, quitRequested: boolean, machine = "local") => Effect.gen(function* () {
+  if (old.openedByMuster) return yield* closeOwnedPane(old, dir, "restart old pane");
+  const env = yield* MusterEnv;
+  const left = (why: string) => `left adopted shell ${old.paneId}/${old.terminalId} open: ${why}`;
+  if (!quitRequested) return left("old Pi quit not confirmed");
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const pane = yield* paneGet(old.paneId);
+    if (!pane) return `old adopted pane ${old.paneId} already gone`;
+    if (pane.terminal_id !== old.terminalId) return left("terminal changed; refusing close");
+    if (!pane.agent) {
+      const project = yield* load(dir);
+      const holder = project.agents.find(row => row.state !== "closed" && row.machine === machine && sharesPane(old, row.pane));
+      if (holder) return left(`now bound to ${holder.name}`);
+      // This synthetic close authority exists only after the exact shutdown/shell checks above.
+      return yield* closeOwnedPane({ ...old, openedByMuster: true }, dir, "restart agentless adopted shell");
+    }
+    if (attempt < 11) yield* env.sleep(250);
+  }
+  return left("agent still present; close only after it exits and the terminal still matches");
+});
+
+const adoptedSelfNote = (pane: PaneBinding) => `adopted shell ${pane.paneId}/${pane.terminalId}: close after its agent is gone: herdr_pane close ${pane.paneId} once herdr pane get shows no agent on terminal ${pane.terminalId}`;
+
 /** Called only at session_shutdown after the old caller's agent_end. */
 export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; replacementPane: PaneBinding; name: string }) => Effect.gen(function* () {
-  yield* closeOwnedPane(restart.oldPane, dir, `self restart ${restart.name}`);
-  yield* agentRename(restart.replacementPane.paneId, restart.name).pipe(Effect.catch(() => Effect.void));
+  // This awaited hook cannot observe its own Pi's exit. The replacement is Muster-owned;
+  // its next restart closes normally. Never invent close authority for this one adopted shell.
+  const closed = restart.oldPane.openedByMuster
+    ? yield* closeOwnedPane(restart.oldPane, dir, `self restart ${restart.name}`)
+    : adoptedSelfNote(restart.oldPane);
+  const renamed = yield* renameRestart(restart.replacementPane, restart.name);
+  return { notes: [closed, renamed] };
 });
 
 /** Replacement is provisional until fresh fork evidence is proven. No catalog launch reservation
@@ -1774,7 +1820,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       const binding: PaneBinding = { paneId: fresh.pane_id, terminalId: fresh.terminal_id, tabId: fresh.tab_id, openedByMuster: true };
       yield* guardLaunchShell(binding.paneId);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
-      const wait = yield* waitForSession(binding.paneId, null, remote ? undefined : () => findSessionFile(row.cwd, row.sessionId, env.home));
+      const wait = yield* waitForSession(binding.paneId, null, remote ? undefined : () => findSessionFile(row.cwd, row.sessionId, env.home), `exec sh ${shellQuote(script)}`);
       if (wait.state !== "ready") return yield* input(`restart failed before rebind: replacement session ${wait.state}; old agent untouched`);
       const id = sessionIdFromFile(wait.sessionFile);
       if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed: replacement did not prove a new session");
@@ -1806,15 +1852,20 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       phase = "rebound";
       // The catalog is authoritative. Never forward before its atomic write succeeds.
       yield* recordOwnerForward(old.sessionId, id, project.slug, env).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`catalog rebound; scoped owner forward needs repair: ${error.message}`); })));
-      if (self) notes.push("Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place.");
+      if (self) notes.push(`Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place.${oldPane.openedByMuster ? "" : ` ${adoptedSelfNote(oldPane)}`}`);
       else {
+        let quitRequested = false;
         if (!oldPane.openedByMuster) {
           const retiring = yield* locatePane(oldPane);
-          if (retiring?.agent_session?.kind === "path" && retiring.agent_session.value === old.sessionFile) yield* paneRun(retiring.pane_id, "/quit").pipe(Effect.catch(error => Effect.sync(() => { notes.push(`old Pi quit failed: ${error.message}`); })));
+          if (retiring?.agent_session?.kind === "path" && retiring.agent_session.value === old.sessionFile) {
+            const quit = yield* paneRun(retiring.pane_id, "/quit").pipe(Effect.result);
+            quitRequested = quit._tag === "Success";
+            if (quit._tag === "Failure") notes.push(`old Pi quit failed: ${quit.failure.message}`);
+          }
         }
-        notes.push(yield* closeOwnedPane(oldPane, dir, `restart ${old.name}`).pipe(Effect.catch(error => Effect.succeed(`old pane close failed: ${error.message}; close only ${oldPane.paneId}/${oldPane.terminalId}`))));
+        notes.push(yield* closeRestartShell(dir, oldPane, quitRequested, old.machine).pipe(Effect.catch(error => Effect.succeed(`old pane close failed: ${error.message}; close only ${oldPane.paneId}/${oldPane.terminalId}`))));
+        notes.push(yield* renameRestart(binding, old.name));
       }
-      yield* agentRename(binding.paneId, old.name).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`rename pending: ${error.message}`); })));
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
       return { row, argv, readiness: "proven", proof, sessionIdMatched: argv.includes(id), notes, ...(self ? { endSession: { oldPane, replacementPane: binding, name: old.name } } : {}) };
     }),
