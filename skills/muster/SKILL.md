@@ -116,7 +116,7 @@ Messages must be plain sentences with spaces between words; put code, paths and 
 - Rat King schemas and native decoded types come from the hash-pinned generated lexicon vendored at `0e895a3`; never hand-edit vendor files. Network delivery and the private lease authority refuse calls. DID routing requires local alias resolution and an explicit harness session adapter; ack carries `leaseId` and `generation`. Wake is separate, and `signed` stays opaque until golden crypto vectors exist.
 - A desk asks another project's desk for anything that project owns, such as a Muster bug or a tool gap. Open the message with sender and receiver (`💬 drovr desk → 💬 muster desk`). Include one concrete ask, the receipt paths, and what you already ruled out.
 - The receiving desk acks, lanes the work or says no with the reason, and messages back when it ships with the steps the asker needs. Nobody hand-edits another project's catalog.
-- Touch another project's pane only when the session in it asks, and only for what it asked, such as a `/reload` it can't run mid-turn.
+- Touch another project's pane only when the session in it asks, and only for what it asked, such as a keypress it can't send mid-turn.
 - Questions for Joel go through your own project's `desk_post`, never through another desk.
 
 ## Clocks and cost

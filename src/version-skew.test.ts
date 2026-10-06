@@ -39,7 +39,7 @@ describe("version skew", () => {
     commit(root);
     const disk = commit(root);
     tick();
-    expect(await skew.check()).toBe(`⚠ Muster tools are stale: loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (2 commits). Restart this session (or /reload) to load them.`);
+    expect(await skew.check()).toBe(`⚠ Muster tools are stale: loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (2 commits). Restart it onto current code with agent_launch action: "restart" (an owner, or a desk for itself); never /reload.`);
     git(root, "checkout", "--detach", loaded);
     tick();
     expect(await skew.check()).toBeUndefined();

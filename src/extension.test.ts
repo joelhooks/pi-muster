@@ -133,7 +133,7 @@ describe("registered tool version skew", () => {
     git("commit", "-q", "--allow-empty", "-m", "updated");
     const disk = git("rev-parse", "HEAD");
     const result = await fake.defs.get("thinking_set")?.execute("id", { level: "low" });
-    expect(result?.content[0]?.text).toBe(`Thinking high → low, from the next model call.\n⚠ Muster tools are stale: loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (1 commits). Restart this session (or /reload) to load them.`);
+    expect(result?.content[0]?.text).toBe(`Thinking high → low, from the next model call.\n⚠ Muster tools are stale: loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (1 commits). Restart it onto current code with agent_launch action: "restart" (an owner, or a desk for itself); never /reload.`);
   });
 });
 
