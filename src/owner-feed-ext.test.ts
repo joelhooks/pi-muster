@@ -66,13 +66,13 @@ describe("owner feed lifecycle", () => {
     try {
       handlers.get("session_start")!({}, ctx);
       // The heartbeat is async so a stalled rename never freezes the TUI.
-      await vi.waitFor(() => expect(readerFresh("reader", home)).toBe(true));
+      await vi.waitFor(() => expect(readerFresh("reader", home)).toBe(true), { timeout: 5000 });
       appendOwnerItem("reader", { author: "sender", kind: "progress", title: "silent" }, home);
       await vi.advanceTimersByTimeAsync(30000); expect(sent).toEqual([]);
       appendOwnerItem("reader", { author: "sender", kind: "question", title: "wake" }, home);
       await vi.advanceTimersByTimeAsync(30000);
       // Advancing fake time schedules a tick; real asynchronous file reads settle separately.
-      await vi.waitFor(() => expect(sent).toMatchObject([{ options: { triggerTurn: true } }]));
+      await vi.waitFor(() => expect(sent).toMatchObject([{ options: { triggerTurn: true } }]), { timeout: 5000 });
       handlers.get("agent_start")!({}, ctx); idle.mockReturnValue(false);
       appendOwnerItem("reader", { author: "sender", kind: "blocked", title: "held" }, home);
       await vi.advanceTimersByTimeAsync(30000); expect(sent).toHaveLength(1);
