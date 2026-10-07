@@ -138,6 +138,10 @@ export type NetworkPayload = ReturnType<typeof decodeNetworkPayload>;
 export const decodeNetworkPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, AgentName));
 export const decodeNetworkDeskPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, NetworkDeskName));
 export const decodeNetworkPeerReferences = Schema.decodeUnknownSync(Schema.Record(SessionId, NetworkIdentityName));
+/** One fleet callsign claim, appended by desks to the Switchboard's callsigns.jsonl. Unknown fields are kept out. */
+export const CallsignClaim = Schema.Struct({ project: Schema.String, agent: Schema.String, callsign: Schema.String.check(Schema.isPattern(/^\S+$/u)), emoji: Schema.String.check(Schema.isMinLength(1)) });
+export const decodeCallsignClaim = Schema.decodeUnknownSync(CallsignClaim);
+export const decodeCallsignRelease = Schema.decodeUnknownSync(Schema.Struct({ project: Schema.String, released: Schema.String }));
 export const decodeNetworkCursors = Schema.decodeUnknownSync(Schema.Record(AgentName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
 export const decodeNetworkDeskCursors = Schema.decodeUnknownSync(Schema.Record(NetworkDeskName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
 const decodeOwnerRecord = Schema.decodeUnknownSync(OwnerItem);

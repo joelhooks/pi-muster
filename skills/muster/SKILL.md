@@ -70,6 +70,10 @@ Workers mark `ctx:ready` with `context_mark` once the code they need is read, be
 
 When an instruction is overruled, use `agent_rewind name=<worker> to=<label or entry id> note=<correction>` rather than stacking an “ignore that” message. Wait for verified branch evidence, then send the corrected instruction as usual. Rewind changes conversation context, not files or commits.
 
+## Callsigns
+
+Every live agent wears `<emoji> <Callsign> · <role>` on its pane and session name. Each project picks one theme from a weird, obscure pop-culture deep cut (cult TV, forgotten cartoons, B-movies, prog-rock sleeves, 80s toy lines, defunct game shows), not a blockbuster franchise. Callsigns are one word and unique across the fleet. Read `~/.local/state/switchboard/callsigns.jsonl` before claiming. Claim by appending one line per agent (`at`, `project`, `theme`, `callsign`, `emoji`, `agent`, `pane`); to drop a name, append `{"at","project","released":"<Callsign>"}`, and never rewrite lines. `agent_launch` uses a row's claim as its label when `label` is omitted. Callsigns are display only: row names, Herdr agent names, session ids, lane slugs and tab labels stay as they are, because they're routing.
+
 ## The sidebar
 
 - The space label is the project's name. Status never goes there; `project_status` puts a drifted label back.

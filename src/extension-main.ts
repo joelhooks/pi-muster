@@ -459,7 +459,7 @@ export default function muster(host: ExtensionAPI) {
       name: Type.String({ description: "Catalog and Herdr agent name, [a-z][a-z0-9_-]{0,31}" }),
       role: Type.Optional(StringEnum(["desk", "hawk", "boss", "worker", "judge"] as const)),
       lane: Type.Optional(Type.String()),
-      label: Type.Optional(Type.String({ description: "Pane and session name: an emoji plus the role" })),
+      label: Type.Optional(Type.String({ description: "Pane and session name, shaped `<emoji> <Callsign> · <role>` (e.g. \"🐦 Yaffle · muster desk\"). Omitted: the row's claim in ~/.local/state/switchboard/callsigns.jsonl, then the parent or existing label" })),
       cwd: Type.Optional(Type.String()),
       clone: Type.Optional(Type.Boolean({ description: "Allocate a rift clone of the lane repo as cwd" })),
       hydrate: Type.Optional(Type.Boolean({ description: "With clone: run worker-worktree.sh create --hydrate (one locked offline pnpm install) for clones that will commit" })),

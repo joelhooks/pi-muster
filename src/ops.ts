@@ -58,6 +58,7 @@ import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, ste
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
 import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
+import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
@@ -148,7 +149,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   const remoteSource = mapPath(source, machine);
   yield* prerequisites(nameOfMachine, machine, remoteSource);
   const roster = (yield* loadRoster).roster;
-  const label = params.label ?? parent?.profile.label ?? existing?.profile.label;
+  const label = params.label ?? claimedLabel(env.home, project.slug, name, role) ?? parent?.profile.label ?? existing?.profile.label;
   if (!label) return yield* input("a remote agent needs a label");
   const retroChoice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
   const model = params.model ?? retroChoice?.model ?? parent?.profile.model;
@@ -1974,6 +1975,21 @@ export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; repl
 
 /** Replacement is provisional until fresh fork evidence is proven. No catalog launch reservation
  * is needed: the per-name lock fences concurrent replacements while the old row stays live. */
+/** The latest fleet callsign claim for this row, shaped `<emoji> <Callsign> · <role>`. A missing or bad line is skipped. */
+export function claimedLabel(home: string, project: string, agent: string, role: string | undefined): string | undefined {
+  let text: string;
+  try { text = readFileSync(join(home, ".local/state/switchboard/callsigns.jsonl"), "utf8"); } catch { return undefined; }
+  let found: { emoji: string; callsign: string } | undefined;
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let value: unknown;
+    try { value = JSON.parse(line); } catch { continue; } // another writer's partial line
+    try { const claim = decodeCallsignClaim(value); if (claim.project === project && claim.agent === agent) found = claim; continue; } catch { /* not a claim */ }
+    try { const release = decodeCallsignRelease(value); if (release.project === project && found?.callsign === release.released) found = undefined; } catch { /* neither */ }
+  }
+  return found ? `${found.emoji} ${found.callsign} · ${role ?? agent}` : undefined;
+}
+
 const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(`restart-${old.name.slice(0, 23)}`, Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
@@ -2185,7 +2201,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const lane = yield* findLane(project, side?.lane ?? params.lane ?? parent?.lane ?? existing?.lane ?? "");
     if (lane.state !== "open") return yield* input(`lane ${lane.slug} is ${lane.state}`);
     if (!role) return yield* input("a new agent needs role and lane");
-    const label = params.label ?? parent?.profile.label ?? existing?.profile.label;
+    const label = params.label ?? claimedLabel(env.home, project.slug, params.name, role) ?? parent?.profile.label ?? existing?.profile.label;
     if (!label) return yield* input("a new agent needs a label");
     const cwd = params.cwd ?? parent?.cwd ?? existing?.cwd ?? lane.repo ?? project.dir;
     yield* requireAbsolute("cwd", cwd);
