@@ -235,7 +235,9 @@ describe("qualified desk routing", () => {
       expect(order).toEqual(["receive", "deliver", "ack"]);
       expect(pi.sendUserMessage).toHaveBeenCalledWith("Desk to desk.\n\n[Authenticated agent message from alpha-session, not Joel.]", { deliverAs: "followUp" });
       privateFile(networkCursorPath(h.home, "beta/desk"), { "beta/desk": 0 });
-      await expect(Effect.runPromise(consumeNetworkMailbox({ home: h.home, agent: "beta/desk", session: "beta-session", mailbox, senderAgent: () => Effect.succeed("beta/desk"), receive: () => Effect.sync(() => { throw new Error("must not deliver"); }) }))).rejects.toThrow("authenticated sender differs");
+      const refused: string[] = [];
+      await Effect.runPromise(consumeNetworkMailbox({ home: h.home, agent: "beta/desk", session: "beta-session", mailbox, senderAgent: () => Effect.succeed("beta/desk"), receive: payload => Effect.sync(() => { if (payload.type !== "message" || payload.author !== "NetworkComms (local)") throw new Error("must not deliver"); refused.push(payload.body); }) }));
+      expect(refused).toHaveLength(1); expect(refused[0]).toContain("authenticated sender differs");
     } finally { handlers.get("session_shutdown")!(); }
   });
 });

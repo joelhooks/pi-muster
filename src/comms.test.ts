@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Effect, Schema } from "effect";
 import { describe, expect, it, vi } from "vitest";
-import { commsAddress, createComms, IntercomComms, NetworkComms, selectComms, LeaseAuthority, NetworkMailbox, leaseToComms, resolveNetworkAddress } from "./comms.ts";
+import { commsAddress, createComms, retiredCatalogSession, IntercomComms, NetworkComms, selectComms, LeaseAuthority, NetworkMailbox, leaseToComms, resolveNetworkAddress } from "./comms.ts";
 import { Input as AckInput } from "./vendor/rat-king-lexicon/mailbox.ack.ts";
 import { Main as Lease, type MainValue as LeaseValue } from "./vendor/rat-king-lexicon/runtime.lease.ts";
 import { Params as ListInput } from "./vendor/rat-king-lexicon/mailbox.list.ts";
@@ -128,6 +128,16 @@ describe("Comms port", () => {
     }
     expect(events.requests).toEqual([]); expect(events.listeners.size).toBe(0);
     expect(await Effect.runPromise(NetworkComms.send("live", "opaque"))).toMatchObject({ status: "failed" });
+  });
+  it("calls a session retired only when its row now belongs to another session", async () => {
+    const h = harness(); const dir = h.home + "/project"; mkdirSync(dir, { recursive: true });
+    await runWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n", ephemeral: true, createSpace: true }));
+    await runWith(h, laneOpen(dir, { slug: "desk", label: "desk", goal: "g", repo: dir }));
+    const row = (await runWith(h, agentLaunch(dir, { action: "launch", name: "desk", role: "desk", lane: "desk", label: "desk", cwd: dir }))).row;
+    expect(retiredCatalogSession(dir, "desk", row.sessionId)).toBe(false);
+    expect(retiredCatalogSession(dir, "desk", "predecessor-session")).toBe(true);
+    expect(retiredCatalogSession(dir, "other", "predecessor-session")).toBe(false);
+    expect(retiredCatalogSession(h.home + "/nowhere", "desk", "x")).toBe(false);
   });
   it("explicit network env wins over an unset project policy; an explicit project opt-out still wins", async () => {
     // The Switchboard runs from a cwd that holds another project's catalog with no comms policy.

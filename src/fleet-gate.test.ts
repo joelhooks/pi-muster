@@ -145,6 +145,13 @@ describe("fleet gate routing", () => {
     expect(args[args.indexOf("--host") + 1]).toBe("flagg");
   });
 
+  it("names the worker machine in the summary while checks keep host", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
+    const { options } = fixture();
+    const result = await run(options, fakeRunner(0, true, { host: "flagg", machine: "pennywise", exactTree: true }).proc);
+    expect(result).toMatchObject({ kind: "fleet", code: 0, note: expect.stringContaining("muster-heavy gate: host pennywise; run fake-run") });
+  });
+
   it.each([0, 1, 75])("propagates exit %s", async exit => {
     vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
     const { options } = fixture();
@@ -217,5 +224,9 @@ console.log('streamed output'); process.exit(${exit});\n`);
     expect(parseHeavyGate(["--wait", "3", "--tree", sha, "--host", "pennywise", "--", "echo", "--tree"])).toEqual({ wait: 3, tree: sha, host: "pennywise", command: ["echo", "--tree"] });
     for (const args of [["--exclusive", "--", "true"], ["--wait", "-1", "--", "true"], ["--wait", "1", "--wait", "2", "--", "true"], ["--tree", "HEAD", "--", "true"], ["--host", "elsewhere", "--", "true"], ["--"]]) expect(() => parseHeavyGate(args)).toThrow();
     expect(gateRepoName("/clone/lane", "ssh://git@example.invalid/owner/drovr.git")).toBe("drovr");
+    // codetv.dev failed decodeSlug and blocked its gates and hydrate (Theora, 2026-10-07).
+    expect(gateRepoName("/clone/lane", "git@github.com:owner/codetv.dev.git")).toBe("codetv-dev");
+    expect(gateRepoName("/clone/My_Repo", "")).toBe("my-repo");
+    expect(gateRepoName("/clone/lane", "https://example.invalid/owner/" + "a".repeat(70))).toHaveLength(64);
   });
 });

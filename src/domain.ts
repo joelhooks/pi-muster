@@ -251,6 +251,8 @@ export const MachineConfig = Schema.Struct({
   comms: Schema.optionalKey(Schema.Struct({ config: RemotePath })),
   /** At most one machine: `agent_launch clone: true` without `machine` launches there (fleet SOP 2026-10-07). */
   cloneDefault: Schema.optionalKey(Schema.Boolean),
+  /** Provider renames for this machine, e.g. openai-codex → cliproxy-codex. A mapped model must be served there. */
+  providerMap: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
 });
 export type MachineConfig = typeof MachineConfig.Type;
 export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
@@ -341,6 +343,8 @@ export const GateReceipt = Schema.Struct({
   /** fleet-compute: whether a flagg run started on a checkout equal to the tree. */
   exactTree: Schema.optionalKey(Schema.Boolean),
   dirtyCount: Schema.optionalKey(Schema.Number),
+  /** fleet-compute: the machine a worker-host run used; display only, checks keep `host`. */
+  machine: Schema.optionalKey(Schema.String),
 });
 export type GateReceipt = typeof GateReceipt.Type;
 export const PacketGate = Schema.Struct({ ...GateFields, receipt: Path });

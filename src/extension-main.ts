@@ -14,7 +14,7 @@ import { registerCompaction } from "./compact.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
 import { MAX_CADENCE_MINUTES, decodeNetworkPeers, decodeNetworkDeskPeers } from "./domain.ts";
 import { sendDesk } from "./desk-route.ts";
-import { createComms, catalogCommsSender, catalogNetworkPeers } from "./comms.ts";
+import { createComms, catalogCommsSender, catalogNetworkPeers, retiredCatalogSession } from "./comms.ts";
 import {
   agentClose,
   agentLaunch,
@@ -155,6 +155,9 @@ export default function muster(host: ExtensionAPI) {
               const local = catalogCommsSender(dir, session);
               if (local) return local;
               if (!env.MUSTER_AGENT) return undefined;
+              // A session whose own row moved to a successor is retired: it must not sign as the
+              // legacy bare identity (receivers refuse the mismatch). Its sends fall back, reported.
+              if (retiredCatalogSession(dir, env.MUSTER_AGENT, session)) return undefined;
               const peers = { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) };
               return { agent: peers[session] ?? env.MUSTER_AGENT, session };
             },

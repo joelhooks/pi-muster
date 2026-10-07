@@ -170,12 +170,22 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
   const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
-  let remoteProfile: LaunchProfile = { ...profile, model: selected.model, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
+  // A machine can serve a provider under another name (pennywise runs openai-codex models through cliproxy-codex).
+  const [provider, ...modelRest] = selected.model.split("/");
+  const mappedProvider = provider ? machine.providerMap?.[provider] : undefined;
+  const remoteModel = mappedProvider && modelRest.length ? [mappedProvider, ...modelRest].join("/") : selected.model;
+  let remoteProfile: LaunchProfile = { ...profile, model: remoteModel, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
   let modelFailure: GuardFailed | null = null;
   return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
+    if (mappedProvider) {
+      // Fail closed: never let a missing model on the target silently fall back to another one.
+      const served = `const fs=require("node:fs"),p=require("node:path");try{const d=JSON.parse(fs.readFileSync(p.join(process.env.HOME,".pi/agent/models.json"),"utf8"));process.exit((d.providers?.[process.argv[1]]?.models??[]).some(m=>m.id===process.argv[2])?0:3)}catch{process.exit(4)}`;
+      yield* must("node", ["-e", served, mappedProvider, modelRest.join("/")], { cwd: "/", timeoutMs: 15_000 }).pipe(Effect.mapError(error => new ProcError({ ...error,
+        message: `model ${selected.model} maps to ${remoteModel} on ${nameOfMachine}, which its ~/.pi/agent/models.json does not serve; pick a served model or add it there` })));
+    }
     // Skills are optional guidance: one missing on the target (an unmapped home path) is dropped with a note, not fatal.
     const skillNotes: string[] = [];
     const readableSkills: string[] = [];

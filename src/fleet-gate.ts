@@ -60,9 +60,10 @@ export function parseHeavyGate(args: readonly string[]): Pick<FleetGateOptions, 
 }
 
 /** A clone directory is a lane name, not a registry key. Prefer its origin's repo name. */
+/** Fleet repo key: the origin name made kebab-case (e.g. `codetv.dev` → `codetv-dev`), else the checkout name. */
 export function gateRepoName(source: string, origin: string): string {
-  const name = origin.trim().split(/[/:]/).at(-1)?.replace(/\.git$/, "");
-  return decodeSlug(name || basename(source));
+  const kebab = (value: string | undefined) => (value ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 64).replace(/-$/, "");
+  return decodeSlug(kebab(origin.trim().split(/[/:]/).at(-1)?.replace(/\.git$/, "")) || kebab(basename(source)));
 }
 
 /** Fleet owns registration, host eligibility and queueing for every repo. No policy copy here. */
@@ -123,7 +124,7 @@ export const runFleetGate = (options: FleetGateOptions) => Effect.gen(function* 
   if (receipt?.host === "flagg" && receipt.exactTree === false) return yield* input(`fleet gate ran on flagg in a checkout that differed from tree ${tree} (${receipt.dirtyCount ?? "?"} path(s)); not proven. Receipt ${receiptPath}`);
   // Admission timeout has no external receipt; never invent host/run/duration proof for it.
   const note = receipt
-    ? `muster-heavy gate: host ${receipt.host}; run ${receipt.runId}; exit ${receipt.exit ?? "lost"}; duration ${receipt.durationMs}ms; receipt ${receiptPath}`
+    ? `muster-heavy gate: host ${receipt.machine ?? receipt.host}; run ${receipt.runId}; exit ${receipt.exit ?? "lost"}; duration ${receipt.durationMs}ms; receipt ${receiptPath}`
     : `muster-heavy gate: runner exit ${result.code ?? "lost"}; no receipt (not proven)`;
   return { kind: "fleet" as const, code: !receipt || receipt.exit === null ? result.code || 1 : result.code ?? 1, note, receipt, receiptPath };
 });

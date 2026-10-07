@@ -190,8 +190,11 @@ describe("network owner routing and consumption", () => {
     const path = join(root, ".local/state/muster/network-cursors/desk.json"); expect(statSync(path).mode & 0o777).toBe(0o600);
     await Effect.runPromise(consumeNetworkMailbox(options)); expect(seen.mock.calls).toEqual([[0], [2]]); expect(order).toHaveLength(3);
     privateFile(path, { desk: 0 });
-    const failed = consumeNetworkMailbox({ ...options, senderAgent: () => Effect.succeed("desk") });
-    await expect(Effect.runPromise(failed)).rejects.toThrow("authenticated sender differs"); expect(order).toHaveLength(3);
+    // A mismatch is refused per message: saved, acked and surfaced, never ingested, and the reader keeps going.
+    const notices: string[] = [];
+    await Effect.runPromise(consumeNetworkMailbox({ ...options, senderAgent: () => Effect.succeed("desk"), receive: payload => Effect.sync(() => { notices.push(payload.type === "message" ? payload.body : "owner payload delivered"); }) }));
+    expect(notices).toHaveLength(1); expect(notices[0]).toContain("authenticated sender differs from payload author worker-session");
+    expect(readOwnerQueue("desk-session", root).items).toHaveLength(1); expect(order).toEqual(["ingest", "deliver", "ack", "deliver", "ack"]);
   });
   it("remote provisioning exchanges only public references and keeps the configured path on that machine", async () => {
     const h = harness(); const machine = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/package", workerWorktree: "/worker", env: {}, comms: { config: "/private/network.json" } } }).remote!;

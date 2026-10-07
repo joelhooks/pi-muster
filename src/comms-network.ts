@@ -482,11 +482,16 @@ export function consumeNetworkMailbox(options: {
             if (decoded === UNDECODABLE) { yield* undecodable("body is not a Muster network payload"); }
             else {
             const payload = decoded;
-            if (payload.recipient !== options.session) return yield* Effect.fail(new CommsError("NetworkComms recipient session changed; refusing stale delivery"));
+            // These refusals are per message: saved, acked and surfaced, never delivered. Failing the consumer
+            // instead replays the same message on every start, so one bad record kills the reader for good
+            // (2026-10-07: a retired desk session signed with its legacy identity after handover).
             const author = payload.type === "owner" ? payload.item.author : payload.author;
-            const agent = yield* options.senderAgent(author);
-            if (networkRecipient(options.home, agent).did !== opened.senderDid) return yield* Effect.fail(new CommsError("NetworkComms authenticated sender differs from payload author"));
-            yield* options.receive(payload);
+            const agent = payload.recipient !== options.session ? undefined : yield* options.senderAgent(author).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            const expected = agent === undefined ? undefined : yield* Effect.try({ try: () => networkRecipient(options.home, agent).did, catch: () => undefined }).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            if (payload.recipient !== options.session) yield* undecodable(`addressed to session ${payload.recipient}, not this session (stale delivery refused)`);
+            else if (agent === undefined) yield* undecodable(`payload author ${author} is not a known agent (refused)`);
+            else if (expected !== opened.senderDid) yield* undecodable(`authenticated sender differs from payload author ${author} (expected ${expected ?? "unknown"}; refused)`);
+            else yield* options.receive(payload);
             }
           }
         }

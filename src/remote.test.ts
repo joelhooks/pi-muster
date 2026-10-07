@@ -205,6 +205,18 @@ describe("remote owner operations", () => {
     s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }), other: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }) });
     await expect(s.run(agentLaunch(s.dir, { action: "launch", name: "two-w", role: "worker", lane: "work", label: "two", clone: true, noSkills: true }))).rejects.toThrow(/cloneDefault is set on remote, other/);
   }, 30_000);
+  it("maps a model's provider for the machine, and refuses a mapped model the machine does not serve", async () => {
+    const s = setup(); await s.open();
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, providerMap: { "openai-codex": "cliproxy-codex" } }) });
+    const original = s.proc.run; let served = true;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh" && args.at(-1)?.includes("'node' '-e'") && args.at(-1)?.includes(".pi/agent/models.json")
+      ? Effect.succeed({ code: served ? 0 : 3, stdout: "", stderr: "" }) : original(command, args, options));
+    const launched = await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "proxy-w", role: "worker", lane: "work", label: "proxy", cwd: s.dir, noSkills: true, model: "openai-codex/gpt-6-sol" }));
+    expect(launched.row.profile.model).toBe("cliproxy-codex/gpt-6-sol");
+    served = false;
+    await expect(s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "proxy-x", role: "worker", lane: "work", label: "proxy", cwd: s.dir, noSkills: true, model: "openai-codex/gpt-6.1-sol" })))
+      .rejects.toThrow(/maps to cliproxy-codex\/gpt-6.1-sol on remote, which its ~\/.pi\/agent\/models.json does not serve/);
+  }, 30_000);
   it("names the unreadable remote path, with a hint for a brief", async () => {
     const s = setup(); await s.open();
     const original = s.proc.run;

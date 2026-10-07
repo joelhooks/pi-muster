@@ -17,6 +17,13 @@ export function catalogCommsSender(dir: string, session: string) {
     return row ? { agent: networkRowIdentity(project, row), session } : undefined;
   } catch { return undefined; }
 }
+/** True when this catalog's row `name` now belongs to another session: the caller is a retired predecessor. */
+export function retiredCatalogSession(dir: string, name: string, session: string): boolean {
+  try {
+    const row = decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8"))).agents.find(row => row.name === name);
+    return row !== undefined && row.sessionId !== session;
+  } catch { return false; }
+}
 /** Decoded policies default comms to intercom; only the raw catalog tells an explicit choice from an unset one. */
 export function explicitPolicyComms(dir: string): "intercom" | "network" | undefined {
   try {
