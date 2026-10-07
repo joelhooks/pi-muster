@@ -30,6 +30,22 @@ async function withMailbox(test: (service: ReturnType<typeof createNetworkComms>
 }
 
 describe("same-process consumer send fence", () => {
+  it("waits out a predecessor's unexpired lease instead of failing, and never takes it over", async () => {
+    // Live 2026-10-07: a restart replacement got LeaseHeld while the old desk's renewed lease ran out.
+    const soon = (ms: number, session = "desk-session") => Schema.decodeUnknownSync(Main)({ ...lease(1), expiresAt: new Date(Date.now() + ms).toISOString(), harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: session } });
+    await withMailbox(async (_service, home) => {
+      let calls = 0;
+      const acquire = vi.fn(() => ++calls === 1 ? Effect.fail(new MailboxClientError({ error: "LeaseHeld", reason: "held", status: 409 })) : Effect.succeed(soon(60_000)));
+      const resolve = vi.fn(() => Effect.succeed(soon(-1_500, "old-session")));
+      const mailbox = {
+        lease: { acquire, renew: () => Effect.succeed(soon(60_000)), resolve, release: () => Effect.void },
+        watch: () => Stream.succeed({ events: [], throughSeq: 2 }),
+        open: () => Effect.die("no envelope"), deliver: () => Effect.die("no delivery"), ack: () => Effect.die("no ack"),
+      };
+      await Effect.runPromise(consumeNetworkMailbox({ home, agent: "desk", session: "desk-session", mailbox, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void }));
+      expect(acquire).toHaveBeenCalledTimes(2); expect(resolve).toHaveBeenCalledOnce();
+    }, () => Effect.succeed(output));
+  });
   it("renews its short lease while watching, and stops with a named error when renewal fails", async () => {
     // Live 2026-10-07: the mailbox granted ~5 min leases, nothing renewed, and every reader died at expiry.
     const soon = (ms: number) => Schema.decodeUnknownSync(Main)({ ...lease(1), expiresAt: new Date(Date.now() + ms).toISOString() });

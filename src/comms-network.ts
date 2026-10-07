@@ -432,11 +432,20 @@ export function consumeNetworkMailbox(options: {
         yield* publishConsumerFence(options.home, lease).pipe(Effect.uninterruptible, Effect.mapError(() => new MailboxClientError({ reason: "NetworkComms could not publish consumer fence" })));
         return lease;
       })));
+    // A restart replacement starts while its predecessor's lease is still unexpired (it renewed until exit),
+    // and the server refuses every unexpired holder. Wait out that holder's returned expiry and retry;
+    // never take a lease over. A holder that keeps renewing outlasts the attempts and the consumer fails.
+    const acquireWaiting = (attempt = 0): Effect.Effect<LeaseFence, import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError> => acquire().pipe(
+      Effect.catch(error => error.error !== "LeaseHeld" || attempt >= 3 ? Effect.fail(error) : options.mailbox.lease.resolve(ownDid).pipe(
+        Effect.map(holder => Math.min(6 * 60_000, Math.max(1_000, Date.parse(holder.expiresAt) - Date.now() + 2_000))),
+        Effect.catch(missing => missing.error === "LeaseNotFound" ? Effect.succeed(0) : Effect.fail(missing)),
+        Effect.flatMap(wait => Effect.sleep(wait)),
+        Effect.flatMap(() => acquireWaiting(attempt + 1)))));
     const reacquire = () => options.mailbox.lease.resolve(ownDid).pipe(Effect.flatMap(current =>
       current.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || current.harness.sessionId !== options.session
         ? Effect.fail(new MailboxClientError({ error: "LeaseTakenOver", reason: "Identity lease belongs to another session" }))
         : acquire()));
-    const run = watchNetworkMailbox({ mailbox: options.mailbox, acquire, reacquire, afterSeq }).pipe(Stream.runForEach(batch => Effect.gen(function* () {
+    const run = watchNetworkMailbox({ mailbox: options.mailbox, acquire: () => acquireWaiting(), reacquire, afterSeq }).pipe(Stream.runForEach(batch => Effect.gen(function* () {
       for (const event of batch.events) {
         if (event.$type !== "sh.mschf.ratking.defs#messageEvent" || !isMessage(event)) continue;
         const authenticated = yield* (options.open ?? options.mailbox.open)(event.envelope).pipe(
