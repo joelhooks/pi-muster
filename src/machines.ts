@@ -35,6 +35,19 @@ export const networkConsumerMachine = setup({ types: { events: {} as { type: "NE
   },
 });
 
+/** Temporary pinned-client lease policy. The host consumer stays running during recovery. */
+export const networkLeaseMachine = setup({ types: { events: {} as { type: "ACTIVE" | "DEGRADE" | "EXPIRE" | "FAIL" | "STOP" } } }).createMachine({
+  initial: "acquiring",
+  on: { FAIL: ".failed", STOP: ".stopped" },
+  states: {
+    acquiring: { on: { ACTIVE: "live", DEGRADE: "degraded", EXPIRE: "reacquiring" } },
+    live: { on: { DEGRADE: "degraded", EXPIRE: "reacquiring" } },
+    degraded: { on: { ACTIVE: "live", EXPIRE: "reacquiring" } },
+    reacquiring: { on: { ACTIVE: "live" } },
+    failed: { type: "final" }, stopped: { type: "final" },
+  },
+});
+
 /** Desk phone outbox: persist intent before send, feedback before resolution, and update receipts last. */
 export const deskPhoneMachine = setup({ types: { events: {} as { type: "SENT" | "ANSWER" | "RESOLVE" | "UPDATE" } } }).createMachine({
   initial: "sending",

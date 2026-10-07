@@ -353,6 +353,22 @@ describe("restart by fork", () => {
     expect(shutdown).not.toHaveBeenCalled();
   });
 
+  it("handover waits for lease/fence release before close can kill the old pane", async () => {
+    const hooks = new Map<string, (event: unknown, ctx: unknown) => unknown>(); const order: string[] = [];
+    let finish!: () => void;
+    const released = new Promise<void>(resolve => { finish = resolve; });
+    const close = vi.fn(async () => { order.push("close"); });
+    const arm = registerRestartExit({ on: (name: string, callback: (event: unknown, ctx: unknown) => unknown) => hooks.set(name, callback) } as never,
+      close, async () => { order.push("release-start"); await released; order.push("released"); });
+    const binding = { paneId: "old", terminalId: "terminal", tabId: "tab", openedByMuster: true };
+    const ctx = { sessionManager: { getSessionId: () => "old" }, shutdown: vi.fn() };
+    arm({ sessionId: "old", dir: "/project", restart: { oldPane: binding, replacementPane: { ...binding, paneId: "replacement" }, name: "desk" } });
+    hooks.get("agent_end")!({}, ctx);
+    const shutdown = hooks.get("session_shutdown")!({}, ctx);
+    expect(order).toEqual(["release-start"]); expect(close).not.toHaveBeenCalled();
+    finish(); await shutdown; expect(order).toEqual(["release-start", "released", "close"]);
+  });
+
   it("unarmed, wrong-session and repeated agent_end cannot quit a process", async () => {
     const hooks = new Map<string, (event: unknown, ctx: unknown) => unknown>();
     const close = vi.fn(async () => {});
