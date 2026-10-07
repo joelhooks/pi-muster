@@ -372,6 +372,19 @@ export function seedNetworkIdentities(home: string, value: unknown) {
   }
 }
 
+const UNDECODABLE = Symbol("undecodable");
+
+/** Private evidence for an authenticated message the consumer could not decode. */
+export const quarantineNetworkMessage = (home: string, agent: string, record: { seq: number; messageId: string; senderDid: string; reason: string; body: string }) => Effect.tryPromise({
+  try: async () => {
+    const dir = join(home, ".local/state/muster/network-quarantine", createHash("sha256").update(agent).digest("hex").slice(0, 16));
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, `${record.seq}-${createHash("sha256").update(record.messageId).digest("hex").slice(0, 16)}-${randomUUID().slice(0, 8)}.json`);
+    await writeFile(path, JSON.stringify({ agent, ...record }), { mode: 0o600, flag: "wx" });
+    return path;
+  }, catch: () => new CommsError("NetworkComms quarantine write failed"),
+});
+
 export type NetworkRecordHandler = (input: {
   ownDid: string;
   envelope: Parameters<Effect.Success<ReturnType<typeof openNetworkMailbox>>["open"]>[0];
@@ -441,19 +454,30 @@ export function consumeNetworkMailbox(options: {
         } else {
           const opened = authenticated.opened;
           if (opened.tid !== event.receipt.message.messageId || opened.senderDid !== event.receipt.message.senderDid) return yield* Effect.fail(new CommsError("NetworkComms receipt differs from authenticated envelope"));
-          const raw: unknown = yield* Effect.try({ try: () => JSON.parse(opened.body), catch: failure });
-          if (options.deskRecord && raw !== null && typeof raw === "object" && "$type" in raw && raw.$type === "sh.mschf.ratking.desk.answer") {
+          // An authenticated body that is not a Muster payload is saved and acked, never fatal:
+          // the cursor replays it on every start, so failing here would stop the consumer for good.
+          const undecodable = (reason: string) => quarantineNetworkMessage(options.home, options.agent, { seq: event.seq, messageId: opened.tid, senderDid: opened.senderDid, reason, body: opened.body }).pipe(
+            Effect.mapError(() => new CommsError("NetworkComms could not quarantine an undecodable message; it was not acked")),
+            Effect.flatMap(path => options.receive({ type: "message", recipient: options.session, author: "NetworkComms (local)",
+              body: `NetworkComms skipped message seq ${event.seq} from ${opened.senderDid}: ${reason}. Saved before ack: ${path}.` })));
+          const raw = yield* Effect.try({ try: (): unknown => JSON.parse(opened.body), catch: () => "not JSON" as const }).pipe(Effect.catch(() => Effect.succeed(UNDECODABLE)));
+          if (raw === UNDECODABLE) yield* undecodable("body is not JSON");
+          else if (options.deskRecord && raw !== null && typeof raw === "object" && "$type" in raw && raw.$type === "sh.mschf.ratking.desk.answer") {
             // This shares the authenticated consumer, lease and checkpoint with ordinary network messages.
             // Record refusals become visible notices, never agent payload decoding failures.
             const notice = yield* options.deskRecord({ ownDid, envelope: event.envelope, opened }).pipe(Effect.catch(() => Effect.succeed("desk_phone answer failed: record handler unavailable; inspect sidecar and retry sync")));
             yield* options.receive({ type: "message", recipient: options.session, author: "desk_phone (local dispatch)", body: notice });
           } else {
-            const payload = yield* Effect.try({ try: () => decodeNetworkPayload(raw), catch: failure });
+            const decoded = yield* Effect.try({ try: () => decodeNetworkPayload(raw), catch: () => "not a payload" as const }).pipe(Effect.catch(() => Effect.succeed(UNDECODABLE)));
+            if (decoded === UNDECODABLE) { yield* undecodable("body is not a Muster network payload"); }
+            else {
+            const payload = decoded;
             if (payload.recipient !== options.session) return yield* Effect.fail(new CommsError("NetworkComms recipient session changed; refusing stale delivery"));
             const author = payload.type === "owner" ? payload.item.author : payload.author;
             const agent = yield* options.senderAgent(author);
             if (networkRecipient(options.home, agent).did !== opened.senderDid) return yield* Effect.fail(new CommsError("NetworkComms authenticated sender differs from payload author"));
             yield* options.receive(payload);
+            }
           }
         }
         if (!fence) return yield* Effect.fail(failure());

@@ -165,6 +165,27 @@ describe("desk phone routing", () => {
     expect(notices[1]).toBe("normal payload still arrives");
     expect((await s.state()).entries[item.itemId]?.state).toBe(failed ? "pending" : "closed");
   });
+  it("saves and acks an authenticated plain-text or non-payload body instead of stopping the consumer forever", async () => {
+    // Live case: a "traffic feed check" sent to the Switchboard replayed from seq 0 and killed its reader on every start.
+    const s = setup();
+    privateFile(networkIdentityPath(s.h.home), { switchboard: { did: identities.switchboard, secret: "key", document: { id: identities.switchboard, verificationMethod: [], authentication: [], keyAgreement: [] } }, worker: { did: identities.phone, secret: "key", document: { id: identities.phone, verificationMethod: [], authentication: [], keyAgreement: [] } } });
+    const event = Schema.decodeUnknownSync(Schema.toType(MessageEvent))(Schema.decodeUnknownSync(ListOutput)(fixture("list.output")).events[0]);
+    const base = { ...event, $type: "sh.mschf.ratking.defs#messageEvent" as const, envelope, receipt: { ...event.receipt, message: { ...event.receipt.message, messageId: opened.tid, senderDid: opened.senderDid } } };
+    const lease = Schema.decodeUnknownSync(Lease)({ did: identities.switchboard, leaseId: "3m5abcde23456", generation: 1, expiresAt: "2099-10-07T00:00:00.000Z", harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: s.h.sessionId } });
+    const bodies = ["traffic feed check", JSON.stringify({ hello: "not a payload" }), JSON.stringify({ type: "message", recipient: s.h.sessionId, author: "worker-session", body: "good network message" })];
+    const open = vi.fn((_envelope: typeof envelope): Effect.Effect<OpenedMessage, MailboxClientError> => Effect.succeed({ ...opened, body: bodies.shift()! }));
+    const notices: string[] = []; let acks = 0;
+    const mailbox = { open, lease: { acquire: () => Effect.succeed(lease), release: () => Effect.void, resolve: () => Effect.succeed(lease), renew: () => Effect.succeed(lease) },
+      watch: () => Stream.succeed({ events: [base, base, base], throughSeq: 3 }), deliver: () => Effect.succeed({ receipt: base.receipt }),
+      ack: () => Effect.sync(() => { acks += 1; return { receipt: base.receipt }; }) };
+    await Effect.runPromise(consumeNetworkMailbox({ home: s.h.home, agent: "switchboard", session: s.h.sessionId, mailbox, senderAgent: () => Effect.succeed("worker"),
+      receive: payload => Effect.sync(() => { if (payload.type === "message") notices.push(payload.body); }) }));
+    expect(acks).toBe(3);
+    expect(notices[0]).toContain("body is not JSON"); expect(notices[1]).toContain("not a Muster network payload"); expect(notices[2]).toBe("good network message");
+    const saved = notices[0]!.match(/Saved before ack: (.+)\.$/)![1]!;
+    expect(statSync(saved).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(saved, "utf8")).body).toBe("traffic feed check");
+  });
   it.each(["signature", "AuthRequired", "LeaseMismatch", "without-hook", "save-fails"] as const)("quarantines only envelope failures before ack, mode=%s", async mode => {
     const s = setup();
     privateFile(networkIdentityPath(s.h.home), { switchboard: { did: identities.switchboard, secret: "key", document: { id: identities.switchboard, verificationMethod: [], authentication: [], keyAgreement: [] } }, worker: { did: identities.phone, secret: "key", document: { id: identities.phone, verificationMethod: [], authentication: [], keyAgreement: [] } } });
