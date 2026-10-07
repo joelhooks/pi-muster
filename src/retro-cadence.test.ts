@@ -65,7 +65,7 @@ describe("retro cadence", () => {
     const env: EnvShape = {
       home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/owner/muster", workerWorktree: h.workerWorktree,
       createId: () => "remote-id", sleep: ms => Effect.sync(() => h.sleep(ms)), emitPaneClose: h.emitPaneClose,
-      machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree, env: {}, wrap: [] } },
+      machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: [] } },
       remoteHerdr: () => Effect.succeed(remote.client()),
     };
     const result = await runWith(h, agentLaunch(dir, { action: "launch", machine: "remote", name: "remote-reviewer", role: "judge", lane: "review", label: "🔎 judge", cwd: dir, noSkills: true }).pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc)));

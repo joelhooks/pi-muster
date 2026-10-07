@@ -61,7 +61,7 @@ printf 'worktree: %s\\nbranch: worker/%s\\nbase: %s %s\\n' "$target" "$3" "$base
   const run = <A, E>(program: Parameters<typeof runWith<A, E>>[1]) => runWith(h, remote ? program.pipe(Effect.provideService(MusterEnv, {
     home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", sleep: () => Effect.void, emitPaneClose: h.emitPaneClose,
-    machines: { remote: { herdr: "remote", ssh: "remote", paths: { [dir]: remoteSource }, musterExtension: "/muster", workerWorktree: h.workerWorktree, env: {}, wrap: [] } },
+    machines: { remote: { herdr: "remote", ssh: "remote", paths: { [dir]: remoteSource }, musterExtension: "/muster", workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: [] } },
     remoteHerdr: () => Effect.succeed(h.herdr.client()),
   })) : program);
   await run(projectOpen({ dir, slug: "probe", outcome: "test", reviewTrigger: "weekly", nextAction: "test", criticalPath: [], space: "w1", ephemeral: true, mode }));

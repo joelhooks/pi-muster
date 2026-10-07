@@ -26,7 +26,7 @@ async function setup(collision = false) {
   const env: EnvShape = {
     home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/owner/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", sleep: ms => Effect.sync(() => h.sleep(ms)), emitPaneClose: h.emitPaneClose,
-    machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree, env: {}, wrap: [] } },
+    machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: [] } },
     remoteHerdr: () => Effect.succeed(remote.client()),
   };
   const launch = (extra: Partial<AgentLaunchInput> = {}) => runWith(h, agentLaunch(dir, {
@@ -101,11 +101,12 @@ describe("remote launch argv delivery", () => {
     const brief = join(s.dir, "brief.md");
     writeFileSync(brief, "Do this precise task. Report through owner_note.");
     const result = await s.launch({ brief, prompt: undefined });
-    expect(result.argv).toContain(`@${brief}`);
+    expect(result.argv).toContain(`@${result.row.brief}`);
+    expect(result.row.brief).not.toBe(brief);
     expect(s.remote.initialPrompts[0]).toContain("Do this precise task.");
     expect(s.remote.initialPrompts[0]).toContain("owner_note");
     expect(result.row.delivery).toBe("proven");
-    expect(result.argv.slice(-2)).toEqual(["--", `@${brief}`]);
+    expect(result.argv.slice(-2)).toEqual(["--", `@${result.row.brief}`]);
   });
 
   it("retains an extra prompt and the brief in one complete private prompt file", async () => {

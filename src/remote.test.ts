@@ -1,11 +1,11 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, utimesSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, utimesSync, statSync, chmodSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
-import { mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient } from "./remote.ts";
+import { mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
-import { agentLaunchForeground as agentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";
@@ -14,7 +14,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendOwnerItem, deliverOwnerItem, forwardOwner, ownerPath, readOwnerQueue, wakeKind } from "./owner-queue.ts";
 import { ownerFeed } from "./owner-feed.ts";
 
-const config = (patch: Partial<MachineConfig> = {}): MachineConfig => decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: "/remote/worker-worktree.sh", env: { CUDA_VISIBLE_DEVICES: "" }, wrap: [], ...patch } }).remote!;
+const config = (patch: Partial<MachineConfig> = {}): MachineConfig => decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: "/remote/worker-worktree.sh", env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off" }, wrap: [], ...patch } }).remote!;
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
@@ -29,14 +29,14 @@ function setup() {
     if (command === "ssh") {
       const script = args.at(-1)!;
       if (script.includes("muster-prerequisites")) return Effect.succeed({ code: missing ? 1 : 0, stdout: "", stderr: missing ? "no rift" : "" });
-      return liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: options.timeoutMs });
+      return liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: options.timeoutMs, ...(options.input === undefined ? {} : { input: options.input }) });
     }
     if (command === "git" && args.includes("fetch")) {
       return base.run(command, args.map(arg => arg.startsWith("ssh://remote/") ? `file:///${arg.slice("ssh://remote/".length)}` : arg), options);
     }
     return base.run(command, args, options);
   } };
-  let machines: unknown = { remote: config({ workerWorktree: h.workerWorktree, wrap: ["/wrapper", "--name", "{name}", "--"] }) };
+  let machines: unknown = { remote: config({ workerWorktree: h.workerWorktree, env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: ["/wrapper", "--name", "{name}", "--"] }) };
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", sleep: ms => Effect.sync(() => { h.now = new Date(h.now.getTime() + ms); }), emitPaneClose: noEmitPaneClose,
     get machines() { return machines; }, remoteHerdr: () => Effect.succeed(remote.client()) };
@@ -47,7 +47,7 @@ function setup() {
     await run(laneOpen(dir, { slug: "work", label: "remote work", goal: "packet", repo: dir }));
   };
   const launch = (name = "remote-w") => run(agentLaunch(dir, { action: "launch", machine: "remote", name, role: "worker", lane: "work", label: "remote worker", clone: true, noSkills: true }));
-  return { h, remote, dir, calls, env, proc, run, open, launch, setMissing: () => { missing = true; }, setMachines: (value: unknown) => { machines = value; } };
+  return { h, remote, dir, calls, env, proc, run, open, launch, setMissing: () => { missing = true; }, setMachines: (value: unknown) => { machines = Object.fromEntries(Object.entries(value as Record<string, MachineConfig>).map(([name, machine]) => [name, { ...machine, env: { ...machine.env, HOME: h.home } }])); } };
 }
 
 describe("machine boundary", () => {
@@ -85,6 +85,117 @@ describe("machine boundary", () => {
     expect(capture[1]).toContain("-L");
     // A master that idled out leaves its forwarded socket behind; the next bind must replace it.
     expect(capture[1]).toContain("StreamLocalBindUnlink=yes");
+  });
+});
+
+describe("remote launch hygiene", () => {
+  it("queues machine launch tickets in FIFO order and reports waiting", async () => {
+    const s = setup();
+    const env = { ...s.env, sleep: (ms: number) => Effect.sleep(ms) };
+    const run = <A, E>(effect: Effect.Effect<A, E, MusterEnv>) => Effect.runPromise(effect.pipe(Effect.provideService(MusterEnv, env)));
+    let release!: () => void;
+    let started!: () => void;
+    const start = new Promise<void>(resolve => { started = resolve; });
+    const hold = new Promise<void>(resolve => { release = resolve; });
+    const order: number[] = [], notes: string[] = [];
+    const first = run(withMachineLaunchLock("remote", Effect.promise(async () => { order.push(1); started(); await hold; })));
+    await start;
+    const second = run(withMachineLaunchLock("remote", Effect.sync(() => { order.push(2); }), text => notes.push(text)));
+    const third = run(withMachineLaunchLock("remote", Effect.sync(() => { order.push(3); }), text => notes.push(text)));
+    release();
+    await Promise.all([first, second, third]);
+    expect(order).toEqual([1, 2, 3]);
+    expect(notes.join(" ")).toContain("after waiting");
+    expect(readdirSync(join(s.h.home, ".config/muster/launch-locks/remote.queue"))).toEqual([]);
+  });
+  it("bounds stale-lock waits and removes only its own queue ticket", async () => {
+    const s = setup(); const lock = join(s.h.home, ".config/muster/launch-locks/remote");
+    mkdirSync(lock, { recursive: true });
+    await expect(s.run(withMachineLaunchLock("remote", Effect.void, () => {}, 200))).rejects.toThrow("FIFO launch lock timed out");
+    expect(existsSync(lock)).toBe(true);
+    expect(readdirSync(`${lock}.queue`)).toEqual([]);
+  });
+  it("probes remote prerequisites once, reports Pi skew and names a missing helper fix", async () => {
+    const s = setup(), bin = join(s.h.root, "preflight-bin"), extension = join(s.h.root, "muster");
+    mkdirSync(bin); mkdirSync(join(extension, "extensions"), { recursive: true }); mkdirSync(join(extension, "node_modules"));
+    writeFileSync(join(extension, "extensions/pi-muster.ts"), "");
+    for (const cmd of ["pi", "node", "git", "rift", "muster-heavy"]) { const file = join(bin, cmd); writeFileSync(file, `#!/bin/sh\nprintf '%s\\n' '${cmd === "pi" ? "0.99.2" : ""}'\n`); chmodSync(file, 0o700); }
+    const helper = join(bin, "worker-worktree.sh"); writeFileSync(helper, "#!/bin/sh\n# --hydrate\n"); chmodSync(helper, 0o700);
+    const machine = config({ musterExtension: extension, workerWorktree: helper, env: { HOME: s.h.home, PATH: `${bin}:/usr/bin:/bin`, MUSTER_FLEET_COMPUTE: "off" } });
+    const calls: string[] = [];
+    const proc: ProcShape = { run: (command, args, options) => { if (command === "pi") return Effect.succeed({ code: 0, stdout: "1.0.3\n", stderr: "" }); calls.push(args.at(-1)!); return liveProc.run("sh", ["-c", args.at(-1)!], options); } };
+    const notes = await s.run(prerequisites("remote", machine, s.dir, true).pipe(Effect.provideService(Proc, proc)));
+    expect(calls).toHaveLength(1); expect(notes.join(" ")).toContain("remote Pi 0.99.2; owner Pi 1.0.3; warning: Pi version skew");
+    unlinkSync(join(bin, "muster-heavy"));
+    await expect(s.run(prerequisites("remote", machine, s.dir, true).pipe(Effect.provideService(Proc, proc)))).rejects.toThrow("install muster-heavy on the remote non-interactive PATH");
+  });
+  it("refuses mapped-provider capability failures before allocating a clone or opening Herdr", async () => {
+    const s = setup(); await s.open();
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, env: {}, providerMap: { "openai-codex": "cliproxy-codex" } }) });
+    const original = s.proc.run;
+    const readyCalls: string[] = [];
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => {
+      if (command === "ssh" && args.at(-1)?.includes("'fleet-compute' 'ready'")) { readyCalls.push(args.at(-1)!); return Effect.succeed({ code: 69, stdout: JSON.stringify({ machine: "remote", verdict: "not-ready", checks: [{ name: "auth", ok: false, detail: "log in on target" }], busy: [] }), stderr: "" }); }
+      return original(command, args, options);
+    });
+    await expect(s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "not-ready", role: "worker", lane: "work", label: "not ready", clone: true, noSkills: true, model: "openai-codex/gpt-6.1-sol", thinking: "medium", env: { PROBE_VALUE: "launch-env" } }))).rejects.toThrow("auth: log in on target");
+    expect(readyCalls[0]).toContain("'cliproxy-codex/gpt-6.1-sol:medium'"); expect(readyCalls[0]).toContain("PROBE_VALUE='launch-env'");
+    expect(s.remote.calls).toEqual([]); expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("'create'"))).toBe(false);
+  });
+  it("waits for fleet busy and passes the resolved model and source before clone allocation", async () => {
+    const s = setup(); const receipts = [
+      { machine: "remote", verdict: "busy", checks: [], busy: ["gate held"] },
+      { machine: "remote", verdict: "ready", checks: [{ name: "auth", ok: true, detail: "served" }], busy: [] },
+    ]; const calls: string[] = [];
+    const proc: ProcShape = { run: (_cmd, args) => { calls.push(args.at(-1)!); const receipt = receipts.shift()!; return Effect.succeed({ code: receipt.verdict === "busy" ? 75 : 0, stdout: JSON.stringify(receipt), stderr: "" }); } };
+    const notes = await s.run(readyForRemoteLaunch("remote", config({ env: {} }), "/mapped/repo", "cliproxy-codex/gpt-6.1-sol:medium").pipe(Effect.provideService(Proc, proc)));
+    expect(calls).toHaveLength(2); expect(calls[0]).toContain("'cliproxy-codex/gpt-6.1-sol:medium'"); expect(calls[0]).toContain("'/mapped/repo'");
+    expect(notes.join(" ")).toContain("after waiting 1000 ms");
+  });
+  it("includes slow capability probe time in the bounded busy wait", async () => {
+    const s = setup(); let probes = 0;
+    const proc: ProcShape = { run: (_command, _args, options) => Effect.sync(() => {
+      probes += 1; expect(options.timeoutMs).toBe(2000);
+      s.h.now = new Date(s.h.now.getTime() + 1500);
+      return { code: 75, stdout: JSON.stringify({ machine: "remote", verdict: "busy", checks: [], busy: ["gate held"] }), stderr: "" };
+    }) };
+    await expect(s.run(readyForRemoteLaunch("remote", config({ env: {} }), "/repo", "sol", 2000).pipe(Effect.provideService(Proc, proc)))).rejects.toThrow("busy after 2000 ms: gate held");
+    expect(probes).toBe(1);
+  });
+  it.each(["not-ready", "busy", "mismatched"])("fails closed on a %s fleet capability receipt", async verdict => {
+    const s = setup();
+    const proc: ProcShape = { run: () => Effect.succeed({ code: verdict === "busy" ? 75 : 69, stdout: JSON.stringify({ machine: verdict === "mismatched" ? "other" : "remote", verdict: verdict === "busy" ? "busy" : "not-ready", checks: [{ name: "auth", ok: false, detail: "log in on target" }], busy: ["gate held"] }), stderr: "" }) };
+    await expect(s.run(readyForRemoteLaunch("remote", config({ env: {} }), "/repo", "sol", 1000).pipe(Effect.provideService(Proc, proc)))).rejects.toThrow(verdict === "mismatched" ? "identity" : verdict === "busy" ? "gate held" : "auth: log in on target");
+  });
+  it("copies brief references privately, verifies hashes and removes only unchanged row-owned inputs", async () => {
+    const s = setup(); const inputs = join(s.h.root, "private"); mkdirSync(inputs);
+    const reference = join(inputs, "review.svx"), brief = join(inputs, "brief.md");
+    writeFileSync(reference, "private source review"); writeFileSync(brief, `Read ${reference}.\n`);
+    const machine = config({ env: { HOME: s.h.home }, paths: { [inputs]: "/mapped/private" } });
+    const transfer = join(s.h.home, ".cache/muster-transfers/probe/worker");
+    const synced = await s.run(syncRemoteBrief("remote", machine, brief, transfer));
+    expect(readFileSync(synced.brief, "utf8")).toBe(readFileSync(brief, "utf8"));
+    expect(statSync(synced.brief).mode & 0o777).toBe(0o600);
+    const copy = JSON.parse(readFileSync(join(transfer, "transfers.json"), "utf8")).find((file: { path: string }) => file.path.endsWith("/review.svx")).path;
+    expect(readFileSync(copy, "utf8")).toBe("private source review");
+    expect(synced.note).toContain("sha256");
+    writeFileSync(brief, `Updated task. Read ${reference}.\n`);
+    const updated = await s.run(syncRemoteBrief("remote", machine, brief, transfer));
+    expect(updated.brief).not.toBe(synced.brief); expect(existsSync(synced.brief)).toBe(true);
+    const secondTransfer = `${transfer}-second`, second = await s.run(syncRemoteBrief("remote", machine, brief, secondTransfer));
+    writeFileSync(copy, "edited review");
+    expect((await s.run(cleanupRemoteBrief("remote", machine, transfer))).join(" ")).toContain("private input kept (changed)");
+    expect(existsSync(synced.brief)).toBe(false); expect(existsSync(updated.brief)).toBe(false); expect(existsSync(copy)).toBe(true);
+    expect(existsSync(second.brief)).toBe(true);
+    await s.run(cleanupRemoteBrief("remote", machine, secondTransfer));
+    expect(existsSync(second.brief)).toBe(false);
+  });
+  it.each(["planned", "failed", "interrupted"] as const)("clearly refuses explicit cross-machine relaunch of a %s row without reusing a lock", async state => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, state, sessionFile: null })) }, undefined] as const)));
+    s.calls.length = 0;
+    for (const launch of [agentLaunch, queuedAgentLaunch]) await expect(s.run(launch(s.dir, { action: "launch", machine: "local", name: launched.row.name, clone: true }))).rejects.toThrow("explicit machine local differs");
+    expect(s.calls).toEqual([]); expect((await s.run(load(s.dir))).agents[0]?.machine).toBe("remote");
   });
 });
 
@@ -217,13 +328,27 @@ describe("remote owner operations", () => {
     await expect(s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "proxy-x", role: "worker", lane: "work", label: "proxy", cwd: s.dir, noSkills: true, model: "openai-codex/gpt-6.1-sol" })))
       .rejects.toThrow(/maps to cliproxy-codex\/gpt-6.1-sol on remote, which its ~\/.pi\/agent\/models.json does not serve/);
   }, 30_000);
-  it("names the unreadable remote path, with a hint for a brief", async () => {
+  it("launches with a synced private brief and removes only its remote copies on close", async () => {
     const s = setup(); await s.open();
-    const original = s.proc.run;
-    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh" && args.at(-1)?.includes("'test' '-r' '/flagg-only/brief.md'")
-      ? Effect.succeed({ code: 1, stdout: "", stderr: "" }) : original(command, args, options));
+    const inputs = join(s.h.root, "inputs"); mkdirSync(inputs);
+    const brief = join(inputs, "brief.md"), reference = join(inputs, "review with spaces.svx");
+    writeFileSync(reference, "source review"); writeFileSync(brief, `Read \`${reference}\` and report.\n`);
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, paths: { [inputs]: "/mapped/inputs" } }) });
+    const launched = await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "private-w", role: "worker", lane: "work", label: "private worker", clone: true, noSkills: true, brief }));
+    expect(launched.row.brief).not.toBe(brief); expect(statSync(launched.row.brief!).mode & 0o777).toBe(0o600);
+    expect(launched.argv).toContain(`@${launched.row.brief}`);
+    const context = launched.row.profile.appendSystemPrompt.at(-1)!;
+    expect(readFileSync(context, "utf8")).toContain("review with spaces.svx");
+    expect(readFileSync(context, "utf8")).toContain("do not try a second destructive command");
+    const closed = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(existsSync(launched.row.brief!)).toBe(false); expect(existsSync(brief)).toBe(true); expect(existsSync(reference)).toBe(true);
+    expect(closed.notes.join(" ")).toContain("private input removed"); expect(existsSync(launched.row.cwd)).toBe(false);
+  });
+  it("names an unreadable owner brief before allocating a clone", async () => {
+    const s = setup(); await s.open();
     await expect(s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "brief-worker", role: "worker", lane: "work", label: "brief worker", cwd: s.dir, brief: "/flagg-only/brief.md" })))
-      .rejects.toThrow(/\/flagg-only\/brief\.md is not readable on remote; briefs are not copied/);
+      .rejects.toThrow(/brief sync/);
+    expect(s.remote.panes.size).toBe(0);
   });
   it("refuses at maxPanes before allocating any clone or pane", async () => {
     const s = setup(); s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, maxPanes: 1 }) }); await s.open(); await s.launch();
@@ -371,6 +496,53 @@ describe("remote owner operations", () => {
     expect((await s.run(packetVerify(s.dir, report.packet.id))).packet.state).toBe("verified");
     expect(vi.mocked(s.proc.run).mock.calls.some(([command]) => command === "ssh")).toBe(false);
     await expect(s.run(packetVerify(s.dir, "f".repeat(40)))).rejects.toThrow("machine remote: ingest skipped");
+  });
+  it.each(["accepted", "unconsumed", "changed-report", "changed-note"])("retires only accepted unchanged remote sidecars: %s", async kind => {
+    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/remote-project", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "No source changes", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    if (kind !== "unconsumed") {
+      await s.run(packetVerify(s.dir, commit));
+      await s.run(packetLand(s.dir, { id: commit, outcome: "no_changes" }));
+    }
+    if (kind === "changed-report") writeFileSync(join(cwd, ".pi/muster/packets", commit, "report.svx"), "edited report");
+    if (kind === "changed-note") {
+      const root = join(cwd, ".pi/muster/notes"), path = join(root, readdirSync(root)[0]!);
+      const note = JSON.parse(readFileSync(path, "utf8")); note.item.body = "edited owner note"; writeFileSync(path, JSON.stringify(note));
+    }
+    const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(existsSync(cwd)).toBe(kind !== "accepted");
+    expect(result.cloneError === null).toBe(kind === "accepted");
+  });
+  it.each([false, true])("retire exact pi-notes scaffolds but preserve edits (%s)", async edited => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    mkdirSync(join(launched.row.cwd, ".brain"), { recursive: true });
+    // Exact pi-notes 8a8c3da template owned by this fixture; the source tree has no BRAIN.md.
+    const brain = [
+      "# pi-notes brain", "",
+      "Use pi-notes as an agent-connected project brain, not a generic notes site.", "",
+      "- Organize by usefulness: Projects, Areas, Resources, Archives.",
+      "- Ask: Where will this be useful next?",
+      "- Keep notes atomic, linked, and source-grounded.",
+      "- Capture only durable decisions, terms, tradeoffs, gotchas, sources, questions, and review feedback.",
+      "- Refine captures into graph edges, backlinks, summaries, and canonical concepts.",
+      "- Express knowledge as code, docs, decisions, UI, issues, or plans. Storage is not the goal; output is.",
+      "- Browser pages are read/review surfaces. Agents own source edits and must leave receipts.",
+      "- Avoid bloated PKM ceremony, append-only logs as truth, Obsidian cloning, and generic static-site sludge.", "",
+    ].join("\n");
+    writeFileSync(join(launched.row.cwd, "BRAIN.md"), brain);
+    const index = ["# Project Brain", "", "The rendered Brain index is programmatic.", "", "Open `/notes` in the local pi-notes Document Host to browse entries sorted by PARA.", "", "Do not maintain a manual page list here; `.brain/**/*.svx` is discovered automatically.", ""].join("\n");
+    writeFileSync(join(launched.row.cwd, ".brain/index.svx"), index + (edited ? "private edited note" : ""));
+    const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(existsSync(launched.row.cwd)).toBe(edited);
+    expect(result.cloneError === null).toBe(!edited);
+  });
+  it("keeps unknown remote pi-notes bridge files rather than declaring the whole directory disposable", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const root = join(launched.row.cwd, ".pi/notes-bridge"); mkdirSync(root, { recursive: true }); writeFileSync(join(root, "edited-review.json"), "private note");
+    const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(result.cloneError).toContain(".pi/notes-bridge/edited-review.json"); expect(existsSync(launched.row.cwd)).toBe(true);
   });
   it("saves remote logs, closes the bound pane and removes the clone through SSH", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();

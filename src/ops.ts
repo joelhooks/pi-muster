@@ -57,7 +57,7 @@ import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
-import { cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
+import { cleanupRemoteBrief, cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { recordSessionSuccessor, remoteCommsEnvironment } from "./comms.ts";
@@ -65,7 +65,7 @@ import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtim
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
-import { deliverOwnerItem, forwardOwner, ingestOwnerItem, ownerRoute } from "./owner-queue.ts";
+import { deliverOwnerItem, forwardOwner, ingestOwnerItem, ownerRoute, readOwnerQueue } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { retroCadence, retroJudgeModel } from "./retro-cadence.ts";
@@ -119,7 +119,9 @@ const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
 
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
-const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string, jobId?: string) => withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
+const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string, jobId?: string) => {
+  const lockNotes: string[] = [];
+  return withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(nameOfMachine);
   const catalogs = [project];
@@ -127,7 +129,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const registered = yield* decodeWith(() => [...readRegistry(env.home).values()], null);
     for (const entry of registered) if (entry.dir !== project.dir && exists(entry.dir)) catalogs.push(yield* load(entry.dir));
   }
-  const openCount = catalogs.flatMap(catalog => catalog.agents).filter(row => row.machine === nameOfMachine && row.state !== "closed").length;
+  const openCount = catalogs.flatMap(catalog => catalog.agents.filter(row => catalog.dir !== project.dir || row.name !== params.name)).filter(row => row.machine === nameOfMachine && row.state !== "closed").length;
   if (machine.maxPanes !== undefined && openCount >= machine.maxPanes) return yield* input(`machine ${nameOfMachine}: maxPanes ${machine.maxPanes} reached (${openCount} open Muster rows); close one before launching`);
   const wrap = machine.wrap.map(arg => arg.replaceAll("{name}", params.name));
   if (params.action === "adopt" || params.side || params.pane) return yield* input("remote launch does not adopt supplied panes or side desks");
@@ -139,7 +141,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (lane.state !== "open") return yield* input(`lane ${lane.slug} is ${lane.state}`);
   if (!role) return yield* input("a remote agent needs a role");
   if (params.action === "restore" && !existing) return yield* input(`no row ${name} to restore`);
-  if (params.action !== "restore" && existing && !["planned", "failed"].includes(existing.state)) return yield* input(`row ${name} is ${existing.state}; restore it or choose another name`);
+  if (params.action !== "restore" && existing && !["planned", "failed"].includes(existing.state) && !(existing.state === "interrupted" && !existing.sessionFile)) return yield* input(`row ${name} is ${existing.state}; restore it or choose another name`);
   if (parent && !parent.sessionFile) return yield* input("fork needs a parent session file");
   const custodyNotes: string[] = [];
   if (project.policy?.comms === "network") {
@@ -149,7 +151,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   }
   const source = lane.repo ?? project.dir;
   const remoteSource = mapPath(source, machine);
-  yield* prerequisites(nameOfMachine, machine, remoteSource);
+  custodyNotes.push(...lockNotes);
   const roster = (yield* loadRoster).roster;
   const label = params.label ?? claimedLabel(env.home, project.slug, name, role) ?? parent?.profile.label ?? existing?.profile.label;
   if (!label) return yield* input("a remote agent needs a label");
@@ -179,6 +181,14 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   let remoteProfile: LaunchProfile = { ...profile, model: remoteModel, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
+  resolved.notes.push(...(yield* prerequisites(nameOfMachine, machine, remoteSource, params.hydrate === true, remoteProfile.env)));
+  resolved.notes.push(...(yield* readyForRemoteLaunch(nameOfMachine, machine, remoteSource, `${remoteModel}${remoteProfile.thinking ? `:${remoteProfile.thinking}` : ""}`, 300_000, remoteProfile.env)));
+  const remoteHome = machine.env.HOME ?? (yield* remoteNode(nameOfMachine, machine, "process.stdout.write(process.env.HOME ?? '')")).trim();
+  if (!isAbsolute(remoteHome)) return yield* input(`machine ${nameOfMachine}: remote HOME is not absolute`);
+  const scratch = join(remoteHome, ".cache", project.slug, name);
+  const transferDir = join(remoteHome, ".cache/muster-transfers", project.slug, name);
+  const syncedBrief = params.brief ? yield* syncRemoteBrief(nameOfMachine, machine, params.brief, transferDir) : null;
+  if (syncedBrief) resolved.notes.push(syncedBrief.note);
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
   let modelFailure: GuardFailed | null = null;
   return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
@@ -197,10 +207,10 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     }
     remoteProfile = { ...remoteProfile, skills: readableSkills };
     const requiredPaths = [...remoteProfile.extensions, ...remoteProfile.appendSystemPrompt,
-      ...(params.brief ? [mapPath(params.brief, machine)] : []), ...(params.action === "restore" && existing?.sessionFile ? [existing.sessionFile] : [])];
+      ...(syncedBrief ? [syncedBrief.brief] : []), ...(params.action === "restore" && existing?.sessionFile ? [existing.sessionFile] : [])];
     for (const path of requiredPaths) {
       yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.mapError(error => new ProcError({ ...error,
-        message: `${path} is not readable on ${nameOfMachine}${params.brief && path === mapPath(params.brief, machine) ? "; briefs are not copied to remote machines, so put the brief in the lane repo or copy it there first" : ""}` })));
+        message: `${path} is not readable on ${nameOfMachine}` })));
     }
     let cwd = params.cwd ? mapPath(yield* requireAbsolute("cwd", params.cwd), machine) : existing?.cwd ?? parent?.cwd ?? remoteSource;
     let clone = existing?.clone ?? null;
@@ -211,6 +221,9 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       cwd = yield* requireAbsolute("remote clone", allocated.path);
       clone = { source, branch: allocated.branch, base: allocated.base };
       cloneNotes.push(...allocated.notes);
+      // A private/local base may not exist on GitHub: retain the mapped checkout as the fetch remote.
+      yield* git(cwd, "remote", "set-url", "origin", remoteSource);
+      yield* must("git", ["fetch", "--no-tags", "--", remoteSource, allocated.base?.sha ?? "HEAD"], { cwd, timeoutMs: 30_000 });
     }
     yield* must("test", ["-d", cwd], { cwd: "/", timeoutMs: 10_000 });
     yield* guardDurable(project, "remote cwd", cwd);
@@ -233,13 +246,18 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const now = iso(env);
     let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
       profile: remoteProfile, owner: env.sessionId, sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
-      brief: params.brief ? mapPath(params.brief, machine) : existing?.brief ?? null,
+      brief: syncedBrief?.brief ?? existing?.brief ?? null,
       state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
       restore: null, createdAt: existing?.createdAt ?? now, updatedAt: now };
-    const launchProfile = extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row);
     const promptDir = (yield* git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")
       .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
+    yield* must("mkdir", ["-p", scratch], { cwd, timeoutMs: 10_000 });
+    const scratchNote = `Your scratch path is ${scratch}. This row owns it. Clean your disposable scratch before close; report anything that must survive. Close removes the directory only if empty. If dcg refuses cleanup, stop and report the path and size; do not try a second destructive command.${syncedBrief ? `\n${syncedBrief.note}` : ""}`;
+    const contextFile = yield* writeLaunchFile(promptDir, scratchNote, "prompt.txt");
+    row = { ...row, profile: { ...row.profile, appendSystemPrompt: [...row.profile.appendSystemPrompt, contextFile] } };
+    const launchProfile = extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row);
     const message = params.action === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, promptDir);
+    cloneNotes.push(scratchNote);
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(params.action === "fork" ? parentSessionFile : params.action === "restore" ? sessionFile : existing?.cwd === cwd ? existing.sessionFile : null) : 1;
     const networkBrief = project.policy?.comms === "network" && project.agents.some(agent => agent.sessionId === env.sessionId);
     const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...(networkBrief ? {} : message) });
@@ -322,7 +340,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
-}));
+}), text => lockNotes.push(text));
+};
 
 /** Proc and Herdr are machine-scoped by onRemote for remote rows.
  * A missing pane directory falls back to raw paths; missing root/list evidence blocks retirement. */
@@ -380,23 +399,55 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
     if (/[RC]/.test(field.slice(0, 2))) dirty.push(fields[++i]!);
   }
   const lane = project.lanes.find(lane => lane.slug === row.lane);
+  const env = yield* MusterEnv;
+  const provenSidecars: string[] = [];
+  if (row.machine !== "local") {
+    const paths = dirty.filter(path => /^\.pi\/muster\/(?:packets\/[a-f0-9]{40,64}\/(?:packet\.json|report\.svx)|notes\/[a-f0-9]{64}\.json)$/.test(path));
+    const contents = paths.length ? yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ path: Schema.String, text: Schema.String }))),
+      yield* must("node", ["-e", `const fs=require('node:fs'),p=require('node:path');const root=process.argv[1];process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).flatMap(path=>{try{const file=p.join(root,path);return fs.lstatSync(file).isFile()?[{path,text:fs.readFileSync(file,'utf8')}]:[]}catch{return []}})));`, row.cwd, JSON.stringify(paths)], { cwd: source, timeoutMs: 10_000 })) : [];
+    const acceptedNotes = readOwnerQueue(row.owner, env.home).items.map(record => record.item);
+    for (const file of contents) {
+      try {
+        if (file.path.startsWith(".pi/muster/notes/")) {
+          const sidecar = decodeRemoteNote(JSON.parse(file.text));
+          if (file.text === JSON.stringify(sidecar) && sidecar.project === project.slug && sidecar.machine === row.machine && sidecar.agent === row.name && sidecar.lane === row.lane && acceptedNotes.some(item => JSON.stringify(item) === JSON.stringify(sidecar.item))) provenSidecars.push(file.path);
+          continue;
+        }
+        const id = file.path.split("/")[3];
+        const packet = project.packets.find(packet => packet.id === id && packet.agent === row.name && packet.lane === row.lane);
+        if (!packet || !existsSync(packet.report)) continue;
+        const report = readFileSync(packet.report, "utf8");
+        if (file.path.endsWith("/report.svx")) { if (file.text === report) provenSidecars.push(file.path); continue; }
+        const sidecar = decodeRemotePacket(JSON.parse(file.text));
+        // The catalog mutates packet lifecycle fields after ingestion. Prove immutable identity/checks and the exact accepted report instead.
+        if (sidecar.project === project.slug && sidecar.machine === row.machine && sidecar.packet.id === packet.id && sidecar.packet.agent === row.name && sidecar.packet.lane === row.lane && sidecar.packet.kind === packet.kind && sidecar.packet.artifact === packet.artifact && sidecar.packet.reportedAt === packet.reportedAt && JSON.stringify(sidecar.packet.checks) === JSON.stringify(packet.checks) && sidecar.reportText === report) provenSidecars.push(file.path);
+      } catch { /* Unreadable or undecodable dirt remains user work. */ }
+    }
+  }
   const generated = [...DEFAULT_GENERATED, ...(lane?.generated ?? []), ".wzrrd/"];
   // Lane declarations and the small runtime-junk list are disposable even
   // when the source differs. Everything else needs a byte comparison.
-  const candidates = dirty.filter(path => !isGenerated(path, lane?.generated ?? []) &&
-    !isGenerated(path, [".pi/notes-bridge/", ".rift", ".wzrrd/"]) && !/\.(log|pid)$/.test(path) &&
+  const candidates = dirty.filter(path => !provenSidecars.includes(path) && !isGenerated(path, lane?.generated ?? []) &&
+    !isGenerated(path, [".rift", ".wzrrd/", ...(row.machine === "local" ? [".pi/notes-bridge/"] : [])]) && !/\.(log|pid)$/.test(path) &&
     !/^\.brain\/data\/[^/]+-status\.json$/.test(path));
-  const comparable = candidates.filter(path => isGenerated(path, generated));
+  const comparable = candidates.filter(path => isGenerated(path, generated) || path.startsWith(".pi/notes-bridge/"));
+  // Exact templates from pi-notes 8a8c3da, initLocalBrain. Never allow a tracked edit by template hash.
+  const scaffoldHashes = Object.fromEntries(fields.filter(field => field.startsWith("?? ")).map(field => field.slice(3)).flatMap(path =>
+    path === "BRAIN.md" ? [[path, "f501d733ce49d5995ab33b42b189e02518144905be3aa4b32007e1811c9fce07"]] :
+    path === ".brain/index.svx" ? [[path, "0c946be7234d6669e2f349a4b9f1e964e379441a95c195d67afcc077e51ac777"]] : []));
   // Run on the row's machine, not the desk's filesystem. Missing paths,
   // directories, symlinks and read failures do not establish byte equality.
   const identical = comparable.length ? yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.String)),
     yield* must("node", ["-e", `const fs=require('node:fs'), {join}=require('node:path');
-const [clone,source,json]=process.argv.slice(1);
+const [clone,source,json,hashes]=process.argv.slice(1), templates=JSON.parse(hashes), crypto=require('node:crypto');
 const same=JSON.parse(json).filter(path=>{try{
   const a=join(clone,path), b=join(source,path);
-  return fs.lstatSync(a).isFile() && fs.lstatSync(b).isFile() && fs.readFileSync(a).equals(fs.readFileSync(b));
+  if(!fs.lstatSync(a).isFile())return false;
+  const bytes=fs.readFileSync(a);
+  if(templates[path] && crypto.createHash('sha256').update(bytes).digest('hex')===templates[path])return true;
+  return fs.lstatSync(b).isFile() && bytes.equals(fs.readFileSync(b));
 }catch{return false}});
-process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(comparable)], { cwd: source, timeoutMs: 10_000 })) : [];
+process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(comparable), JSON.stringify(scaffoldHashes)], { cwd: source, timeoutMs: 10_000 })) : [];
   const other = candidates.filter(path => !identical.includes(path));
   if (other.length) return { safe: false, force: false, detail: `dirty: ${row.cwd}; non-harness paths ${other.map(path => JSON.stringify(path)).sort().join(", ")}; HEAD ${head}` };
   // Immutable per-HEAD refs keep earlier rescues when a restored worker advances.
@@ -551,6 +602,14 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     }
     return restore;
   }));
+  const remoteHome = machine.env.HOME ?? (yield* remoteNode(row.machine, machine, "process.stdout.write(process.env.HOME ?? '')")).trim();
+  if (isAbsolute(remoteHome)) {
+    notes.push(...(yield* cleanupRemoteBrief(row.machine, machine, join(remoteHome, ".cache/muster-transfers", project.slug, row.name))));
+    const scratch = join(remoteHome, ".cache", project.slug, row.name);
+    const runner = yield* Proc;
+    const removed = yield* sshProc(row.machine, machine, runner, env.home).run("rmdir", ["--", scratch], { cwd: "/", timeoutMs: 10_000 });
+    notes.push(removed.code === 0 ? `empty owned scratch removed: ${scratch}` : `scratch kept (nonempty or unavailable): ${scratch}; no destructive retry`);
+  }
   if (project.policy?.comms === "network") {
     const helper = yield* Effect.promise(() => import("./comms-network.ts"));
     notes.push(yield* helper.retireRemoteNetworkKey({ home: env.home, agent: networkRowIdentity(project, row), machineName: row.machine, machine }));
@@ -2048,6 +2107,12 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   const notes = [...selected.notes];
   const modelNote = yield* checkRunnableModel(selected.profile.model, old.cwd, { tokens: selected.live.contextTokens });
   if (modelNote) notes.push(modelNote);
+  if (machine && old.clone) {
+    const source = mapPath(old.clone.source, machine);
+    yield* git(old.cwd, "remote", "set-url", "origin", source);
+    yield* must("git", ["fetch", "--no-tags", "--", source, "HEAD"], { cwd: old.cwd, timeoutMs: 30_000 });
+    notes.push(`machine ${old.machine}: restart fetched its base objects from mapped source ${source}`);
+  }
   const sha = (yield* git(machine?.musterExtension ?? env.musterRoot, "rev-parse", "HEAD")).trim();
   let row: AgentRow = { ...old, profile: selected.profile, sessionId: `${mintSessionId(old.name, env.now())}-${randomUUID().slice(0, 8)}`, sessionFile: null, parentSessionFile: old.sessionFile, pane: null };
   if (row.owner === old.sessionId) row = { ...row, owner: row.sessionId };
@@ -2225,6 +2290,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const existing = project.agents.find(row => row.name === params.name);
     const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
     const previous = parent ?? existing;
+    if (params.action === "launch" && params.machine !== undefined && existing && params.machine !== existing.machine) return yield* input(`explicit machine ${params.machine} differs from row ${existing.name}'s ${existing.machine}; cross-machine relaunch cannot reuse its cwd, clone or session. Choose a new row name on ${params.machine}; the old row is unchanged`);
     const machine = params.machine ?? previous?.machine ?? (params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined) ?? "local";
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (machine !== "local") {
@@ -2374,6 +2440,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     const project = jobRow && job ? { ...catalog, agents: catalog.agents.map(row => row === jobRow ? { ...row, state: job.priorState } : row) } : catalog;
     if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
+    if (params.action === "launch" && params.machine !== undefined && previous && params.machine !== previous.machine) return yield* input(`explicit machine ${params.machine} differs from row ${previous.name}'s ${previous.machine}; cross-machine relaunch cannot reuse its cwd, clone or session. Choose a new row name on ${params.machine}; the old row is unchanged`);
     const machine = params.machine ?? previous?.machine ?? (params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined) ?? "local";
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (params.action === "restart") {
