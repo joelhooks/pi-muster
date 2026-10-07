@@ -56,10 +56,13 @@ type Services = Herdr | Proc | MusterEnv | Comms;
 
 const text = (body: string, details: unknown) => ({ content: [{ type: "text" as const, text: body }], details });
 
-function failure(cause: Cause.Cause<unknown>) {
+export function failure(cause: Cause.Cause<unknown>) {
   const error = Cause.squash(cause) as { _tag?: string; message?: string } & Record<string, unknown>;
   const tag = typeof error?._tag === "string" ? error._tag : "Defect";
-  const message = typeof error?.message === "string" ? error.message : String(error);
+  // Schema errors such as MailboxClientError carry error/reason/status fields and an empty message.
+  const fields = [error?.error, error?.reason, error?.status === undefined ? undefined : `status ${String(error.status)}`]
+    .filter((field, index, all): field is string => typeof field === "string" && field !== "" && all.indexOf(field) === index);
+  const message = typeof error?.message === "string" && error.message !== "" ? error.message : fields.length > 0 ? fields.join(" · ") : String(error);
   const extra = Array.isArray(error?.failures) ? `\n${(error.failures as string[]).map((line) => `- ${line}`).join("\n")}` : "";
   return {
     content: [{ type: "text" as const, text: `${tag}: ${message}${extra}` }],

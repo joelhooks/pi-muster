@@ -17,6 +17,13 @@ export function catalogCommsSender(dir: string, session: string) {
     return row ? { agent: networkRowIdentity(project, row), session } : undefined;
   } catch { return undefined; }
 }
+/** Decoded policies default comms to intercom; only the raw catalog tells an explicit choice from an unset one. */
+export function explicitPolicyComms(dir: string): "intercom" | "network" | undefined {
+  try {
+    const comms = (JSON.parse(readFileSync(projectPath(dir), "utf8")) as { policy?: { comms?: unknown } }).policy?.comms;
+    return comms === "intercom" || comms === "network" ? comms : undefined;
+  } catch { return undefined; }
+}
 export function catalogNetworkPeers(dir: string) {
   const project = decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8")));
   return Object.fromEntries(project.agents.map(row => [row.sessionId, networkRowIdentity(project, row)]));
@@ -153,7 +160,7 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
     const follow = env === "network" && options.followProjectPolicy && exists(options.projectDir);
     const policy = (env === undefined || follow) && exists(options.projectDir) ? (yield* project(options.projectDir)).policy : undefined;
     // Following policy lets an explicit project opt-out win; an unset policy never overrides explicit env.
-    const fromEnv = follow ? (policy?.comms === undefined ? env : undefined) : env;
+    const fromEnv = follow ? (explicitPolicyComms(options.projectDir) === undefined ? env : undefined) : env;
     const selected = yield* Effect.try({ try: () => selectComms(fromEnv, policy?.comms === undefined && options.networkSender?.()?.agent.includes("/") ? { ...policy, comms: "network" } : policy), catch: error => new CommsError(String(error)) });
     return selected;
   });

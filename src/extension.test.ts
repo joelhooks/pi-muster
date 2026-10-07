@@ -4,14 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as versionSkew from "./version-skew.ts";
-import { Effect, Schema } from "effect";
+import { Cause, Effect, Schema } from "effect";
 import * as ops from "./ops.ts";
 import * as ownerQueue from "./owner-queue.ts";
 import { Packet, decodeOwnerItem } from "./domain.ts";
 import { deskRecord } from "./desk.ts";
 import { POST_NSID } from "./owner-lexicon.ts";
 
-import muster from "./extension-main.ts";
+import muster, { failure as toolFailure } from "./extension-main.ts";
+import { MailboxClientError } from "./vendor/rat-king-mailbox-client/error.ts";
 import { musterToolNames } from "./reload-stale.ts";
 
 function fakePi() {
@@ -240,5 +241,12 @@ describe("readable message boundaries", () => {
     expect((await call("send", JOINED, "another_tool")).every(value => value === undefined)).toBe(true);
     for (const key of Object.keys(process.env)) if (key.startsWith("MUSTER_")) delete process.env[key];
     for (const action of ["send", "ask", "reply"]) expect((await call(action, JOINED)).every(value => value === undefined)).toBe(true);
+  });
+});
+
+describe("tool failure text", () => {
+  it("names a schema error's code, reason and status instead of an empty message", () => {
+    const text = toolFailure(Cause.fail(new MailboxClientError({ error: "LeaseNotFound", reason: "LeaseNotFound", status: 404 }))).content[0]!.text;
+    expect(text).toBe("MailboxClientError: LeaseNotFound · status 404");
   });
 });

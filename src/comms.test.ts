@@ -133,6 +133,10 @@ describe("Comms port", () => {
     // The Switchboard runs from a cwd that holds another project's catalog with no comms policy.
     const h = harness(); const dir = h.home + "/project"; mkdirSync(dir, { recursive: true });
     await runWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n", ephemeral: true, createSpace: true }));
+    // A real catalog has no comms key, but decoding defaults it to intercom; strip it the way older catalogs persist.
+    const opened = JSON.parse(readFileSync(projectPath(dir), "utf8"));
+    writeFileSync(projectPath(dir), JSON.stringify({ ...opened, policy: { roles: {} } }));
+    expect((await Effect.runPromise(load(dir))).policy?.comms).toBe("intercom");
     const options = { events: bus().events, createId: () => "1", home: h.home, projectDir: dir, adapterEnv: () => "network" as const, followProjectPolicy: true };
     // Reaching the network adapter (which then wants its private config) proves network was selected.
     await expect(Effect.runPromise(createComms(options).mode!())).rejects.toThrow("NetworkComms missing or invalid config");
