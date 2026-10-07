@@ -249,6 +249,8 @@ export const MachineConfig = Schema.Struct({
   wrap: Schema.Array(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   socket: RemotePath.pipe(Schema.withDecodingDefaultKey(Effect.succeed("/home/joel/.config/herdr/herdr.sock"))),
   comms: Schema.optionalKey(Schema.Struct({ config: RemotePath })),
+  /** At most one machine: `agent_launch clone: true` without `machine` launches there (fleet SOP 2026-10-07). */
+  cloneDefault: Schema.optionalKey(Schema.Boolean),
 });
 export type MachineConfig = typeof MachineConfig.Type;
 export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));

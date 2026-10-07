@@ -187,6 +187,24 @@ describe("remote owner operations", () => {
     expect(restored.row.profile.skills).toEqual(["/only-remote/SKILL.md"]);
     expect(restored.argv).toContain("/only-remote/SKILL.md");
   });
+  it("drops a skill that is unreadable on the remote machine with a note, instead of failing the launch", async () => {
+    // Live 2026-10-07: /Users/joel/.agents/skills paths are not mapped to pennywise, and every launch failed.
+    const s = setup(); await s.open();
+    const original = s.proc.run;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh" && args.at(-1)?.includes("'test' '-r' '/flagg-only/SKILL.md'")
+      ? Effect.succeed({ code: 1, stdout: "", stderr: "" }) : original(command, args, options));
+    const launched = await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "skill-drop", role: "worker", lane: "work", label: "skill drop", cwd: s.dir, skills: ["/flagg-only/SKILL.md"] }));
+    expect(launched.row.profile.skills).not.toContain("/flagg-only/SKILL.md");
+    expect(launched.notes.join("\n")).toContain("skill /flagg-only/SKILL.md is not readable on remote; launched without it");
+  });
+  it("sends clone launches without a machine to the cloneDefault machine, and refuses two defaults", async () => {
+    const s = setup(); await s.open();
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, wrap: ["/wrapper", "--name", "{name}", "--"], cloneDefault: true }) });
+    const launched = await s.run(agentLaunch(s.dir, { action: "launch", name: "default-w", role: "worker", lane: "work", label: "default worker", clone: true, noSkills: true }));
+    expect(launched.row.machine).toBe("remote");
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }), other: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }) });
+    await expect(s.run(agentLaunch(s.dir, { action: "launch", name: "two-w", role: "worker", lane: "work", label: "two", clone: true, noSkills: true }))).rejects.toThrow(/cloneDefault is set on remote, other/);
+  }, 30_000);
   it("names the unreadable remote path, with a hint for a brief", async () => {
     const s = setup(); await s.open();
     const original = s.proc.run;

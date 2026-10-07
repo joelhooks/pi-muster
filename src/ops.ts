@@ -57,7 +57,7 @@ import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
-import { cloneUrl, decodeRemoteNote, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
+import { cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
@@ -176,7 +176,15 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
   let modelFailure: GuardFailed | null = null;
   return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
-    const requiredPaths = [...remoteProfile.skills, ...remoteProfile.extensions, ...remoteProfile.appendSystemPrompt,
+    // Skills are optional guidance: one missing on the target (an unmapped home path) is dropped with a note, not fatal.
+    const skillNotes: string[] = [];
+    const readableSkills: string[] = [];
+    for (const path of remoteProfile.skills) {
+      const ok = yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false)));
+      if (ok) readableSkills.push(path); else skillNotes.push(`skill ${path} is not readable on ${nameOfMachine}; launched without it`);
+    }
+    remoteProfile = { ...remoteProfile, skills: readableSkills };
+    const requiredPaths = [...remoteProfile.extensions, ...remoteProfile.appendSystemPrompt,
       ...(params.brief ? [mapPath(params.brief, machine)] : []), ...(params.action === "restore" && existing?.sessionFile ? [existing.sessionFile] : [])];
     for (const path of requiredPaths) {
       yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.mapError(error => new ProcError({ ...error,
@@ -184,7 +192,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     }
     let cwd = params.cwd ? mapPath(yield* requireAbsolute("cwd", params.cwd), machine) : existing?.cwd ?? parent?.cwd ?? remoteSource;
     let clone = existing?.clone ?? null;
-    const cloneNotes: string[] = [];
+    const cloneNotes: string[] = [...skillNotes];
     if (params.clone && params.action !== "restore") {
       // onRemote supplies the remote Proc, so branch selection reads the remote source.
       const allocated = yield* cloneFor(remoteSource, name, lane, project.mode, machine.workerWorktree, params.hydrate === true);
@@ -2182,7 +2190,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const existing = project.agents.find(row => row.name === params.name);
     const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
     const previous = parent ?? existing;
-    const machine = params.machine ?? previous?.machine ?? "local";
+    const machine = params.machine ?? previous?.machine ?? (params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined) ?? "local";
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (machine !== "local") {
       yield* machineConfig(machine);
@@ -2331,7 +2339,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     const project = jobRow && job ? { ...catalog, agents: catalog.agents.map(row => row === jobRow ? { ...row, state: job.priorState } : row) } : catalog;
     if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
-    const machine = params.machine ?? previous?.machine ?? "local";
+    const machine = params.machine ?? previous?.machine ?? (params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined) ?? "local";
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (params.action === "restart") {
       const row = yield* findRow(project, name);

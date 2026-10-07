@@ -58,6 +58,19 @@ export const machineConfig = (name: string) => Effect.gen(function* () {
   return config;
 });
 
+/** The configured clone machine, if any. More than one is a config error, never a guess. */
+export const defaultCloneMachine = Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const path = machinesPath(env.home);
+  const configs = yield* Effect.try({
+    try: () => decodeMachines(env.machines ?? (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {})),
+    catch: error => new InputError({ message: `invalid ${path}: ${String(error)}` }),
+  });
+  const names = Object.entries(configs).filter(([, config]) => config.cloneDefault === true).map(([name]) => name);
+  if (names.length > 1) return yield* new InputError({ message: `${path}: cloneDefault is set on ${names.join(", ")}; set it on one machine` });
+  return names[0];
+});
+
 /** SSH has one quoted shell argument; remote user data never becomes local argv. */
 export function sshProc(name: string, machine: MachineConfig, runner: ProcShape, localCwd: string): ProcShape {
   return { run: (command, args, options) => {
