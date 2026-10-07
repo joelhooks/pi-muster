@@ -2003,7 +2003,11 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   if (machine || environment.PATH !== undefined) environment.PATH = [bin, environment.PATH ?? (yield* must("printenv", ["PATH"], { cwd: old.cwd })).trim()].join(":");
   const launchDir = remote ? (yield* git(old.cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")).trim() : join(env.home, ".pi/agent");
   yield* must("mkdir", ["-p", launchDir], { cwd: old.cwd });
-  const snapshot = join(launchDir, `restart-${row.sessionId}.jsonl`);
+  // Never a .jsonl in the Pi agent root: Pi's startup migration moves those into sessions/,
+  // so the replacement's own startup moved its --fork source away and it exited (2026-10-07).
+  const snapshotDir = remote ? launchDir : join(env.home, ".local/state/muster/restart-snapshots");
+  if (!remote) yield* must("mkdir", ["-p", snapshotDir], { cwd: old.cwd });
+  const snapshot = join(snapshotDir, `restart-${row.sessionId}.jsonl`);
   const snapshotScript = `import {snapshotRestartSession} from ${JSON.stringify(`${machine?.musterExtension ?? env.musterRoot}/src/herdr.ts`)}; snapshotRestartSession(process.argv[1], process.argv[2]);`;
   // Use the executing checkout's helper locally (the install root can be older).
   if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile, snapshot], { cwd: old.cwd });

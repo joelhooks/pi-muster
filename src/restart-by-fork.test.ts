@@ -1,5 +1,5 @@
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
@@ -120,6 +120,8 @@ describe("restart by fork", () => {
     const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
     expect(result.proof?.state).toBe("proven");
     const snapshot = result.argv[result.argv.indexOf("--fork") + 1]!;
+    // Pi migrates every .jsonl in its agent root into sessions/ at startup, before reading --fork.
+    expect(dirname(snapshot).endsWith("/.pi/agent")).toBe(false);
     expect(readFileSync(snapshot, "utf8")).toBe(oldBytes.trimEnd().split("\n").slice(0, -1).join("\n") + "\n");
   });
 
