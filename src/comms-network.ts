@@ -422,12 +422,13 @@ export function consumeNetworkMailbox(options: {
     const { MailboxClientError } = yield* Effect.promise(() => import("./vendor/rat-king-mailbox-client/error.ts"));
     const ownDid = yield* Effect.try({ try: () => networkRecipient(options.home, options.agent).did, catch: failure });
     let fence: LeaseFence | undefined;
+    let leaseExpiresAt: string | undefined;
     const acquire = () => options.mailbox.lease.acquire({ did: ownDid,
       harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: options.session }, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),
     }).pipe(Effect.flatMap(lease => lease.did !== ownDid || lease.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || lease.harness.sessionId !== options.session
       ? Effect.fail(new MailboxClientError({ reason: "Mailbox lease differs from consumer identity" }))
       : Effect.gen(function* () {
-        fence = lease; // Release even if publishing fails.
+        fence = lease; leaseExpiresAt = lease.expiresAt; // Release even if publishing fails.
         yield* publishConsumerFence(options.home, lease).pipe(Effect.uninterruptible, Effect.mapError(() => new MailboxClientError({ reason: "NetworkComms could not publish consumer fence" })));
         return lease;
       })));
@@ -482,8 +483,9 @@ export function consumeNetworkMailbox(options: {
         }
         if (!fence) return yield* Effect.fail(failure());
         const delivery = { message: event.receipt.message, leaseId: fence.leaseId, generation: fence.generation };
-        yield* options.mailbox.deliver(delivery).pipe(Effect.mapError(failure));
-        yield* options.mailbox.ack(delivery).pipe(Effect.mapError(failure));
+        // Mailbox errors pass through so lease loss is named below, not withheld.
+        yield* options.mailbox.deliver(delivery);
+        yield* options.mailbox.ack(delivery);
       }
       // The consumer runs off a poll: never block the event loop on a stalled rename (Pi Freeze, 2026-10-06).
       yield* Effect.tryPromise({ try: async () => {
@@ -491,8 +493,23 @@ export function consumeNetworkMailbox(options: {
         const temp = `${cursorPath}.${process.pid}.tmp`;
         await writeFile(temp, JSON.stringify({ [options.agent]: batch.throughSeq }), { mode: 0o600 }); await rename(temp, cursorPath);
       }, catch: failure });
-    })), Effect.mapError(error => "error" in error && error.error === "AuthRequired" ? new CommsError("NetworkComms authentication failed; consumer stopped") : "error" in error && ["LeaseMismatch", "StaleGeneration", "LeaseExpired", "LeaseTakenOver"].includes(String(error.error)) ? new CommsError("NetworkComms consumer lost its identity lease; another session may have taken over. Consumer stopped; this notice is desk-visible.") : error instanceof CommsError ? error : failure()));
-    return yield* Effect.ensuring(run, Effect.suspend(() => {
+    })), Effect.mapError(error => "error" in error && error.error === "AuthRequired" ? new CommsError("NetworkComms authentication failed; consumer stopped") : "error" in error && ["LeaseMismatch", "StaleGeneration", "LeaseExpired", "LeaseNotFound", "LeaseTakenOver"].includes(String(error.error)) ? new CommsError("NetworkComms consumer lost its identity lease; another session may have taken over. Consumer stopped; this notice is desk-visible.") : error instanceof CommsError ? error : failure()));
+    // The mailbox grants short leases whatever is requested; renew at half the remaining time while the consumer runs.
+    const renewing = Effect.gen(function* () {
+      for (;;) {
+        const current = fence;
+        const wait = current && leaseExpiresAt ? Math.max(1_000, (Date.parse(leaseExpiresAt) - Date.now()) / 2) : 1_000;
+        yield* Effect.sleep(wait);
+        if (!current || fence !== current) continue;
+        const renewed = yield* options.mailbox.lease.renew({ did: current.did, leaseId: current.leaseId, generation: current.generation, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() }).pipe(
+          Effect.mapError(error => new CommsError(`NetworkComms lease renewal failed${error.error ? `: ${error.error}` : ""}; consumer stopped. Restart this session to take the lease again.`)));
+        if (fence !== current) continue; // re-acquired meanwhile
+        fence = renewed; leaseExpiresAt = renewed.expiresAt;
+        if (renewed.leaseId !== current.leaseId || renewed.generation !== current.generation)
+          yield* publishConsumerFence(options.home, renewed).pipe(Effect.uninterruptible, Effect.mapError(() => new CommsError("NetworkComms could not publish renewed consumer fence")));
+      }
+    });
+    return yield* Effect.ensuring(Effect.raceFirst(run, renewing), Effect.suspend(() => {
       if (!fence) return Effect.void;
       const retired = fence;
       const path = networkFencePath(options.home, ownDid);

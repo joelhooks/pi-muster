@@ -66,7 +66,7 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       if (!actor || networkActor !== actor || actor.getSnapshot().value === "failed") return;
       actor.send({ type: "FAILURE" }); consumer?.abort(); consumer = undefined;
       const detail = error instanceof CommsError ? error.message : "NetworkComms consumer stopped. Check its config, identity lease and recipient binding (private output withheld).";
-      pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. Reload or toggle comms off then on after fixing it.`, display: true }, { triggerTurn: true });
+      pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. After fixing the cause, restart this session (agent_launch action "restart", or /quit and relaunch the same session); never /reload.`, display: true }, { triggerTurn: true });
     };
     const refreshNetwork = () => {
       if (!network || !actor) return;

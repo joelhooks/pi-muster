@@ -30,6 +30,24 @@ async function withMailbox(test: (service: ReturnType<typeof createNetworkComms>
 }
 
 describe("same-process consumer send fence", () => {
+  it("renews its short lease while watching, and stops with a named error when renewal fails", async () => {
+    // Live 2026-10-07: the mailbox granted ~5 min leases, nothing renewed, and every reader died at expiry.
+    const soon = (ms: number) => Schema.decodeUnknownSync(Main)({ ...lease(1), expiresAt: new Date(Date.now() + ms).toISOString() });
+    for (const fails of [false, true]) {
+      await withMailbox(async (_service, home) => {
+        const renew = vi.fn(() => fails ? Effect.fail(new MailboxClientError({ error: "LeaseExpired", reason: "expired", status: 409 })) : Effect.succeed(soon(60_000)));
+        const mailbox = {
+          lease: { acquire: () => Effect.succeed(soon(2_000)), renew, resolve: () => Effect.succeed(lease(1)), release: () => Effect.void },
+          watch: () => Stream.fromEffect(Effect.sleep("1500 millis").pipe(Effect.as({ events: [], throughSeq: 2 }))),
+          open: () => Effect.die("no envelope"), deliver: () => Effect.die("no delivery"), ack: () => Effect.die("no ack"),
+        };
+        const run = Effect.runPromise(consumeNetworkMailbox({ home, agent: "desk", session: "desk-session", mailbox, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void }));
+        if (fails) await expect(run).rejects.toThrow("lease renewal failed: LeaseExpired");
+        else await run;
+        expect(renew).toHaveBeenCalledOnce();
+      }, () => Effect.succeed(output));
+    }
+  });
   it("recovers a dead holder lock before a live consumer sends with its own fence", async () => {
     await withMailbox(async (service, home) => {
       const path = networkFencePath(home, reference("desk").did);
