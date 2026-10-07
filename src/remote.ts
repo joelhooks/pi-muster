@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,13 +29,45 @@ export function writeRemoteOwnerItem(owner: string, item: OwnerItem, session: st
 }
 
 /** Serializes capacity reservations across registered projects on this owner machine. */
-export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.Effect<A, E, R>) => Effect.gen(function* () {
+export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.Effect<A, E, R>, note: (text: string) => void = () => {}, timeoutMs = 300_000) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const safeName = yield* Effect.try({ try: () => decodeAgentName(name), catch: error => new InputError({ message: `invalid machine name: ${String(error)}` }) });
   const parent = join(env.home, ".config/muster/launch-locks");
   const lock = join(parent, safeName);
-  const acquire = Effect.try({ try: () => { mkdirSync(parent, { recursive: true, mode: 0o700 }); mkdirSync(lock, { mode: 0o700 }); }, catch: error => new InputError({ message: `machine ${name}: launch lock unavailable at ${lock}; another launch may be in progress. Inspect a stale lock before removing it. ${String(error)}` }) });
-  return yield* Effect.acquireUseRelease(acquire, () => operation, () => Effect.sync(() => rmdirSync(lock)));
+  // Allocate monotonically increasing tickets under a short filesystem mutex.
+  // Waiting state: allocating -> queued -> held -> released; timeout never steals a lock.
+  const queue = `${lock}.queue`;
+  const allocator = `${lock}.allocator`;
+  const counter = `${lock}.counter`;
+  const io = <T>(fn: () => T) => Effect.try({ try: fn, catch: error => new InputError({ message: `machine ${name}: launch queue at ${lock}: ${String(error)}` }) });
+  const attempt = (path: string) => io(() => { try { mkdirSync(path, { mode: 0o700 }); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; } });
+  yield* io(() => mkdirSync(queue, { recursive: true, mode: 0o700 }));
+  let waited = 0;
+  const pause = Effect.gen(function* () {
+    if (waited >= timeoutMs) return yield* new InputError({ message: `machine ${name}: FIFO launch lock timed out after ${timeoutMs} ms at ${lock}; inspect the holder and stale tickets before retrying` });
+    yield* env.sleep(100);
+    waited += 100;
+  });
+  const ticket = yield* Effect.acquireUseRelease(Effect.gen(function* () {
+    while (!(yield* attempt(allocator))) yield* pause;
+  }), () => io(() => {
+    const next = (existsSync(counter) ? Number(readFileSync(counter, "utf8")) : 0) + 1;
+    if (!Number.isSafeInteger(next)) throw new Error("invalid launch queue counter");
+    writeFileSync(counter, String(next), { mode: 0o600 });
+    const ticket = String(next).padStart(16, "0");
+    writeFileSync(join(queue, ticket), String(process.pid), { flag: "wx", mode: 0o600 });
+    return ticket;
+  }), () => Effect.sync(() => rmdirSync(allocator)));
+  return yield* Effect.acquireUseRelease(Effect.succeed(ticket), () => Effect.acquireUseRelease(Effect.gen(function* () {
+    while (true) {
+      const first = yield* io(() => readdirSync(queue).sort()[0]);
+      if (first === ticket && (yield* attempt(lock))) return;
+      yield* pause;
+    }
+  }), () => Effect.gen(function* () {
+    note(`machine ${name}: FIFO launch lock acquired${waited ? ` after waiting ${waited} ms` : " without waiting"}`);
+    return yield* operation;
+  }), () => Effect.sync(() => rmdirSync(lock))), () => Effect.sync(() => unlinkSync(join(queue, ticket))));
 });
 
 export const machinesPath = (home: string) => join(home, ".config/muster/machines.json");
@@ -118,11 +150,105 @@ export const remoteNode = (name: string, machine: MachineConfig, script: string,
   return result.stdout;
 });
 
-export const prerequisites = (name: string, machine: MachineConfig, source: string) => Effect.gen(function* () {
+export const prerequisites = (name: string, machine: MachineConfig, source: string, hydrate = false, launchEnv: Readonly<Record<string, string>> = {}) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const proc = yield* Proc;
-  const result = yield* sshProc(name, machine, proc, env.home).run("sh", ["-c", 'command -v pi && command -v node && command -v git && command -v rift && test -r "$1/extensions/pi-muster.ts" && test -d "$1/node_modules" && test -x "$2" && test -d "$3" && { test -z "$4" || command -v "$4"; }', "muster-prerequisites", machine.musterExtension, machine.workerWorktree, source, machine.wrap[0] ?? ""], { cwd: "/", timeoutMs: 15_000 });
-  if (result.code !== 0) return yield* new InputError({ message: `machine ${name}: missing prerequisites: pi, node, git, rift on PATH; readable ${machine.musterExtension}/extensions/pi-muster.ts (with dependencies); executable ${machine.workerWorktree}; source repository ${source}; wrapper ${machine.wrap[0] ?? "(none)"}. ${result.stderr.slice(-500)}` });
+  const probe = `set -e
+fail() { printf '%s\\n' "$*" >&2; exit 69; }
+for cmd in pi node git rift muster-heavy; do command -v "$cmd" >/dev/null || fail "install $cmd on the remote non-interactive PATH"; done
+test -r "$1/extensions/pi-muster.ts" && test -d "$1/node_modules" || fail "install Muster with dependencies at $1"
+test -x "$2" || fail "install executable dark-wizard worker helper at $2"
+test -d "$3" || fail "provide the mapped source checkout $3"
+{ test -z "$4" || command -v "$4" >/dev/null; } || fail "install launch wrapper $4"
+if test "$5" = hydrate; then grep -q -- --hydrate "$2" || fail "update dark-wizard worker-worktree.sh for --hydrate"; fi
+if test "\${MUSTER_FLEET_COMPUTE:-}" != off; then command -v fleet-compute >/dev/null || fail "install fleet-compute or set machine.env.MUSTER_FLEET_COMPUTE=off"; fi
+pi --version`;
+  const result = yield* sshProc(name, machine, proc, env.home).run("sh", ["-c", probe, "muster-prerequisites", machine.musterExtension, machine.workerWorktree, source, machine.wrap[0] ?? "", hydrate ? "hydrate" : "plain"], { cwd: "/", timeoutMs: 15_000, env: launchEnv });
+  if (result.code !== 0) return yield* new InputError({ message: `machine ${name}: missing prerequisites: ${result.stderr.slice(-1000) || "remote probe failed; verify pi, node, git, rift, muster-heavy, Muster dependencies, dark-wizard and the source checkout"}` });
+  const local = yield* proc.run("pi", ["--version"], { cwd: env.home, timeoutMs: 10_000 });
+  const remoteVersion = result.stdout.trim();
+  return [`machine ${name}: remote Pi ${remoteVersion || "unknown"}; owner Pi ${local.stdout.trim() || "unknown"}${remoteVersion !== local.stdout.trim() ? "; warning: Pi version skew" : ""}`];
+});
+
+/** Fleet-compute owns capability/auth checks. Explicit off keeps the legacy prerequisite fallback. */
+export const readyForRemoteLaunch = (name: string, machine: MachineConfig, source: string, model: string, timeoutMs = 300_000, launchEnv: Readonly<Record<string, string>> = {}) => Effect.gen(function* () {
+  if (machine.env.MUSTER_FLEET_COMPUTE === "off") return [`machine ${name}: fleet capability check disabled by machine.env.MUSTER_FLEET_COMPUTE=off; prerequisite fallback only`];
+  const env = yield* MusterEnv;
+  const runner = yield* Proc;
+  const proc = sshProc(name, machine, runner, env.home);
+  let waited = 0;
+  const decode = Schema.decodeUnknownSync(Schema.Struct({ machine: Schema.String, verdict: Schema.Literals(["ready", "busy", "not-ready"]), checks: Schema.Array(Schema.Struct({ name: Schema.String, ok: Schema.Boolean, detail: Schema.String })), busy: Schema.Array(Schema.String) }));
+  while (true) {
+    const result = yield* proc.run("fleet-compute", ["ready", "--machine", name, "--repo", source, "--model", model, "--json"], { cwd: "/", timeoutMs: 30_000, env: launchEnv });
+    const receipt = yield* Effect.try({ try: () => decode(JSON.parse(result.stdout)), catch: error => new InputError({ message: `machine ${name}: invalid fleet capability receipt (${result.code}): ${String(error)}` }) });
+    if (receipt.machine !== name || result.code !== ({ ready: 0, busy: 75, "not-ready": 69 })[receipt.verdict]) return yield* new InputError({ message: `machine ${name}: fleet capability receipt identity or exit code disagrees` });
+    if (receipt.verdict === "ready") return [`machine ${name}: fleet capability ready${waited ? ` after waiting ${waited} ms` : ""}`];
+    const reason = receipt.verdict === "busy" ? receipt.busy.join("; ") : receipt.checks.filter(check => !check.ok).map(check => `${check.name}: ${check.detail}`).join("; ");
+    if (receipt.verdict === "not-ready" || waited >= timeoutMs) return yield* new InputError({ message: `machine ${name}: fleet capability ${receipt.verdict}${waited ? ` after ${waited} ms` : ""}: ${reason}` });
+    yield* env.sleep(1000);
+    waited += 1000;
+  }
+});
+
+/** Copy private launch inputs without replacing an existing remote file. Close removes only unchanged owned copies. */
+export const syncRemoteBrief = (name: string, machine: MachineConfig, brief: string, transferDir: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const runner = yield* Proc;
+  const payload = yield* Effect.try({ try: () => {
+    if (!lstatSync(brief).isFile()) throw new Error(`brief ${brief} must be a regular file`);
+    const bytes = readFileSync(brief);
+    const refs = [...bytes.toString("utf8").matchAll(/(?:`(\/[^`\r\n]+)`|"(\/[^"\r\n]+)"|'(\/[^'\r\n]+)'|(\/[A-Za-z0-9_.@/+~-]+))/g)].map(match => (match[1] ?? match[2] ?? match[3] ?? match[4]!).replace(/[.,;:]+$/, ""));
+    const referenced = refs.filter(path => Object.keys(machine.paths).some(root => path === root || path.startsWith(`${root}/`))).filter(path => {
+      const stat = lstatSync(path); // Missing mapped inputs refuse before allocation, rather than disappearing from the brief.
+      if (stat.isSymbolicLink()) throw new Error(`referenced input ${path} is a symlink; name its regular-file source`);
+      return stat.isFile();
+    });
+    const files = [...new Set([brief, ...referenced])];
+    return files.map(path => {
+      const target = mapPath(path, machine);
+      const content = readFileSync(path), hash = createHash("sha256").update(content).digest("hex");
+      // Row-private, content-addressed copies avoid shared-close races and never overwrite an earlier brief.
+      return { path: join(transferDir, "files", hash, target.slice(1)), source: path, mapped: target, content: content.toString("base64"), hash };
+    });
+  }, catch: error => new InputError({ message: `machine ${name}: brief sync: ${String(error)}` }) });
+  const script = `const fs=require('node:fs'),p=require('node:path'),crypto=require('node:crypto');
+const dir=process.argv[1], files=JSON.parse(fs.readFileSync(0,'utf8')); fs.mkdirSync(dir,{recursive:true,mode:0o700});
+if(fs.lstatSync(dir).isSymbolicLink())throw Error('private transfer directory is a symlink');
+const manifest=p.join(dir,'transfers.json');
+if(fs.existsSync(manifest) && !fs.lstatSync(manifest).isFile())throw Error('private transfer manifest is not a regular file');
+const owned=fs.existsSync(manifest)?JSON.parse(fs.readFileSync(manifest,'utf8')):[];
+if(!Array.isArray(owned) || owned.some(f=>typeof f.path!=='string'||!f.path.startsWith(dir+'/files/')||typeof f.hash!=='string'||!/^[a-f0-9]{64}$/.test(f.hash)))throw Error('invalid private transfer manifest');
+const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+for(const file of files){
+  const bytes=Buffer.from(file.content,'base64'); if(hash(bytes)!==file.hash) throw Error('input hash differs');
+  fs.mkdirSync(p.dirname(file.path),{recursive:true,mode:0o700});
+  for(let current=p.dirname(file.path);current.startsWith(dir);current=p.dirname(current)){if(fs.lstatSync(current).isSymbolicLink())throw Error('private transfer parent is a symlink');if(current===dir)break;}
+  try { fs.writeFileSync(file.path,bytes,{flag:'wx',mode:0o600}); owned.push({path:file.path,hash:file.hash}); fs.writeFileSync(manifest,JSON.stringify(owned),{mode:0o600}); }
+  catch(e){if(e.code!=='EEXIST')throw e;}
+  if(!fs.lstatSync(file.path).isFile() || hash(fs.readFileSync(file.path))!==file.hash) throw Error('existing remote input differs: '+file.path);
+  if((fs.statSync(file.path).mode&0o777)!==0o600) throw Error('private remote input needs mode 0600: '+file.path);
+}
+process.stdout.write(String(files.length));`;
+  const result = yield* sshProc(name, machine, runner, env.home).run("node", ["-e", script, transferDir], { cwd: "/", timeoutMs: 30_000, input: JSON.stringify(payload) });
+  if (result.code !== 0) return yield* new InputError({ message: `machine ${name}: brief sync refused: ${result.stderr.slice(-1000)}` });
+  return { brief: payload[0]!.path, note: `machine ${name}: brief and ${payload.length - 1} mapped referenced file(s) copied into row-private storage with mode 0600 and verified sha256; owned copies removed on close. Resolve absolute paths named in the brief with this input map: ${JSON.stringify(payload.map(file => ({ source: file.source, mapped: file.mapped, copy: file.path })))}` };
+});
+
+export const cleanupRemoteBrief = (name: string, machine: MachineConfig, transferDir: string) => Effect.gen(function* () {
+  const output = yield* remoteNode(name, machine, `import fs from 'node:fs'; import {join} from 'node:path'; import {createHash} from 'node:crypto';
+const dir=process.argv[1],manifest=join(dir,'transfers.json'); const notes=[], kept=[];
+if(fs.existsSync(dir) && fs.lstatSync(dir).isSymbolicLink())throw Error('private transfer directory is a symlink');
+if(fs.existsSync(manifest) && !fs.lstatSync(manifest).isFile())throw Error('private transfer manifest is not a regular file');
+if(fs.existsSync(manifest)) { const files=JSON.parse(fs.readFileSync(manifest,'utf8')); for(const file of files){
+ if(typeof file.path!=='string' || !file.path.startsWith(process.argv[1]+'/files/') || file.path.split('/').includes('..')){notes.push('invalid private input manifest; kept');kept.push(file);continue;}
+ if(!fs.existsSync(file.path))continue;
+ const real=fs.realpathSync(file.path), root=fs.realpathSync(dir);
+ if(!real.startsWith(root+'/files/')){kept.push(file);notes.push('private input kept (symlink parent): '+file.path);continue;}
+ if(!fs.lstatSync(file.path).isFile() || createHash('sha256').update(fs.readFileSync(file.path)).digest('hex')!==file.hash){kept.push(file);notes.push('private input kept (changed): '+file.path);continue;}
+ fs.unlinkSync(file.path); notes.push('private input removed: '+file.path);
+} if(kept.length)fs.writeFileSync(manifest,JSON.stringify(kept),{mode:0o600});else fs.unlinkSync(manifest); }
+process.stdout.write(JSON.stringify(notes));`, [transferDir]);
+  return yield* Effect.try({ try: () => Schema.decodeUnknownSync(Schema.Array(Schema.String))(JSON.parse(output)), catch: error => new InputError({ message: `machine ${name}: brief cleanup receipt invalid: ${String(error)}` }) });
 });
 
 export const cloneUrl = (machine: MachineConfig, path: string) => `ssh://${machine.ssh}/${path.replace(/^\//, "")}`;

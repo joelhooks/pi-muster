@@ -48,7 +48,7 @@ async function setup(options: { error?: string; paneTail?: string; readyAfterWai
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", emitPaneClose: noEmitPaneClose, startupLoad: () => ({ load: 0, cpus: 1 }),
     machines: decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree,
-      env: { HOME: h.home, PATH: `${bin}:${process.env.PATH}`, PRIVATE_REMOTE_TOKEN: "private-launch-value", ...options.env }, wrap: [] } }),
+      env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home, PATH: `${bin}:${process.env.PATH}`, PRIVATE_REMOTE_TOKEN: "private-launch-value", ...options.env }, wrap: [] } }),
     remoteHerdr: () => Effect.succeed(remote.client()),
     sleep: ms => Effect.sync(() => {
       h.now = new Date(h.now.getTime() + ms);
