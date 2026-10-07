@@ -59,11 +59,13 @@ export function parseHeavyGate(args: readonly string[]): Pick<FleetGateOptions, 
   return { command: args.slice(split + 1), wait, host, ...(tree ? { tree } : {}) };
 }
 
-/** A clone directory is a lane name, not a registry key. Prefer its origin's repo name. */
-/** Fleet repo key: the origin name made kebab-case (e.g. `codetv.dev` → `codetv-dev`), else the checkout name. */
+/** Fleet repo key, made kebab-case (e.g. `codetv.dev` → `codetv-dev`): the origin's repo name; without an origin,
+ * the repo segment of `Code/.worktrees/<org>/<repo>/<lane>` or `Code/<org>/<repo>`, so a clone never reports its lane. */
 export function gateRepoName(source: string, origin: string): string {
   const kebab = (value: string | undefined) => (value ?? "").toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "").slice(0, 64).replace(/-$/, "");
-  return decodeSlug(kebab(origin.trim().split(/[/:]/).at(-1)?.replace(/\.git$/, "")) || kebab(basename(source)));
+  const path = source.replace(/\/+$/, "");
+  const fromPath = /\/Code\/\.worktrees\/[^/]+\/([^/]+)\/[^/]+$/.exec(path)?.[1] ?? /\/Code\/(?!\.worktrees\/)[^/]+\/([^/]+)$/.exec(path)?.[1];
+  return decodeSlug(kebab(origin.trim().split(/[/:]/).at(-1)?.replace(/\.git$/, "")) || kebab(fromPath) || kebab(basename(path)));
 }
 
 /** Fleet owns registration, host eligibility and queueing for every repo. No policy copy here. */

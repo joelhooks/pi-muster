@@ -2048,7 +2048,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   const snapshotDir = remote ? launchDir : join(env.home, ".local/state/muster/restart-snapshots");
   if (!remote) yield* must("mkdir", ["-p", snapshotDir], { cwd: old.cwd });
   const snapshot = join(snapshotDir, `restart-${row.sessionId}.jsonl`);
-  const snapshotScript = `import {snapshotRestartSession} from ${JSON.stringify(`${machine?.musterExtension ?? env.musterRoot}/src/herdr.ts`)}; snapshotRestartSession(process.argv[1], process.argv[2]);`;
+  const snapshotScript = `import {snapshotRestartSession} from ${JSON.stringify(`${machine?.musterExtension ?? env.musterRoot}/src/restart-snapshot.ts`)}; snapshotRestartSession(process.argv[1], process.argv[2]);`;
   // Use the executing checkout's helper locally (the install root can be older).
   if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile, snapshot], { cwd: old.cwd });
   else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });

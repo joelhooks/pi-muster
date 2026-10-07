@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, normalize } from "node:path";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf8"));
 const approved = [...pkg.files, "package.json"].sort();
@@ -18,6 +19,15 @@ const actual = report.files.map((entry) => entry.path).sort();
 if (JSON.stringify(actual) !== JSON.stringify(approved)) {
   throw new Error(`package path set changed\nexpected: ${JSON.stringify(approved)}\nactual:   ${JSON.stringify(actual)}`);
 }
+
+// Every relative value import in a packed source must itself be packed; an installed copy cannot load otherwise.
+const packed = new Set(actual);
+const unresolved = actual.filter((path) => path.endsWith(".ts")).flatMap((path) =>
+  [...readFileSync(path, "utf8").matchAll(/^\s*(?:import|export)\s+(?!type\b)[^;]*?from\s+"(\.[^"]+)"/gmu)]
+    .map((match) => normalize(join(dirname(path), match[1])))
+    .filter((target) => !packed.has(target))
+    .map((target) => `${path} -> ${target}`));
+if (unresolved.length > 0) throw new Error(`packed sources import unpacked files: ${unresolved.join(", ")}`);
 
 const forbidden = actual.filter(
   (path) => path.startsWith(".brain/") || path.startsWith(".pi/") || path.endsWith(".test.ts") || path.endsWith("test-support.ts"),

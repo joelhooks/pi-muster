@@ -227,6 +227,11 @@ console.log('streamed output'); process.exit(${exit});\n`);
     // codetv.dev failed decodeSlug and blocked its gates and hydrate (Theora, 2026-10-07).
     expect(gateRepoName("/clone/lane", "git@github.com:owner/codetv.dev.git")).toBe("codetv-dev");
     expect(gateRepoName("/clone/My_Repo", "")).toBe("my-repo");
+    // No origin: a worker clone reports its repo, never its lane.
+    expect(gateRepoName("/home/joel/Code/.worktrees/joelhooks/pi-tui-verify/canary", "")).toBe("pi-tui-verify");
+    expect(gateRepoName("/home/joel/Code/.worktrees/codetv-dev/codetv.dev/x", "")).toBe("codetv-dev");
+    expect(gateRepoName("/home/joel/Code/joelhooks/fleet-compute/", "")).toBe("fleet-compute");
+    expect(gateRepoName("/home/joel/Code/.worktrees/joelhooks/pi-tui-verify/canary", "git@github.com:owner/other.git")).toBe("other");
     expect(gateRepoName("/clone/lane", "https://example.invalid/owner/" + "a".repeat(70))).toHaveLength(64);
   });
 });
