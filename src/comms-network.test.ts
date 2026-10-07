@@ -6,7 +6,7 @@ import type { Socket } from "effect/socket";
 import ts from "typescript";
 import { describe, expect, it, vi } from "vitest";
 import { createComms } from "./comms.ts";
-import { createNetworkComms, networkConfigPath, networkIdentityPath, networkRecipient, openNetworkMailbox, provisionNetworkAgent, readNetworkConfig, readNetworkIdentities, watchCloseAction, watchNetworkMailbox, consumeNetworkMailbox, prepareRemoteNetworkAgent } from "./comms-network.ts";
+import { createNetworkComms, networkConfigPath, networkIdentityPath, networkRecipient, openNetworkMailbox, provisionNetworkAgent, readNetworkConfig, readNetworkIdentities, watchCloseAction, watchNetworkMailbox, consumeNetworkMailbox, prepareRemoteNetworkAgent, retireRemoteNetworkKey } from "./comms-network.ts";
 import { decodeCommsIdentityReference, decodeMachines } from "./domain.ts";
 import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue, writeReader } from "./owner-queue.ts";
 import { CommsError, Proc, MusterEnv } from "./runtime.ts";
@@ -196,24 +196,46 @@ describe("network owner routing and consumption", () => {
     expect(notices).toHaveLength(1); expect(notices[0]).toContain("authenticated sender differs from payload author worker-session");
     expect(readOwnerQueue("desk-session", root).items).toHaveLength(1); expect(order).toEqual(["ingest", "deliver", "ack", "deliver", "ack"]);
   });
-  it("remote provisioning exchanges only public references and keeps the configured path on that machine", async () => {
+  it("remote custody provisions here, pipes only that agent's key over stdin, and seeds only its peers' public references", async () => {
     const h = harness(); const machine = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/package", workerWorktree: "/worker", env: {}, comms: { config: "/private/network.json" } } }).remote!;
-    const captured: Array<readonly string[]> = [];
-    const proc = { run: (_file: string, args: readonly string[]) => { captured.push(args); return Effect.succeed({ code: 0, stdout: captured.length === 1 ? JSON.stringify(provision("worker")) : "", stderr: "" }); } };
+    privateFile(networkConfigPath(h.home), config);
+    privateFile(networkIdentityPath(h.home), { peer: provision("peer"), stranger: provision("stranger") });
+    const run = vi.fn(async (file: string, args: readonly string[]) => file === config.provisionWrapper ? JSON.stringify(provision(args[2])) : args[0] === "lease" ? "PRIVATE_KEY_SENTINEL" : "");
+    const calls: Array<{ args: readonly string[]; input?: string }> = [];
+    const proc = { run: (_file: string, args: readonly string[], options: { input?: string }) => { calls.push({ args, ...(options.input === undefined ? {} : { input: options.input }) }); return Effect.succeed({ code: 0, stdout: calls.length === 1 ? "added\n" : "", stderr: "" }); } };
     const env = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/package", workerWorktree: h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: () => undefined };
-    await Effect.runPromise(prepareRemoteNetworkAgent({ home: h.home, agent: "worker", machineName: "remote", machine }).pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc)));
-    expect(networkRecipient(h.home, "worker")).toEqual(provision("worker"));
-    expect(captured).toHaveLength(2);
-    expect(captured[0]?.at(-1)).toContain("/private/network.json");
-    expect(captured[1]?.at(-1)).toContain("seedNetworkIdentities");
-    expect(JSON.stringify(captured)).not.toContain('\\\"d\\\"');
+    const note = await Effect.runPromise(prepareRemoteNetworkAgent({ home: h.home, agent: "worker", machineName: "remote", machine, peers: ["peer"], run }).pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc)));
+    expect(note).toBe("remote holds rat_king_agent_worker_identity (added)");
+    expect(run.mock.calls.map(([file, args]) => [file, args[0]])).toEqual([[config.provisionWrapper, "provision"], [config.secretsCommand, "lease"]]);
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.input).toBe("PRIVATE_KEY_SENTINEL");
+    expect(calls[0]?.args.at(-1)).toContain("copy");
+    expect(calls[0]?.args.at(-1)).toContain("rat_king_agent_worker_identity");
+    expect(JSON.stringify(calls.map(call => call.args))).not.toContain("PRIVATE_KEY_SENTINEL");
+    const seeded = calls[1]?.args.at(-1) ?? "";
+    expect(calls[1]?.args.join(" ")).toContain("seedNetworkIdentities");
+    expect(seeded).toContain('"peer":'); expect(seeded).toContain('"worker":'); expect(seeded).not.toContain("stranger");
   });
-  it("remote network requires an explicit config block and refuses a failed probe without fallback", async () => {
+  it("remote network requires an explicit config block and refuses a failed key copy without fallback", async () => {
     const h = harness(); const machine = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/package", workerWorktree: "/worker", env: {} } }).remote!;
-    const run = (config: typeof machine) => Effect.runPromise(prepareRemoteNetworkAgent({ home: h.home, agent: "worker", machineName: "remote", machine: config }).pipe(Effect.provideService(MusterEnv, { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/package", workerWorktree: h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: () => {} }), Effect.provideService(Proc, { run: () => Effect.succeed({ code: 1, stdout: "", stderr: "PRIVATE_SENTINEL" }) })));
-    await expect(run(machine)).rejects.toThrow("requires a comms config block");
-    await expect(run({ ...machine, comms: { config: "/private/network.json" } })).rejects.toThrow("network config/provision probe failed");
+    privateFile(networkConfigPath(h.home), config);
+    const run = async (file: string, args: readonly string[]) => file === config.provisionWrapper ? JSON.stringify(provision(args[2])) : "PRIVATE_KEY_SENTINEL";
+    const attempt = (target: typeof machine) => Effect.runPromise(prepareRemoteNetworkAgent({ home: h.home, agent: "worker", machineName: "remote", machine: target, run }).pipe(Effect.provideService(MusterEnv, { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/package", workerWorktree: h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: () => {} }), Effect.provideService(Proc, { run: () => Effect.succeed({ code: 1, stdout: "", stderr: "PRIVATE_SENTINEL" }) })));
+    await expect(attempt(machine)).rejects.toThrow("requires a comms config block");
+    await expect(attempt({ ...machine, comms: { config: "/private/network.json" } })).rejects.toThrow("identity copy failed for worker; launch refused");
     expect(decodeMachines({ remote: { ...machine, comms: { config: "/private/network.json" } } }).remote?.comms?.config).toBe("/private/network.json");
+  });
+  it("close deletes only the remote copy and says loudly when it could not", async () => {
+    const h = harness(); const machine = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/package", workerWorktree: "/worker", env: {}, comms: { config: "/private/network.json" } } }).remote!;
+    privateFile(networkIdentityPath(h.home), { worker: provision("worker") });
+    const env = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/package", workerWorktree: h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: () => undefined };
+    const retire = (agent: string, result: { code: number; stdout: string }) => { const seen: Array<readonly string[]> = []; return Effect.runPromise(retireRemoteNetworkKey({ home: h.home, agent, machineName: "remote", machine }).pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, { run: (_file, args) => { seen.push(args); return Effect.succeed({ ...result, stderr: "" }); } }))).then(note => ({ note, seen })); };
+    const deleted = await retire("worker", { code: 0, stdout: "deleted\n" });
+    expect(deleted.note).toBe("deleted rat_king_agent_worker_identity from remote secrets");
+    expect(deleted.seen[0]?.at(-1)).toContain("delete");
+    expect((await retire("worker", { code: 0, stdout: "absent\n" })).note).toContain("was not in remote secrets");
+    expect((await retire("worker", { code: 1, stdout: "" })).note).toContain("KEY NOT DELETED");
+    expect((await retire("ghost", { code: 0, stdout: "deleted" })).seen).toHaveLength(0);
   });
 });
 

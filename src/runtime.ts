@@ -24,6 +24,8 @@ export interface ProcOptions {
   readonly cwd: string;
   readonly timeoutMs?: number;
   readonly env?: Readonly<Record<string, string>>;
+  /** Private bytes for stdin; never argv. */
+  readonly input?: string;
 }
 
 export interface ProcShape {
@@ -171,6 +173,7 @@ export const liveProc: ProcShape = {
           resume(Effect.succeed({ code: err ? Number(err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) }));
         },
       );
+      if (options.input !== undefined) child.stdin?.end(options.input);
       return Effect.sync(() => {
         child.kill("SIGTERM");
       });

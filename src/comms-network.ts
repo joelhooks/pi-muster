@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { Effect, Layer, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { decodeOwnerSession, decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
-import { CommsError, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
+import { CommsError, MusterEnv, Proc, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
 
 /** Wait without touching the mailbox or acquiring the old DID's lease.
@@ -279,20 +279,52 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
   });
 }
 
-export function prepareRemoteNetworkAgent(options: { home: string; agent: string; machineName: string; machine: import("./domain.ts").MachineConfig }) {
+/** Finds the remote secrets CLI, then copies (stdin) or deletes one named entry. Output is a status word only. */
+const REMOTE_KEY_SCRIPT = 'S="$HOME/.local/bin/secrets"; [ -x "$S" ] || S="$(command -v secrets)" || exit 127; if "$S" --no-update-check list 2>/dev/null | grep -Fq "\\"name\\": \\"$2\\""; then present=1; else present=0; fi; case "$1" in copy) if [ $present = 1 ]; then "$S" --no-update-check update "$2" >/dev/null 2>&1 || exit 1; echo updated; else "$S" --no-update-check add "$2" >/dev/null 2>&1 || exit 1; echo added; fi ;; delete) if [ $present = 1 ]; then "$S" --no-update-check delete "$2" --force >/dev/null 2>&1 || exit 1; echo deleted; else echo absent; fi ;; *) exit 2 ;; esac';
+
+/**
+ * Fleet custody (Rat King, 2026-10-07): the operator key never leaves this machine. Provision here, copy only this
+ * agent's identity entry to the remote secrets store over ssh stdin, and seed public references for its peers only.
+ */
+export function prepareRemoteNetworkAgent(options: { home: string; agent: string; machineName: string; machine: import("./domain.ts").MachineConfig; peers?: readonly string[]; run?: PrivateCommand }) {
   return Effect.gen(function* () {
     const configPath = options.machine.comms?.config;
     if (!configPath) return yield* Effect.fail(new CommsError(`machine ${options.machineName}: network project requires a comms config block; launch refused`));
-    const { remoteNode } = yield* Effect.promise(() => import("./remote.ts"));
+    const { remoteNode, sshProc } = yield* Effect.promise(() => import("./remote.ts"));
+    const env = yield* MusterEnv;
+    const runner = yield* Proc;
+    const reference = yield* provisionNetworkAgent({ home: options.home, agent: options.agent, ...(options.run ? { run: options.run } : {}) });
+    const config = yield* Effect.try({ try: () => readNetworkConfig(options.home), catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms config invalid") });
+    const key = yield* Effect.tryPromise({
+      try: () => (options.run ?? privateCommand)(config.secretsCommand ?? join(options.home, ".local/bin/secrets"), ["lease", reference.secret, "--ttl", "5m", "--client-id", "muster-remote-custody", "--no-update-check"]),
+      catch: () => new CommsError(`NetworkComms identity lease failed: ${options.agent}; launch refused (output withheld)`),
+    });
+    const copied = yield* sshProc(options.machineName, options.machine, runner, env.home).run("sh", ["-c", REMOTE_KEY_SCRIPT, "muster-key", "copy", reference.secret], { cwd: "/", timeoutMs: 30_000, input: key }).pipe(
+      Effect.mapError(() => new CommsError(`machine ${options.machineName}: identity copy failed for ${options.agent}; launch refused`)));
+    if (copied.code !== 0 || !/^(added|updated)$/mu.test(copied.stdout.trim())) return yield* Effect.fail(new CommsError(`machine ${options.machineName}: identity copy failed for ${options.agent}; launch refused`));
+    const known = yield* Effect.try({ try: () => readNetworkIdentities(options.home), catch: () => new CommsError("NetworkComms peer references unavailable") });
+    const wanted = new Set([options.agent, ...(options.peers ?? [])]);
+    const peers = Object.fromEntries(Object.entries(known).filter(([name]) => wanted.has(name)));
     const helper = join(options.machine.musterExtension, "src/comms-network.ts");
-    const effect = join(options.machine.musterExtension, "node_modules/effect/dist/index.js");
-    const raw = yield* remoteNode(options.machineName, options.machine,
-      `import {homedir} from 'node:os'; import {Effect} from ${JSON.stringify(effect)}; import {provisionNetworkAgent} from ${JSON.stringify(helper)}; const reference=await Effect.runPromise(provisionNetworkAgent({home:process.env.HOME??homedir(),agent:process.argv[1],configPath:process.argv[2]})); console.log(JSON.stringify(reference));`, [options.agent, configPath]).pipe(Effect.mapError(() => new CommsError(`machine ${options.machineName}: network config/provision probe failed for ${options.agent}; launch refused`)));
-    const reference = yield* Effect.try({ try: () => decodeCommsIdentityReference(JSON.parse(raw)), catch: () => new CommsError(`machine ${options.machineName}: invalid public identity reference for ${options.agent}`) });
-    yield* Effect.try({ try: () => seedNetworkIdentities(options.home, { [options.agent]: reference }), catch: () => new CommsError(`machine ${options.machineName}: peer identity cache mismatch for ${options.agent}`) });
-    const peers = yield* Effect.try({ try: () => readNetworkIdentities(options.home), catch: () => new CommsError("NetworkComms peer references unavailable") });
     yield* remoteNode(options.machineName, options.machine,
       `import {homedir} from 'node:os'; import {seedNetworkIdentities} from ${JSON.stringify(helper)}; seedNetworkIdentities(process.env.HOME??homedir(),JSON.parse(process.argv[1]));`, [JSON.stringify(peers)]).pipe(Effect.mapError(() => new CommsError(`machine ${options.machineName}: public peer cache probe failed; launch refused`)));
+    return `${options.machineName} holds ${reference.secret} (${copied.stdout.trim()})`;
+  });
+}
+
+/** Close deletes the remote copy only; this machine's entry is the custody record. Never fails a close. */
+export function retireRemoteNetworkKey(options: { home: string; agent: string; machineName: string; machine: import("./domain.ts").MachineConfig }) {
+  return Effect.gen(function* () {
+    const reference = (() => { try { return readNetworkIdentities(options.home)[options.agent]; } catch { return undefined; } })();
+    if (!reference) return `no network identity for ${options.agent}; nothing to delete on ${options.machineName}`;
+    const { sshProc } = yield* Effect.promise(() => import("./remote.ts"));
+    const env = yield* MusterEnv;
+    const runner = yield* Proc;
+    const result = yield* sshProc(options.machineName, options.machine, runner, env.home).run("sh", ["-c", REMOTE_KEY_SCRIPT, "muster-key", "delete", reference.secret], { cwd: "/", timeoutMs: 30_000 }).pipe(Effect.option);
+    const status = result._tag === "Some" && result.value.code === 0 ? result.value.stdout.trim() : "";
+    if (status === "deleted") return `deleted ${reference.secret} from ${options.machineName} secrets`;
+    if (status === "absent") return `${reference.secret} was not in ${options.machineName} secrets`;
+    return `KEY NOT DELETED: ${reference.secret} on ${options.machineName}; delete it by hand`;
   });
 }
 

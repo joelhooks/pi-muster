@@ -31,7 +31,7 @@ export function sendDesk(options: {
     const prepared = target.row.machine === "local" ? Effect.succeed(undefined) : Effect.gen(function* () {
       const { prepareRemoteNetworkAgent } = yield* Effect.promise(() => import("./comms-network.ts"));
       const { machineConfig } = yield* Effect.promise(() => import("./remote.ts"));
-      yield* prepareRemoteNetworkAgent({ home: options.home, agent: target.identity, machineName: target.row.machine, machine: yield* machineConfig(target.row.machine) });
+      yield* prepareRemoteNetworkAgent({ home: options.home, agent: target.identity, machineName: target.row.machine, machine: yield* machineConfig(target.row.machine), peers: target.project.agents.filter(row => row.state !== "closed" && row.name !== target.row.name).map(row => networkRowIdentity(target.project, row)) });
     }).pipe(Effect.mapError(() => new CommsError("desk_send remote provisioning failed (private output withheld)")));
     return yield* reportedNetworkSend({ ...options,
       network: prepared.pipe(Effect.flatMap(() => options.comms.send(options.to, options.text)), Effect.catch(error => Effect.succeed({ status: "failed" as const, detail: error.message }))),

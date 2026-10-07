@@ -141,9 +141,11 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (params.action === "restore" && !existing) return yield* input(`no row ${name} to restore`);
   if (params.action !== "restore" && existing && !["planned", "failed"].includes(existing.state)) return yield* input(`row ${name} is ${existing.state}; restore it or choose another name`);
   if (parent && !parent.sessionFile) return yield* input("fork needs a parent session file");
+  const custodyNotes: string[] = [];
   if (project.policy?.comms === "network") {
     const helper = yield* Effect.promise(() => import("./comms-network.ts"));
-    yield* helper.prepareRemoteNetworkAgent({ home: env.home, agent: role === "desk" ? `${project.slug}/${name}` : name, machineName: nameOfMachine, machine }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
+    const peers = project.agents.filter(row => row.state !== "closed" && row.name !== name).map(row => networkRowIdentity(project, row));
+    custodyNotes.push(yield* helper.prepareRemoteNetworkAgent({ home: env.home, agent: role === "desk" ? `${project.slug}/${name}` : name, machineName: nameOfMachine, machine, peers }).pipe(Effect.mapError(error => new InputError({ message: error.message }))));
   }
   const source = lane.repo ?? project.dir;
   const remoteSource = mapPath(source, machine);
@@ -169,7 +171,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
-  const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
+  const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...custodyNotes, ...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
   // A machine can serve a provider under another name (pennywise runs openai-codex models through cliproxy-codex).
   const [provider, ...modelRest] = selected.model.split("/");
   const mappedProvider = provider ? machine.providerMap?.[provider] : undefined;
@@ -548,6 +550,10 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     }
     return restore;
   }));
+  if (project.policy?.comms === "network") {
+    const helper = yield* Effect.promise(() => import("./comms-network.ts"));
+    notes.push(yield* helper.retireRemoteNetworkKey({ home: env.home, agent: networkRowIdentity(project, row), machineName: row.machine, machine }));
+  }
   const closed = yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
     yield* requireOwner(latest, env.sessionId, params.takeover, project.slug);
