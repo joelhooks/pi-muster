@@ -152,7 +152,9 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
     // An explicit override must not depend on a readable project catalog.
     const follow = env === "network" && options.followProjectPolicy && exists(options.projectDir);
     const policy = (env === undefined || follow) && exists(options.projectDir) ? (yield* project(options.projectDir)).policy : undefined;
-    const selected = yield* Effect.try({ try: () => selectComms(follow ? undefined : env, policy?.comms === undefined && options.networkSender?.()?.agent.includes("/") ? { ...policy, comms: "network" } : policy), catch: error => new CommsError(String(error)) });
+    // Following policy lets an explicit project opt-out win; an unset policy never overrides explicit env.
+    const fromEnv = follow ? (policy?.comms === undefined ? env : undefined) : env;
+    const selected = yield* Effect.try({ try: () => selectComms(fromEnv, policy?.comms === undefined && options.networkSender?.()?.agent.includes("/") ? { ...policy, comms: "network" } : policy), catch: error => new CommsError(String(error)) });
     return selected;
   });
   const adapter = Effect.gen(function* () {

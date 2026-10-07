@@ -129,6 +129,17 @@ describe("Comms port", () => {
     expect(events.requests).toEqual([]); expect(events.listeners.size).toBe(0);
     expect(await Effect.runPromise(NetworkComms.send("live", "opaque"))).toMatchObject({ status: "failed" });
   });
+  it("explicit network env wins over an unset project policy; an explicit project opt-out still wins", async () => {
+    // The Switchboard runs from a cwd that holds another project's catalog with no comms policy.
+    const h = harness(); const dir = h.home + "/project"; mkdirSync(dir, { recursive: true });
+    await runWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n", ephemeral: true, createSpace: true }));
+    const options = { events: bus().events, createId: () => "1", home: h.home, projectDir: dir, adapterEnv: () => "network" as const, followProjectPolicy: true };
+    // Reaching the network adapter (which then wants its private config) proves network was selected.
+    await expect(Effect.runPromise(createComms(options).mode!())).rejects.toThrow("NetworkComms missing or invalid config");
+    const project = JSON.parse(readFileSync(projectPath(dir), "utf8"));
+    writeFileSync(projectPath(dir), JSON.stringify({ ...project, policy: { ...project.policy, comms: "intercom" } }));
+    expect(await Effect.runPromise(createComms(options).mode!())).toBe("intercom");
+  });
   it("resolves the catalog again after restore changes the session, never caching a lease", async () => {
     const h = harness(); const dir = h.home + "/project"; mkdirSync(dir, { recursive: true });
     await runWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n", ephemeral: true, createSpace: true }));
