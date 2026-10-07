@@ -15,6 +15,7 @@ import { reportedNetworkSend } from "./comms-fallback.ts";
 import { relayEvent } from "./relay-events.ts";
 import type { CommsDelivery, CommsShape } from "./runtime.ts";
 import { writeRemoteOwnerItem } from "./remote.ts";
+import { retiredSessionReason } from "./comms.ts";
 
 export interface OwnerNoteInput { author: string; project?: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string; signed?: unknown }
 export const mentions = (item: OwnerItem, reader: string) => item.facets?.some(f => Number.isInteger(f.index.byteStart) && Number.isInteger(f.index.byteEnd) && f.index.byteStart >= 0 && f.index.byteEnd > f.index.byteStart && f.index.byteEnd <= Buffer.byteLength(item.text) && f.features.some(feature => feature.$type === MENTION_NSID && feature.did === reader)) ?? false;
@@ -260,9 +261,15 @@ export function findOwnerPost(session: string, uri: string, home = homedir()) {
   if (!post) throw new Error(`post not found in this session's queue: ${uri}`);
   return post;
 }
+function guardOwnerRecipient(home: string, owner: string): void {
+  const reason = retiredSessionReason(home, owner);
+  if (reason) throw new Error(`${reason}; owner route has no live successor; repair with project_status takeover or agent_launch adopt`);
+}
+
 export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = homedir(), persist = true): OwnerItem {
   const originalOwner = owner;
   owner = ownerRoute(owner, home, input.project).owner;
+  guardOwnerRecipient(home, owner);
   const author = decodeOwnerSession(input.author);
   const parent = input.replyTo ? findOwnerPost(author, input.replyTo, home) : undefined;
   const mention = input.mention === originalOwner ? owner : input.mention ?? (wakeKind(input.kind) ? owner : undefined);
@@ -350,6 +357,11 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   const project = ownerProject(params.project);
   const route = yield* Effect.try({ try: () => ownerRoute(resolved.owner, params.home, project), catch: error => new StoreError({ path: ownerPath(resolved.owner, params.home), message: String(error) }) });
   const owner = route.owner;
+  const resolution = yield* Effect.try({ try: () => {
+    guardOwnerRecipient(params.home, owner);
+    const retired = retiredSessionReason(params.home, params.owner);
+    return retired && owner !== params.owner ? `${resolved.resolution}; owner ${params.owner} retired; routed to successor ${owner}` : resolved.resolution;
+  }, catch: error => new StoreError({ path: ownerPath(owner, params.home), message: String(error) }) });
   const note = params.item.mention === params.owner ? { ...params.item, mention: owner } : params.item;
   const mode = params.comms?.mode ? yield* params.comms.mode().pipe(Effect.catch(() => Effect.succeed("network" as const))) : "intercom";
   if (mode === "network") {
@@ -375,7 +387,7 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
     const woke = ["delivered", "acked"].includes(delivery.status) && mentions(item, owner);
     const path = result.fallback ? "intercom" as const : "network" as const;
     relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path, itemId: item.uri }, params.home);
-    return { id: item.uri, uri: item.uri, queued, woke, path, delivery, owner, resolution: resolved.resolution, pendingPull: false };
+    return { id: item.uri, uri: item.uri, queued, woke, path, delivery, owner, resolution, pendingPull: false };
   }
   let item: OwnerItem | undefined;
   let queueError: unknown;
@@ -392,5 +404,5 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   if (!logged && woke) path = "intercom";
   const delivery = path === "intercom" ? yield* params.send(owner, params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`) : { status: "queued" as const, detail: "owner queue" };
   const pendingPull = remote && delivery.status !== "delivered" && delivery.status !== "acked";
-  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke: pendingPull ? false : woke, path, delivery: pendingPull ? { status: "queued" as const, detail: "Queued for the Flagg owner to pull on the next status pass; not delivered." } : delivery, owner, resolution: resolved.resolution, ...(remote ? { pendingPull } : {}) };
+  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke: pendingPull ? false : woke, path, delivery: pendingPull ? { status: "queued" as const, detail: "Queued for the Flagg owner to pull on the next status pass; not delivered." } : delivery, owner, resolution, ...(remote ? { pendingPull } : {}) };
 });

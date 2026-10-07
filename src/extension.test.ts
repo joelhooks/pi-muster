@@ -7,6 +7,7 @@ import * as versionSkew from "./version-skew.ts";
 import { Cause, Effect, Schema } from "effect";
 import * as ops from "./ops.ts";
 import * as ownerQueue from "./owner-queue.ts";
+import * as comms from "./comms.ts";
 import { Packet, decodeOwnerItem } from "./domain.ts";
 import { deskRecord } from "./desk.ts";
 import { POST_NSID } from "./owner-lexicon.ts";
@@ -241,6 +242,20 @@ describe("readable message boundaries", () => {
     expect((await call("send", JOINED, "another_tool")).every(value => value === undefined)).toBe(true);
     for (const key of Object.keys(process.env)) if (key.startsWith("MUSTER_")) delete process.env[key];
     for (const action of ["send", "ask", "reply"]) expect((await call(action, JOINED)).every(value => value === undefined)).toBe(true);
+  });
+});
+
+describe("retired intercom destinations", () => {
+  it.each(["send", "ask", "reply", "handover"])("blocks %s to an exact retired id, not a row alias", async action => {
+    const reason = "session old-session retired by restart; successor new-session; send to probe/desk or the new id";
+    vi.spyOn(comms, "retiredSessionReason").mockImplementation((_home, to) => to === "old-session" ? reason : undefined);
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const call = (to: string) => Promise.all(fake.hooks.get("tool_call")!.map(hook => hook({ toolName: "intercom", input: { action, to, message: "Hello." } })));
+    expect(await call("old-session")).toContainEqual({ block: true, reason });
+    expect((await call("probe/desk")).every(value => value === undefined)).toBe(true);
+    expect((await call("new-session")).every(value => value === undefined)).toBe(true);
+    expect(fake.emitted).toEqual([]);
   });
 });
 

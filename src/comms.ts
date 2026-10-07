@@ -1,6 +1,7 @@
 import { Effect, Layer, Schema } from "effect";
-import { readFileSync } from "node:fs";
-import { decodeAgentName, decodeSlug, decodeProject, type Policy } from "./domain.ts";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { decodeAgentName, decodeSlug, decodeProject, decodeSessionSuccessor, type SessionSuccessor, type Policy } from "./domain.ts";
 import { networkCatalogPeer, networkRowIdentity } from "./desk-route.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
@@ -8,6 +9,44 @@ import { exists, load, projectPath } from "./store.ts";
 import { Comms, CommsError, Unsupported, type CommsAddress, type CommsDelivery, type CommsLease, type CommsShape, type CommsTarget, type IntercomTransport, type LeaseAuthorityShape, type NetworkMailboxShape } from "./runtime.ts";
 import type { MainValue as Lease } from "./vendor/rat-king-lexicon/runtime.lease.ts";
 import type { ReceiptValue as Receipt } from "./vendor/rat-king-lexicon/defs.ts";
+
+export const sessionSuccessorsPath = (home: string) => join(home, ".local/state/muster/session-successors.jsonl");
+
+/** Call only after the catalog commits. Same-id restores are not retirements. */
+export function recordSessionSuccessor(home: string, value: SessionSuccessor): void {
+  const record = decodeSessionSuccessor(value);
+  if (record.from === record.to) return;
+  const path = sessionSuccessorsPath(home);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  appendFileSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+}
+
+/** Exact ids only: aliases must keep following the authoritative row. */
+export function retiredSessionReason(home: string, to: string): string | undefined {
+  if (to.includes("/") || to.startsWith("did:")) return undefined;
+  let contents: string;
+  try { contents = readFileSync(sessionSuccessorsPath(home), "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw new CommsError("session successor history unreadable; send refused");
+  }
+  let match: SessionSuccessor | undefined;
+  for (const line of contents.split("\n").filter(line => line.trim())) {
+    let record: SessionSuccessor;
+    try { record = decodeSessionSuccessor(JSON.parse(line)); }
+    catch { throw new CommsError("session successor history invalid; send refused"); }
+    if (record.to === to) match = undefined; // A restore can revive a previously retired id.
+    else if (record.from === to) match = record;
+  }
+  return match ? `session ${match.from} retired by restart; successor ${match.to}; send to ${match.project}/${match.row} or the new id` : undefined;
+}
+
+export function assertCurrentSession(home: string, to: CommsTarget): void {
+  const address = commsAddress(to);
+  if (address.kind !== "session") return;
+  const reason = retiredSessionReason(home, address.id);
+  if (reason) throw new CommsError(reason);
+}
 
 /** Session context is resolved at use time; no arbitrary desk identity fallback. */
 export function catalogCommsSender(dir: string, session: string) {
@@ -245,19 +284,20 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
     transport ??= createIntercom(options.events, options.createId);
     return IntercomComms(transport, lookup);
   });
+  const current = (to: CommsTarget) => Effect.try({ try: () => assertCurrentSession(options.home, to), catch: error => error instanceof CommsError ? error : new CommsError(String(error)) });
   const service: CommsShape = {
-    relay: (to, message) => Effect.suspend(() => {
+    relay: (to, message) => current(to).pipe(Effect.flatMap(() => Effect.suspend(() => {
       transport ??= createIntercom(options.events, options.createId);
       return IntercomComms(transport, lookup).send(to, message);
-    }),
+    })), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: error.message }))),
     mode: () => selection.pipe(Effect.flatMap(selected => selected === "intercom" ? Effect.succeed("intercom" as const) : adapter.pipe(Effect.flatMap(service => service.mode ? service.mode() : Effect.succeed("network" as const))))),
-    postOwner: (to, item) => adapter.pipe(Effect.flatMap(service => service.postOwner ? service.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "owner mailbox not selected" })), Effect.catch(() => Effect.succeed<CommsDelivery>({ status: "failed", detail: "NetworkComms owner send refused" }))),
+    postOwner: (to, item) => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.postOwner ? service.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "owner mailbox not selected" })), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: error.message }))),
     consume: receive => adapter.pipe(Effect.flatMap(service => service.consume ? service.consume(payload => adapter.pipe(Effect.flatMap(current => current.consume ? receive(payload) : Effect.fail(new CommsError("NetworkComms disabled by project policy; consumer stopped"))))) : Effect.void)),
-    send: (to, message) => adapter.pipe(Effect.flatMap(service => service.send(to, message)), Effect.catchCause(cause => Effect.succeed<CommsDelivery>({ status: "failed", detail: String(cause) }))),
-    ask: (to, message, opts) => adapter.pipe(Effect.flatMap(service => service.ask(to, message, opts))),
+    send: (to, message) => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.send(to, message)), Effect.catchCause(cause => Effect.succeed<CommsDelivery>({ status: "failed", detail: String(cause) }))),
+    ask: (to, message, opts) => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.ask(to, message, opts))),
     reply: (id, message) => adapter.pipe(Effect.flatMap(service => service.reply(id, message))),
-    wake: to => adapter.pipe(Effect.flatMap(service => service.wake(to))),
-    resolve: identity => adapter.pipe(Effect.flatMap(service => service.resolve(identity))),
+    wake: to => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.wake(to))),
+    resolve: identity => current(identity).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.resolve(identity))),
     sessions: () => adapter.pipe(Effect.flatMap(service => service.sessions())),
   };
   return { ...service, dispose: () => { transport?.dispose(); transport = undefined; } };

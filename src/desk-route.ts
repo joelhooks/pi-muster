@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { reportedNetworkSend, networkReceiptPath } from "./comms-fallback.ts";
 import { Effect } from "effect";
-import { commsAddress } from "./comms.ts";
+import { assertCurrentSession, commsAddress } from "./comms.ts";
 import { decodeProject, type AgentRow, type Project } from "./domain.ts";
 import { readRegistry } from "./registry.ts";
 import { projectPath } from "./store.ts";
@@ -11,6 +11,7 @@ export const deskRouteReceiptPath = networkReceiptPath;
 
 /** Validate before any send, including fallback. A raw session/DID cannot bypass the desk fence. */
 export function resolveDeskRoute(home: string, dir: string, to: string) {
+  assertCurrentSession(home, to);
   const address = commsAddress(to);
   if (address.kind !== "alias") throw new CommsError("desk_send requires a project/row alias");
   const known = readRegistry(home).get(address.project);
@@ -27,7 +28,7 @@ export function sendDesk(options: {
   comms: CommsShape;
 }) {
   return Effect.gen(function* () {
-    const target = yield* Effect.try({ try: () => resolveDeskRoute(options.home, options.dir, options.to), catch: () => new CommsError(`desk_send refused alias ${options.to}: unknown, foreign, or non-desk row`) });
+    const target = yield* Effect.try({ try: () => resolveDeskRoute(options.home, options.dir, options.to), catch: error => error instanceof CommsError ? error : new CommsError(`desk_send refused alias ${options.to}: unknown, foreign, or non-desk row`) });
     const prepared = target.row.machine === "local" ? Effect.succeed(undefined) : Effect.gen(function* () {
       const { prepareRemoteNetworkAgent } = yield* Effect.promise(() => import("./comms-network.ts"));
       const { machineConfig } = yield* Effect.promise(() => import("./remote.ts"));

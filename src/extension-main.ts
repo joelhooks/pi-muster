@@ -14,7 +14,7 @@ import { registerCompaction } from "./compact.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
 import { MAX_CADENCE_MINUTES, decodeNetworkPeers, decodeNetworkDeskPeers } from "./domain.ts";
 import { sendDesk } from "./desk-route.ts";
-import { createComms, catalogCommsSender, catalogNetworkPeers, retiredCatalogSession } from "./comms.ts";
+import { createComms, catalogCommsSender, catalogNetworkPeers, retiredCatalogSession, retiredSessionReason } from "./comms.ts";
 import {
   agentClose,
   agentLaunch,
@@ -178,7 +178,14 @@ export default function muster(host: ExtensionAPI) {
   const ProjectParam = Type.Optional(Type.String({ description: "Project dir (absolute). Default: MUSTER_PROJECT, then cwd." }));
 
   pi.on("tool_call", event => {
-    if (!env.MUSTER_AGENT || !env.MUSTER_PROJECT || !env.MUSTER_ROLE || event.toolName !== "intercom") return;
+    if (event.toolName !== "intercom") return;
+    if (["send", "ask", "reply", "handover"].includes(String(event.input.action)) && typeof event.input.to === "string") {
+      try {
+        const reason = retiredSessionReason(homedir(), event.input.to);
+        if (reason) return { block: true, reason };
+      } catch (error) { return { block: true, reason: String(error) }; }
+    }
+    if (!env.MUSTER_AGENT || !env.MUSTER_PROJECT || !env.MUSTER_ROLE) return;
     if (!["send", "ask", "reply"].includes(String(event.input.action)) || typeof event.input.message !== "string") return;
     const error = unreadable([event.input.message]);
     if (error) return { block: true, reason: error.content[0]!.text };
@@ -225,7 +232,7 @@ export default function muster(host: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionId();
       const parent = findOwnerPost(session, params.uri);
       const body = capBody(params.text);
-      return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${parent.author} · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
+      return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
     },
   });
 

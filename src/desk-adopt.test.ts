@@ -1,8 +1,9 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { sessionSuccessorsPath } from "./comms.ts";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { decodeMachines, type AgentRow } from "./domain.ts";
+import { decodeMachines, decodeSessionSuccessor, type AgentRow } from "./domain.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus } from "./ops.ts";
 import { MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
 import { load, mutate } from "./store.ts";
@@ -43,6 +44,7 @@ it.each([false, true])("re-adopts an interrupted session in a new pane (remote=%
   const status = await s.run(projectStatus(s.dir, { act: true }));
   expect(status.agents.find(row => row.name === "desk")).toMatchObject({ state: "running", pane: s.pane.pane_id, action: `re-adopted ${s.pane.pane_id}` });
   expect((await runWith(s.h, load(s.dir))).agents[0]!.pane).toMatchObject({ paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: "new-tab", openedByMuster: false });
+  expect(existsSync(sessionSuccessorsPath(s.h.home))).toBe(false);
   s.untouched();
 });
 
@@ -62,6 +64,7 @@ it.each([false, true])("adopts a fork's parent session evidence without changing
   await s.run(projectStatus(s.dir));
   expect((await runWith(s.h, load(s.dir))).agents[0]).toMatchObject({ state: "running", sessionFile: file, sessionId: "new-session" });
   expect(readFileSync(file, "utf8")).toBe(content);
+  expect(decodeSessionSuccessor(JSON.parse(readFileSync(sessionSuccessorsPath(s.h.home), "utf8").trim()))).toEqual({ at: s.h.now.toISOString(), project: "probe", row: "desk", from: s.original.sessionId, to: "new-session" });
   s.untouched();
 });
 
