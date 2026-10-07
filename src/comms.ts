@@ -35,7 +35,8 @@ export function retiredSessionReason(home: string, to: string): string | undefin
     let record: SessionSuccessor;
     try { record = decodeSessionSuccessor(JSON.parse(line)); }
     catch { throw new CommsError("session successor history invalid; send refused"); }
-    if (record.from === to && record.from !== record.to) match = record;
+    if (record.to === to) match = undefined; // A restore can revive a previously retired id.
+    else if (record.from === to) match = record;
   }
   return match ? `session ${match.from} retired by restart; successor ${match.to}; send to ${match.project}/${match.row} or the new id` : undefined;
 }

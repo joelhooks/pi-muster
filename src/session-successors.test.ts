@@ -11,6 +11,7 @@ import { appendOwnerItem, deliverOwnerItem, forwardOwner, ownerPath } from "./ow
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { mutate } from "./store.ts";
+import { OUTBOX_REQUEST_EVENT, OUTBOX_RESULT_EVENT } from "./intercom.ts";
 
 const successor = { at: "2026-10-07T22:00:00.000Z", project: "probe", row: "desk", from: "old-session", to: "new-session" };
 
@@ -33,6 +34,34 @@ describe("private session successor history", () => {
     expect(retiredSessionReason(h.home, successor.from)).toBe("session old-session retired by restart; successor new-session; send to probe/desk or the new id");
     expect(() => assertCurrentSession(h.home, { kind: "session", id: successor.from })).toThrow("successor new-session");
     for (const to of ["probe/desk", "new-session", "old", "desk", "did:web:example.test"]) expect(() => assertCurrentSession(h.home, to)).not.toThrow();
+  });
+
+  it("allows a revived id after A → B → A and refuses the now-retired B", async () => {
+    const h = harness();
+    recordSessionSuccessor(h.home, successor);
+    const listeners = new Map<string, (payload: unknown) => void>();
+    const sent: string[] = [];
+    const comms = createComms({ home: h.home, projectDir: h.root, adapterEnv: () => "intercom", createId: () => "id", events: {
+      on: (event, listener) => { listeners.set(event, listener); return () => { listeners.delete(event); }; },
+      emit: (event, payload) => {
+        if (event !== OUTBOX_REQUEST_EVENT) return;
+        const request = payload as { requestId: string; to: string };
+        sent.push(request.to);
+        listeners.get(OUTBOX_RESULT_EVENT)?.({ requestId: request.requestId, status: "sent" });
+      },
+    } });
+    try {
+      expect(await Effect.runPromise(comms.send(successor.from, "Hello."))).toMatchObject({ status: "failed" });
+      recordSessionSuccessor(h.home, { ...successor, from: successor.to, to: successor.from });
+      expect(retiredSessionReason(h.home, successor.from)).toBeUndefined();
+      expect(await Effect.runPromise(comms.send(successor.from, "Hello again."))).toMatchObject({ status: "delivered" });
+      expect(await Effect.runPromise(comms.send(successor.to, "Hello."))).toMatchObject({ status: "failed", detail: expect.stringContaining("successor old-session") });
+      expect(sent).toEqual([successor.from]);
+      // A subsequent restart must retire the revived id again.
+      recordSessionSuccessor(h.home, successor);
+      expect(retiredSessionReason(h.home, successor.from)).toContain("successor new-session");
+      expect(retiredSessionReason(h.home, successor.to)).toBeUndefined();
+    } finally { comms.dispose(); }
   });
 
   it("fails closed on malformed history, but aliases do not depend on it", () => {
