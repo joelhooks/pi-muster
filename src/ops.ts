@@ -60,7 +60,7 @@ import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
 import { cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, remoteNode, sshProc, withMachineLaunchLock } from "./remote.ts";
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
-import { remoteCommsEnvironment } from "./comms.ts";
+import { recordSessionSuccessor, remoteCommsEnvironment } from "./comms.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
@@ -310,6 +310,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: liveRestore.profile, musterExtension: machine.musterExtension });
       const restore = { cwd, argv: [...wrap, "pi", ...restoreArgv], env: agentEnvironment };
       row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore });
+      if (params.action === "restore") yield* recordRebind(project.slug, name, requestedId, row.sessionId);
       yield* paneRename(binding.paneId, label);
       const prompt = message.expected;
       let proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined, networkBrief) : null;
@@ -693,7 +694,9 @@ const adoptionSession = (row: AgentRow, pane: PaneInfo) => Effect.gen(function* 
 
 const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessionFile: string; sessionId: string }, preserveState = false) => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  return yield* mutate(dir, project => Effect.gen(function* () {
+  let slug = "";
+  const adopted = yield* mutate(dir, project => Effect.gen(function* () {
+    slug = project.slug;
     const latest = yield* findRow(project, row.name);
     yield* requireOwner(latest, env.sessionId, false, project.slug);
     if (latest.state !== row.state || latest.sessionId !== row.sessionId || latest.sessionFile !== row.sessionFile ||
@@ -712,6 +715,8 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
     const next: AgentRow = { ...latest, ...session, pane: adoptionBinding(latest, pane), state, restore, updatedAt: iso(env) };
     return [withRow(project, next), next] as const;
   }));
+  yield* recordRebind(slug, row.name, row.sessionId, adopted.sessionId);
+  return adopted;
 });
 
 /** Search only the project's space (remote launches use its label on that machine). */
@@ -790,7 +795,11 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
       const failedModel = row.state === "failed" && row.events?.some(event => event.type === "MODEL_ERROR");
       const adopt = !failedModel && matches && ["launching", "failed"].includes(row.state);
       if (adopt && act && mine) current = yield* patchRow(dir, row.name, row.state, [{ type: "ADOPT" }], { sessionFile: file });
-      if (act && mine && (pane.pane_id !== row.pane.paneId || (file && file !== current.sessionFile && !["launching", "failed"].includes(current.state)))) current = yield* patchRow(dir, row.name, current.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id }, ...(file ? { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId } : {}) });
+      if (act && mine && (pane.pane_id !== row.pane.paneId || (file && file !== current.sessionFile && !["launching", "failed"].includes(current.state)))) {
+        const previous = current.sessionId;
+        current = yield* patchRow(dir, row.name, current.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id }, ...(file ? { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId } : {}) });
+        yield* recordRebind(project.slug, row.name, previous, current.sessionId);
+      }
     }
     const mtime = current.sessionFile ? mtimes.get(`${row.machine}:${current.sessionFile}`) ?? null : null;
     const silent = mtime === null ? null : Math.max(0, env.now().getTime() - mtime);
@@ -859,6 +868,15 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
 // ---------- small pure helpers ----------
 
 const iso = (env: { now: () => Date }) => env.now().toISOString();
+const recordRebind = (project: string, row: string, from: string, to: string) => Effect.gen(function* () {
+  if (from === to) return;
+  const env = yield* MusterEnv;
+  yield* Effect.try({
+    try: () => recordSessionSuccessor(env.home, { at: iso(env), project, row, from, to }),
+    catch: error => new GuardFailed({ guard: "session-successor", message: `catalog rebound; successor history needs repair: ${String(error)}` }),
+  });
+});
+
 const recordOwnerForward = (from: string, to: string, project: string, env: { home: string; now: () => Date }) => Effect.try({
   try: () => forwardOwner({ from, to, project, home: env.home, at: iso(env) }),
   catch: error => new StoreError({ path: env.home, message: `owner handover failed: ${String(error)}` }),
@@ -2110,6 +2128,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
         return rebound;
       })));
       phase = "rebound";
+      yield* recordRebind(project.slug, old.name, old.sessionId, row.sessionId);
       // Install scoped owner forwarding before telling the replacement to read
       // its inbox, and never before the authoritative catalog write.
       yield* recordOwnerForward(old.sessionId, id, project.slug, env).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`catalog rebound; scoped owner forward needs repair: ${error.message}`); })));
@@ -2630,6 +2649,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       ...(params.action === "restore" && existing?.owner === existing?.sessionId ? { owner: actualId ?? row.sessionId } : {}),
       restore,
     });
+    if (params.action === "restore") yield* recordRebind(project.slug, row.name, row.sessionId, running.sessionId);
 
     const text = message.expected;
     let proof: Proof | null = text && networkBrief && launched.pending
@@ -3563,6 +3583,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
                 sessionId,
                 restore,
               });
+              yield* recordRebind(project.slug, row.name, row.sessionId, current.sessionId);
               action = "adopted (live pi session matches)";
             } else {
               action = "adoptable (live pi session matches; act: false)";
@@ -3590,10 +3611,12 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       if (rebinding.kind === "none" && !reAdoption && !modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
       const herdrFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
       if (act && row.owner === env.sessionId && !adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
+        const previous = current.sessionId;
         current = yield* patchRow(dir, row.name, current.state, [], {
           sessionFile: herdrFile,
           sessionId: sessionIdFromFile(herdrFile) ?? current.sessionId,
         }).pipe(Effect.catch(() => Effect.succeed(current)));
+        yield* recordRebind(project.slug, row.name, previous, current.sessionId);
       }
       const file = current.sessionFile;
       const mtime = file ? sessionMtimeMs(file) : null;

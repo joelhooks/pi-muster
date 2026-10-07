@@ -11,7 +11,8 @@ import { ownerFeed } from "./owner-feed.ts";
 import muster, { registerRestartExit } from "./extension-main.ts";
 import * as ops from "./ops.ts";
 import { InputError } from "./errors.ts";
-import { NetworkComms } from "./comms.ts";
+import { NetworkComms, sessionSuccessorsPath, retiredSessionReason } from "./comms.ts";
+import { decodeSessionSuccessor } from "./domain.ts";
 import { snapshotRestartSession } from "./herdr.ts";
 import { existsSync } from "node:fs";
 
@@ -62,6 +63,10 @@ describe("restart by fork", () => {
     }));
     const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.provideService(Comms, { ...NetworkComms, send: sent })));
     expect(sent).toHaveBeenCalledOnce();
+    const successor = decodeSessionSuccessor(JSON.parse(readFileSync(sessionSuccessorsPath(s.h.home), "utf8").trim()));
+    expect(successor).toEqual({ at: s.h.now.toISOString(), project: "probe", row: "worker", from: s.launch.row.sessionId, to: result.row.sessionId });
+    expect(retiredSessionReason(s.h.home, s.launch.row.sessionId)).toContain(`successor ${result.row.sessionId}`);
+    expect(retiredSessionReason(s.h.home, "probe/worker")).toBeUndefined();
     expect(result.proof).toMatchObject({ state: "proven", via: "network" });
     expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_COMMS='network'");
     expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_RESTART_GATE=");
@@ -95,6 +100,7 @@ describe("restart by fork", () => {
     });
     await expect(s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }))).rejects.toThrow("row changed");
     expect(existsSync(gate)).toBe(false);
+    expect(existsSync(sessionSuccessorsPath(s.h.home))).toBe(false);
   });
   it.each([false, true])("mid-turn restart tolerates only the empty startup placeholder (self %s)", async self => {
     const s = await setup(false, self ? "desk" : "worker");

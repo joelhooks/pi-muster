@@ -51,6 +51,14 @@ export const Slug = Schema.String.check(
 export const SessionId = Schema.String.check(
   Schema.isPattern(SESSION_ID_RE, { message: "invalid Pi session id" }),
 );
+/** Private append-only history of committed row rebinds. */
+export const SessionSuccessor = Schema.Struct({
+  at: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T/u)),
+  project: Slug, row: AgentName, from: SessionId, to: SessionId,
+});
+export type SessionSuccessor = typeof SessionSuccessor.Type;
+export const decodeSessionSuccessor = Schema.decodeUnknownSync(SessionSuccessor);
+
 /** Private machine configuration, never a catalog or package artifact. */
 export const NetworkCommsConfig = Schema.Struct({
   endpoint: Schema.String.check(Schema.isPattern(/^https?:\/\//u)),
