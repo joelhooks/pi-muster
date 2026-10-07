@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { Effect, Schema, Stream } from "effect";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { consumeNetworkMailbox, networkFencePath, networkIdentityPath, readConsumerFence, sendWithConsumerFence } from "./comms-network.ts";
 import { MailboxClientError } from "./vendor/rat-king-mailbox-client/error.ts";
 import { Main } from "./vendor/rat-king-lexicon/runtime.lease.ts";
@@ -49,6 +49,54 @@ function consumer(root: string, watch: Parameters<typeof consumeNetworkMailbox>[
 }
 
 describe("detached launch borrows the boss consumer fence", () => {
+  it("a provisional or refused replacement leaves the old fence and lease untouched", async () => {
+    const root = home(); const gate = join(root, "restart.ready");
+    privateFile(networkFencePath(root, did), lease(1));
+    const acquire = vi.fn(() => Effect.succeed(lease(2)));
+    const release = vi.fn(() => Effect.void);
+    const controller = new AbortController();
+    vi.stubEnv("MUSTER_RESTART_GATE", gate);
+    try {
+      const run = Effect.runPromise(consumeNetworkMailbox({ home: root, agent: "desk", session: "replacement", mailbox: {
+        lease: { acquire, renew: () => Effect.succeed(lease(1)), resolve: () => Effect.succeed(lease(1)), release },
+        watch: () => Stream.die("provisional watch must not start"), open: () => Effect.die("unexpected"), deliver: () => Effect.die("unexpected"), ack: () => Effect.die("unexpected"),
+      }, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void }), { signal: controller.signal }).catch(() => {});
+      await new Promise(resolve => setTimeout(resolve, 5));
+      expect(acquire).not.toHaveBeenCalled();
+      expect(readConsumerFence(root, did)).toMatchObject({ generation: 1 });
+      controller.abort(); await run;
+      expect(acquire).not.toHaveBeenCalled(); expect(release).not.toHaveBeenCalled();
+      expect(readConsumerFence(root, did)).toMatchObject({ generation: 1 });
+    } finally { controller.abort(); vi.unstubAllEnvs(); }
+  });
+
+  it("activates only after the marker names the replacement session", async () => {
+    const root = home(); const gate = join(root, "restart.ready");
+    const watch = vi.fn(() => Stream.empty);
+    vi.stubEnv("MUSTER_RESTART_GATE", gate);
+    try {
+      const c = consumer(root, watch);
+      const run = Effect.runPromise(c.run);
+      privateFile(gate, "another-session");
+      await new Promise(resolve => setTimeout(resolve, 5)); expect(watch).not.toHaveBeenCalled();
+      privateFile(gate, "desk-session"); await run;
+      expect(watch).toHaveBeenCalledOnce(); expect(c.release.calls).toBe(1);
+    } finally { vi.unstubAllEnvs(); }
+  });
+
+  it("an old consumer reports a foreign lease and never steals it back", async () => {
+    const root = home(); seed(root); let acquisitions = 0;
+    const foreign = Schema.decodeUnknownSync(Main)({ ...lease(2), harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: "replacement" } });
+    const run = consumeNetworkMailbox({ home: root, agent: "desk", session: "desk-session", mailbox: {
+      lease: { acquire: () => Effect.sync(() => { acquisitions++; return lease(1); }), renew: () => Effect.succeed(lease(1)), resolve: () => Effect.succeed(foreign), release: () => Effect.void },
+      watch: () => { privateFile(networkFencePath(root, did), foreign); return Stream.fail(mismatch()); },
+      open: () => Effect.die("unexpected"), deliver: () => Effect.die("unexpected"), ack: () => Effect.die("unexpected"),
+    }, senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void });
+    await expect(Effect.runPromise(run)).rejects.toThrow("lost its identity lease");
+    expect(acquisitions).toBe(1);
+    expect(readConsumerFence(root, did)).toMatchObject({ generation: 2 });
+  });
+
   it("sends from a separate process while the boss holds its lease, and unfenced after release", async () => {
     const root = home();
     const c = consumer(root, () => Stream.fromEffect(Effect.tryPromise({ try: async () => {

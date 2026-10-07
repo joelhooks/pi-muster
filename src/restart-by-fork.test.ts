@@ -5,12 +5,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
-import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
+import { Comms, MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
 import { appendOwnerItem, ingestOwnerItem, ownerRoute } from "./owner-queue.ts";
 import { ownerFeed } from "./owner-feed.ts";
 import muster, { registerRestartExit } from "./extension-main.ts";
 import * as ops from "./ops.ts";
 import { InputError } from "./errors.ts";
+import { NetworkComms } from "./comms.ts";
+import { snapshotRestartSession } from "./herdr.ts";
+import { existsSync } from "node:fs";
 
 beforeEach(() => vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"));
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
@@ -23,6 +26,11 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
   const proc: ProcShape = { run: (command, args, options) => {
     if (command === "ssh") {
       const script = args.at(-1) ?? "";
+      if (script.includes("snapshotRestartSession")) return Effect.sync(() => {
+        const paths = [...script.matchAll(/'([^']+)'/g)].map(match => match[1]!);
+        snapshotRestartSession(paths.at(-2)!, paths.at(-1)!);
+        return { code: 0, stdout: "", stderr: "" };
+      });
       if (script.includes("'muster-prerequisites'") || script.includes("exec env  'test'") || script.includes("exec env  'pi'")) return Effect.succeed({ code: 0, stdout: "", stderr: "" });
       return h.proc.run("sh", ["-c", script], { ...options, cwd: dir });
     }
@@ -31,7 +39,7 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
   } };
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: dir, workerWorktree: h.workerWorktree,
     createId: () => "receipt", sleep: ms => Effect.sync(() => h.sleep(ms)), emitPaneClose: h.emitPaneClose,
-    machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: dir, workerWorktree: h.workerWorktree, env: {}, wrap: [] } },
+    machines: { remote: { comms: { config: "/private/network.json" }, herdr: "remote", ssh: "remote", paths: {}, musterExtension: dir, workerWorktree: h.workerWorktree, env: {}, wrap: [] } },
     remoteHerdr: () => Effect.succeed(host.client()),
   };
   const run = <A, E>(effect: Effect.Effect<A, E, MusterEnv | Proc | import("./runtime.ts").Herdr | import("./runtime.ts").Comms>) => runWith(h, effect.pipe(Effect.provideService(MusterEnv, { ...env, sessionId: h.sessionId }), Effect.provideService(Proc, proc)));
@@ -40,6 +48,119 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
 }
 
 describe("restart by fork", () => {
+  it.each([false, true])("network restart activates after rebind and proves mailbox continuation (remote %s)", async remote => {
+    const s = await setup(remote);
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, policy: { ...p.policy!, comms: "network" } }, undefined] as const)));
+    const sent = vi.fn((id: import("./runtime.ts").CommsTarget, message: string) => Effect.sync(() => {
+      const p = JSON.parse(readFileSync(projectPath(s.dir), "utf8"));
+      const row = p.agents.find((row: { sessionId: string }) => row.sessionId === id);
+      expect(row).toBeTruthy(); // Committed before mailbox work.
+      expect(row.restore.env.MUSTER_COMMS).toBe("network");
+      expect(JSON.parse(readFileSync(row.restore.env.MUSTER_RESTART_GATE, "utf8"))).toBe(id);
+      appendFileSync(row.sessionFile, JSON.stringify({ type: "message", message: { role: "user", content: `${message}\n\n[Authenticated agent message from owner, not Joel.]` } }) + "\n" + JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Continuing." }], stopReason: "stop" } }) + "\n");
+      return { status: "accepted" as const };
+    }));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.provideService(Comms, { ...NetworkComms, send: sent })));
+    expect(sent).toHaveBeenCalledOnce();
+    expect(result.proof).toMatchObject({ state: "proven", via: "network" });
+    expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_COMMS='network'");
+    expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_RESTART_GATE=");
+  });
+
+  it("post-rebind mailbox failure preserves the authoritative replacement and reports unproven delivery", async () => {
+    const s = await setup();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, policy: { ...p.policy!, comms: "network" } }, undefined] as const)));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.provideService(Comms, { ...NetworkComms, send: () => Effect.succeed({ status: "failed", detail: "mailbox unavailable" }) })));
+    expect(result.proof?.state).toBe("unproven");
+    expect(result.row.delivery).toBe("unproven");
+    expect((await s.run(load(s.dir))).agents[0]?.sessionId).toBe(result.row.sessionId);
+    expect((await s.run(load(s.dir))).agents[0]?.delivery).toBe("unproven");
+    expect(s.host.panes.has(result.row.pane!.paneId)).toBe(true);
+    expect(result.notes.join("\n")).toContain("catalog rebound; network continuation needs repair");
+  });
+
+  it("failed rebind never writes the consumer activation marker", async () => {
+    const s = await setup();
+    const handle = s.host.handle.bind(s.host);
+    let gate = "";
+    vi.spyOn(s.host, "handle").mockImplementation((method, params) => {
+      const result = handle(method, params);
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) {
+        gate = /MUSTER_RESTART_GATE='([^']+)'/.exec(s.host.launcherScripts.at(-1)!)![1]!;
+        expect(existsSync(gate)).toBe(false);
+        const p = JSON.parse(readFileSync(projectPath(s.dir), "utf8")); p.agents[0].owner = "other";
+        writeFileSync(projectPath(s.dir), JSON.stringify(p));
+      }
+      return result;
+    });
+    await expect(s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }))).rejects.toThrow("row changed");
+    expect(existsSync(gate)).toBe(false);
+  });
+  it.each([false, true])("mid-turn restart tolerates only the empty startup placeholder (self %s)", async self => {
+    const s = await setup(false, self ? "desk" : "worker");
+    if (self) s.h.sessionId = s.launch.row.sessionId;
+    const old = s.launch.row;
+    const oldBytes = readFileSync(old.sessionFile!, "utf8");
+    const handle = s.host.handle.bind(s.host);
+    vi.spyOn(s.host, "handle").mockImplementation((method, params) => {
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) {
+        // The parent's live turn appends AFTER the immutable fork boundary.
+        appendFileSync(old.sessionFile!, JSON.stringify({ type: "message", message: { role: "assistant", content: [] } }) + "\n");
+      }
+      const result = handle(method, params);
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) {
+        const file = s.host.panes.get(String(params.pane_id))!.agent_session!.value;
+        const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+        const index = lines.findIndex(line => line.includes("You continue worker after a restart"));
+        lines.splice(index, 0, JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: "stop" } }));
+        writeFileSync(file, lines.join("\n") + "\n");
+      }
+      return result;
+    });
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(result.proof?.state).toBe("proven");
+    const snapshot = result.argv[result.argv.indexOf("--fork") + 1]!;
+    expect(readFileSync(snapshot, "utf8")).toBe(oldBytes.trimEnd().split("\n").slice(0, -1).join("\n") + "\n");
+  });
+
+  it("recovers a startup hook that consumed the argv prompt with an empty turn", async () => {
+    const s = await setup(false, "desk"); s.h.sessionId = s.launch.row.sessionId;
+    const handle = s.host.handle.bind(s.host);
+    vi.spyOn(s.host, "handle").mockImplementation((method, params) => {
+      const result = handle(method, params);
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) {
+        const file = s.host.panes.get(String(params.pane_id))!.agent_session!.value;
+        const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+        const index = lines.findIndex(line => line.includes("You continue worker after a restart"));
+        lines.splice(index, 2, JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: "stop" } }));
+        writeFileSync(file, lines.join("\n") + "\n");
+      }
+      return result;
+    });
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(result.proof?.state).toBe("proven");
+    expect(s.host.typedPrompts).toHaveLength(1);
+    expect(result.notes.join("\n")).toContain("rechecked the original fork boundary");
+  });
+
+  it.each(["reply", "toolCall", "thinking", "error", "aborted"])("refuses real fresh assistant %s before the continuation", async kind => {
+    const s = await setup();
+    const before = await s.run(load(s.dir));
+    const handle = s.host.handle.bind(s.host);
+    vi.spyOn(s.host, "handle").mockImplementation((method, params) => {
+      const result = handle(method, params);
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh")) {
+        const file = s.host.panes.get(String(params.pane_id))!.agent_session!.value;
+        const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+        const index = lines.findIndex(line => line.includes("You continue worker after a restart"));
+        lines.splice(index, 0, JSON.stringify({ type: "message", message: { role: "assistant", content: ["error", "aborted"].includes(kind) ? [] : [{ type: kind === "reply" ? "text" : kind, text: "real content" }], ...(["error", "aborted"].includes(kind) ? { stopReason: kind } : {}) } }));
+        writeFileSync(file, lines.join("\n") + "\n");
+      }
+      return result;
+    });
+    await expect(s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }))).rejects.toThrow("wrong boundary");
+    expect(await s.run(load(s.dir))).toEqual(before);
+  });
   it.each([false, true])("replaces a worker on its own host (remote %s), never in place", async remote => {
     const s = await setup(remote);
     const old = s.launch.row;
@@ -52,7 +173,9 @@ describe("restart by fork", () => {
     expect(result.row.sessionId).not.toBe(old.sessionId);
     expect(result.row.parentSessionFile).toBe(old.sessionFile);
     expect(result.argv).toContain("--fork");
-    expect(result.argv).toContain(old.sessionFile);
+    const snapshot = result.argv[result.argv.indexOf("--fork") + 1]!;
+    expect(snapshot).not.toBe(old.sessionFile);
+    expect(readFileSync(snapshot, "utf8").split("\n").filter(Boolean)).toEqual(readFileSync(old.sessionFile!, "utf8").split("\n").filter(Boolean));
     expect(result.argv).toContain("openai-codex/gpt-6.1-sol:low");
     expect(result.row.restore?.argv).toContain(result.row.sessionFile);
     expect(result.row.restore?.argv).not.toContain(old.sessionFile);
