@@ -518,7 +518,20 @@ describe("remote owner operations", () => {
   it.each([false, true])("retire exact pi-notes scaffolds but preserve edits (%s)", async edited => {
     const s = setup(); await s.open(); const launched = await s.launch();
     mkdirSync(join(launched.row.cwd, ".brain"), { recursive: true });
-    writeFileSync(join(launched.row.cwd, "BRAIN.md"), readFileSync(join(process.cwd(), "BRAIN.md")));
+    // Exact pi-notes 8a8c3da template owned by this fixture; the source tree has no BRAIN.md.
+    const brain = [
+      "# pi-notes brain", "",
+      "Use pi-notes as an agent-connected project brain, not a generic notes site.", "",
+      "- Organize by usefulness: Projects, Areas, Resources, Archives.",
+      "- Ask: Where will this be useful next?",
+      "- Keep notes atomic, linked, and source-grounded.",
+      "- Capture only durable decisions, terms, tradeoffs, gotchas, sources, questions, and review feedback.",
+      "- Refine captures into graph edges, backlinks, summaries, and canonical concepts.",
+      "- Express knowledge as code, docs, decisions, UI, issues, or plans. Storage is not the goal; output is.",
+      "- Browser pages are read/review surfaces. Agents own source edits and must leave receipts.",
+      "- Avoid bloated PKM ceremony, append-only logs as truth, Obsidian cloning, and generic static-site sludge.", "",
+    ].join("\n");
+    writeFileSync(join(launched.row.cwd, "BRAIN.md"), brain);
     const index = ["# Project Brain", "", "The rendered Brain index is programmatic.", "", "Open `/notes` in the local pi-notes Document Host to browse entries sorted by PARA.", "", "Do not maintain a manual page list here; `.brain/**/*.svx` is discovered automatically.", ""].join("\n");
     writeFileSync(join(launched.row.cwd, ".brain/index.svx"), index + (edited ? "private edited note" : ""));
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
