@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
@@ -11,6 +11,44 @@ import type { NetworkPayload } from "./domain.ts";
 import type { CommsError } from "./runtime.ts";
 
 describe("owner feed lifecycle", () => {
+  it("holds a pending mention at a gated start, leaves the argv prompt first, and resumes after activation", async () => {
+    const home = mkdtempSync(join(tmpdir(), "owner-gated-")); const gate = join(home, "restart.ready");
+    const handlers = new Map<string, (...args: unknown[]) => unknown>(); const sent = vi.fn();
+    const journal: string[] = [];
+    const pi = { on: (name: string, fn: (...args: unknown[]) => unknown) => handlers.set(name, fn), registerTool() {}, registerMessageRenderer() {}, appendEntry() {},
+      sendMessage: (message: { content: string }, options: unknown) => { sent(message, options); journal.push(message.content); } };
+    const ctx = { isIdle: () => true, sessionManager: { getSessionId: () => "replacement", getBranch: () => [] } };
+    appendOwnerItem("replacement", { author: "owner", kind: "question", title: "pending at startup" }, home);
+    registerOwnerFeed(pi as never, { HOME: home, MUSTER_RESTART_GATE: gate });
+    vi.useFakeTimers();
+    try {
+      handlers.get("session_start")!({}, ctx);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(handlers.get("before_agent_start")!({}, ctx)).toBeUndefined();
+      handlers.get("agent_end")!({}, ctx);
+      expect(sent).not.toHaveBeenCalled();
+      writeFileSync(gate, JSON.stringify("another-session"), { mode: 0o600 });
+      await vi.advanceTimersByTimeAsync(30_000); expect(sent).not.toHaveBeenCalled();
+      journal.push("The argv continuation prompt");
+      writeFileSync(gate, JSON.stringify("replacement"), { mode: 0o600 });
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => expect(sent).toHaveBeenCalledOnce());
+      expect(journal[0]).toBe("The argv continuation prompt"); expect(journal[1]).toContain("pending at startup");
+    } finally { await handlers.get("session_shutdown")!(); vi.useRealTimers(); }
+  });
+
+  it("shutdown awaits the consumer finalizer, rather than just aborting its signal", async () => {
+    const home = mkdtempSync(join(tmpdir(), "owner-release-")); const handlers = new Map<string, (...args: unknown[]) => unknown>();
+    const pi = { on: (name: string, fn: (...args: unknown[]) => unknown) => handlers.set(name, fn), registerTool() {}, registerMessageRenderer() {}, appendEntry() {}, sendMessage() {}, sendUserMessage() {} };
+    const ctx = { isIdle: () => false, sessionManager: { getSessionId: () => "reader", getBranch: () => [] } };
+    let finishRelease!: () => void; const release = new Promise<void>(resolve => { finishRelease = resolve; }); const releasing = vi.fn();
+    const stop = registerOwnerFeed(pi as never, { HOME: home }, { consume: (_ctx, signal) => Effect.runPromise(Effect.never.pipe(
+      Effect.ensuring(Effect.promise(() => { releasing(); return release; }))), { signal }) });
+    handlers.get("session_start")!({}, ctx); await Promise.resolve();
+    const stopped = vi.fn(); const shutdown = stop().then(stopped);
+    await vi.waitFor(() => expect(releasing).toHaveBeenCalledOnce()); expect(stopped).not.toHaveBeenCalled();
+    finishRelease(); await shutdown; expect(stopped).toHaveBeenCalledOnce();
+  });
   it("starts a mailbox consumer only on session_start, ingests owner records, delivers attributed briefs and aborts on shutdown", async () => {
     const home = mkdtempSync(join(tmpdir(), "owner-network-ext-"));
     const handlers = new Map<string, (...args: unknown[]) => unknown>();

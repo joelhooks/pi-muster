@@ -1,6 +1,6 @@
 // Pi TUI patterns: message-fold, detail-fold (delegated to owner-view).
 // Renderer changes stay separate from this file's wake and delivery lifecycle.
-import { mkdirSync, watch } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
@@ -12,10 +12,20 @@ import { OwnerTimelineView, ownerInboxText, ownerLine, readOwnerTimelineData } f
 import { ownerPath, writeReaderAsync, retireReader, ingestOwnerItem } from "./owner-queue.ts";
 
 import { Effect } from "effect";
-import type { NetworkPayload } from "./domain.ts";
+import { decodeOwnerSession, type NetworkPayload } from "./domain.ts";
 import { CommsError } from "./runtime.ts";
 import { createActor, type ActorRefFrom } from "xstate";
 import { networkConsumerMachine } from "./machines.ts";
+
+/** Missing, malformed and foreign activation markers all hold feeds, without advancing cursors. */
+export function restartFeedActivated(session: string, env: Readonly<Record<string, string | undefined>>): boolean {
+  const gate = env.MUSTER_RESTART_GATE;
+  if (!gate) return true;
+  try {
+    const stat = lstatSync(gate);
+    return stat.isFile() && (stat.mode & 0o777) === 0o600 && decodeOwnerSession(JSON.parse(readFileSync(gate, "utf8"))) === session;
+  } catch { return false; }
+}
 
 /** Registration is inert. Session lifecycle owns its file watch and fallback poll. */
 export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>, network?: {
@@ -29,6 +39,7 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
   let poll: ReturnType<typeof setInterval> | undefined;
   let pending: ReturnType<typeof setTimeout> | undefined;
   let consumer: AbortController | undefined;
+  const consuming = new Set<Promise<void>>();
   let networkActor: ActorRefFrom<typeof networkConsumerMachine> | undefined;
   let beating: Promise<void> | undefined;
   const home = () => env.HOME ?? homedir();
@@ -66,28 +77,31 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       if (!actor || networkActor !== actor || actor.getSnapshot().value === "failed") return;
       actor.send({ type: "FAILURE" }); consumer?.abort(); consumer = undefined;
       const detail = error instanceof CommsError ? error.message : "NetworkComms consumer stopped. Check its config, identity lease and recipient binding (private output withheld).";
+      if (!restartFeedActivated(id, env)) return;
       pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. After fixing the cause, restart this session (agent_launch action "restart", or /quit and relaunch the same session); never /reload.`, display: true }, { triggerTurn: true });
     };
     const refreshNetwork = () => {
-      if (!network || !actor) return;
+      if (!network || !actor || !restartFeedActivated(id, env)) return;
       void (network.mode?.(ctx) ?? Promise.resolve("network")).then(mode => {
         if (networkActor !== actor) return;
         if (mode === "intercom") { actor.send({ type: "INTERCOM" }); consumer?.abort(); consumer = undefined; return; }
         if (actor.getSnapshot().value !== "off") return;
         actor.send({ type: "NETWORK" });
         const controller = new AbortController(); consumer = controller;
-        void network.consume(ctx, controller.signal, payload => Effect.try({
+        const task = network.consume(ctx, controller.signal, payload => Effect.try({
           try: () => {
             if (controller.signal.aborted) throw new Error("retired consumer");
             if (payload.type === "owner") {
               ingestOwnerItem(id, payload.item, home());
-              if (ctx.isIdle()) current.flush();
+              if (restartFeedActivated(id, env) && ctx.isIdle()) current.flush();
             } else {
               // Preserve the brief prefix for first-turn proof; attribution is not operator authority.
               pi.sendUserMessage(`${payload.body}\n\n[Authenticated agent message from ${payload.author}, not Joel.]`, { deliverAs: "followUp" });
             }
           }, catch: () => new CommsError("NetworkComms mailbox delivery could not be recorded"),
         })).then(() => { if (networkActor === actor && !controller.signal.aborted) actor.send({ type: "INTERCOM" }); }).catch(error => { if (!controller.signal.aborted) failed(error); });
+        consuming.add(task);
+        void task.finally(() => consuming.delete(task));
       }).catch(failed);
     };
     let ticking: Promise<void> | undefined;
@@ -98,7 +112,7 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       if (ticking) { again = true; return; }
       ticking = (async () => {
         // One asynchronous snapshot for both queue validation and idle delivery.
-        await current.poll(() => ctx.isIdle(), () => feed === current && readerStartedAt === startedAt);
+        await current.poll(() => ctx.isIdle(), () => feed === current && readerStartedAt === startedAt && restartFeedActivated(id, env));
         // One heartbeat in flight; a stalled disk skips beats instead of freezing the TUI.
         if (!beating && readerStartedAt === startedAt) {
           beating = writeReaderAsync(id, home(), Date.now(), process.pid, startedAt)
@@ -121,8 +135,10 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       poll = setInterval(tick, 30000); poll.unref?.(); tick();
     } catch { stop(); /* unavailable reader: writers retain the outbox fallback */ }
   });
-  pi.on("session_shutdown", stop);
-  pi.on("before_agent_start", (_event, ctx) => get(ctx).beforeTurn());
+  // Aborting starts Effect interruption; awaiting the task waits for its release/fence finalizer.
+  const stopAndRelease = async () => { stop(); await Promise.all([...consuming]); };
+  pi.on("session_shutdown", stopAndRelease);
+  pi.on("before_agent_start", (_event, ctx) => restartFeedActivated(ctx.sessionManager.getSessionId(), env) ? get(ctx).beforeTurn() : undefined);
   pi.on("agent_start", () => feed?.turnStarted());
   pi.on("agent_end", () => { feed?.turnEnded(); /* next poll checks Pi's real idle state */ });
   pi.registerMessageRenderer(OWNER_NOTE, (message, options, theme) => {
@@ -144,4 +160,5 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       return { content: [{ type: "text", text: ownerInboxText(result, result.cursor) }], details: result };
     },
   });
+  return stopAndRelease;
 }

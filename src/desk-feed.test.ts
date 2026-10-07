@@ -2,7 +2,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { queuePath } from "./desk.ts";
 import { deskProjectFor, registerDeskFeed } from "./desk-feed-ext.ts";
@@ -26,6 +26,25 @@ afterEach(() => {
 });
 
 describe("desk feed", () => {
+  it("holds startup backlog and turn hooks behind restart activation without consuming the cursor", async () => {
+    const dir = home(); const path = queuePath("space", dir); const gate = join(dir, "restart.ready");
+    post(path, { kind: "blocked", title: "waiting for activation" });
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>(); const sent: NoteMessage[] = [];
+    const pi = { on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(event, handler), registerMessageRenderer() {},
+      sendMessage: (message: NoteMessage) => sent.push(message), appendEntry() {} };
+    const ctx = { sessionManager: { getSessionId: () => "replacement", getBranch: () => [{ type: "custom", customType: CURSOR_ENTRY, data: { cursor: 0 } }] } };
+    registerDeskFeed(pi as never, { HOME: dir, HERDR_DESK_PROJECT: "space", MUSTER_RESTART_GATE: gate });
+    vi.useFakeTimers();
+    try {
+      handlers.get("session_start")!({}, ctx); await vi.advanceTimersByTimeAsync(30_200);
+      expect(handlers.get("before_agent_start")!({}, ctx)).toBeUndefined();
+      handlers.get("agent_start")!({}, ctx); handlers.get("agent_end")!({}, ctx);
+      expect(sent).toEqual([]);
+      writeFileSync(gate, JSON.stringify("foreign"), { mode: 0o600 }); await vi.advanceTimersByTimeAsync(30_200); expect(sent).toEqual([]);
+      writeFileSync(gate, JSON.stringify("replacement"), { mode: 0o600 }); await vi.advanceTimersByTimeAsync(30_200);
+      expect(sent).toHaveLength(1); expect(sent[0]?.content).toContain("waiting for activation");
+    } finally { handlers.get("session_shutdown")!({}, ctx); vi.useRealTimers(); }
+  });
   it("cards each new line when idle, holds them mid-turn, and never replays history", () => {
     const path = queuePath("space", home());
     const sent: NoteMessage[] = [];
@@ -45,7 +64,7 @@ describe("desk feed", () => {
     expect(sent[0]?.content).toContain("Desk inbox now: 1 open · ✅1 · oldest 1h.");
 
     feed.turnStarted();
-    post(path, { kind: "done", title: "minted", resolves: "i2" });
+    post(path, { kind: "done", title: "minted", resolves: sent[0]!.details.items[0]!.id });
     expect(feed.flush()).toBe(0);
     expect(feed.turnEnded()).toBe(1);
     expect(sent.at(-1)?.details.inbox.open).toBe(0);

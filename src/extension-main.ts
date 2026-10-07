@@ -87,7 +87,7 @@ function unreadable(fields: readonly (string | undefined)[]) {
 type RestartExit = { sessionId: string; dir: string; restart: Parameters<typeof finishRestart>[1] };
 
 /** No durable flag: only a proven self-restart in this process can arm its exit. */
-export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>) {
+export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>, release: () => Promise<void> = async () => {}) {
   let ending: RestartExit | undefined;
   let closing: RestartExit | undefined;
   pi.on("agent_end", (_event, ctx) => {
@@ -100,6 +100,8 @@ export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pendin
     const pending = closing;
     closing = undefined;
     if (!pending || pending.sessionId !== ctx.sessionManager.getSessionId()) return;
+    // close may kill this Pi process: finish the consumer's scoped release before asking Herdr.
+    await release();
     await close(pending, ctx);
   });
   return (pending: RestartExit) => { ending ??= pending; };
@@ -113,7 +115,7 @@ export default function muster(host: ExtensionAPI) {
   const comms = new Map<string, ReturnType<typeof createComms>>();
   const armRestartExit = registerRestartExit(pi, async (pending, ctx) => {
     await Effect.runPromise(finishRestart(pending.dir, pending.restart).pipe(Effect.provide(layer(ctx))));
-  });
+  }, () => stopOwnerFeed());
 
   registerCompaction(pi, env);
 
@@ -189,7 +191,7 @@ export default function muster(host: ExtensionAPI) {
     comms.clear();
   });
 
-  registerOwnerFeed(pi, env, { mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
+  const stopOwnerFeed = registerOwnerFeed(pi, env, { mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
 
   if ((worker || role === "boss") && env.MUSTER_OWNER) {
     pi.registerTool({

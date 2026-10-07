@@ -15,6 +15,7 @@ import type { DeskItem } from "./domain.ts";
 import { readRegistry } from "./registry.ts";
 import { compactWords, mobileOwnerRow } from "./owner-view.ts";
 import { formatAge } from "./switchboard.ts";
+import { restartFeedActivated } from "./owner-feed-ext.ts";
 
 const DEBOUNCE_MS = 150;
 /** fs.watch can miss events on some filesystems; the poll is the floor. */
@@ -58,6 +59,8 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
   let watcher: FSWatcher | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   let pending: ReturnType<typeof setTimeout> | undefined;
+  let session: string | undefined;
+  const activated = () => session !== undefined && restartFeedActivated(session, env);
   const claims = globalThis as Claims;
 
   const stop = () => {
@@ -67,13 +70,14 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
     if (pending) clearTimeout(pending);
     poll = pending = undefined;
     feed = undefined;
+    session = undefined;
   };
 
   const schedule = () => {
     if (pending) clearTimeout(pending);
     pending = setTimeout(() => {
       pending = undefined;
-      feed?.flush();
+      if (activated()) feed?.flush();
     }, DEBOUNCE_MS);
   };
 
@@ -81,6 +85,7 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
     stop();
     // Another desk feed in this process (the dark-wizard extension) already delivers: never twice.
     if (claims[FEED_CLAIM] && claims[FEED_CLAIM] !== OWNER) return;
+    session = ctx.sessionManager.getSessionId();
     const home = env.HOME ?? homedir();
     const project = deskProjectFor(ctx.sessionManager.getSessionId(), env, home);
     if (!project) return;
@@ -109,10 +114,10 @@ export function registerDeskFeed(pi: ExtensionAPI, env: Readonly<Record<string, 
     if (feed && claims[FEED_CLAIM] === OWNER) delete claims[FEED_CLAIM];
     stop();
   });
-  pi.on("before_agent_start", () => feed?.beforeTurn());
-  pi.on("agent_start", () => feed?.turnStarted());
+  pi.on("before_agent_start", () => activated() ? feed?.beforeTurn() : undefined);
+  pi.on("agent_start", () => { if (activated()) feed?.turnStarted(); });
   pi.on("agent_end", () => {
-    feed?.turnEnded();
+    if (activated()) feed?.turnEnded();
   });
 
   pi.registerMessageRenderer(NOTE, (message, options, theme) => {
