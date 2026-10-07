@@ -152,6 +152,16 @@ describe("remote launch hygiene", () => {
     expect(calls).toHaveLength(2); expect(calls[0]).toContain("'cliproxy-codex/gpt-6.1-sol:medium'"); expect(calls[0]).toContain("'/mapped/repo'");
     expect(notes.join(" ")).toContain("after waiting 1000 ms");
   });
+  it("includes slow capability probe time in the bounded busy wait", async () => {
+    const s = setup(); let probes = 0;
+    const proc: ProcShape = { run: (_command, _args, options) => Effect.sync(() => {
+      probes += 1; expect(options.timeoutMs).toBe(2000);
+      s.h.now = new Date(s.h.now.getTime() + 1500);
+      return { code: 75, stdout: JSON.stringify({ machine: "remote", verdict: "busy", checks: [], busy: ["gate held"] }), stderr: "" };
+    }) };
+    await expect(s.run(readyForRemoteLaunch("remote", config({ env: {} }), "/repo", "sol", 2000).pipe(Effect.provideService(Proc, proc)))).rejects.toThrow("busy after 2000 ms: gate held");
+    expect(probes).toBe(1);
+  });
   it.each(["not-ready", "busy", "mismatched"])("fails closed on a %s fleet capability receipt", async verdict => {
     const s = setup();
     const proc: ProcShape = { run: () => Effect.succeed({ code: verdict === "busy" ? 75 : 69, stdout: JSON.stringify({ machine: verdict === "mismatched" ? "other" : "remote", verdict: verdict === "busy" ? "busy" : "not-ready", checks: [{ name: "auth", ok: false, detail: "log in on target" }], busy: ["gate held"] }), stderr: "" }) };

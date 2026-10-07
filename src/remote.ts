@@ -42,9 +42,10 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
   const io = <T>(fn: () => T) => Effect.try({ try: fn, catch: error => new InputError({ message: `machine ${name}: launch queue at ${lock}: ${String(error)}` }) });
   const attempt = (path: string) => io(() => { try { mkdirSync(path, { mode: 0o700 }); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; } });
   yield* io(() => mkdirSync(queue, { recursive: true, mode: 0o700 }));
+  const started = env.now().getTime();
   let waited = 0;
   const pause = Effect.gen(function* () {
-    if (waited >= timeoutMs) return yield* new InputError({ message: `machine ${name}: FIFO launch lock timed out after ${timeoutMs} ms at ${lock}; inspect the holder and stale tickets before retrying` });
+    if (Math.max(waited, env.now().getTime() - started) >= timeoutMs) return yield* new InputError({ message: `machine ${name}: FIFO launch lock timed out after ${timeoutMs} ms at ${lock}; inspect the holder and stale tickets before retrying` });
     yield* env.sleep(100);
     waited += 100;
   });
@@ -176,17 +177,24 @@ export const readyForRemoteLaunch = (name: string, machine: MachineConfig, sourc
   const env = yield* MusterEnv;
   const runner = yield* Proc;
   const proc = sshProc(name, machine, runner, env.home);
+  const started = env.now().getTime();
   let waited = 0;
+  let lastBusy = "";
   const decode = Schema.decodeUnknownSync(Schema.Struct({ machine: Schema.String, verdict: Schema.Literals(["ready", "busy", "not-ready"]), checks: Schema.Array(Schema.Struct({ name: Schema.String, ok: Schema.Boolean, detail: Schema.String })), busy: Schema.Array(Schema.String) }));
   while (true) {
-    const result = yield* proc.run("fleet-compute", ["ready", "--machine", name, "--repo", source, "--model", model, "--json"], { cwd: "/", timeoutMs: 30_000, env: launchEnv });
+    const elapsed = Math.max(waited, env.now().getTime() - started);
+    if (lastBusy && elapsed >= timeoutMs) return yield* new InputError({ message: `machine ${name}: fleet capability busy after ${elapsed} ms: ${lastBusy}` });
+    const result = yield* proc.run("fleet-compute", ["ready", "--machine", name, "--repo", source, "--model", model, "--json"], { cwd: "/", timeoutMs: Math.max(1, Math.min(30_000, timeoutMs - elapsed)), env: launchEnv });
     const receipt = yield* Effect.try({ try: () => decode(JSON.parse(result.stdout)), catch: error => new InputError({ message: `machine ${name}: invalid fleet capability receipt (${result.code}): ${String(error)}` }) });
     if (receipt.machine !== name || result.code !== ({ ready: 0, busy: 75, "not-ready": 69 })[receipt.verdict]) return yield* new InputError({ message: `machine ${name}: fleet capability receipt identity or exit code disagrees` });
-    if (receipt.verdict === "ready") return [`machine ${name}: fleet capability ready${waited ? ` after waiting ${waited} ms` : ""}`];
+    if (receipt.verdict === "ready") return [`machine ${name}: fleet capability ready${waited ? ` after waiting ${Math.max(waited, env.now().getTime() - started)} ms` : ""}`];
     const reason = receipt.verdict === "busy" ? receipt.busy.join("; ") : receipt.checks.filter(check => !check.ok).map(check => `${check.name}: ${check.detail}`).join("; ");
-    if (receipt.verdict === "not-ready" || waited >= timeoutMs) return yield* new InputError({ message: `machine ${name}: fleet capability ${receipt.verdict}${waited ? ` after ${waited} ms` : ""}: ${reason}` });
-    yield* env.sleep(1000);
-    waited += 1000;
+    const spent = Math.max(waited, env.now().getTime() - started);
+    if (receipt.verdict === "not-ready" || spent >= timeoutMs) return yield* new InputError({ message: `machine ${name}: fleet capability ${receipt.verdict}${spent ? ` after ${spent} ms` : ""}: ${reason}` });
+    lastBusy = reason || "target reports busy";
+    const delay = Math.min(1000, timeoutMs - spent);
+    yield* env.sleep(delay);
+    waited += delay;
   }
 });
 

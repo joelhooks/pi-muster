@@ -65,13 +65,13 @@ describe("Muster CLI launch PATH", () => {
     const proc: ProcShape = { run: (command, args, options) => {
       if (command !== "ssh") return h.proc.run(command, args, options);
       const script = args.at(-1) ?? "";
-      if (["'node' '-e'", "'git'", "'mkdir'", "'mktemp'"].some(part => script.includes(part))) return h.proc.run("sh", ["-c", script.replace("exec env PATH='/configured/bin:/usr/bin'", "exec env")], options);
+      if (["'node' '-e'", "'git'", "'mkdir'", "'mktemp'"].some(part => script.includes(part))) return h.proc.run("sh", ["-c", script.replace(/PATH='\/(?:configured|profile)\/bin:\/usr\/bin'\s*/g, "")], options);
       return Effect.succeed({ code: 0, stdout: script.includes("'printenv' 'PATH'") ? "/remote/node/bin:/usr/bin\n" : "", stderr: "" });
     } };
     const env: EnvShape = {
       home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/owner/muster", workerWorktree: h.workerWorktree,
       createId: () => "remote-id", sleep: () => Effect.void, emitPaneClose: h.emitPaneClose,
-      machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree, env: configuredPath?.startsWith("/configured") ? { PATH: configuredPath } : {}, wrap: [] } },
+      machines: { remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home, ...(configuredPath?.startsWith("/configured") ? { PATH: configuredPath } : {}) }, wrap: [] } },
       remoteHerdr: () => Effect.succeed(remote.client()),
     };
     const result = await runWith(h, agentLaunch(dir, {

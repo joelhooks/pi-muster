@@ -31,7 +31,7 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
         snapshotRestartSession(paths.at(-2)!, paths.at(-1)!);
         return { code: 0, stdout: "", stderr: "" };
       });
-      if (script.includes("'muster-prerequisites'") || script.includes("exec env  'test'") || script.includes("exec env  'pi'")) return Effect.succeed({ code: 0, stdout: "", stderr: "" });
+      if (script.includes("'muster-prerequisites'") || script.includes(" 'test'") || script.includes(" 'pi'")) return Effect.succeed({ code: 0, stdout: "", stderr: "" });
       return h.proc.run("sh", ["-c", script], { ...options, cwd: dir });
     }
     if (command === "pi") return Effect.succeed({ code: 0, stdout: "", stderr: "" });
@@ -39,7 +39,7 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
   } };
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: dir, workerWorktree: h.workerWorktree,
     createId: () => "receipt", sleep: ms => Effect.sync(() => h.sleep(ms)), emitPaneClose: h.emitPaneClose,
-    machines: { remote: { comms: { config: "/private/network.json" }, herdr: "remote", ssh: "remote", paths: {}, musterExtension: dir, workerWorktree: h.workerWorktree, env: {}, wrap: [] } },
+    machines: { remote: { comms: { config: "/private/network.json" }, herdr: "remote", ssh: "remote", paths: {}, musterExtension: dir, workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: [] } },
     remoteHerdr: () => Effect.succeed(host.client()),
   };
   const run = <A, E>(effect: Effect.Effect<A, E, MusterEnv | Proc | import("./runtime.ts").Herdr | import("./runtime.ts").Comms>) => runWith(h, effect.pipe(Effect.provideService(MusterEnv, { ...env, sessionId: h.sessionId }), Effect.provideService(Proc, proc)));

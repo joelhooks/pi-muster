@@ -149,7 +149,7 @@ describe("close live clone guard", () => {
     expect(result.row.state).toBe("closed");
     expect(existsSync(row.cwd)).toBe(true);
     expect(result.notes.join("\n")).toContain(`clone kept: ${live.pane_id} (pi working)`);
-    expect(commands.filter(command => command.includes("realpathSync"))).toHaveLength(1);
+    expect(commands.filter(command => command.includes("root=realpathSync"))).toHaveLength(1);
     expect(h.herdr.panes.has(row.pane!.paneId)).toBe(true);
     remote.panes.delete(live.pane_id);
     await close();
