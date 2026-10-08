@@ -88,6 +88,18 @@ function unreadable(fields: readonly (string | undefined)[]) {
 type RestartExit = { sessionId: string; dir: string; restart: Parameters<typeof finishRestart>[1] };
 
 /** No durable flag: only a proven self-restart in this process can arm its exit. */
+/** A catalog row signs as its row; a rowless owner (MUSTER_AGENT, e.g. a project owner) signs as that agent.
+ * A session whose own row moved to a successor is retired and gets no sender. */
+export function sessionCommsSender(dir: string, session: string, env: NodeJS.ProcessEnv) {
+  const local = catalogCommsSender(dir, session);
+  if (local) return local;
+  if (!env.MUSTER_AGENT) return undefined;
+  // Receivers refuse a retired predecessor signing as the legacy bare identity; its sends fall back, reported.
+  if (retiredCatalogSession(dir, env.MUSTER_AGENT, session)) return undefined;
+  const peers = { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) };
+  return { agent: peers[session] ?? env.MUSTER_AGENT, session };
+}
+
 export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>, release: () => Promise<void> = async () => {}) {
   let ending: RestartExit | undefined;
   let closing: RestartExit | undefined;
@@ -153,17 +165,7 @@ export default function muster(host: ExtensionAPI) {
               try { return catalogNetworkPeers(dir); }
               catch { return { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) }; }
             },
-            networkSender: () => {
-              const session = ctx.sessionManager.getSessionId();
-              const local = catalogCommsSender(dir, session);
-              if (local) return local;
-              if (!env.MUSTER_AGENT) return undefined;
-              // A session whose own row moved to a successor is retired: it must not sign as the
-              // legacy bare identity (receivers refuse the mismatch). Its sends fall back, reported.
-              if (retiredCatalogSession(dir, env.MUSTER_AGENT, session)) return undefined;
-              const peers = { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) };
-              return { agent: peers[session] ?? env.MUSTER_AGENT, session };
-            },
+            networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
           });
           comms.set(key, service);
         }
@@ -307,7 +309,7 @@ export default function muster(host: ExtensionAPI) {
       const dir = resolve(env.MUSTER_PROJECT ?? ctx.cwd);
       const service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir,
         adapterEnv: () => "network", networkConfig: () => env.MUSTER_NETWORK_CONFIG,
-        networkSender: () => catalogCommsSender(dir, ctx.sessionManager.getSessionId()),
+        networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
       });
       try {
         return await run(ctx, signal, sendDesk({ home: homedir(), dir, to: params.to, text: params.text,
