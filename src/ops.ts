@@ -135,7 +135,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   const wrap = machine.wrap.map(arg => arg.replaceAll("{name}", params.name));
   if (params.action === "adopt" || params.side || params.pane) return yield* input("remote launch does not adopt supplied panes or side desks");
   const name = yield* decodeWith(decodeAgentName, params.name);
-  const existing = project.agents.find(row => row.name === name);
+  let existing = project.agents.find(row => row.name === name);
+  if (params.action === "restore" && existing) existing = yield* recoverRestoreOnMachine(existing);
   const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
   const role = params.role ?? parent?.role ?? existing?.role;
   const lane = yield* findLane(project, params.lane ?? parent?.lane ?? existing?.lane ?? "");
@@ -236,7 +237,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       // This Proc is already SSH-backed; do not nest SSH.
       parentSessionFile = (yield* must("node", ["--input-type=module", "-e", script, parentSessionFile ?? "", params.at, `${cwd}/.pi/muster/forks`], { cwd, timeoutMs: 30_000 })).trim();
     }
-    const restoreNotes: string[] = [];
+    const restoreNotes: string[] = (existing?.events ?? []).filter(event => event.type === "PANE_GONE" && event.detail.startsWith("restore:")).slice(-1).map(event => event.detail);
     if (params.action === "restore") {
       const selected = yield* sessionRestore(remoteProfile, sessionFile, project, role, roster, params, true);
       remoteProfile = selected.profile;
@@ -249,7 +250,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       profile: remoteProfile, owner: params.action === "restore" && existing ? existing.owner : env.sessionId, sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
       brief: syncedBrief?.brief ?? existing?.brief ?? null,
       state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
-      restore: null, createdAt: existing?.createdAt ?? now, updatedAt: now };
+      restore: null, ...(existing?.events ? { events: existing.events } : {}), createdAt: existing?.createdAt ?? now, updatedAt: now };
     const promptDir = (yield* git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")
       .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
     yield* must("mkdir", ["-p", scratch], { cwd, timeoutMs: 10_000 });
@@ -322,8 +323,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
         }
         return yield* input(detail);
       }
-      const named = yield* agentRename(binding.paneId, row.name).pipe(Effect.result);
-      if (named._tag === "Failure") cloneNotes.push(`machine ${nameOfMachine}: agent rename refused (${named.failure.code ?? "transport"}): ${named.failure.message}; leaving existing names unchanged.`);
+      const named = yield* renameWhenRegistered(binding.paneId, row.name);
+      if (named.note) cloneNotes.push(`machine ${nameOfMachine}: ${named.note}`);
       const requestedId = row.sessionId;
       const actual = sessionIdFromFile(wait.sessionFile) ?? requestedId;
       const liveRestore = yield* sessionRestore(launchProfile, wait.sessionFile, project, role, roster, params.action === "restore" ? params : {}, true);
@@ -804,6 +805,21 @@ const readoptionPanes = (project: Project, row: AgentRow) => Effect.gen(function
 
 const paneProvesSession = (pane: PaneInfo, row: AgentRow) => pane.agent === "pi" && pane.agent_session?.kind === "path" && sameSessionFile(row, pane.agent_session.value);
 
+/** Catalog-only recovery. A live session anywhere on this machine vetoes interruption. */
+const recoverGoneRestore = (row: AgentRow) => Effect.gen(function* () {
+  if (!row.pane || !PROCESS_STATES.includes(row.state)) return row;
+  if (yield* locatePane(row.pane)) return row;
+  if ((yield* paneList()).some(pane => paneProvesSession(pane, row))) return row;
+  const env = yield* MusterEnv;
+  const detail = `restore: pane ${row.pane.paneId} gone; interrupted before restore`;
+  return { ...row, pane: null, state: yield* stepAgent(row.name, row.state, { type: "PANE_GONE" }),
+    events: [...(row.events ?? []), { type: "PANE_GONE", at: iso(env), detail }], updatedAt: iso(env) };
+});
+const recoverRestoreOnMachine = (row: AgentRow) => Effect.gen(function* () {
+  const recovery = recoverGoneRestore(row);
+  return row.machine === "local" ? yield* recovery : yield* onRemote(row.machine, yield* machineConfig(row.machine), recovery);
+});
+
 /** Exact identity repair is independent of lifecycle and ownership. Duplicates keep the binding. */
 const findRebinding = (project: Project, row: AgentRow, bound: PaneInfo | null | undefined) => Effect.gen(function* () {
   if (row.state === "closed") return { kind: "none" } as const;
@@ -862,7 +878,7 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
       current = yield* readoptRow(dir, row, reAdoption.pane, reAdoption.session);
       pane = reAdoption.pane;
       action = `re-adopted ${pane.pane_id}`;
-    } else if (act && mine && !pane && row.pane && PROCESS_STATES.includes(row.state)) {
+    } else if (act && !pane && row.pane && PROCESS_STATES.includes(row.state) && !(yield* paneList()).some(candidate => paneProvesSession(candidate, row))) {
       current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: null }); action = "remote pane gone: interrupted";
     } else if (act && mine && pane && !pane.agent && PROCESS_STATES.includes(row.state)) {
       current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }]); action = "remote agent exited: interrupted";
@@ -1886,6 +1902,27 @@ const waitForSession = (paneId: string, previous: string | null, fallback: () =>
     }
   });
 
+/** Session files can predate Herdr's agent registration, especially on restore. */
+const renameWhenRegistered = (paneId: string, name: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const retry = `herdr agent rename ${shellQuote(paneId)} ${shellQuote(name)}`;
+  const started = env.now().getTime();
+  let slept = 0;
+  while (true) {
+    const agent = yield* agentGet(paneId).pipe(Effect.orElseSucceed(() => null));
+    if (agent?.agent) {
+      const named = yield* agentRename(paneId, name).pipe(Effect.result);
+      return named._tag === "Success" ? { agent: named.success, note: null } :
+        { agent, note: `agent rename refused (${named.failure.code ?? "transport"}): ${named.failure.message}; retry: ${retry}` };
+    }
+    const elapsed = Math.max(slept, env.now().getTime() - started);
+    if (elapsed >= 15_000) return { agent: null, note: `agent registration not proven after 15 s; name unchanged; retry: ${retry}` };
+    const pause = Math.min(250, 15_000 - elapsed);
+    yield* env.sleep(pause);
+    slept += pause;
+  }
+});
+
 const slowStartNote = (wait: { elapsed: number; load: number }) =>
   `slow start: Pi session appeared after ${Math.ceil(wait.elapsed / 1_000)}s (load ${wait.load})`;
 const pendingPromptNote = (paneId: string, text: string | undefined) =>
@@ -2286,7 +2323,8 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     yield* guardSideDesk(project, env.sessionId, "agent_launch");
     if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
-    const existing = project.agents.find(row => row.name === params.name);
+    let existing = project.agents.find(row => row.name === params.name);
+    if (params.action === "restore" && existing) existing = yield* recoverRestoreOnMachine(existing);
     const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
     const previous = parent ?? existing;
     if (params.action === "launch" && params.machine !== undefined && existing && params.machine !== existing.machine) return yield* input(`explicit machine ${params.machine} differs from row ${existing.name}'s ${existing.machine}; cross-machine relaunch cannot reuse its cwd, clone or session. Choose a new row name on ${params.machine}; the old row is unchanged`);
@@ -2480,10 +2518,16 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     if (machine !== "local") return yield* remoteLaunch(dir, project, { ...params, action: params.action }, machine, jobId);
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
     const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
-    const existing = project.agents.find((agent) => agent.name === name);
+    let existing = project.agents.find((agent) => agent.name === name);
+    if (params.action === "restore" && existing) {
+      const recovered = yield* recoverGoneRestore(existing);
+      existing = recovered !== existing
+        ? yield* patchRow(dir, name, existing.state, [{ type: "PANE_GONE" }], { pane: null, events: recovered.events ?? [] })
+        : existing;
+    }
 
     const roster = (yield* loadRoster).roster;
-    const skillNotes: string[] = [];
+    const skillNotes: string[] = params.action === "restore" ? (existing?.events ?? []).filter(event => event.type === "PANE_GONE" && event.detail.startsWith("restore:")).slice(-1).map(event => event.detail) : [];
     let restoreTokens: number | null = null;
     let row: AgentRow;
     if (params.action === "restore") {
@@ -2639,8 +2683,13 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       return [withRow(current, row), row] as const;
     }));
 
-    const lane = yield* findLane(project, row.lane);
     const failLaunch = () => patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void));
+    let lane = yield* findLane(project, row.lane);
+    if (params.action === "restore" && !params.pane && !(row.pane && (yield* locatePane(row.pane))) && lane.state === "open" && (!lane.root || !(yield* locatePane(lane.root)))) {
+      const reopened = yield* laneOpen(dir, { slug: lane.slug }).pipe(Effect.tapError(failLaunch));
+      lane = reopened.lane;
+      skillNotes.push(`restore: lane ${lane.slug} reopened; ${reopened.note ?? `opened tab ${lane.tabId} pane ${lane.root?.paneId}`}`);
+    }
     const picked = yield* pickPane(project, lane, row, params).pipe(Effect.tapError(failLaunch));
     // Claim and release stale bindings together, before sending anything to the shell.
     const binding = yield* mutate(dir, (current) => Effect.gen(function* () {
@@ -2684,9 +2733,9 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       }
       let agent = null;
       if (wait.state === "ready") {
-        const named = yield* agentRename(binding.paneId, row.name).pipe(Effect.result);
-        if (named._tag === "Failure") skillNotes.push(`agent rename refused (${named.failure.code ?? "transport"}): ${named.failure.message}; leaving existing names unchanged.`);
-        agent = yield* agentGet(binding.paneId).pipe(Effect.orElseSucceed(() => null));
+        const named = yield* renameWhenRegistered(binding.paneId, row.name);
+        if (named.note) skillNotes.push(named.note);
+        agent = named.agent;
       }
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
       return { binding, agent, sessionFile, pending: wait.state === "pending" };
@@ -3587,10 +3636,6 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         }))));
         continue;
       }
-      if (missingSpace && !panes.some(pane => paneProvesSession(pane, row))) {
-        lines.push({ name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action: null });
-        continue;
-      }
       let pane: PaneInfo | undefined;
       if (row.pane) {
         const direct = byId.get(row.pane.paneId);
@@ -3616,6 +3661,9 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         current = yield* readoptRow(dir, row, reAdoption.pane, reAdoption.session);
         pane = reAdoption.pane;
         action = `re-adopted ${pane.pane_id}`;
+      } else if (act && row.pane && !pane && !panes.some(candidate => paneProvesSession(candidate, row))) {
+        current = yield* patchRow(dir, row.name, row.state, PROCESS_STATES.includes(row.state) ? [{ type: "PANE_GONE" }] : [], { pane: null });
+        if (PROCESS_STATES.includes(row.state)) action = "pane gone: interrupted";
       } else if (modelError) {
         action = `FAILED (model error: ${modelError})`;
         if (act && row.owner === env.sessionId) {
@@ -3654,13 +3702,6 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
               action = "adoptable (live pi session matches; act: false)";
             }
           }
-        }
-      } else if (act && row.owner === env.sessionId && row.pane && !pane) {
-        if (PROCESS_STATES.includes(row.state)) {
-          current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: null }).pipe(Effect.catch(() => Effect.succeed(row)));
-          action = "pane gone: interrupted";
-        } else {
-          current = yield* patchRow(dir, row.name, row.state, [], { pane: null }).pipe(Effect.catch(() => Effect.succeed(row)));
         }
       } else if (act && row.owner === env.sessionId && pane && !pane.agent && PROCESS_STATES.includes(row.state) && row.state !== "restoring") {
         current = yield* patchRow(dir, row.name, row.state, [{ type: "PANE_GONE" }], { pane: { ...(row.pane as PaneBinding), paneId: pane.pane_id } }).pipe(

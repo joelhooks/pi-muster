@@ -330,6 +330,22 @@ describe("remote owner operations", () => {
     expect(restored.row.machine).toBe("remote"); expect(restored.argv).toContain("--session");
     expect(s.calls.filter(call => call.command === "ssh").every(call => (call.timeoutMs ?? Infinity) <= 300000)).toBe(true);
   }, 30_000);
+  it("non-owner status interrupts a gone remote pane without touching live panes", async () => {
+    const s = setup(); await s.open(); const { row } = await s.launch();
+    s.remote.panes.delete(row.pane!.paneId);
+    const boundary = s.remote.calls.length;
+    await s.run(projectStatus(s.dir, { act: true }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: "other-owner" })));
+    expect((await s.run(load(s.dir))).agents[0]).toMatchObject({ state: "interrupted", pane: null, owner: row.owner });
+    expect(s.remote.calls.slice(boundary).some(call => ["pane.close", "agent.prompt", "pane.send_input"].includes(call.method))).toBe(false);
+  });
+  it("restore recovers a running remote row whose bound pane is gone", async () => {
+    const s = setup(); await s.open(); const { row } = await s.launch();
+    s.remote.panes.delete(row.pane!.paneId);
+    const result = await s.run(agentLaunch(s.dir, { action: "restore", name: row.name }));
+    expect(result.row.state).toBe("running"); expect(result.row.owner).toBe(row.owner);
+    expect(result.notes.join("\n")).toContain("gone; interrupted before restore");
+    expect(result.row.events?.some(event => event.type === "PANE_GONE")).toBe(true);
+  });
   it("keeps remote-only skill paths across restore instead of rediscovering them locally", async () => {
     const s = setup(); await s.open();
     const original = s.proc.run;

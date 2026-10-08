@@ -177,14 +177,14 @@ it("preview does not interrupt a missing pane or write the catalog", async () =>
   s.untouched();
 });
 
-it("a missing workspace gets one diagnostic and no rebuild or catalog mutation", async () => {
+it("a missing workspace gets one diagnostic and interrupts its gone pane without rebuilding", async () => {
   const s = await setup("running", true);
   s.h.herdr.workspaces.delete("w1");
   s.h.herdr.panes.delete(s.pane.pane_id);
   const before = await runWith(s.h, load(s.dir));
   const result = await runWith(s.h, projectStatus(s.dir, { act: true }));
   expect(result.notes.filter(note => note.includes("workspace w1 is missing"))).toEqual(["project probe: workspace w1 is missing; space not rebuilt"]);
-  expect(await runWith(s.h, load(s.dir))).toEqual(before);
+  expect(await runWith(s.h, load(s.dir))).toEqual({ ...before, agents: before.agents.map(row => ({ ...row, state: "interrupted", pane: null })) });
   expect(s.h.herdr.calls.some(call => ["workspace.create", "tab.create", "pane.split"].includes(call.method))).toBe(false);
 });
 
