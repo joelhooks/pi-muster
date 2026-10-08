@@ -16,6 +16,7 @@ import { MAX_CADENCE_MINUTES, decodeNetworkPeers, decodeNetworkDeskPeers } from 
 import { sendDesk } from "./desk-route.ts";
 import { createComms, catalogCommsSender, catalogNetworkPeers, retiredCatalogSession, retiredSessionReason } from "./comms.ts";
 import {
+  pullRemoteOwnerInbox,
   agentClose,
   agentLaunch,
   launchResultText,
@@ -198,7 +199,7 @@ export default function muster(host: ExtensionAPI) {
     comms.clear();
   });
 
-  const stopOwnerFeed = registerOwnerFeed(pi, env, { mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
+  const stopOwnerFeed = registerOwnerFeed(pi, env, { pull: ctx => Effect.runPromise(pullRemoteOwnerInbox(env.MUSTER_PROJECT).pipe(Effect.provide(layer(ctx)))), mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
 
   if ((worker || role === "boss") && env.MUSTER_OWNER) {
     pi.registerTool({
