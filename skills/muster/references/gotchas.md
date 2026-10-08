@@ -63,7 +63,11 @@ When a larger squash changes the same paths, a dirty clone fails verification, o
 
 ## Restore
 
-A manually restarted desk does not need a second Pi process. The owner's `project_status act: true` re-adopts an interrupted row when its session is live in the project's workspace; moved silent, nudged, and restarted rows use the same check. A direct fork matches the session header's `parentSession` path and updates the row's session file and id. If two panes carry the same session, choose one with `agent_launch action: adopt name: <row> pane: <pane>` (no `side`). Adoption changes only the catalog, never sends input, and leaves panes bound to other rows alone. A replacement terminal is not marked as opened by Muster, so closing the row leaves that terminal open.
+A manually resumed desk does not need another restore. Run `project_status act: true` and read the board's session identity evidence. A resumed pane does not inherit the launch-profile receipt or close authority. Re-check `until list` and `herdr_watch list` before re-arming watches.
+
+If the same journal was resumed twice, fork the unbound copy with `/fork` to keep its context under a new session id, or launch a named fork from the bound row. Do not repeatedly restore or adopt the duplicate; that does not create a new identity. The duplicate's own feed asks it to fork, and a second network reader must not run on the row's DID.
+
+Restore is not an ownership handover. To take the catalog's open rows explicitly, use `project_status takeover: true`. A session can restart itself even when another session owns its row. Other actors must own the row before restarting it.
 
 - Takeover forwarding is project-scoped; restart every desk after this update before lifting the takeover ban, and leave legacy posts without a project in their original session's inbox.
 

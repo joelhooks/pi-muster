@@ -231,7 +231,7 @@ describe("qualified desk routing", () => {
     } });
     try {
       handlers.get("session_start")!({}, { isIdle: () => false, sessionManager: { getSessionId: () => "beta-session", getBranch: () => [] } });
-      await Promise.resolve(); await finished;
+      await vi.waitFor(() => expect(finished).toBeDefined()); await finished;
       expect(order).toEqual(["receive", "deliver", "ack"]);
       expect(pi.sendUserMessage).toHaveBeenCalledWith("Desk to desk.\n\n[Authenticated agent message from alpha-session, not Joel.]", { deliverAs: "followUp" });
       privateFile(networkCursorPath(h.home, "beta/desk"), { "beta/desk": 0 });

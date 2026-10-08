@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,7 +16,7 @@ import { decodeSessionSuccessor } from "./domain.ts";
 import { snapshotRestartSession } from "./herdr.ts";
 import { existsSync } from "node:fs";
 
-beforeEach(() => vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"));
+beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_PROJECT", ""); vi.stubEnv("MUSTER_MACHINE", ""); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 async function setup(remote = false, role: "worker" | "desk" = "worker") {
   const h = harness();
@@ -49,6 +49,46 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
 }
 
 describe("restart by fork", () => {
+  it.each([false, true])("a non-owner restarts its own session from a moved pane (remote %s)", async remote => {
+    const s = await setup(remote);
+    const old = s.launch.row;
+    s.h.sessionId = old.sessionId;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "other-owner" })) }, undefined] as const)));
+    s.host.panes.delete(old.pane!.paneId);
+    const moved = s.host.addPane("w1", "moved-tab", s.dir);
+    moved.agent = "pi"; moved.agent_session = { source: "pi", agent: "pi", kind: "path", value: old.sessionFile! };
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(result.row.owner).toBe("other-owner");
+    expect(result.row.sessionId).not.toBe(old.sessionId);
+    expect("endSession" in result ? result.endSession?.oldPane : undefined).toMatchObject({ paneId: moved.pane_id, terminalId: moved.terminal_id, openedByMuster: false });
+    expect(s.host.calls.filter(call => ["pane.send_input", "pane.send_keys", "pane.close"].includes(call.method) && call.params.pane_id === moved.pane_id)).toEqual([]);
+  });
+
+  it("restart forks the actual Herdr journal when its path changed", async () => {
+    const s = await setup();
+    const liveFile = join(dirname(s.launch.row.sessionFile!), `moved_${s.launch.row.sessionId}.jsonl`);
+    copyFileSync(s.launch.row.sessionFile!, liveFile);
+    s.host.panes.get(s.launch.row.pane!.paneId)!.agent_session!.value = liveFile;
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(result.row.parentSessionFile).toBe(liveFile);
+    expect(result.row.sessionId).not.toBe(s.launch.row.sessionId);
+  });
+
+  it("a non-owner cannot restart another session", async () => {
+    const s = await setup();
+    s.h.sessionId = "outsider";
+    await expect(s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }))).rejects.toThrow("belongs to owner");
+    expect((await s.run(load(s.dir))).agents[0]?.sessionId).toBe(s.launch.row.sessionId);
+  });
+
+  it.each([false, true])("restore preserves another owner's row (remote %s)", async remote => {
+    const s = await setup(remote);
+    delete s.host.panes.get(s.launch.row.pane!.paneId)!.agent;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "original-owner", state: "interrupted" as const })) }, undefined] as const)));
+    const result = await s.run(agentLaunch(s.dir, { action: "restore", name: "worker", noSkills: true }));
+    expect(result.row.owner).toBe("original-owner");
+    expect((await s.run(load(s.dir))).agents[0]?.owner).toBe("original-owner");
+  });
   it.each([false, true])("network restart activates after rebind and proves mailbox continuation (remote %s)", async remote => {
     const s = await setup(remote);
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, policy: { ...p.policy!, comms: "network" } }, undefined] as const)));

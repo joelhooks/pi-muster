@@ -361,7 +361,7 @@ describe("remote owner operations", () => {
     await expect(s.launch()).rejects.toThrow("machine remote: missing prerequisites");
     expect(s.remote.calls).toHaveLength(0);
   });
-  it("reconciles by terminal, batches remote session stats and nudges over remote Herdr", async () => {
+  it("rebinds moved remote sessions before the next pass can nudge", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const pane = s.remote.panes.get(launched.row.pane!.paneId)!;
     s.remote.panes.delete(pane.pane_id); pane.pane_id = "moved"; s.remote.panes.set("moved", pane);
@@ -369,8 +369,11 @@ describe("remote owner operations", () => {
     const status = await s.run(projectStatus(s.dir));
     expect(status.agents[0]?.pane).toBe("moved"); expect(status.agents[0]?.silentMin).toBeGreaterThanOrEqual(35);
     expect(status.agents[0]?.cost).toBe(null);
-    expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(true);
+    expect(status.agents[0]?.action).toContain("rebound");
+    expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(false);
     expect(s.calls.filter(call => call.command === "ssh" && call.args.at(-1)?.includes("mtimeMs"))).toHaveLength(1);
+    await s.run(projectStatus(s.dir));
+    expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(true);
   });
   it("verifies and lands a remote-only packet over SSH", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;

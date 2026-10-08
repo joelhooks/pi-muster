@@ -1906,14 +1906,14 @@ describe("project_status live adoption", () => {
     noPaneInput(h);
   });
 
-  it("rebinds a moved pane by terminal id before adopting", async () => {
-    const { h, dir, pane } = await candidate();
+  it("rebinds a moved pane by session identity without inventing startup proof", async () => {
+    const { h, dir, pane, before } = await candidate();
     h.herdr.panes.delete(pane.pane_id);
     pane.pane_id = "moved";
     pane.tab_id = "moved-tab";
     h.herdr.panes.set(pane.pane_id, pane);
     const status = await runWith(h, projectStatus(dir));
-    expect(status.project.agents[0]).toMatchObject({ state: "running", pane: { paneId: "moved", tabId: "moved-tab" } });
+    expect(status.project.agents[0]).toMatchObject({ state: before.state, pane: { paneId: "moved", tabId: "moved-tab" } });
     noPaneInput(h);
   });
 
@@ -1959,7 +1959,7 @@ describe("project_status live adoption", () => {
     h.herdr.panes.set(pane.pane_id, pane);
     const status = await runWith(h, projectStatus(dir, { act: false }));
     expect(status.project.agents[0]).toEqual(before);
-    expect(status.board).toContain("adoptable (live pi session matches; act: false)");
+    expect(status.board).toContain(`rebound ${before.name} → moved (identity: session path match) (preview; act: false)`);
     noPaneInput(h);
   });
 });
