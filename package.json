@@ -190,6 +190,7 @@
     "src/desk-report-ops.ts",
     "src/desk-report-ext.ts",
     "src/tokens.ts",
+    "src/task-status.ts",
     "src/version-skew.ts"
   ],
   "scripts": {

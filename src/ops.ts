@@ -78,6 +78,7 @@ import { readRegistry } from "./registry.ts";
 import { relayEvent, watchFallback } from "./relay-events.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
+import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
 import type { LiveCounts } from "./tokens.ts";
 
 const MAX_WORKERS_PER_TAB = 4;
@@ -3787,7 +3788,8 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
-    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    const tracer = yield* traceProjectTasks(final, panes);
+    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
@@ -3803,15 +3805,21 @@ export function reviewDue(project: Project, nowMs: number): string | null {
   return last ? `⚠ review overdue: last project_review ${days}d ago` : `⚠ review overdue: no project_review in ${days}d`;
 }
 
-export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null): string {
+export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null, traces: ReadonlyMap<string, TaskTrace> = new Map()): string {
   const lanes = project.lanes.filter((lane) => !lane.archived);
   const posture = deployPosture(project);
   const due = reviewDue(project, nowMs);
   const pending = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state));
   const rows = new Map(project.agents.map(row => [row.name, row]));
-  const parents = agents.filter(agent => !rows.get(agent.name)?.side);
-  const grouped = parents.flatMap(parent => [parent, ...agents.filter(agent => rows.get(agent.name)?.side?.parent === parent.name)]);
-  const orphans = agents.filter(agent => {
+  // A restart handoff can end the operational pass early; the tracer still
+  // prints every non-closed row without performing the remaining actions.
+  const boardAgents: readonly AgentLine[] = [...agents, ...project.agents
+    .filter(row => row.state !== "closed" && traces.has(row.name) && !agents.some(agent => agent.name === row.name))
+    .map(row => ({ name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null,
+      silentMin: null, cache: null, cost: null, intercom: "unknown" as const, action: null }))];
+  const parents = boardAgents.filter(agent => !rows.get(agent.name)?.side);
+  const grouped = parents.flatMap(parent => [parent, ...boardAgents.filter(agent => rows.get(agent.name)?.side?.parent === parent.name)]);
+  const orphans = boardAgents.filter(agent => {
     const side = rows.get(agent.name)?.side;
     return side && !parents.some(parent => parent.name === side.parent);
   });
@@ -3829,7 +3837,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
       (agent) => {
         const row = rows.get(agent.name);
         const name = row?.side ? `  ${row.profile.label.split(" ")[0]} ${agent.name} ↳ ${row.side.parent}` : agent.name;
-        return `- ${name} ${agent.role}/${agent.lane} ${agent.state} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}${agent.identity ? ` · identity: ${agent.identity}` : ""}${agent.capability ? ` · capability: ${agent.capability}` : ""}${agent.recovery ? ` · recovery: ${agent.recovery}` : ""}`;
+        return `- ${name} ${agent.role}/${agent.lane} ${agent.state}${traces.has(agent.name) ? ` task=${traces.get(agent.name)!.derived} liveness=${traces.get(agent.name)!.liveness}` : ""} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}${agent.identity ? ` · identity: ${agent.identity}` : ""}${agent.capability ? ` · capability: ${agent.capability}` : ""}${agent.recovery ? ` · recovery: ${agent.recovery}` : ""}`;
       },
     ),
   ];
