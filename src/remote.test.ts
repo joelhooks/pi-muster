@@ -92,7 +92,7 @@ describe("machine boundary", () => {
 describe("remote launch hygiene", () => {
   it("explains pull delivery only for non-network policy", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
-    const receipt = "remote notes reach the owner only when it runs owner_inbox or project_status; set policy comms network for push";
+    const receipt = "remote notes reach the owner only when it runs owner_inbox or project_status; for push, set policy comms network only after the owner and its desk run pi-muster 6ec5d32 or later (older owners publish no consumer fence, so launch brief sends fail with LeaseMismatch)";
     expect(launched.notes).toContain(receipt);
     expect(remotePullReceipt("intercom")).toEqual([receipt]);
     expect(remotePullReceipt(undefined)).toEqual([receipt]);

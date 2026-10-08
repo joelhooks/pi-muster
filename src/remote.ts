@@ -26,7 +26,7 @@ export const sidecarRootsScript = `import {execFileSync} from 'node:child_proces
 import {join,resolve} from 'node:path';
 const sidecarRoots = cwd => (${resolveSidecarRoots.toString()})(cwd,execFileSync,join,resolve);`;
 
-export const remotePullReceipt = (comms?: string): string[] => comms === "network" ? [] : ["remote notes reach the owner only when it runs owner_inbox or project_status; set policy comms network for push"];
+export const remotePullReceipt = (comms?: string): string[] => comms === "network" ? [] : ["remote notes reach the owner only when it runs owner_inbox or project_status; for push, set policy comms network only after the owner and its desk run pi-muster 6ec5d32 or later (older owners publish no consumer fence, so launch brief sends fail with LeaseMismatch)"];
 
 /** Remote workers retain the exact queue record; publish last so interrupted writes stay invisible. */
 export function writeRemoteOwnerItem(owner: string, item: OwnerItem, session: string) {
