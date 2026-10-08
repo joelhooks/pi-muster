@@ -147,7 +147,11 @@ const probeTask = (project: Project, row: AgentRow, panes: readonly PaneInfo[], 
         const symbolic = yield* run(source, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD");
         target = symbolic.code === 0 ? symbolic.stdout.trim() : "main";
       }
-      const base = yield* resolve(source, target);
+      // The source's local lane base owns a bot merge before anyone pushes it.
+      // origin/HEAD only supplies the default branch name, not landing truth.
+      const baseName = target.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "");
+      let base = yield* resolve(source, baseName);
+      if (base.code !== 0 && baseName !== target) base = yield* resolve(source, target);
       if (base.code !== 0) gaps.push("lane base head unavailable");
       else {
         const object = yield* run(source, "cat-file", "-t", head);

@@ -72,6 +72,9 @@ describe("read-only task tracer", () => {
   it("requires a report for the exact head, then an exact passing merged-tree receipt", async () => {
     const { h, dir, row, trace, commit } = await fixture();
     const head = commit();
+    // A cloned source normally has an origin/HEAD; it can lag an unpushed bot merge.
+    sh(dir, "update-ref", "refs/remotes/origin/main", row.clone!.base!.sha);
+    sh(dir, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
     const root = join(row.cwd, ".pi/muster/packets", head); mkdirSync(root, { recursive: true });
     writeFileSync(join(root, "report.svx"), "report\n");
     expect((await trace()).derived).toBe("reported");
