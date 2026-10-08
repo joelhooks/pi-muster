@@ -150,9 +150,10 @@ const probeTask = (project: Project, row: AgentRow, panes: readonly PaneInfo[], 
       const base = yield* resolve(source, target);
       if (base.code !== 0) gaps.push("lane base head unavailable");
       else {
-        const object = yield* proc.run("git", ["cat-file", "--batch-check"], { cwd: source, timeoutMs: 10_000, input: `${head}\n` });
+        const object = yield* run(source, "cat-file", "-t", head);
         // A source that has never fetched this head cannot contain its merge.
-        if (object.code === 0 && object.stdout.trim() === `${head} missing`) facts.merged = false;
+        // Keep the probe argv-only: existing SSH/test adapters need no stdin seam.
+        if (object.code !== 0 && /Not a valid object name|could not get object info/.test(object.stderr)) facts.merged = false;
         else {
           const merged = yield* run(source, "merge-base", "--is-ancestor", head, base.stdout.trim());
           if (merged.code !== 0 && merged.code !== 1) gaps.push("merge reachability unavailable");
@@ -196,7 +197,7 @@ const probeTask = (project: Project, row: AgentRow, panes: readonly PaneInfo[], 
   });
 
 /** Read-only shadow projection. Existing SSH and Herdr helpers are the only remote transport. */
-export const traceProjectTasks = (project: Project, panes: readonly PaneInfo[]) => Effect.gen(function* () {
+export const traceProjectTasks = (project: Project, panes: readonly PaneInfo[], unavailableMachines: ReadonlySet<string> = new Set()) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const proc = yield* Proc;
   const traces = new Map<string, TaskTrace>();
@@ -207,6 +208,7 @@ export const traceProjectTasks = (project: Project, panes: readonly PaneInfo[]) 
     const result = yield* Effect.gen(function* () {
       if (row.machine === "local") return yield* probeTask(project, row, panes, proc, source,
         (head, report) => io(() => localFiles(row.cwd, head, report, env.home)));
+      if (unavailableMachines.has(row.machine)) return yield* new InputError({ message: `machine ${row.machine}: facts unavailable earlier in this pass` });
       const machine = yield* machineConfig(row.machine);
       if (!remotePanes.has(row.machine)) remotePanes.set(row.machine, yield* onRemote(row.machine, machine, paneList()));
       const runner = sshProc(row.machine, machine, proc, env.home);

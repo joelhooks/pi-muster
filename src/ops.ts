@@ -3788,7 +3788,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       return { line: gatesLine(status, env.now().getTime()), note: null };
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
-    const tracer = yield* traceProjectTasks(final, panes);
+    const tracer = yield* traceProjectTasks(final, panes, ingestion.failedMachines);
     return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
   });
 
