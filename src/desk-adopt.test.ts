@@ -42,7 +42,7 @@ async function setup(remote = false) {
 it.each([false, true])("re-adopts an interrupted session in a new pane (remote=%s)", async remote => {
   const s = await setup(remote);
   const status = await s.run(projectStatus(s.dir, { act: true }));
-  expect(status.agents.find(row => row.name === "desk")).toMatchObject({ state: "running", pane: s.pane.pane_id, action: `re-adopted ${s.pane.pane_id}` });
+  expect(status.agents.find(row => row.name === "desk")).toMatchObject({ state: "running", pane: s.pane.pane_id, action: `rebound desk → ${s.pane.pane_id} (identity: session path match)` });
   expect((await runWith(s.h, load(s.dir))).agents[0]!.pane).toMatchObject({ paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: "new-tab", openedByMuster: false });
   expect(existsSync(sessionSuccessorsPath(s.h.home))).toBe(false);
   s.untouched();
@@ -98,14 +98,22 @@ it.each(["silent", "nudged", "restarted"] as const)("re-adopts a %s row and skip
   const s = await setup(); await s.patch({ state });
   s.h.now = new Date(s.h.now.getTime() + 3 * 3600_000);
   const result = await s.run(projectStatus(s.dir));
-  expect(result.agents[0]).toMatchObject({ state: "running", action: `re-adopted ${s.pane.pane_id}` });
+  expect(result.agents[0]).toMatchObject({ state: "running", action: `rebound desk → ${s.pane.pane_id} (identity: session path match)` });
   s.untouched();
 });
 
-it.each(["preview", "foreign owner", "foreign workspace", "not pi", "ambiguous"])("does not re-adopt with %s", async kind => {
+it.each(["foreign owner", "foreign workspace"])("exact identity repair accepts %s without taking ownership", async kind => {
   const s = await setup();
   if (kind === "foreign owner") await s.patch({ owner: "other-owner" });
-  if (kind === "foreign workspace") s.pane.workspace_id = "w-other";
+  else s.pane.workspace_id = "w-other";
+  const owner = (await runWith(s.h, load(s.dir))).agents[0]!.owner;
+  await s.run(projectStatus(s.dir, { act: true }));
+  expect((await runWith(s.h, load(s.dir))).agents[0]).toMatchObject({ owner, state: "running", pane: { paneId: s.pane.pane_id, openedByMuster: false } });
+  s.untouched();
+});
+
+it.each(["preview", "not pi", "ambiguous"])("does not re-adopt with %s", async kind => {
+  const s = await setup();
   if (kind === "not pi") { s.pane.agent = "claude"; s.pane.agent_session!.agent = "claude"; }
   if (kind === "ambiguous") {
     const duplicate: FakePane = s.h.herdr.addPane("w1", "other-tab", s.dir);
