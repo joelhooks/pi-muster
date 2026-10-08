@@ -1,16 +1,16 @@
 # Finished-lane retro
 
-Improve the agent's environment from finished work, not from guesses about the chat. The `retro` skill is the entry point; this file is the judge's procedure. Run after three closed work lanes since the last retro, and at every `project_review`. Three is the tool's default reminder threshold; an owner can commission an earlier review or choose another batch size in the judge's brief. Muster starts no timer and launches no agent automatically.
+Improve the agent's environment from finished work, not from guesses about the chat. The `retro` skill is the entry point; this file is the judge's procedure. Retros run only after an incident (a bad landing, outage or lost work), friction that repeats across lanes, or when Joel asks. The desk opens one by hand and records the trigger in the brief. Lane counts, elapsed days and ordinary project reviews do not trigger retros.
 
 ## Dispatch
 
-Open the standing slot with the slug from the `lane_close` note and `kind: "retro"` even at full work WIP; only one retro lane may be open or draining. The owner launches a short-lived judge-role agent with the selected lanes, read scope, and one absolute artifact path under `.brain/data/muster/retros/`. Use `project_review`'s `retroLanes` and worker session files to form the batch. A `lane_close` reminder means at least three lanes are awaiting review, not that another judge should launch while one is already running.
+Open a lane with a fresh slug and `kind: "retro"` even at full work WIP; only one retro lane may be open or draining. There is no standing judge slot. The owner launches a short-lived judge-role agent with the trigger, selected lanes, read scope, and one absolute artifact path under `.brain/data/muster/retros/`. Use `project_review`'s `retroLanes` and worker session files to find evidence relevant to the chosen scope.
 
-The judge returns an artifact packet containing ranked findings in a `.svx`. It never edits steering files, skills, or code inline. The owner verifies and records the artifact, routes candidates, then calls `project_review` with `retro: true` to set `lastRetroAt`. Ordinary project reviews do not consume the batch. Finish a pending batch before closing more lanes: this marker records completion time, not a selective per-lane cursor.
+The judge returns an artifact packet containing ranked findings in a `.svx`. It never edits steering files, skills, or code inline. The owner verifies and records the artifact, routes candidates, then calls `project_review` with `retro: true` to set `lastRetroAt`. Ordinary project reviews do not consume the batch. This marker records completion time, not a selective per-lane cursor; bound the review cutoff and state any lanes it did not cover. Do not hold unrelated lane closures for a retro.
 
 ## Evidence per lane
 
-`project_review` lists each pending lane's worker sessions from agent rows, closed and restart tails from exact agent-name filenames in `closed/`, and reports from packet rows; the `lane_close` reminder names that call.
+`project_review` lists each pending lane's worker sessions from agent rows, closed and restart tails from exact agent-name filenames in `closed/`, and reports from packet rows.
 
 - Worker's session file: the row's `sessionFile`, or `agent_close`'s `restore:` line.
 - Every packet report under `.brain/data/muster/reports/<lane>/`, including rejected and follow-up packets.

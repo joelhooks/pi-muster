@@ -2,7 +2,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { decodeDeploySection, DEPLOY_NAMES, DEPLOY_SECTION, type DeployLevel } from "./domain.ts";
 import { formatAge } from "./switchboard.ts";
-import { retroCadence } from "./retro-cadence.ts";
 import type { AgentState, DeskItem, Lane, Project } from "./domain.ts";
 import { TERMINAL_PACKET_STATES } from "./domain.ts";
 
@@ -144,12 +143,11 @@ export function flowLine(project: Project, now: number = Date.now()): string {
   const slots = openSlots(project);
   const next = backlog(project)[0];
   const retro = project.lanes.find(lane => lane.kind === "retro" && (lane.state === "open" || lane.state === "draining"));
-  const cadence = retroCadence(project, now);
   const ago = (at: number) => { const age = formatAge(Math.max(0, now - at)); return age === "now" ? "just now" : `${age} ago`; };
   return [
     `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"}`,
     ...(slots ? [`${slots} open`, next ? `next: ${next.slug}` : "backlog empty"] : []),
-    ...(retro ? [`retro: running ${retro.slug}`] : cadence.due ? [`retro: due (${cadence.reason === "day" ? "1d, " : ""}${cadence.count} closed)`] : []),
+    ...(retro ? [`retro: running ${retro.slug}`] : []),
     `landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"}`,
     ...(watching.length ? [`watching: ${watching.map(lane => lane.slug).join(", ")}`] : []),
     ...(lanes.length ? [`oldest in flight ${formatAge(Math.max(0, now - oldest))}`] : []),
