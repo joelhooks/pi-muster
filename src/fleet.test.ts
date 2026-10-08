@@ -42,4 +42,11 @@ describe("fleet status", () => {
     expect(() => decode({ machines: [], queue: [ticket("a", "probe", ["flagg"], "bad")] })).toThrow();
     expect(() => decode({ machines: [{ host: "flagg", reading: { state: "live", data: { slots: -1 } } }], queue: [] })).toThrow();
   });
+  it("shows a stale cached reading as unknown, never busy", () => {
+    const live = (ageSeconds?: number | null) => ({ host: "pennywise", ...(ageSeconds === undefined ? {} : { ageSeconds }), reading: { state: "live" as const, data: { slots: 10, holders: [{ held: true }] } } });
+    expect(gatesLine({ machines: [live(4040)], queue: [] }, 0)).toBe("gates: pennywise ?/10");
+    expect(gatesLine({ machines: [live(null)], queue: [] }, 0)).toBe("gates: pennywise ?/10");
+    expect(gatesLine({ machines: [live(5)], queue: [] }, 0)).toBe("gates: pennywise 1/10");
+    expect(gatesLine({ machines: [live()], queue: [] }, 0)).toBe("gates: pennywise 1/10");
+  });
 });

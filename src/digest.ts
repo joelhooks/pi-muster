@@ -9,6 +9,7 @@ import { Cause, Effect, Exit, Schema } from "effect";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { decodeProject, silenceLimits } from "./domain.ts";
 import { projectPath } from "./store.ts";
+import { staleReading } from "./fleet.ts";
 
 export class BadProjectDir extends Error {}
 export type DigestPart = { state: "ok"; text: string; compact: string } | { state: "unknown"; text: string; compact: string } | { state: "skipped"; text: ""; compact: "" };
@@ -28,7 +29,7 @@ const Pulls = Schema.Array(Schema.Struct({ number: Count, isDraft: Schema.Boolea
 const Runs = Schema.Array(Schema.Struct({ status: Schema.String, conclusion: Schema.NullOr(Schema.String) }));
 const Slot = Schema.Struct({ held: Schema.Boolean, window: Schema.optionalKey(Schema.NullOr(Schema.String)) });
 const Gate = Schema.Struct({ slots: Count, holders: Schema.Array(Slot), queue: Schema.optionalKey(Schema.Array(Schema.Unknown)), deploySlot: Schema.optionalKey(Slot), exclusivePending: Schema.optionalKey(Slot) });
-const Fleet = Schema.Struct({ machines: Schema.Array(Schema.Struct({ reading: Schema.Struct({ state: Schema.String, data: Schema.optionalKey(Schema.Unknown) }) })), queue: Schema.Array(Schema.Unknown), leases: Schema.Struct({ leases: Schema.Array(Schema.Struct({ state: Schema.optionalKey(Schema.String), label: Schema.optionalKey(Schema.String), kind: Schema.optionalKey(Schema.String) })) }) });
+const Fleet = Schema.Struct({ machines: Schema.Array(Schema.Struct({ ageSeconds: Schema.optionalKey(Schema.NullOr(Schema.Number)), reading: Schema.Struct({ state: Schema.String, data: Schema.optionalKey(Schema.Unknown) }) })), queue: Schema.Array(Schema.Unknown), leases: Schema.Struct({ leases: Schema.Array(Schema.Struct({ state: Schema.optionalKey(Schema.String), label: Schema.optionalKey(Schema.String), kind: Schema.optionalKey(Schema.String) })) }) });
 const Branch = Schema.Struct({ defaultBranchRef: Schema.Struct({ name: Schema.String }) });
 const parse = <S extends Schema.ConstraintDecoder<unknown>>(schema: S, text: string): S["Type"] => Schema.decodeUnknownSync(schema)(JSON.parse(text));
 const ok = (text: string, compact = text): DigestPart => ({ state: "ok", text, compact });
@@ -82,6 +83,8 @@ export function gatesPart(text: string, fleet: boolean): DigestPart {
       const raw = machine.reading.data;
       if (typeof raw !== "object" || raw === null || !("slots" in raw)) continue;
       const gate = Schema.decodeUnknownSync(Gate)(raw);
+      // A stale cached reading says nothing about current holders.
+      if (staleReading(machine)) continue;
       total += gate.slots; used += gate.holders.filter(h => h.held).length;
       deploy ||= !!gate.deploySlot?.held || !!gate.exclusivePending?.held;
     }

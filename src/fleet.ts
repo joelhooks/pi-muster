@@ -7,6 +7,7 @@ const Hosts = Schema.Array(Schema.String);
 export const FleetStatus = Schema.Struct({
   machines: Schema.Array(Schema.Struct({
     host: Schema.String,
+    ageSeconds: Schema.optionalKey(Schema.NullOr(Schema.Number)),
     reading: Schema.Struct({
       state: Schema.Literals(["live", "unavailable", "not-probed"]),
       data: Schema.optionalKey(Schema.NullOr(Schema.Struct({
@@ -26,6 +27,12 @@ export const FleetStatus = Schema.Struct({
 });
 export type FleetStatus = typeof FleetStatus.Type;
 
+/** fleet-compute serves cached remote readings without probing; past this window holders are a guess. */
+export const FLEET_FRESH_SECONDS = 60;
+/** A missing ageSeconds is an older fleet-compute that sampled on the call; null means never sampled. */
+export const staleReading = (machine: { ageSeconds?: number | null }) =>
+  machine.ageSeconds !== undefined && (machine.ageSeconds === null || machine.ageSeconds > FLEET_FRESH_SECONDS);
+
 const ordered = (status: FleetStatus) => [...status.queue].sort((a, b) =>
   Date.parse(a.enqueuedAt) - Date.parse(b.enqueuedAt) || a.id.localeCompare(b.id));
 const hosts = (ticket: FleetStatus["queue"][number]) => ticket.eligibleHosts ?? ticket.hosts ?? [];
@@ -33,9 +40,11 @@ const oldestMinutes = (queue: FleetStatus["queue"], now: number) => queue.length
   : Math.max(0, Math.floor((now - Math.min(...queue.map((ticket) => Date.parse(ticket.enqueuedAt)))) / 60_000));
 
 export function gatesLine(status: FleetStatus, now: number): string {
-  const parts = status.machines.map(({ host, reading }) => {
+  const parts = status.machines.map((machine) => {
+    const { host, reading } = machine;
     const slots = reading.data?.slots;
     return reading.state !== "live" || slots == null ? `${host} off`
+      : staleReading(machine) ? `${host} ?/${slots}`
       : `${host} ${(reading.data?.holders ?? []).filter((holder) => holder.held).length}/${slots}`;
   });
   if (status.queue.length > 0) parts.push(`${status.queue.length} waiting (oldest ${oldestMinutes(status.queue, now)}m)`);

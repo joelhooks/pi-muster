@@ -60,6 +60,7 @@ describe("digest parsers", () => {
   it("parses local and fleet slots, queues and deploy windows", () => {
     expect(gatesPart(JSON.stringify(gates), false).text).toBe("gates 3/4 q1 deploy");
     expect(gatesPart(JSON.stringify({ machines: [{ reading: { state: "live", data: { slots: 4, holders: [{ held: true }] } } }, { reading: { state: "live", data: { load: 1 } } }], queue: [{}, {}], leases: { leases: [{ state: "active" }] } }), true).text).toBe("gates 1/4 q2 deploy");
+    expect(gatesPart(JSON.stringify({ machines: [{ reading: { state: "live", data: { slots: 1, holders: [] } } }, { ageSeconds: 4040, reading: { state: "live", data: { slots: 10, holders: [{ held: true }] } } }], queue: [], leases: { leases: [] } }), true).text).toBe("gates 0/1 q0");
     expect(() => gatesPart('{"slots":-1,"holders":[]}', false)).toThrow();
     expect(() => gatesPart('{"machines":[{"reading":{"state":"unavailable"}}],"queue":[],"leases":{"leases":[]}}', true)).toThrow("unavailable");
   });
