@@ -49,6 +49,7 @@ async function ownDuplicate(session: string, env: Readonly<Record<string, string
 
 /** Registration is inert. Session lifecycle owns its file watch and fallback poll. */
 export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>, network?: {
+  pull?: (ctx: ExtensionContext) => Promise<readonly string[]>;
   mode?: (ctx: ExtensionContext) => Promise<"intercom" | "network">;
   consume: (ctx: ExtensionContext, signal: AbortSignal, receive: (payload: NetworkPayload) => Effect.Effect<void, CommsError>) => Promise<void>;
 }, duplicate: (session: string, env: Readonly<Record<string, string | undefined>>) => Promise<boolean> = ownDuplicate) {
@@ -184,12 +185,16 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     renderResult(result, options, theme) {
       if (options.isPartial) return ownerLine("🐦 reading owner inbox…", theme);
       const data = readOwnerTimelineData(result.details);
+      if ((result.details as { remoteNotes?: readonly string[] })?.remoteNotes?.length) return ownerLine(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), theme);
       return data ? new OwnerTimelineView(data, { expanded: options.expanded, noColor: env.NO_COLOR !== undefined || process.env.NO_COLOR !== undefined }, theme) : ownerLine(result.content.filter(c => c.type === "text").map(c => c.text).join(" "), theme);
     },
     parameters: Type.Object({ since: Type.Optional(Type.String()), kinds: Type.Optional(Type.Array(StringEnum(["fyi", "progress", "done", "question", "blocked", "action"] as const))), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })), ack: Type.Optional(Type.Boolean()) }),
     async execute(_id, input, _signal, _onUpdate, ctx) {
+      let notes: readonly string[] = [];
+      try { notes = await network?.pull?.(ctx) ?? []; }
+      catch (error) { notes = [`remote inbox: ${String(error).replace(/[\r\n]+/g, " ")}`]; }
       const result = get(ctx).inbox(input);
-      return { content: [{ type: "text", text: ownerInboxText(result, result.cursor) }], details: result };
+      return { content: [{ type: "text", text: [ownerInboxText(result, result.cursor), ...notes].join("\n") }], details: { ...result, remoteNotes: notes } };
     },
   });
   return stopAndRelease;

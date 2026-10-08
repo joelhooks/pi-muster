@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Effect, Schema } from "effect";
 import { createHerdrClient, type HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
@@ -14,12 +15,25 @@ export function decodeRemoteNote(value: unknown) {
   const envelope = decodeNoteEnvelope(value);
   return { ...envelope, item: decodeOwnerItem(envelope.item) };
 }
+/** Use the worktree's own git directory, never the shared common directory. */
+function resolveSidecarRoots(cwd: string, exec: typeof execFileSync, pathJoin: typeof join, pathResolve: typeof resolve): string[] {
+  const gitDir = exec("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf8", timeout: 2000 }).trim();
+  return [pathJoin(pathResolve(cwd, gitDir), "muster"), pathJoin(cwd, ".pi/muster")];
+}
+export const sidecarRoots = (cwd: string) => resolveSidecarRoots(cwd, execFileSync, join, resolve);
+/** Same resolver for bounded remote Node probes. */
+export const sidecarRootsScript = `import {execFileSync} from 'node:child_process';
+import {join,resolve} from 'node:path';
+const sidecarRoots = cwd => (${resolveSidecarRoots.toString()})(cwd,execFileSync,join,resolve);`;
+
+export const remotePullReceipt = (comms?: string): string[] => comms === "network" ? [] : ["remote notes reach the owner only when it runs owner_inbox or project_status; set policy comms network for push"];
+
 /** Remote workers retain the exact queue record; publish last so interrupted writes stay invisible. */
 export function writeRemoteOwnerItem(owner: string, item: OwnerItem, session: string) {
   const row = decodeAgentRow(JSON.parse(process.env.MUSTER_REMOTE_ROW ?? "null"));
   if (row.machine !== process.env.MUSTER_MACHINE || row.sessionId !== session || item.author !== session || item.lane !== row.lane) throw new Error("remote note identity differs from the launch row");
   const sidecar = decodeRemoteNote({ project: process.env.MUSTER_PROJECT_SLUG, machine: row.machine, agent: row.name, lane: row.lane, owner, item });
-  const root = join(row.cwd, ".pi/muster/notes");
+  const root = join(sidecarRoots(row.cwd)[0]!, "notes");
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const path = join(root, `${createHash("sha256").update(item.cid).digest("hex")}.json`);
   const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
@@ -143,10 +157,10 @@ export const onRemote = <A, E, R>(name: string, machine: MachineConfig, effect: 
 });
 
 /** Small read-only probes run in one bounded SSH process. JSON is decoded by the caller's domain schema. */
-export const remoteNode = (name: string, machine: MachineConfig, script: string, args: readonly string[] = []) => Effect.gen(function* () {
+export const remoteNode = (name: string, machine: MachineConfig, script: string, args: readonly string[] = [], timeoutMs = 30_000) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const runner = yield* Proc;
-  const result = yield* sshProc(name, machine, runner, env.home).run("node", ["--input-type=module", "-e", script, ...args], { cwd: "/", timeoutMs: 30_000 });
+  const result = yield* sshProc(name, machine, runner, env.home).run("node", ["--input-type=module", "-e", script, ...args], { cwd: "/", timeoutMs });
   if (result.code !== 0) return yield* new ProcError({ command: `node on ${name}`, code: result.code, stderr: result.stderr, message: `machine ${name}: ${result.stderr.slice(-1000)}` });
   return result.stdout;
 });

@@ -57,7 +57,7 @@ import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
-import { cleanupRemoteBrief, cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
+import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { recordSessionSuccessor, remoteCommsEnvironment } from "./comms.ts";
@@ -338,7 +338,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
-      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
+      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(project.policy?.comms), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
@@ -634,7 +634,7 @@ const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
   if (row.machine !== process.env.MUSTER_MACHINE || row.name !== params.agent || row.cwd !== params.cwd) return yield* input("remote report identity differs from the launch row");
   const artifact = params.artifact ? yield* requireAbsolute("artifact", params.artifact) : null;
   const id = params.commit ? (yield* git(params.cwd, "rev-parse", "--verify", `${params.commit}^{commit}`)).trim() : yield* decodeWith(() => sha256File(artifact!), null);
-  const root = join(params.cwd, ".pi/muster/packets", id);
+  const root = yield* decodeWith(() => join(sidecarRoots(params.cwd)[0]!, "packets", id), null);
   const report = join(root, "report.svx");
   const packet: Packet = { id, kind: params.commit ? "commit" : "artifact", artifact, lane: row.lane, agent: row.name, report, checks: [...params.checks], state: "reported", verification: null, landedAs: null, gate: null, supersedes: null, reportedAt: iso(env), updatedAt: iso(env) };
   const sidecar = yield* decodeWith(decodeRemotePacket, { project: process.env.MUSTER_PROJECT_SLUG, machine: row.machine, packet, reportText: reportMarkdown(row, packet, params.summary, params.body, params) });
@@ -649,18 +649,18 @@ const remoteReport = (params: PacketReportInput) => Effect.gen(function* () {
   return { packet, delivery: notice.delivery, notice };
 });
 
-export const ingestRemotePackets = (dir: string) => Effect.gen(function* () {
+export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_000) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const project = yield* load(dir);
   const notes: string[] = [];
   const failedMachines = new Set<string>();
-  for (const row of project.agents.filter(row => row.machine !== "local" && row.state !== "closed")) {
+  for (const row of project.agents.filter(row => row.machine !== "local" && row.state !== "closed" && (!owner || row.owner === owner))) {
     const skipped = (reason: string) => notes.push(`machine ${row.machine}: ingest skipped for ${row.name}: ${reason}`);
     if (failedMachines.has(row.machine)) { skipped("machine unavailable earlier in this pass"); continue; }
     const fetched = yield* Effect.gen(function* () {
       const machine = yield* machineConfig(row.machine);
       // One bounded call per row reads both kinds; transport failure skips all remaining machine rows.
-      const output = yield* remoteNode(row.machine, machine, `import {existsSync,readdirSync,readFileSync} from 'node:fs'; const root=process.argv[1]; const values=[]; for(const kind of ['packet','note']) { const dir=root+'/'+(kind==='packet'?'packets':'notes'); const files=existsSync(dir)?readdirSync(dir).filter(n=>kind==='packet'?/^[a-f0-9]{40,64}$/.test(n):/^[a-f0-9]{64}\\.json$/.test(n)):[]; for(const id of files){const p=dir+'/'+id+(kind==='packet'?'/packet.json':'');if(!existsSync(p))continue;try{values.push({kind,id,value:JSON.parse(readFileSync(p,'utf8')),error:null})}catch(error){values.push({kind,id,value:null,error:String(error)})}} } console.log(JSON.stringify(values));`, [join(row.cwd, ".pi/muster")]);
+      const output = yield* remoteNode(row.machine, machine, `${sidecarRootsScript}\nimport {existsSync,readdirSync,readFileSync} from 'node:fs'; const roots=sidecarRoots(process.argv[1]); const values=[]; for(const root of roots) for(const kind of ['packet','note']) { const dir=root+'/'+(kind==='packet'?'packets':'notes'); const files=existsSync(dir)?readdirSync(dir).filter(n=>kind==='packet'?/^[a-f0-9]{40,64}$/.test(n):/^[a-f0-9]{64}\\.json$/.test(n)):[]; for(const id of files){const p=dir+'/'+id+(kind==='packet'?'/packet.json':'');if(!existsSync(p))continue;try{values.push({kind,id,value:JSON.parse(readFileSync(p,'utf8')),error:null})}catch(error){values.push({kind,id,value:null,error:String(error)})}} } console.log(JSON.stringify(values));`, [row.cwd], timeoutMs);
       const values = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ kind: Schema.Literals(["packet", "note"]), id: Schema.String, value: Schema.Unknown, error: Schema.NullOr(Schema.String) }))), output);
       return { machine, values };
     }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(row.machine); skipped(error.message); return null; })));
@@ -706,6 +706,19 @@ export const ingestRemotePackets = (dir: string) => Effect.gen(function* () {
     }
   }
   return { notes, failedMachines };
+});
+
+/** Explicit inbox pulls only rows owned by the caller; a dead host never prevents local reads. */
+export const pullRemoteOwnerInbox = (currentDir?: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const dirs = new Set([...readRegistry(env.home).values()].map(entry => entry.dir));
+  if (currentDir) dirs.add(currentDir);
+  const notes: string[] = [];
+  for (const dir of dirs) {
+    const result = yield* ingestRemotePackets(dir, env.sessionId, 5000).pipe(Effect.catch(error => Effect.succeed({ notes: [`remote inbox: ${error.message.replace(/[\r\n]+/g, " ")}`], failedMachines: new Set<string>() })));
+    notes.push(...result.notes.map(note => note.replace(/[\r\n]+/g, " ")));
+  }
+  return notes;
 });
 
 const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[]) => Effect.gen(function* () {

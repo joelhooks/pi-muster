@@ -4,7 +4,7 @@ import { Effect, Schema } from "effect";
 import { AgentState, GateReceipt, Slug, AgentName, decodeRemotePacket, type AgentRow, type Project } from "./domain.ts";
 import { InputError } from "./errors.ts";
 import { paneList, type PaneInfo } from "./herdr.ts";
-import { machineConfig, mapPath, onRemote, remoteNode, sshProc } from "./remote.ts";
+import { sidecarRoots, sidecarRootsScript, machineConfig, mapPath, onRemote, remoteNode, sshProc } from "./remote.ts";
 import { MusterEnv, Proc, type ProcShape } from "./runtime.ts";
 import { sourceOf } from "./packet.ts";
 
@@ -89,24 +89,24 @@ const decodeFiles = Schema.decodeUnknownSync(Schema.Struct({ sidecar: Schema.Nul
 
 /** Only file presence is needed for reports; structured sidecars and receipts decode through domain.ts. */
 function localFiles(cwd: string, head: string, report: string | null, home: string): Files {
-  const sidecar = join(cwd, ".pi/muster/packets", head, "packet.json");
+  const roots = (existsSync(cwd) ? sidecarRoots(cwd) : [join(cwd, ".pi/muster")]).map(root => join(root, "packets", head));
   const root = join(home, ".local/state/muster/gates");
   const present = (path: string) => existsSync(path) && statSync(path).isFile() && statSync(path).size > 0;
   return decodeFiles({
-    sidecar: present(sidecar) ? readFileSync(sidecar, "utf8") : null,
-    report: [join(cwd, ".pi/muster/packets", head, "report.svx"), ...(report ? [report] : [])].some(present),
+    sidecar: roots.map(root => join(root, "packet.json")).filter(present).map(path => readFileSync(path, "utf8"))[0] ?? null,
+    report: [...roots.map(root => join(root, "report.svx")), ...(report ? [report] : [])].some(present),
     gates: existsSync(root) ? readdirSync(root).filter(file => file.endsWith(".json")).map(file => readFileSync(join(root, file), "utf8")) : [],
   });
 }
 
-const filesScript = `import {existsSync,statSync,readFileSync,readdirSync} from 'node:fs';
-import {join} from 'node:path';
+const filesScript = `${sidecarRootsScript}\nimport {existsSync,statSync,readFileSync,readdirSync} from 'node:fs';
 const [cwd,head,report] = process.argv.slice(1);
 const present = p => existsSync(p) && statSync(p).isFile() && statSync(p).size > 0;
-const sidecar = join(cwd,'.pi/muster/packets',head,'packet.json');
+const roots = (existsSync(cwd)?sidecarRoots(cwd):[join(cwd,'.pi/muster')]).map(root=>join(root,'packets',head));
+const sidecar = roots.map(root=>join(root,'packet.json')).find(present);
 const root = join(process.env.HOME,'.local/state/muster/gates');
-process.stdout.write(JSON.stringify({sidecar:present(sidecar)?readFileSync(sidecar,'utf8'):null,
-report:[join(cwd,'.pi/muster/packets',head,'report.svx'),...(report?[report]:[])].some(present),
+process.stdout.write(JSON.stringify({sidecar:sidecar?readFileSync(sidecar,'utf8'):null,
+report:[...roots.map(root=>join(root,'report.svx')),...(report?[report]:[])].some(present),
 gates:existsSync(root)?readdirSync(root).filter(f=>f.endsWith('.json')).map(f=>readFileSync(join(root,f),'utf8')):[]}));`;
 
 const probeTask = (project: Project, row: AgentRow, panes: readonly PaneInfo[], proc: ProcShape,

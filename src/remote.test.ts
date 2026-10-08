@@ -1,11 +1,11 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, utimesSync, statSync, chmodSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, renameSync, utimesSync, statSync, chmodSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Layer } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
-import { mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief } from "./remote.ts";
+import { remotePullReceipt, sidecarRoots, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
-import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";
@@ -13,6 +13,7 @@ import { agentRewind } from "./rewind.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendOwnerItem, deliverOwnerItem, forwardOwner, ownerPath, readOwnerQueue, wakeKind } from "./owner-queue.ts";
 import { ownerFeed } from "./owner-feed.ts";
+import { registerOwnerFeed } from "./owner-feed-ext.ts";
 
 const config = (patch: Partial<MachineConfig> = {}): MachineConfig => decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: "/remote/worker-worktree.sh", env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off" }, wrap: [], ...patch } }).remote!;
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); });
@@ -89,6 +90,14 @@ describe("machine boundary", () => {
 });
 
 describe("remote launch hygiene", () => {
+  it("explains pull delivery only for non-network policy", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const receipt = "remote notes reach the owner only when it runs owner_inbox or project_status; set policy comms network for push";
+    expect(launched.notes).toContain(receipt);
+    expect(remotePullReceipt("intercom")).toEqual([receipt]);
+    expect(remotePullReceipt(undefined)).toEqual([receipt]);
+    expect(remotePullReceipt("network")).toEqual([]);
+  });
   it("queues machine launch tickets in FIFO order and reports waiting", async () => {
     const s = setup();
     const env = { ...s.env, sleep: (ms: number) => Effect.sleep(ms) };
@@ -200,6 +209,40 @@ describe("remote launch hygiene", () => {
 });
 
 describe("remote owner operations", () => {
+  it.each([false, true])("owner_inbox pulls before reading and tolerates an offline host (%s)", async offline => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: "work", kind: "progress", title: "Remote-only note" }, join(s.h.root, "remote-home"));
+    const root = join(sidecarRoots(launched.row.cwd)[0]!, "notes"); mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: launched.row.name, lane: "work", owner: launched.row.owner, item }));
+    appendOwnerItem(launched.row.owner, { author: "local-worker", kind: "progress", title: "Local note" }, s.h.home);
+    if (offline) vi.spyOn(s.proc, "run").mockImplementation(() => Effect.fail(new ProcError({ command: "ssh", code: 255, stderr: "offline", message: "offline\nnow" })));
+    const tools = new Map<string, any>();
+    const stop = registerOwnerFeed({ on: vi.fn(), registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer: vi.fn(), sendMessage: vi.fn(), appendEntry: vi.fn() } as never,
+      { HOME: s.h.home }, { pull: () => s.run(pullRemoteOwnerInbox(s.dir)), consume: async () => {} });
+    const result = await tools.get("owner_inbox").execute("id", {}, undefined, undefined, { sessionManager: { getSessionId: () => launched.row.owner, getBranch: () => [] } });
+    const text = result.content[0].text;
+    expect(text).toContain("Local note");
+    if (offline) expect(text).toContain("offline now");
+    else expect(text).toContain("Remote-only note");
+    if (!offline) expect(s.calls.filter(call => call.command === "ssh").at(-1)?.timeoutMs).toBe(5000);
+    stop();
+  });
+  it("does not pull another owner's rows", async () => {
+    const s = setup(); await s.open(); await s.launch();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "different-owner" })) }, undefined] as const)));
+    s.calls.length = 0;
+    expect(await s.run(pullRemoteOwnerInbox(s.dir))).toEqual([]);
+    expect(s.calls.filter(call => call.command === "ssh")).toEqual([]);
+  });
+  it("keeps gitfile checkout sidecars in its own git directory", () => {
+    const s = setup(); const cwd = join(s.h.root, "linked");
+    mkdirSync(cwd); mkdirSync(join(s.dir, ".git/worktrees"));
+    sh(cwd, "init", "--separate-git-dir", join(s.dir, ".git/worktrees/linked"));
+    const root = sidecarRoots(cwd)[0]!;
+    expect(root).toBe(join(s.dir, ".git/worktrees/linked/muster"));
+    mkdirSync(join(root, "notes"), { recursive: true }); writeFileSync(join(root, "notes/note.json"), "{}");
+    expect(sh(cwd, "status", "--porcelain").trim()).toBe("");
+  });
   it.each(["question", "blocked", "action", "progress"] as const)("pulls a remote %s note once and preserves local wake semantics", async kind => {
     const s = setup(); await s.open(); const launched = await s.launch();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
@@ -207,7 +250,8 @@ describe("remote owner operations", () => {
     const posted = await s.run(deliverOwnerItem({ owner: launched.row.owner, home: join(s.h.root, "remote-home"), session: launched.row.sessionId, project: "probe", item: { author: launched.row.sessionId, lane: launched.row.lane, kind, title: "Need owner eyes", body: "Full note", refs: ["source"] }, send }));
     expect(send).toHaveBeenCalledTimes(wakeKind(kind) ? 1 : 0); expect(posted.pendingPull).toBe(true);
     expect(posted.delivery).toMatchObject({ status: "queued", detail: expect.stringContaining("not delivered") });
-    const root = join(launched.row.cwd, ".pi/muster/notes");
+    const root = join(sidecarRoots(launched.row.cwd)[0]!, "notes");
+    expect(sh(launched.row.cwd, "status", "--porcelain").trim()).toBe("");
     expect(readdirSync(root)).toHaveLength(1); expect(readdirSync(root)[0]).toMatch(/\.json$/);
     const sidecar = JSON.parse(readFileSync(join(root, readdirSync(root)[0]!), "utf8"));
     expect(sidecar).toMatchObject({ project: "probe", machine: "remote", agent: launched.row.name, lane: launched.row.lane, owner: launched.row.owner, item: { uri: posted.uri, kind } });
@@ -416,7 +460,8 @@ describe("remote owner operations", () => {
     const before = readFileSync(projectPath(s.dir), "utf8");
     const report = await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "Remote work committed", checks: [{ name: "unit", outcome: "pass" }] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
     expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
-    expect(existsSync(join(cwd, ".pi/muster/packets", commit, "packet.json"))).toBe(true);
+    expect(existsSync(join(sidecarRoots(cwd)[0]!, "packets", commit, "packet.json"))).toBe(true);
+    expect(sh(cwd, "status", "--porcelain").trim()).toBe("");
     // Unknown packet verification must ingest it before lookup.
     const verified = await s.run(packetVerify(s.dir, commit)); expect(verified.packet.state).toBe("verified");
     await s.run(ingestRemotePackets(s.dir)); await s.run(ingestRemotePackets(s.dir));
@@ -505,6 +550,9 @@ describe("remote owner operations", () => {
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     await s.run(packetReport({ dir: "/remote-project", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "No source changes", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    // Exercise compatibility and the harness-only dirt allowance for in-flight legacy clones.
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    renameSync(sidecarRoots(cwd)[0]!, join(cwd, ".pi/muster"));
     if (kind !== "unconsumed") {
       await s.run(packetVerify(s.dir, commit));
       await s.run(packetLand(s.dir, { id: commit, outcome: "no_changes" }));
