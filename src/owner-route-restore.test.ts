@@ -49,15 +49,19 @@ it("a restored self-owned row owns the actual new session id when the journal id
   expect(forwardFiles(h.home, "new-desk-session")).toEqual([]);
 });
 
-it("external-owned restore retains caller ownership and forwarding", async () => {
+it("external-owned restore preserves ownership without forwarding", async () => {
   const { h, dir } = await setup(false);
   const oldOwner = h.sessionId;
   h.sessionId = "replacement";
   const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "probe" }));
-  expect(restored.row.owner).toBe("replacement");
-  expect((await runWith(h, load(dir))).agents[0]?.restore?.env.MUSTER_OWNER).toBe("replacement");
-  expect(restored.notes).toContain(`restore moved external owner ${oldOwner} → replacement for probe`);
-  expect(ownerRoute(oldOwner, h.home, "probe").owner).toBe("replacement");
+  expect(restored.row.owner).toBe(oldOwner);
+  expect((await runWith(h, load(dir))).agents[0]?.restore?.env.MUSTER_OWNER).toBe(oldOwner);
+  expect(restored.notes.join("\n")).not.toContain("restore moved external owner");
+  expect(ownerRoute(oldOwner, h.home, "probe").owner).toBe(oldOwner);
+  appendOwnerItem(oldOwner, { author: "child", project: "probe", kind: "question", title: "owner mail" }, h.home);
+  expect(forwardFiles(h.home, oldOwner)).toEqual([]);
+  expect(readOwnerQueue("replacement", h.home).items).toEqual([]);
+  expect(readOwnerQueue(oldOwner, h.home).items).toHaveLength(1);
 });
 
 it("explicit takeover reclaims a stale reverse forward and reports its retirement", async () => {

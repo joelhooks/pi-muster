@@ -3,7 +3,9 @@
 import { lstatSync, mkdirSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { createHerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
+import type { PaneInfo } from "./herdr.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
@@ -12,7 +14,7 @@ import { OwnerTimelineView, ownerInboxText, ownerLine, readOwnerTimelineData } f
 import { ownerPath, writeReaderAsync, retireReader, ingestOwnerItem } from "./owner-queue.ts";
 
 import { Effect } from "effect";
-import { decodeOwnerSession, type NetworkPayload } from "./domain.ts";
+import { decodeOwnerSession, decodeProject, decodeAgentRow, type AgentRow, type NetworkPayload } from "./domain.ts";
 import { CommsError } from "./runtime.ts";
 import { createActor, type ActorRefFrom } from "xstate";
 import { networkConsumerMachine } from "./machines.ts";
@@ -27,11 +29,29 @@ export function restartFeedActivated(session: string, env: Readonly<Record<strin
   } catch { return false; }
 }
 
+/** The duplicate speaks through its own feed. Never send pane input to a resumed shell. */
+export function duplicateSessionPane(row: AgentRow, session: string, paneId: string | undefined, panes: readonly PaneInfo[]): boolean {
+  if (row.state === "closed" || row.sessionId !== session || !paneId || !row.pane) return false;
+  const matches = panes.filter(pane => pane.agent === "pi" && pane.agent_session?.kind === "path" &&
+    (pane.agent_session.value === row.sessionFile || pane.agent_session.value.endsWith(`_${session}.jsonl`)));
+  const own = matches.find(pane => pane.pane_id === paneId);
+  return matches.length > 1 && !!own && (row.pane?.paneId !== own.pane_id || row.pane.terminalId !== own.terminal_id);
+}
+
+async function ownDuplicate(session: string, env: Readonly<Record<string, string | undefined>>): Promise<boolean> {
+  if (!env.HERDR_PANE_ID || (!env.MUSTER_PROJECT && !env.MUSTER_REMOTE_ROW)) return false;
+  const row = env.MUSTER_REMOTE_ROW ? decodeAgentRow(JSON.parse(env.MUSTER_REMOTE_ROW))
+    : decodeProject(JSON.parse(readFileSync(join(env.MUSTER_PROJECT!, ".brain/data/muster/project.json"), "utf8"))).agents.find(row => row.sessionId === session && row.state !== "closed");
+  if (!row) return false;
+  const result = await Effect.runPromise(createHerdrClient().request({ method: "pane.list", params: {} }));
+  return duplicateSessionPane(row, session, env.HERDR_PANE_ID, result.panes);
+}
+
 /** Registration is inert. Session lifecycle owns its file watch and fallback poll. */
 export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>, network?: {
   mode?: (ctx: ExtensionContext) => Promise<"intercom" | "network">;
   consume: (ctx: ExtensionContext, signal: AbortSignal, receive: (payload: NetworkPayload) => Effect.Effect<void, CommsError>) => Promise<void>;
-}) {
+}, duplicate: (session: string, env: Readonly<Record<string, string | undefined>>) => Promise<boolean> = ownDuplicate) {
   let feed: ReturnType<typeof ownerFeed> | undefined;
   let session: string | undefined;
   let readerStartedAt: string | undefined;
@@ -78,12 +98,23 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       actor.send({ type: "FAILURE" }); consumer?.abort(); consumer = undefined;
       const detail = error instanceof CommsError ? error.message : "NetworkComms consumer stopped. Check its config, identity lease and recipient binding (private output withheld).";
       if (!restartFeedActivated(id, env)) return;
-      pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. After fixing the cause, restart this session (agent_launch action "restart", or /quit and relaunch the same session); never /reload.`, display: true }, { triggerTurn: true });
+      pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. If this journal was resumed twice, run /fork in the unbound pane before starting another reader. Otherwise, after fixing the cause, restart this session (agent_launch action "restart", or /quit and relaunch the same session); never /reload.`, display: true }, { triggerTurn: true });
+    };
+    let forkNoticed = false;
+    const checkDuplicate = async () => {
+      // Herdr failure leaves enforcement to the existing one-reader fence.
+      const found = await duplicate(id, env).catch(() => false);
+      if (found && !forkNoticed && feed === current) {
+        forkNoticed = true;
+        actor?.send({ type: "FAILURE" }); consumer?.abort(); consumer = undefined;
+        pi.sendMessage({ customType: "muster-session-fork", content: `This pane resumed session ${id} a second time. The catalog binding stays unchanged. Run /fork to keep your context under a new session id, or ask the owner for agent_launch action:fork from:${env.MUSTER_AGENT ?? "the bound row"} with a new name. A second network reader on this row's DID is refused; no intercom fallback.`, display: true }, { triggerTurn: true });
+      }
+      return found;
     };
     const refreshNetwork = () => {
       if (!network || !actor || !restartFeedActivated(id, env)) return;
-      void (network.mode?.(ctx) ?? Promise.resolve("network")).then(mode => {
-        if (networkActor !== actor) return;
+      void Promise.all([network.mode?.(ctx) ?? Promise.resolve("network"), checkDuplicate()]).then(([mode, duplicated]) => {
+        if (networkActor !== actor || duplicated) return;
         if (mode === "intercom") { actor.send({ type: "INTERCOM" }); consumer?.abort(); consumer = undefined; return; }
         if (actor.getSnapshot().value !== "off") return;
         actor.send({ type: "NETWORK" });
@@ -108,7 +139,8 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     // A tick during an in-flight snapshot reruns once after it, instead of waiting for the next 30 s poll.
     let again = false;
     const tick = () => {
-      refreshNetwork();
+      if (network) refreshNetwork();
+      else void checkDuplicate();
       if (ticking) { again = true; return; }
       ticking = (async () => {
         // One asynchronous snapshot for both queue validation and idle delivery.

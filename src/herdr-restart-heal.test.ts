@@ -64,23 +64,51 @@ it("a rebound reported worker can report again", async () => {
   expect(result.packet.state).toBe("reported");
 });
 
-it.each(["ambiguous", "held", "closed", "foreign", "preview", "different path", "not pi"])("refuses or leaves untouched: %s", async kind => {
+it.each(["ambiguous", "held", "closed", "preview", "not pi"])("refuses or leaves untouched: %s", async kind => {
   const s = await setup(kind === "closed" ? "closed" : "landed");
   if (kind === "ambiguous") {
     const duplicate = s.h.herdr.addPane("w1", "other-tab", s.dir);
     duplicate.agent = "pi"; duplicate.agent_session = { ...s.pane.agent_session! };
   }
   if (kind === "held") await runWith(s.h, mutate(s.dir, project => Effect.succeed([{ ...project, agents: [...project.agents, { ...s.row, name: "holder", owner: "other", state: "landed", pane: { paneId: s.pane.pane_id, tabId: s.pane.tab_id, terminalId: s.pane.terminal_id, openedByMuster: true } }] }, undefined] as const)));
-  if (kind === "foreign") await s.patch({ owner: "other" });
-  if (kind === "different path") s.pane.agent_session!.value = join(s.h.root, `elsewhere_${s.row.sessionId}.jsonl`);
   if (kind === "not pi") s.pane.agent = "claude";
   const before = await s.saved();
   const result = await runWith(s.h, projectStatus(s.dir, { act: kind !== "preview" }));
   expect(await s.saved()).toEqual(before);
   if (kind === "ambiguous" || kind === "held") {
-    expect(result.agents[0]!.action).toContain("rebind refused");
-    await expect(runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id }))).rejects.toThrow("rebind refused");
+    expect(result.agents[0]!.action).toContain(kind === "ambiguous" ? "duplicate session" : "rebind refused");
+    await expect(runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id }))).rejects.toThrow(kind === "ambiguous" ? "duplicate session" : "rebind refused");
   }
+  s.untouched();
+});
+
+it.each(["foreign owner", "session id filename", "unrelated old terminal", "missing old workspace"])('rebinds by session evidence: %s', async kind => {
+  const s = await setup("running", true);
+  if (kind === "foreign owner") await s.patch({ owner: "other" });
+  if (kind === "session id filename") s.pane.agent_session!.value = join(s.h.root, `elsewhere_${s.row.sessionId}.jsonl`);
+  if (kind === "unrelated old terminal") {
+    const shell = s.h.herdr.addPane("w1", "old-tab", s.dir);
+    await s.patch({ pane: { paneId: shell.pane_id, terminalId: shell.terminal_id, tabId: shell.tab_id, openedByMuster: true } });
+  }
+  if (kind === "missing old workspace") {
+    s.h.herdr.workspaces.delete("w1"); s.pane.workspace_id = "moved-workspace";
+  }
+  const owner = (await s.saved()).owner;
+  const result = await runWith(s.h, projectStatus(s.dir, { act: true }));
+  expect(await s.saved()).toMatchObject({ owner, state: "running", pane: { paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, openedByMuster: false } });
+  expect(result.board).toContain(`rebound worker → ${s.pane.pane_id}`);
+  s.untouched();
+});
+
+it("duplicates keep the bound row and ask the other pane to fork", async () => {
+  const s = await setup("running");
+  await s.patch({ pane: { paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: s.pane.tab_id, openedByMuster: false } });
+  const duplicate = s.h.herdr.addPane("w1", "duplicate", s.dir);
+  duplicate.agent = "pi"; duplicate.agent_session = { ...s.pane.agent_session! };
+  const before = await s.saved();
+  const result = await runWith(s.h, projectStatus(s.dir, { act: true }));
+  expect(await s.saved()).toEqual(before);
+  expect(result.board).toContain("unbound panes must /fork");
   s.untouched();
 });
 
@@ -152,6 +180,7 @@ it("preview does not interrupt a missing pane or write the catalog", async () =>
 it("a missing workspace gets one diagnostic and no rebuild or catalog mutation", async () => {
   const s = await setup("running", true);
   s.h.herdr.workspaces.delete("w1");
+  s.h.herdr.panes.delete(s.pane.pane_id);
   const before = await runWith(s.h, load(s.dir));
   const result = await runWith(s.h, projectStatus(s.dir, { act: true }));
   expect(result.notes.filter(note => note.includes("workspace w1 is missing"))).toEqual(["project probe: workspace w1 is missing; space not rebuilt"]);
@@ -170,7 +199,7 @@ async function restartSetup() {
   return { ...s, run };
 }
 
-it("retries a name collision after the old Pi quits", async () => {
+it("retries a name collision without typing into the adopted old pane", async () => {
   const s = await restartSetup();
   const handle = s.h.herdr.handle.bind(s.h.herdr);
   let attempts = 0;
@@ -181,7 +210,8 @@ it("retries a name collision after the old Pi quits", async () => {
   });
   const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
   expect(attempts).toBe(3);
-  expect(s.h.herdr.panes.has(s.pane.pane_id)).toBe(false);
+  expect(s.h.herdr.panes.has(s.pane.pane_id)).toBe(true);
+  expect(s.h.herdr.calls.some(call => call.method === "pane.send_input" && call.params.pane_id === s.pane.pane_id)).toBe(false);
   expect(s.h.herdr.panes.get(result.row.pane!.paneId)!.name).toBe("worker");
 });
 
@@ -197,7 +227,8 @@ it.each(["live agent", "changed terminal", "quit failed"])("does not close an ad
   });
   const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
   expect(s.h.herdr.panes.has(s.pane.pane_id)).toBe(true);
-  expect(result.notes.join("\n")).toContain(`left adopted shell ${s.pane.pane_id}/`);
+  expect(result.notes.join("\n")).toContain(`adopted shell ${s.pane.pane_id}/`);
+  expect(s.h.herdr.calls.some(call => call.method === "pane.send_input" && call.params.pane_id === s.pane.pane_id)).toBe(false);
   expect(s.h.herdr.calls.some(call => call.method === "pane.close" && call.params.pane_id === s.pane.pane_id)).toBe(false);
 });
 

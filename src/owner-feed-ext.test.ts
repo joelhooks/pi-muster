@@ -2,7 +2,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, expect, vi } from "vitest";
-import { registerOwnerFeed } from "./owner-feed-ext.ts";
+import { registerOwnerFeed, duplicateSessionPane } from "./owner-feed-ext.ts";
+import type { AgentRow } from "./domain.ts";
+import type { PaneInfo } from "./herdr.ts";
 import { appendOwnerItem, readerFresh, readOwnerQueue } from "./owner-queue.ts";
 
 import { Effect } from "effect";
@@ -11,6 +13,32 @@ import type { NetworkPayload } from "./domain.ts";
 import type { CommsError } from "./runtime.ts";
 
 describe("owner feed lifecycle", () => {
+  it("identifies only the unbound live session copy", () => {
+    const row = { state: "running", sessionId: "same", sessionFile: "/sessions/date_same.jsonl", pane: { paneId: "bound", terminalId: "bound-terminal" } } as AgentRow;
+    const panes = ["bound", "copy"].map(paneId => ({ pane_id: paneId, terminal_id: `${paneId}-terminal`, agent: "pi", agent_session: { kind: "path", value: row.sessionFile } })) as PaneInfo[];
+    expect(duplicateSessionPane(row, "same", "bound", panes)).toBe(false);
+    expect(duplicateSessionPane(row, "same", "copy", panes)).toBe(true);
+    expect(duplicateSessionPane(row, "same", "copy", panes.slice(1))).toBe(false);
+    expect(duplicateSessionPane(row, "different", "copy", panes)).toBe(false);
+  });
+
+  it("the duplicate sends one fork notice through its own feed and never starts a second reader", async () => {
+    const home = mkdtempSync(join(tmpdir(), "owner-duplicate-"));
+    const handlers = new Map<string, (...args: unknown[]) => unknown>(); const sent = vi.fn(); const consume = vi.fn(async () => {});
+    const pi = { on: (name: string, fn: (...args: unknown[]) => unknown) => handlers.set(name, fn), registerTool() {}, registerMessageRenderer() {}, appendEntry() {}, sendMessage: sent };
+    const ctx = { isIdle: () => false, sessionManager: { getSessionId: () => "same", getBranch: () => [] } };
+    registerOwnerFeed(pi as never, { HOME: home }, { consume }, async () => true);
+    vi.useFakeTimers();
+    try {
+      handlers.get("session_start")!({}, ctx);
+      await vi.advanceTimersByTimeAsync(90_000);
+      expect(consume).not.toHaveBeenCalled();
+      expect(sent).toHaveBeenCalledOnce();
+      expect(sent.mock.calls[0]![0]).toMatchObject({ customType: "muster-session-fork" });
+      expect(sent.mock.calls[0]![0].content).toContain("Run /fork");
+      expect(sent.mock.calls[0]![0].content).toContain("second network reader");
+    } finally { await handlers.get("session_shutdown")!(); vi.useRealTimers(); }
+  });
   it("holds a pending mention at a gated start, leaves the argv prompt first, and resumes after activation", async () => {
     const home = mkdtempSync(join(tmpdir(), "owner-gated-")); const gate = join(home, "restart.ready");
     const handlers = new Map<string, (...args: unknown[]) => unknown>(); const sent = vi.fn();
@@ -41,10 +69,11 @@ describe("owner feed lifecycle", () => {
     const home = mkdtempSync(join(tmpdir(), "owner-release-")); const handlers = new Map<string, (...args: unknown[]) => unknown>();
     const pi = { on: (name: string, fn: (...args: unknown[]) => unknown) => handlers.set(name, fn), registerTool() {}, registerMessageRenderer() {}, appendEntry() {}, sendMessage() {}, sendUserMessage() {} };
     const ctx = { isIdle: () => false, sessionManager: { getSessionId: () => "reader", getBranch: () => [] } };
-    let finishRelease!: () => void; const release = new Promise<void>(resolve => { finishRelease = resolve; }); const releasing = vi.fn();
-    const stop = registerOwnerFeed(pi as never, { HOME: home }, { consume: (_ctx, signal) => Effect.runPromise(Effect.never.pipe(
-      Effect.ensuring(Effect.promise(() => { releasing(); return release; }))), { signal }) });
-    handlers.get("session_start")!({}, ctx); await Promise.resolve();
+    let finishRelease!: () => void; const release = new Promise<void>(resolve => { finishRelease = resolve; }); const releasing = vi.fn(); const started = vi.fn();
+    const stop = registerOwnerFeed(pi as never, { HOME: home }, { consume: (_ctx, signal) => { started(); return Effect.runPromise(Effect.never.pipe(
+      Effect.ensuring(Effect.promise(() => { releasing(); return release; }))), { signal }); } });
+    handlers.get("session_start")!({}, ctx);
+    await vi.waitFor(() => expect(started).toHaveBeenCalledOnce());
     const stopped = vi.fn(); const shutdown = stop().then(stopped);
     await vi.waitFor(() => expect(releasing).toHaveBeenCalledOnce()); expect(stopped).not.toHaveBeenCalled();
     finishRelease(); await shutdown; expect(stopped).toHaveBeenCalledOnce();
@@ -64,7 +93,7 @@ describe("owner feed lifecycle", () => {
     registerOwnerFeed(pi as never, { HOME: home, MUSTER_ROLE: "desk" }, { consume });
     expect(consume).not.toHaveBeenCalled();
     handlers.get("session_start")!({}, ctx);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(consume).toHaveBeenCalledOnce());
     const item = appendOwnerItem("desk-session", { author: "worker-session", kind: "question", title: "question" }, home, false);
     await Effect.runPromise(receive!({ type: "owner", recipient: "desk-session", item }));
     expect(readOwnerQueue("desk-session", home).items).toHaveLength(1);
