@@ -49,6 +49,10 @@ const decodeTrace = Schema.decodeUnknownSync(Schema.Struct({
 }));
 const io = <A>(fn: () => A) => Effect.try({ try: fn, catch: error => new InputError({ message: `task tracer: ${String(error)}` }) });
 
+// Agreement is not written to the journal, but it breaks an unchanged pair
+// during this reader's lifetime. The journal seeds deduplication after restart.
+const observedPairs = new Map<string, string>();
+
 /** Persist deduplication across tool calls and owner restarts. Nothing is written for agreement. */
 export function appendTaskTraces(home: string, at: string, project: string, rows: readonly AgentRow[], traces: ReadonlyMap<string, TaskTrace>): void {
   const root = join(home, ".local/state/muster");
@@ -62,16 +66,22 @@ export function appendTaskTraces(home: string, at: string, project: string, rows
     } catch { /* A torn last append does not disable the read-only board. */ }
   }
   const records: string[] = [];
+  const observations = new Map<string, string>();
   for (const row of rows) {
     const trace = traces.get(row.name);
-    if (row.state === "closed" || !trace || STORED_TASK_STATUS[row.state] === trace.derived) continue;
+    if (row.state === "closed" || !trace) continue;
     const key = `${row.state}/${trace.derived}`;
-    if (previous.get(`${project}/${row.name}`) === key) continue;
+    const identity = `${path}/${project}/${row.name}`;
+    observations.set(identity, key);
+    if (STORED_TASK_STATUS[row.state] === trace.derived) continue;
+    if ((observedPairs.get(identity) ?? previous.get(`${project}/${row.name}`)) === key) continue;
     records.push(JSON.stringify(decodeTrace({ at, project, row: row.name, stored: row.state, derived: trace.derived, facts: trace.facts })));
   }
-  if (!records.length) return;
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  appendFileSync(path, `${records.join("\n")}\n`, { mode: 0o600 });
+  if (records.length) {
+    mkdirSync(root, { recursive: true, mode: 0o700 });
+    appendFileSync(path, `${records.join("\n")}\n`, { mode: 0o600 });
+  }
+  for (const [identity, key] of observations) observedPairs.set(identity, key);
 }
 
 interface Files { readonly sidecar: string | null; readonly report: boolean; readonly gates: readonly string[] }

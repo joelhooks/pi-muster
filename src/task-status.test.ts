@@ -171,6 +171,11 @@ describe("read-only task tracer", () => {
     traces.set(row.name, { ...working, derived: "drafted" });
     appendTaskTraces(h.home, h.now.toISOString(), "trace", rows, traces);
     expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(2);
+    traces.set(row.name, { ...working, derived: "reported" }); // Agreement breaks the previous pair.
+    appendTaskTraces(h.home, h.now.toISOString(), "trace", rows, traces);
+    traces.set(row.name, { ...working, derived: "drafted" });
+    appendTaskTraces(h.home, h.now.toISOString(), "trace", rows, traces);
+    expect(readFileSync(path, "utf8").trim().split("\n")).toHaveLength(3);
     expect((await runWith(h, load(dir))).agents[0]!.state).toBe("running");
   });
 });
