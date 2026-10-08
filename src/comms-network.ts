@@ -173,7 +173,15 @@ function privateJson(path: string): unknown {
   if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.uid !== process.getuid?.()) throw new CommsError(`NetworkComms requires an owned 0600 regular file: ${path}`);
   return JSON.parse(readFileSync(path, "utf8"));
 }
+/** A Pi that cached older sibling modules can lazy-load this file from a newer checkout; a missing
+ * import then reads as undefined. Fail typed instead of crashing the process with a TypeError. */
+export const NETWORK_SKEW = "NetworkComms unavailable: this Pi loaded an older pi-muster than the one on disk; restart it onto current code";
+export const networkModuleSkew = (imports: readonly unknown[] = [networkLeaseMachine, decodeOwnerSession, decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, CommsError, MusterEnv, Proc, Unsupported]) =>
+  imports.some(value => value === undefined);
+
 export function readNetworkConfig(home: string, path = networkConfigPath(home)) {
+  // Old callers wrap this in Effect.try, so throwing here keeps network comms from starting at all.
+  if (networkModuleSkew()) throw CommsError ? new CommsError(NETWORK_SKEW) : new Error(NETWORK_SKEW);
   try {
     const config = decodeNetworkCommsConfig(privateJson(path));
     const url = new URL(config.endpoint);
@@ -439,6 +447,7 @@ export function consumeNetworkMailbox(options: {
 }) {
   const failure = () => new CommsError("NetworkComms consumer failed (private output withheld)");
   return Effect.gen(function* () {
+    if (networkModuleSkew()) return yield* Effect.fail(new CommsError(NETWORK_SKEW));
     yield* awaitRestartActivation(options.session);
     const cursorPath = networkCursorPath(options.home, options.agent);
     let afterSeq = yield* Effect.try({
