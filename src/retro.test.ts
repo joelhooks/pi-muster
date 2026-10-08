@@ -23,19 +23,10 @@ async function setup() {
 }
 
 describe("finished lane retros", () => {
-  it("prompts from three pending work lanes onward, not role lanes", async () => {
+  it("never prompts from closed work or role lanes", async () => {
     const s = await setup();
     expect(await s.close("judge", "role")).not.toHaveProperty("retro");
-    expect(await s.close("one")).not.toHaveProperty("retro");
-    expect(await s.close("two")).not.toHaveProperty("retro");
-    const three = (await s.close("three")).retro;
-    expect(three).toContain("retro: 3 lanes closed since the last retro;");
-    expect(three).toContain("judge model: claude-bridge/claude-opus-5-5:high");
-    expect(three).toContain('missing roster judge alternate with useFor: "retro"');
-    expect(three).toContain('run project_review note: "retro evidence"');
-    expect(three).toContain('run lane_open slug: "retro-2026-09-29" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"');
-    expect(three).toContain("run references/retro.md");
-    expect((await s.close("four")).retro).toContain("retro: 4 lanes closed since the last retro;");
+    for (const slug of ["one", "two", "three", "four"]) expect(await s.close(slug)).not.toHaveProperty("retro");
     await runWith(s.h, projectReview(s.dir, { note: "done", retro: true }));
     expect(await s.close("five")).not.toHaveProperty("retro");
   });
@@ -58,7 +49,7 @@ describe("finished lane retros", () => {
     expect(await s.close("two")).not.toHaveProperty("retro");
     expect(await runWith(s.h, projectReview(s.dir, { note: "next" }))).toHaveProperty("retroLanes", [{ slug: "two", sessionFiles: [], closedTails: [], reports: [] }]);
   });
-  it("renders the cadence reminder and review session paths in tool output", async () => {
+  it("renders close without a retro reminder and preserves review session paths", async () => {
     const s = await setup();
     await s.close("one");
     await s.close("two");
@@ -84,7 +75,8 @@ describe("finished lane retros", () => {
       // SAFETY: these mocked operations need only the session identity, not live UI.
       const ctx = { cwd: s.dir, sessionManager: { getSessionId: () => "test", getBranch: () => [] } } as unknown as Parameters<ToolDefinition["execute"]>[4];
       const closeResult = await tools.get("lane_close")!.execute("id", { slug: "three" }, undefined, undefined, ctx);
-      expect(closeResult.content).toContainEqual({ type: "text", text: expect.stringContaining('run project_review note: "retro evidence"') });
+      expect(closeResult.content).toContainEqual({ type: "text", text: expect.stringContaining("Lane three closed.") });
+      expect(JSON.stringify(closeResult.content)).not.toContain("retro");
       const reviewResult = await tools.get("project_review")!.execute("id", { note: "complete", retro: true }, undefined, undefined, ctx);
       expect(reviewResult.content).toContainEqual({ type: "text", text: expect.stringContaining("retro lane: one; worker sessions: /sessions/worker.jsonl; closed tails: /closed/worker-100.txt, /closed/worker-restart-200.txt; reports: /reports/worker.svx\nretro lane: two; worker sessions: none recorded; closed tails: none recorded; reports: none recorded") });
       expect(ops.projectReview).toHaveBeenLastCalledWith(s.dir, { note: "complete", retro: true });

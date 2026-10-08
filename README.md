@@ -8,6 +8,14 @@ It sits on top of [Bellwether](https://github.com/joelhooks/pi-bellwether), whic
 herdr (terminals) → Bellwether (runtime) → Muster (projects, lanes, packets, agents, desk)
 ```
 
+## Default shape
+
+One writer, one gate, one accountable desk. The desk owns the project; each lane has one writer, a worker who reports directly to the desk. The desk may also be the writer. The land gate proves the exact candidate.
+
+Bosses, the hawk, judges and arbiters are opt-in for a named risk. Record the risk on the lane or in the launch before opening the role: for example, many packets touching shared files, a long unattended run, or customer money. There is no standing judge slot.
+
+Retros run only after an incident (a bad landing, outage or lost work), friction that repeats across lanes, or when Joel asks. The desk opens one by hand; lane counts, elapsed days and ordinary project reviews do not trigger one.
+
 ## Install
 
 ```bash
@@ -63,7 +71,7 @@ Role and alternate `skills` name standing skills (names or absolute paths); laun
 
 ## Tools
 
-Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane_deliver`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`, `desk_report`, `desk_rulings`, `thinking_set` (a session lowers or raises its own thinking level, as a standing Hawk does when the line stops).
+Owner side: `project_open`, `project_move`, `project_update`, `lane_open`, `lane_deliver`, `lane_close`, `agent_launch`, `agent_close`, `packet_verify`, `packet_land`, `desk_post`, `project_status`, `project_review`, `desk_inbox`, `desk_answer`, `desk_report`, `desk_rulings`, `thinking_set` (a session lowers or raises its own thinking level, as an opted-in hawk may do when the line stops).
 
 ### Deploy posture
 
@@ -81,7 +89,7 @@ Live proof frees the slot.
 | --- | --- | --- | --- |
 | 0 | locked | Cite a resolved approval desk item in evidence | Live proof |
 | 1 | prove | Green gate | Live proof |
-| 2 | ship-and-watch | Green gate, `Rollback: ...` and `Watch: ...` evidence lines | Deploy; proof checked at retro |
+| 2 | ship-and-watch | Green gate, `Rollback: ...` and `Watch: ...` evidence lines | Deploy; desk follows watch evidence |
 | 3 | jfdi | Green gate and `Rollback: ...` evidence line | Deploy; no proof step |
 
 `lane_open deployLevel` only lowers permission and requires `deployRule`: `customer-facing`, `money`, `outbound-sends`, `irreversible`, `shared-infra` or `slow-rollback`. The tool refuses an override above that rule's cap. Customer-facing work, money or outbound sends cap permission at 1; irreversible work at 0; shared infrastructure at 2; rollback over five minutes or needing another person at 1. A later project-level decrease also lowers existing lanes.

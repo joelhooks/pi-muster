@@ -7,7 +7,6 @@ import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { Effect } from "effect";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
 import { flowLine } from "./tokens.ts";
-import { retroCadence } from "./retro-cadence.ts";
 import { projectPath } from "./store.ts";
 
 async function setup() {
@@ -18,13 +17,18 @@ async function setup() {
   return { h, dir, project, lane };
 }
 
-describe("retro cadence", () => {
-  for (const count of [0, 1, 2, 3]) for (const age of [86_399_999, 86_400_000, 86_400_001]) for (const cursor of [false, true]) {
-    it(`${count} closed, ${age} ms, cursor ${cursor}`, async () => {
-      const { h, project, lane } = await setup();
+describe("manual retros and judge selection", () => {
+  for (const count of [0, 1, 2, 3, 10]) for (const age of [86_399_999, 86_400_000, 604_800_000]) for (const cursor of [false, true]) {
+    it(`does not nag for ${count} closed, ${age} ms, cursor ${cursor}`, async () => {
+      const { h, dir, project, lane } = await setup();
       const at = new Date(h.now.getTime() - age).toISOString();
-      const p = decodeProject({ ...project, ...(cursor ? { lastRetroAt: at } : {}), lanes: Array.from({ length: count }, (_, i) => ({ ...lane, slug: `work-${i}`, kind: "work", state: "closed", closedAt: cursor ? h.now.toISOString() : at })) });
-      expect(retroCadence(p, h.now.getTime())).toMatchObject({ count, due: count >= 3 || count >= 1 && age >= 86_400_000 });
+      const p = decodeProject({ ...project, ...(cursor ? { lastRetroAt: at } : {}), lanes: [
+        ...Array.from({ length: count }, (_, i) => ({ ...lane, slug: `work-${i}`, kind: "work", state: "closed", closedAt: cursor ? h.now.toISOString() : at })),
+        { ...lane, slug: "closing", kind: "work", root: null },
+      ] });
+      writeFileSync(projectPath(dir), JSON.stringify(p));
+      expect(await runWith(h, laneClose(dir, "closing"))).not.toHaveProperty("retro");
+      expect(flowLine(p, h.now.getTime())).not.toContain("retro:");
     });
   }
 
@@ -73,39 +77,5 @@ describe("retro cadence", () => {
     expect(result.argv).toContain("openai-codex/gpt-6-astra:xhigh");
   });
 
-  it("close and flow agree on the day rule and close names the judge model", async () => {
-    const { h, dir, project, lane } = await setup();
-    mkdirSync(join(h.home, ".config", "muster"), { recursive: true });
-    writeFileSync(join(h.home, ".config", "muster", "roster.json"), JSON.stringify({ version: 1, roles: { judge: { alternates: [{ model: "openai-codex/gpt-6-astra", thinking: "xhigh", useFor: ["retro"] }] } } }));
-    const at = new Date(h.now.getTime() - 86_400_000).toISOString();
-    const p = decodeProject({ ...project, lanes: [{ ...lane, slug: "old", kind: "work", state: "closed", closedAt: at }, { ...lane, slug: "new", kind: "work", root: null }] });
-    writeFileSync(projectPath(dir), JSON.stringify(p));
-    const result = await runWith(h, laneClose(dir, "new"));
-    expect(result.retro).toContain("2 lanes closed since the last retro (1d)");
-    expect(result.retro).toContain("judge model: openai-codex/gpt-6-astra:xhigh");
-    expect(flowLine(p, h.now.getTime())).toContain("retro: due (1d, 1 closed)");
-  });
 
-  it("ignores consumed, discarded, and non-work lanes and uses the oldest close", async () => {
-    const { h, project, lane } = await setup();
-    const old = new Date(h.now.getTime() - 86_400_000).toISOString();
-    const fresh = h.now.toISOString();
-    const p = decodeProject({ ...project, lanes: [
-      { ...lane, slug: "old", kind: "work", state: "closed", closedAt: old },
-      { ...lane, slug: "fresh", kind: "work", state: "closed", closedAt: fresh },
-      { ...lane, slug: "discard", kind: "work", state: "closed", discarded: true, closedAt: old },
-      { ...lane, state: "closed", closedAt: old },
-    ] });
-    expect(retroCadence(p, h.now.getTime())).toMatchObject({ count: 2, reason: "day" });
-    expect(retroCadence({ ...p, lastRetroAt: old }, h.now.getTime())).toMatchObject({ count: 1, reason: "day" });
-    expect(retroCadence({ ...p, lastRetroAt: fresh }, h.now.getTime())).toMatchObject({ count: 0, due: false });
-    expect(flowLine(decodeProject({ ...p, lanes: [...p.lanes, { ...lane, slug: "running" }] }), h.now.getTime())).toContain("retro: running running");
-  });
-
-  it("shows the one-day due state in the flow line", async () => {
-    const { h, project, lane } = await setup();
-    const closed = new Date(h.now.getTime() - 86_400_000).toISOString();
-    const p = decodeProject({ ...project, lanes: [{ ...lane, kind: "work", state: "closed", closedAt: closed }] });
-    expect(flowLine(p, h.now.getTime())).toContain("retro: due (1d, 1 closed)");
-  });
 });

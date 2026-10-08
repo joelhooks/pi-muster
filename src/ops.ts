@@ -68,7 +68,7 @@ import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem, forwardOwner, ingestOwnerItem, ownerRoute, readOwnerQueue } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
-import { retroCadence, retroJudgeModel } from "./retro-cadence.ts";
+import { retroJudgeModel } from "./retro-cadence.ts";
 import { checkRunnableModel, checkRestoreContext, resolveModel, modelOutputIssue } from "./models.ts";
 import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./session-model.ts";
 import { resolveSkills, skillIndex } from "./skills.ts";
@@ -1741,25 +1741,7 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
       }),
     );
     yield* publishTokens(yield* load(dir));
-    const latest = yield* load(dir);
-    const cadence = retroCadence(latest, env.now().getTime());
-    const judge = closed.kind === "work" && !closed.discarded && cadence.due
-      ? yield* Effect.gen(function* () {
-        const roster = (yield* loadRoster).roster;
-        const choice = retroJudgeModel(roster);
-        const profile = yield* decodeWith(() => roleDefaults(roster, latest.policy, "judge", choice.model, latest.slug), null);
-        return `judge model: ${profile.model}:${profile.thinking}; ${choice.notes.length ? `${choice.notes.join("; ")}; ` : ""}`;
-      }) : null;
-    const retroBase = `retro-${iso(env).slice(0, 10)}`;
-    const taken = new Set(latest.lanes.map(lane => lane.slug));
-    let retroSlug = retroBase;
-    for (let index = 2; taken.has(retroSlug); index++) {
-      let suffix = "";
-      for (let n = index; n > 0; n = Math.floor((n - 1) / 26)) suffix = String.fromCharCode(97 + (n - 1) % 26) + suffix;
-      retroSlug = `${retroBase}-${suffix}`;
-    }
-    return { lane: closed, closed: true, pending: [] as string[], paneNote,
-      ...(judge ? { retro: `retro: ${cadence.count} lanes closed since the last retro${cadence.reason === "day" ? " (1d)" : ""}; ${judge}run project_review note: "retro evidence" for pending lanes' session, tail and report paths; run lane_open slug: "${retroSlug}" label: "🔁 retro" goal: "Review finished lanes" kind: "retro"; run references/retro.md` } : {}) };
+    return { lane: closed, closed: true, pending: [] as string[], paneNote };
   });
 
 // ---------- agents ----------

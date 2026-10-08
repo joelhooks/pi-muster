@@ -51,13 +51,10 @@ describe("closing proposed lanes", () => {
     const closed = await runWith(h, laneClose(dir, "three", { discard: true }));
     expect(closed.lane.state).toBe("closed");
     expect(closed.lane.discarded).not.toBe(true);
-    expect(closed.retro).toContain("retro: 3 lanes closed since the last retro;");
-    expect(closed.retro).toContain("judge model: claude-bridge/claude-opus-5-5:high");
-    expect(closed.retro).toContain('run project_review note: "retro evidence"');
-    expect(closed.retro).toContain('run lane_open slug: "retro-2026-09-29"');
+    expect(closed).not.toHaveProperty("retro");
     await open("another-parked", true);
     expect(await runWith(h, laneClose(dir, "another-parked", { discard: true }))).not.toHaveProperty("retro");
-    // Reopening a discarded lane makes it real work; its next close counts normally.
+    // Reopening a discarded lane makes it real work and available as manual retro evidence.
     await open("parked");
     expect((await runWith(h, laneClose(dir, "parked"))).lane.discarded).not.toBe(true);
     expect((await runWith(h, projectReview(dir, { note: "reopened work" }))).retroLanes.map(lane => lane.slug)).toEqual(["one", "two", "parked", "three"]);

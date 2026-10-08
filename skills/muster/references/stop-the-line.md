@@ -2,17 +2,17 @@
 
 Joel may say "stop the line", "freeze", or "only essentials and monitoring for 24h". That means stop all project work for a set window, for safety and token cost. Production and monitoring keep running.
 
-The desk runs the stop, Hawk carries it out, and only Joel ends it. Hawk never stops standing. There is always one Hawk on duty with the page watch and the resume timer armed.
+The desk owns the stop, the page watch and the resume timer; only Joel ends it. Bosses, the hawk, judges and arbiters are opt-in for a named risk. Open or retain a hawk only for a monitoring risk you can name, such as a long unattended production run, and record it on the lane or in the launch. Below, “monitor” means the desk unless it delegates that risk to a hawk.
 
 ## 1. Relay the terms, within minutes
 
-- **Send one stop order to Hawk**, and copy the owner. It gives:
+- **Record the stop terms**, and send them to an opted-in monitor if separate from the desk. They give:
   - the window in UTC, both ends;
   - the purpose;
-  - that Hawk stays on duty at low thinking (§6);
+  - who holds the watches at low thinking (§6);
   - a **STOP** list, a **KEEP** list, and the resume rule (§2);
-  - a request that, before stopping, Hawk post one desk item with the freeze state (§3).
-- **Give the owner a heads-up.** The full terms went to Hawk, and the owner waits for Hawk's instructions. Until they arrive, it starts no new packets, merges or measurements.
+  - one desk item with the freeze state before stopping (§3).
+- **Give writers the terms.** They start no new packets, merges or measurements.
 - **Update the project:**
   - Set the `headline` to "⛔ Line stopped until <end>".
   - Set `nextAction` to the resume checklist.
@@ -26,7 +26,7 @@ The desk runs the stop, Hawk carries it out, and only Joel ends it. Hawk never s
 - **Merges and deploys.** A deploy already in flight either finishes through its post-check or rolls back, then stops. The deploy gate gives no GO.
 - **New work.** No new packets, lanes, load tests, stage waves or measurement runs.
 - **Clocks that wake an agent.** Every `until repeat` or tick that wakes an LLM on a schedule stops.
-- **Agents.** Workers stop at a clean checkpoint and write a handoff. Bosses, reviewers and the owner go idle. Hawk stays up (§6).
+- **Agents.** Workers stop at a clean checkpoint and write a handoff. Any opted-in bosses and reviewers go idle. The monitor keeps the watches (§6).
 
 **KEEP**
 
@@ -48,7 +48,7 @@ Post one `fyi` desk item that Joel can read in a minute. It has four parts:
 
 ## 4. Close and catalogue
 
-Joel may also ask to close the sessions and panes. That covers everyone except Hawk and the desk: those two stay open.
+Joel may also ask to close the sessions and panes. Keep the desk open, plus an opted-in monitor if it holds the watches.
 
 1. **Write the roster first,** as a Brain note. For each agent it records:
    - the role;
@@ -67,16 +67,16 @@ Joel may also ask to close the sessions and panes. That covers everyone except H
 
 ## 5. Watches die with their session
 
-Pi-until watches and Herdr watches belong to their session. Closing the session that holds the page watch or the resume timer kills them. That is why Hawk stands.
+Pi-until watches and Herdr watches belong to their session. Closing the session that holds the page watch or the resume timer kills them. Keep their holder open, whether it is the desk or an opted-in hawk.
 
 If watches must move anyway, arm them in the new session first, wait for its `fyi` saying both are armed, and only then close the old one. Never leave a gap.
 
-## 6. The standing Hawk
+## 6. The monitor
 
-Hawk stays on duty through the freeze on a quiet brief. There are two ways to do it:
+The desk holds the watches by default. A hawk is opt-in for a named monitoring risk recorded on the lane or in the launch. If that risk warrants a separate monitor, there are two ways to retain coverage:
 
-- **The same Hawk (default).** Hawk calls `thinking_set low` and takes the freeze brief below as its standing orders. Its watches, its context and its judgment carry straight through.
-- **A fresh third-shift Hawk.** Use this when the day Hawk's context is heavy or Joel wants a clean start.
+- **The same monitor.** It calls `thinking_set low` and takes the freeze brief below. Its watches and context carry through.
+- **A fresh third-shift Hawk.** Use this only for the recorded risk when the existing hawk's context is heavy or Joel wants a clean start.
   1. Launch it on the Hawk role with low thinking, compact-at 200000 and the freeze brief.
   2. It arms its own watches and posts an `fyi` saying both are armed.
   3. Only then close the day Hawk, which goes on the roster for restore.
@@ -96,7 +96,7 @@ The freeze brief:
   Every deploy keeps its gate and its post-check.
 - **Off limits:** everything else, and any new class of risk: new audiences, DNS, deleting data. Those go to Joel through the desk queue.
 - **Reporting:** the desk queue only, one item per incident. When Joel is needed urgently: a `blocked` item plus one `needs_joel` ping.
-- **No recurring ticks.** The Hawk on duty wakes only on a watch.
+- **No recurring ticks.** The monitor wakes only on a watch.
 
 ## 7. Work inside the freeze
 
@@ -108,9 +108,9 @@ A paused project's local main goes stale. Fetch origin before cutting clones, an
 
 When Joel says go:
 
-1. Hawk returns to full duty. The same Hawk calls `thinking_set` back to its role's level. A third shift either keeps the watch with its thinking raised, or restores the day Hawk and hands over, watches first.
-2. Restore the owner, then the deploy gate.
-3. Hawk decides which lanes come back. Items with a deadline go first.
+1. The monitor returns to its usual thinking level. Retain a hawk only while its named risk remains; hand watches back to the desk before retiring it.
+2. Restore the writer, then the deploy gate.
+3. The desk decides which lanes come back. Items with a deadline go first.
 4. Put the policy back (the silence limits), along with the headline and the owner loop.
 5. Re-plan anything the freeze voided.
 6. Mark the roster note done.
