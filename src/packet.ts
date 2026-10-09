@@ -7,7 +7,7 @@ import { Effect } from "effect";
 import type { AgentRow, CheckOutcome, Lane, Packet, Project } from "./domain.ts";
 import { Proc, git, type ProcShape } from "./runtime.ts";
 
-/** Paths a clone may leave dirty without matching the source (worker-worktree.sh's allowlist). */
+/** Harness prefixes, not permission to discard transcripts or other differing work. */
 export const DEFAULT_GENERATED = [".brain/", ".pi/", ".pi-subagents/", ".claude/", ".agents/", ".codex/", "BRAIN.md", "AGENTS.md", "CLAUDE.md", ".rift"];
 
 /** Paths from `git status --porcelain=v1 -z`. A rename entry carries its source path as an extra field. */
@@ -26,6 +26,72 @@ export function parsePorcelainZ(output: string): string[] {
 
 export const isGenerated = (path: string, generated: readonly string[]) =>
   generated.some((prefix) => (prefix.endsWith("/") ? path.startsWith(prefix) : path === prefix || path.startsWith(`${prefix}/`)));
+
+/** Shared by the owner and the filesystem scan executed on the clone's machine. */
+export function isTranscriptPath(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
+  return /(?:^|\/)\.pi-subagents(?:\/|$)/.test(normalized) ||
+    /(?:^|\/)(?:\.pi\/agent\/sessions|\.claude\/projects|\.codex\/sessions)(?:\/|$)/.test(normalized) ||
+    /[^/]*transcript[^/]*\.jsonl$/i.test(normalized) ||
+    /(?:^|\/)sessions\/.*\.jsonl$/i.test(normalized);
+}
+
+/** No transport assumptions: Proc runs this unchanged locally or through SSH.
+ * Walk ignored and tracked files too. Never follow transcript symlinks or
+ * overwrite a rescue. Verify the complete manifest again just before retirement. */
+export const transcriptRescueScript = () => `
+try {
+const fs=require('node:fs'), p=require('node:path'), crypto=require('node:crypto');
+const isTranscriptPath=${isTranscriptPath.toString()};
+const [mode,root,home,slug,row,stamp,previous]=process.argv.slice(1);
+const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const files=[];
+function walk(dir,relative='') {
+  for(const name of fs.readdirSync(dir).sort()) {
+    const path=relative?relative+'/'+name:name, full=p.join(root,path), stat=fs.lstatSync(full);
+    if(stat.isSymbolicLink()) {
+      if(isTranscriptPath(path))throw new Error('transcript symlink refuses retirement: '+path);
+      // A symlink is not part of the clone's owned directory tree.
+      continue;
+    }
+    if(stat.isDirectory())walk(full,path);
+    else if(isTranscriptPath(path)) {
+      if(!stat.isFile())throw new Error('non-regular transcript: '+path);
+      files.push({path,bytes:stat.size,sha256:hash(full)});
+    }
+  }
+}
+walk(root);
+let receipt;
+if(mode==='rescue') {
+  let dir=null;
+  if(files.length) {
+    const parent=p.join(home||require('node:os').homedir(),'.local/state/transcript-rescue');
+    fs.mkdirSync(parent,{recursive:true,mode:0o700});
+    const safe=s=>s.replace(/[^a-zA-Z0-9_-]/g,'_');
+    dir=fs.mkdtempSync(p.join(parent,safe(slug)+'-'+safe(row)+'-'+stamp+'-'));
+    fs.chmodSync(dir,0o700);
+    if(fs.realpathSync(dir).startsWith(fs.realpathSync(root)+p.sep))throw new Error('transcript rescue is inside clone');
+    for(const file of files) {
+      const dest=p.join(dir,file.path);
+      fs.mkdirSync(p.dirname(dest),{recursive:true,mode:0o700});
+      fs.copyFileSync(p.join(root,file.path),dest,fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(dest,0o600);
+      if(fs.statSync(dest).size!==file.bytes||hash(dest)!==file.sha256)throw new Error('transcript rescue mismatch: '+file.path);
+    }
+  }
+  receipt={dir,files,bytes:files.reduce((sum,file)=>sum+file.bytes,0)};
+} else {
+  receipt=JSON.parse(previous);
+  if(JSON.stringify(files)!==JSON.stringify(receipt.files))throw new Error('transcripts changed during preservation');
+  for(const file of files) {
+    const dest=p.join(receipt.dir,file.path);
+    if(!fs.lstatSync(dest).isFile()||fs.statSync(dest).size!==file.bytes||hash(dest)!==file.sha256)throw new Error('transcript rescue mismatch: '+file.path);
+  }
+}
+process.stdout.write(JSON.stringify(receipt));
+} catch(error) { console.error('transcript preservation failed: '+error.message); process.exitCode=1; }
+`;
 
 function bytesEqual(a: string, b: string): boolean {
   const aExists = existsSync(a);

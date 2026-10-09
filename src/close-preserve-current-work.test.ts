@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -29,11 +29,14 @@ async function fixture(remote: boolean) {
   const { h, dir } = forkHarness(template, templateDir);
   if (remote) await runWith(h, mutate(dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, machine: "remote" })) }, undefined] as const)));
   const row = (await runWith(h, load(dir))).agents[0]!;
-  const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: h.workerWorktree, env: {}, wrap: [] } });
+  const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: h.workerWorktree, env: { HOME: join(h.home, "remote") }, wrap: [] } });
   const ssh: string[] = [];
   let failFetch = false;
   let wrongReadback = false;
   let advanceOnFetch = false;
+  let failTranscriptCopy = false;
+  let changeTranscript = false;
+  let corruptRescue = false;
   const commit = (cwd: string, file = "work.txt", text = "current work") => {
     writeFileSync(join(cwd, file), text);
     sh(cwd, "add", file); sh(cwd, "commit", "-q", "-m", text);
@@ -46,13 +49,21 @@ async function fixture(remote: boolean) {
       Effect.provideService(Proc, { run: (command, args, options) => {
         const script = command === "ssh" ? args.at(-1)! : args.join(" ");
         if (command === "ssh") ssh.push(script);
+        const transcriptCopy = script.includes("transcript rescue mismatch") && script.includes(command === "ssh" ? "'rescue'" : " rescue ");
+        if (failTranscriptCopy && transcriptCopy) return Effect.succeed({ code: 1, stdout: "", stderr: "injected transcript copy failure" });
         const rescue = script.includes("refs/muster/rescue/");
         const rescueFetch = script.includes("fetch") && script.includes("--no-tags");
         if (failFetch && rescueFetch) return Effect.succeed({ code: 1, stdout: "", stderr: "injected rescue fetch failure" });
         if (wrongReadback && rescue && script.includes("rev-parse")) return Effect.succeed({ code: 0, stdout: `${"0".repeat(40)}\n`, stderr: "" });
         const result = command === "ssh" ? liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: options.timeoutMs }) : h.proc.run(command, args, options);
-        return result.pipe(Effect.tap(() => Effect.sync(() => {
+        return result.pipe(Effect.tap(output => Effect.sync(() => {
+          if (corruptRescue && transcriptCopy && output.code === 0) {
+            corruptRescue = false;
+            const receipt = JSON.parse(output.stdout);
+            writeFileSync(join(receipt.dir, receipt.files[0].path), "corrupted rescue");
+          }
           if (advanceOnFetch && rescueFetch) { advanceOnFetch = false; commit(row.cwd, "late.txt", "late commit"); }
+          if (changeTranscript && transcriptCopy) { changeTranscript = false; writeFileSync(join(row.cwd, ".pi-subagents/artifacts/x_transcript.jsonl"), "changed"); }
         })));
       } }),
     );
@@ -65,10 +76,55 @@ async function fixture(remote: boolean) {
     if (remote) await runWith(h, mutate(dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, machine: "remote" })) }, undefined] as const)));
   };
   const retained = (head: string) => expect(sh(dir, "rev-parse", `refs/muster/rescue/worker-${head}^{commit}`).trim()).toBe(head);
-  return { h, dir, row, commit, close, report, retained, ssh, failFetch: () => { failFetch = true; }, wrongReadback: () => { wrongReadback = true; }, advanceOnFetch: () => { advanceOnFetch = true; } };
+  return { h, dir, row, commit, close, report, retained, ssh, failTranscriptCopy: () => { failTranscriptCopy = true; }, changeTranscript: () => { changeTranscript = true; }, corruptRescue: () => { corruptRescue = true; }, failFetch: () => { failFetch = true; }, wrongReadback: () => { wrongReadback = true; }, advanceOnFetch: () => { advanceOnFetch = true; } };
 }
 
 for (const remote of [false, true]) describe(remote ? "SSH preservation" : "local preservation", () => {
+  it.each(["ignored", "untracked", "tracked", "git metadata"])("rescues %s transcripts before retiring, with byte proof and a durable receipt", async kind => {
+    const f = await fixture(remote);
+    const path = kind === "git metadata" ? ".git/muster/session_transcript.jsonl" : ".pi-subagents/artifacts/x_transcript.jsonl";
+    const bytes = Buffer.from(' {"private":"session"}\n\u0000');
+    mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
+    writeFileSync(join(f.row.cwd, path), bytes);
+    if (kind === "ignored") writeFileSync(join(f.row.cwd, ".git/info/exclude"), ".pi-subagents/\n");
+    if (kind === "tracked") {
+      sh(f.row.cwd, "add", path); sh(f.row.cwd, "commit", "-qm", "session fixture");
+      sh(f.dir, "fetch", "-q", f.row.cwd, "HEAD"); sh(f.dir, "merge", "--ff-only", "FETCH_HEAD");
+    }
+    const result = await f.close();
+    expect(result.cloneError).toBeNull();
+    expect(existsSync(f.row.cwd)).toBe(false);
+    const detail = result.row.events?.at(-1)?.detail ?? "";
+    const rescueDir = /transcripts rescued: ([^;]+);/.exec(detail)?.[1];
+    expect(rescueDir).toBeTruthy();
+    expect(rescueDir).toContain(join(f.h.home, ...(remote ? ["remote"] : []), ".local/state/transcript-rescue/preserve-worker-"));
+    expect(readFileSync(join(rescueDir!, path))).toEqual(bytes);
+    expect(detail).toContain(`1 files; ${bytes.length} bytes; sha256 verified`);
+    if (remote) expect(f.ssh.some(script => script.includes("transcript rescue mismatch"))).toBe(true);
+  });
+
+  it.each(["copy", "changed", "mismatch"])("keeps transcript sources on %s failure, even with force", async kind => {
+    const f = await fixture(remote);
+    const path = ".pi-subagents/artifacts/x_transcript.jsonl";
+    mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
+    writeFileSync(join(f.row.cwd, path), "original");
+    if (kind === "copy") f.failTranscriptCopy(); else if (kind === "changed") f.changeTranscript(); else f.corruptRescue();
+    const result = await f.close(true);
+    expect(result.cloneError).toContain(kind === "copy" ? "injected transcript copy failure" : kind === "changed" ? "transcripts changed during preservation" : "transcript rescue mismatch");
+    expect(existsSync(join(f.row.cwd, path))).toBe(true);
+    expect(result.row.events?.at(-1)?.type).toBe("CLONE_KEPT");
+  });
+
+  it("keeps a clone with a transcript symlink instead of trusting or following it", async () => {
+    const f = await fixture(remote);
+    const target = join(f.h.home, "external_transcript.jsonl");
+    writeFileSync(target, "external session");
+    symlinkSync(target, join(f.row.cwd, "session_transcript.jsonl"));
+    expect((await f.close(true)).cloneError).toContain("transcript symlink refuses retirement");
+    expect(existsSync(f.row.cwd)).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe("external session");
+  });
+
   it.each(["verified", "rejected", "newer", "no packet"])("force preserves exact current HEAD: %s", async kind => {
     const f = await fixture(remote);
     let head = f.commit(f.row.cwd);
