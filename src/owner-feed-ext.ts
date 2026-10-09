@@ -27,7 +27,9 @@ const failureKind = (error: unknown) => {
   return typeof coded === "string" && /^[A-Za-z]+$/.test(coded) ? coded : String((error as { _tag?: unknown })._tag ?? (error as Error).name ?? "unknown");
 };
 /** Credentials do not heal by waiting; they wait for a toggle or a fix. */
-const authFailure = (error: unknown) => /Auth|Forbidden|Unauthori[sz]ed/.test(`${failureKind(error)} ${error instanceof Error ? error.message : ""}`);
+const authFailure = (error: unknown) => /Auth|authentication|Forbidden|Unauthori[sz]ed/.test(`${failureKind(error)} ${error instanceof Error ? error.message : ""}`);
+/** A retired session's reader handed the mailbox to its successor; starting it again would take it back. */
+const retiredReader = (error: unknown) => error instanceof Error && error.message.startsWith("NetworkComms reader retired:");
 /** How long a failed network consumer waits before the next refresh starts it again. */
 export const RETRY_FAILED_MS = 60_000;
 
@@ -114,12 +116,15 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     const failed = (error?: unknown) => {
       if (!actor || networkActor !== actor || actor.getSnapshot().value === "failed") return;
       actor.send({ type: "FAILURE" }); consumer?.abort(); consumer = undefined;
-      retryAt = error instanceof CommsError || authFailure(error) ? undefined : Date.now() + RETRY_FAILED_MS;
+      // The consumer reports every failure as a CommsError, so the class cannot decide: only credentials and a
+      // retired session's handover wait; a lost lease, an outage or a generic failure is retried.
+      retryAt = authFailure(error) || retiredReader(error) ? undefined : Date.now() + RETRY_FAILED_MS;
       if (retryAt !== undefined && retryAnnounced) return;
       if (retryAt !== undefined) retryAnnounced = true;
       // The class names the cause (a predecessor's live lease, a transport error) without its private output.
       const kind = failureKind(error);
-      const detail = error instanceof CommsError ? error.message : `NetworkComms consumer stopped (${kind}); it retries every ${Math.round(RETRY_FAILED_MS / 1000)} s. Check its config, identity lease and recipient binding (private output withheld).`;
+      const retrying = retryAt === undefined ? "" : ` It retries every ${Math.round(RETRY_FAILED_MS / 1000)} s.`;
+      const detail = error instanceof CommsError ? `${error.message}${retrying}` : `NetworkComms consumer stopped (${kind}); it retries every ${Math.round(RETRY_FAILED_MS / 1000)} s. Check its config, identity lease and recipient binding (private output withheld).`;
       if (!restartFeedActivated(id, env)) return;
       pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. If this journal was resumed twice, run /fork in the unbound pane before starting another reader. Otherwise, after fixing the cause, restart this session (agent_launch action "restart", or /quit and relaunch the same session); never /reload.`, display: true }, { triggerTurn: true });
     };
