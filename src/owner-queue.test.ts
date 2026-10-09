@@ -148,6 +148,19 @@ describe("owner queue", () => {
     f.feed.turnEnded(); expect(f.sent).toHaveLength(1);
     expect(f.entries.some(e => e.customType === OWNER_CURSOR)).toBe(true);
   });
+  it("a restarted successor never inherits its predecessor's cursor for its own queue", () => {
+    const f = fixture();
+    for (let i = 0; i < 6; i++) f.post("fyi");
+    f.feed.beforeTurn(); f.feed.turnEnded();
+    const inherited = f.entries.filter(e => e.customType === OWNER_CURSOR);
+    expect(inherited.length).toBeGreaterThan(0);
+    const sent: unknown[] = [];
+    const successor = ownerFeed({ home: f.home, session: "owner-next", appendEntry: () => {}, sendMessage: m => sent.push(m) });
+    successor.restore(inherited);
+    const blocked = appendOwnerItem("owner-next", { author: "probe", kind: "blocked", title: "need a repo", mention: "owner-next" }, f.home);
+    expect(successor.inbox({}).items.map(item => item.uri)).toContain(blocked.uri);
+    expect(successor.flush()).toBe(1); expect(sent).toHaveLength(1);
+  });
   it("filtered inbox ack consumes only returned items, without dropping other kinds", () => {
     const f = fixture(); const a = f.post("fyi"); f.post("question"); const b = f.post("done");
     expect(f.feed.inbox({ kinds: ["fyi", "done"], limit: 1, ack: true }).items.map(i => i.uri)).toEqual([a.uri]);

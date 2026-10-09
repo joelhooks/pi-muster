@@ -60,7 +60,9 @@ export function ownerFeed(deps: { session: string; home: string; project?: strin
       cursor = 0; sources = {}; delivered = new Set();
       for (const e of entries) {
         if (e.type !== "custom" || e.customType !== OWNER_CURSOR) continue;
-        try { const data = decodeOwnerCursor(e.data); if (Number.isInteger(data.cursor) && data.cursor >= 0) { cursor = data.cursor; sources = { ...data.sources, [deps.session]: data.cursor }; delivered = new Set(data.delivered); } } catch { /* keep last valid cursor */ }
+        // A restart forks the predecessor's transcript, entries included. Its cursor counts lines of
+        // the predecessor's queue; applying it to this session's own queue silently marked unread posts read.
+        try { const data = decodeOwnerCursor(e.data); if (Number.isInteger(data.cursor) && data.cursor >= 0) { sources = { ...data.sources }; cursor = sourceCursor(deps.session); delivered = new Set(data.delivered); } } catch { /* keep last valid cursor */ }
       }
     },
     queueEvent(name: string | undefined) {
