@@ -659,6 +659,28 @@ export const Roster = Schema.Struct({
 export type Roster = typeof Roster.Type;
 export const decodeRoster = Schema.decodeUnknownSync(Roster);
 
+/** Writer contract for the launch-time fleet steer; unrelated writer fields are ignored. */
+const SteerIso = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/));
+export const FleetSteer = Schema.Struct({
+  at: SteerIso,
+  validUntil: SteerIso,
+  workerDefault: Schema.String.check(Schema.isPattern(/^(?:sol|opus|[^/\s:]+\/[^/\s:]+)$/)),
+  claude: Schema.optionalKey(Schema.Struct({ pace: Schema.Number })),
+  codex: Schema.optionalKey(Schema.Struct({ pace: Schema.Number })),
+  source: Schema.optionalKey(Schema.String),
+});
+export type FleetSteer = typeof FleetSteer.Type;
+export const decodeFleetSteer = Schema.decodeUnknownSync(FleetSteer);
+
+export function steerChoice(steer: FleetSteer | undefined, now: number): { model?: string; note: string } {
+  if (!steer) return { note: "fleet steer unavailable; roster default" };
+  const at = Date.parse(steer.at);
+  const until = Date.parse(steer.validUntil);
+  if (!Number.isFinite(at) || !Number.isFinite(until) || !Number.isFinite(now) || now >= until || now - at >= 3 * 60 * 60_000)
+    return { note: `fleet steer stale (at ${steer.at}, valid until ${steer.validUntil}); roster default` };
+  return { model: steer.workerDefault, note: `fleet steer at ${steer.at} (valid until ${steer.validUntil})` };
+}
+
 /** Only the settings field used by skill discovery; other Pi settings stay Pi's. */
 export const SkillSettings = Schema.Struct({ skills: Schema.optionalKey(Schema.Array(Schema.String)) });
 export const decodeSkillSettings = Schema.decodeUnknownSync(SkillSettings);
@@ -680,15 +702,16 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
 
 /**
  * Built-in defaults, then the roster's role, then the alternate matching the
- * chosen model, then the project's policy. `model` is an explicit launch
- * choice; picking an alternate brings its settings (a smaller window's
+ * chosen model, then the project's policy. Worker model precedence is explicit,
+ * project pin, fresh steer (when supplied), roster, built-in. `model` is an explicit
+ * launch choice; picking an alternate brings its settings (a smaller window's
  * compact-at, say) with it.
  */
-export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string): RoleDefaults {
+export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string, steer?: FleetSteer, now?: number): RoleDefaults {
   const { alternates = [], ...fleet } = roster?.roles?.[role] ?? {};
   const project = policy?.roles?.[role] ?? {};
   // Role exceptions are opt-in: only an explicit launch choice can use one, never a policy or fleet default.
-  const resolved = resolveModel(model ?? project.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug, model === undefined ? undefined : role);
+  const resolved = resolveModel(model ?? project.model ?? (role === "worker" && now !== undefined ? steerChoice(steer, now).model : undefined) ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug, model === undefined ? undefined : role);
   const chosen = resolved.model;
   const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => { try { return resolveModel(candidate.model, roster, slug, role).model === chosen; } catch { return false; } }) ?? { useFor: [] };
   return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen, ...(resolved.thinking ? { thinking: resolved.thinking } : {}),

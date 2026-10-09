@@ -24,7 +24,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { LaunchJob, AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, roleDefaults, silenceLimits } from "./domain.ts";
+import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, silenceLimits } from "./domain.ts";
 import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
 import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
@@ -68,6 +68,7 @@ import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem, forwardOwner, ingestOwnerItem, ownerRoute, readOwnerQueue } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
+import { launchDefaults } from "./fleet-steer.ts";
 import { retroJudgeModel } from "./retro-cadence.ts";
 import { checkRunnableModel, checkRestoreContext, resolveModel, modelOutputIssue } from "./models.ts";
 import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./session-model.ts";
@@ -159,9 +160,10 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (!label) return yield* input("a remote agent needs a label");
   const retroChoice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
   const model = params.model ?? retroChoice?.model ?? parent?.profile.model;
+  const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug });
   const profile = profileFor(role, { ...(parent?.profile ?? existing?.profile), label,
     ...(retroChoice?.model ? { thinking: undefined } : {}),
-    ...(model !== undefined ? { model } : {}),
+    ...(params.action === "launch" && role === "worker" ? { model: workerChoice.defaults.model } : model !== undefined ? { model } : {}),
     ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
     ...(params.skills !== undefined ? { skills: params.skills } : {}),
     ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
@@ -169,14 +171,14 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     ...(params.env !== undefined ? { env: params.env } : {}),
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
     ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
-  }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, model, project.slug), null));
+  }, workerChoice.defaults);
   // Restore resolves too: a row or param may carry an alias (sol, opus) that a remote probe cannot read.
   const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
   const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
-  const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...custodyNotes, ...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
+  const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...custodyNotes, ...workerChoice.notes, ...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
   // A machine can serve a provider under another name (pennywise runs openai-codex models through cliproxy-codex).
   const [provider, ...modelRest] = selected.model.split("/");
   const mappedProvider = provider ? machine.providerMap?.[provider] : undefined;
@@ -2423,6 +2425,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
   const roster = (yield* loadRoster).roster;
   const id = randomUUID();
   const log = join(env.home, ".local/state/muster/launches", `${id}.log`);
+  const modelNotes: string[] = [];
   const reserved = yield* mutate(dir, project => Effect.gen(function* () {
     yield* guardSideDesk(project, env.sessionId, "agent_launch");
     if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
@@ -2472,8 +2475,10 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     }
     for (const path of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", path);
     const choice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
-    const model = params.model ?? choice?.model ?? parent?.profile.model ?? existing?.profile.model;
-    const defaults = yield* decodeWith(() => roleDefaults(roster, project.policy, role, model, project.slug), null);
+    const model = params.model ?? choice?.model ?? parent?.profile.model ?? (params.action === "launch" && role === "worker" ? undefined : existing?.profile.model);
+    const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug });
+    const defaults = workerChoice.defaults;
+    modelNotes.push(...workerChoice.notes);
     const resolved = yield* decodeWith(() => resolveModel(model ?? defaults.model, roster, project.slug, role), null);
     const profile = profileFor(role, { ...(parent?.profile ?? existing?.profile), label, model: resolved.model, thinking: params.thinking ?? resolved.thinking ?? defaults.thinking }, defaults);
     const priorState = existing?.state ?? "planned";
@@ -2519,7 +2524,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
   }))), Effect.mapError(error => new InputError({ message: error.message })));
   return { row, job: yield* readJob(env.home, id), jobId: id, log, tab: (yield* load(dir)).lanes.find(lane => lane.slug === row.lane)?.tabId,
     argv: [] as string[], readiness: "not checked (background launch)", proof: null, sessionIdMatched: null,
-    notes: ["result arrives in your owner queue as an action; arm a herdr_watch on the pane after it arrives"] };
+    notes: [...modelNotes, "result arrives in your owner queue as an action; arm a herdr_watch on the pane after it arrives"] };
 }).pipe(Effect.uninterruptible);
 
 export const launchResultText = (result: { row: AgentRow; argv: readonly string[]; readiness: string; proof: Proof | null; sessionIdMatched: boolean | null; notes: readonly string[] }) => [
@@ -2692,6 +2697,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       const retroChoice = retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
       skillNotes.push(...(retroChoice?.notes ?? []));
       const model = params.model ?? retroChoice?.model ?? parent?.profile.model;
+      const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug });
+      skillNotes.push(...workerChoice.notes);
       const requestedProfile: LaunchProfile = profileFor(role, {
         ...inherited,
         ...(retroChoice?.model ? { thinking: undefined } : {}),
@@ -2703,10 +2710,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
-      }, yield* Effect.try({
-        try: () => roleDefaults(roster, project.policy, role, model, project.slug),
-        catch: (error) => input(String(error instanceof Error ? error.message : error)),
-      }));
+      }, workerChoice.defaults);
       const resolved = requestedProfile.skills.length > 0
         ? yield* Effect.try({
           try: () => resolveSkills({ skills: requestedProfile.skills, index: requestedProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
