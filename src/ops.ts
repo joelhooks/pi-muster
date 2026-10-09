@@ -55,7 +55,7 @@ import {
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
-import { DEFAULT_GENERATED, isGenerated, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
+import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
 import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
@@ -387,7 +387,7 @@ type ReapSources = Map<string, { readonly origin: boolean; readonly fetched: boo
 /** Runs through the same Proc on the clone's machine. Verification is not
  * preservation: require harvest proof or an exact external rescue, and
  * classify every dirty path before ordinary or forced retirement. */
-const cloneReapAssessment = (project: Project, row: AgentRow, source: string, rescue = false, sources?: ReapSources) => Effect.gen(function* () {
+const cloneReapAssessment = (project: Project, row: AgentRow, source: string, rescue = false, sources?: ReapSources, preservedTranscripts: readonly string[] = []) => Effect.gen(function* () {
   const proc = yield* Proc;
   const run = (cwd: string, ...args: string[]) => proc.run("git", args, { cwd, timeoutMs: 30_000 });
   const head = (yield* git(row.cwd, "rev-parse", "HEAD")).trim();
@@ -430,10 +430,11 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
   const generated = [...DEFAULT_GENERATED, ...(lane?.generated ?? []), ".wzrrd/"];
   // Lane declarations and the small runtime-junk list are disposable even
   // when the source differs. Everything else needs a byte comparison.
-  const candidates = dirty.filter(path => !provenSidecars.includes(path) && !isGenerated(path, lane?.generated ?? []) &&
+  const candidates = dirty.filter(path => !preservedTranscripts.includes(path) && (isTranscriptPath(path) ||
+    (!provenSidecars.includes(path) && !isGenerated(path, lane?.generated ?? []) &&
     !isGenerated(path, [".rift", ".wzrrd/", ...(row.machine === "local" ? [".pi/notes-bridge/"] : [])]) && !/\.(log|pid)$/.test(path) &&
-    !/^\.brain\/data\/[^/]+-status\.json$/.test(path));
-  const comparable = candidates.filter(path => isGenerated(path, generated) || path.startsWith(".pi/notes-bridge/"));
+    !/^\.brain\/data\/[^/]+-status\.json$/.test(path))));
+  const comparable = candidates.filter(path => !isTranscriptPath(path) && (isGenerated(path, generated) || path.startsWith(".pi/notes-bridge/")));
   // Exact templates from pi-notes 8a8c3da, initLocalBrain. Never allow a tracked edit by template hash.
   const scaffoldHashes = Object.fromEntries(fields.filter(field => field.startsWith("?? ")).map(field => field.slice(3)).flatMap(path =>
     path === "BRAIN.md" ? [[path, "f501d733ce49d5995ab33b42b189e02518144905be3aa4b32007e1811c9fce07"]] :
@@ -552,16 +553,25 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
     if (kept.keep) return { removed: false, detail: kept.notes.join("; ") };
     const headBefore = yield* git(row.cwd, "rev-parse", "HEAD");
     const dirtBefore = yield* git(row.cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all");
-    const assessment = yield* cloneReapAssessment(project, row, source, force, sources);
-    if (!assessment.safe) return { removed: false, detail: assessment.detail };
+    const rescueArgs = [row.cwd, row.machine === "local" ? env.home : "", project.slug, row.name, env.now().toISOString().replace(/[:.]/g, "-")];
+    const receipt = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Struct({
+      dir: Schema.NullOr(Schema.String), bytes: Schema.Number,
+      files: Schema.Array(Schema.Struct({ path: Schema.String, bytes: Schema.Number, sha256: Schema.String })),
+    })), yield* must("node", ["-e", transcriptRescueScript(), "rescue", ...rescueArgs], { cwd: source, timeoutMs: 120_000 }));
+    const transcriptNote = receipt.dir ? `transcripts rescued: ${receipt.dir}; ${receipt.files.length} files; ${receipt.bytes} bytes; sha256 verified` : "";
+    if (transcriptNote) notes.push(transcriptNote);
+    const assessment = yield* cloneReapAssessment(project, row, source, force, sources, receipt.files.map(file => file.path));
+    const detail = [assessment.detail, transcriptNote].filter(Boolean).join("; ");
+    if (!assessment.safe) return { removed: false, detail };
     if ((yield* git(row.cwd, "rev-parse", "HEAD")) !== headBefore ||
         (yield* git(row.cwd, "status", "--porcelain=v1", "-z", "--untracked-files=all")) !== dirtBefore) {
       return { removed: false, detail: `clone changed during preservation: ${row.cwd}; retry agent_close` };
     }
+    yield* must("node", ["-e", transcriptRescueScript(), "verify", ...rescueArgs, JSON.stringify(receipt)], { cwd: source, timeoutMs: 120_000 });
     const removal = yield* must(script, ["remove", ...(force || assessment.force ? ["--force"] : []), row.cwd], { cwd: source, timeoutMs: 120_000 }).pipe(Effect.result);
-    if (removal._tag === "Failure") return { removed: false, detail: `${assessment.detail}; removal failed: ${removal.failure.message}` };
-    if (yield* present()) return { removed: false, detail: `${assessment.detail}; removal left clone on disk` };
-    return { removed: true, detail: `clone removed: ${row.cwd}; ${assessment.detail}` };
+    if (removal._tag === "Failure") return { removed: false, detail: `${detail}; removal failed: ${removal.failure.message}` };
+    if (yield* present()) return { removed: false, detail: `${detail}; removal left clone on disk` };
+    return { removed: true, detail: `clone removed: ${row.cwd}; ${detail}` };
   })).pipe(Effect.catch(error => Effect.succeed({ removed: false, detail: `clone kept: ${row.cwd}; ${error.message}` })));
   yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
