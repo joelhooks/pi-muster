@@ -281,12 +281,14 @@ describe("restart by fork", () => {
       entry("pi-until-started", { receipt: { id: "cad1", label: "owner pass", kind: "recurring", intervalMs: 600_000 }, snapshot: { quickRef: "project_status act" } }),
       entry("pi-until-started", { receipt: { id: "gate2", label: "gate done", kind: "until", intervalMs: 30_000 } }),
       entry("pi-until-finished", { id: "gate2", status: "done" }),
+      // Days-old watches with no finish receipt (a timeout or cancel) are over too.
+      entry("pi-until-started", { receipt: { id: "old3", label: "gate100", kind: "until", intervalMs: 30_000, expiresAt: new Date(s.h.now.getTime() - 60_000).toISOString() } }),
     ].join("\n") + "\n");
     const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
     const receipt = result.notes.join("\n");
     expect(receipt).toContain("pi-until watches not carried into the fork");
     expect(receipt).toContain('cad1 "owner pass" (recurring, every 600 s; project_status act)');
-    expect(receipt).not.toContain("gate2");
+    expect(receipt).not.toContain("gate2"); expect(receipt).not.toContain("old3");
     expect(s.host.initialPrompts.at(-1)).toContain("re-arm the ones still needed: cad1");
   });
 

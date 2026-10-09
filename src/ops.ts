@@ -2144,8 +2144,10 @@ const UNTIL_LINES_SCRIPT = "process.stdout.write(require('node:fs').readFileSync
 
 /** pi-until watches a journal started and never finished, one short line each. A cancel writes no
  * receipt, so a listed watch may already be gone: the successor checks before re-arming. */
-export function openUntilWatches(journal: string): string[] {
+export function openUntilWatches(journal: string, now = Date.now()): string[] {
   const open = new Map<string, string>();
+  // A watch past its deadline has ended, receipt or not (a timeout or a cancel can leave none).
+  const expired = (at: unknown) => typeof at === "string" && Number.isFinite(Date.parse(at)) && Date.parse(at) <= now;
   const describe = (id: string, label: unknown, kind: unknown, interval: unknown, quickRef?: unknown) =>
     `${id} "${String(label ?? "").slice(0, 80)}" (${String(kind ?? "until")}${typeof interval === "number" ? `, every ${Math.round(interval / 1000)} s` : ""}${typeof quickRef === "string" && quickRef ? `; ${quickRef.slice(0, 120)}` : ""})`;
   for (const line of journal.split("\n")) {
@@ -2157,12 +2159,14 @@ export function openUntilWatches(journal: string): string[] {
     if (entry.customType === "pi-until-started") {
       const receipt = data.receipt as Record<string, unknown> | undefined;
       const snapshot = data.snapshot as Record<string, unknown> | undefined;
-      if (typeof receipt?.id === "string") open.set(receipt.id, describe(receipt.id, receipt.label, receipt.kind, receipt.intervalMs, snapshot?.quickRef));
+      if (typeof receipt?.id === "string" && expired(receipt.expiresAt)) open.delete(receipt.id);
+      else if (typeof receipt?.id === "string") open.set(receipt.id, describe(receipt.id, receipt.label, receipt.kind, receipt.intervalMs, snapshot?.quickRef));
     } else if (entry.customType === "pi-until-suspended" && Array.isArray(data.watches)) {
       for (const watch of data.watches as Array<{ definition?: Record<string, unknown>; facts?: Record<string, unknown> }>) {
         const id = watch.facts?.id;
         const snapshot = watch.definition?.snapshot as Record<string, unknown> | undefined;
-        if (typeof id === "string") open.set(id, describe(id, watch.definition?.label, watch.definition?.kind, watch.definition?.intervalMs, snapshot?.quickRef));
+        if (typeof id === "string" && expired(watch.facts?.expiresAt)) open.delete(id);
+        else if (typeof id === "string") open.set(id, describe(id, watch.definition?.label, watch.definition?.kind, watch.definition?.intervalMs, snapshot?.quickRef));
       }
     } else if (entry.customType === "pi-until-finished" && typeof data.id === "string") open.delete(data.id);
   }

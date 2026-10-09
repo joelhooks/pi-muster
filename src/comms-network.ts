@@ -693,6 +693,8 @@ export function seedNetworkIdentities(home: string, value: unknown) {
 
 const UNDECODABLE = Symbol("undecodable");
 
+/** A retired session's reader stops with this; it is never retried. */
+export const RETIRED_PREFIX = "NetworkComms reader retired: mail is addressed to successor session";
 export const REFUSAL_PREFIX = "NetworkComms refused your message";
 export interface NetworkRefusal {
   readonly kind: "stale-recipient" | "unknown-author" | "sender-mismatch";
@@ -748,6 +750,8 @@ export function consumeNetworkMailbox(options: {
   receive: (payload: import("./domain.ts").NetworkPayload) => Effect.Effect<void, CommsError>;
   /** Whether a payload addressed to `recipient` belongs to this session: itself, or a recorded predecessor. */
   accepts?: (recipient: string, session: string) => boolean;
+  /** Whether `recipient` is this session's recorded successor: this reader is retired and must hand the mailbox over. */
+  succeededBy?: (recipient: string, session: string) => boolean;
   /** Tell an authenticated sender, once, that its message was refused. Failures never stop the reader. */
   refused?: (refusal: NetworkRefusal) => Effect.Effect<void, CommsError>;
   /** Outage length before the agent is told; default five minutes. */
@@ -885,6 +889,16 @@ export function consumeNetworkMailbox(options: {
             if (decoded === UNDECODABLE) { yield* undecodable("body is not a Muster network payload"); }
             else {
             const payload = decoded;
+            // A retired session's reader that meets its successor's mail stops before acking it: the cursor
+            // stays before this message, the lease is released on exit, and the successor reads it.
+            if (payload.recipient !== options.session && options.succeededBy?.(payload.recipient, options.session)) {
+              yield* Effect.tryPromise({ try: async () => {
+                await mkdir(dirname(cursorPath), { recursive: true, mode: 0o700 });
+                const temp = `${cursorPath}.${process.pid}.tmp`;
+                await writeFile(temp, JSON.stringify({ [options.agent]: Math.max(afterSeq, event.seq - 1) }), { mode: 0o600 }); await rename(temp, cursorPath);
+              }, catch: failure });
+              return yield* Effect.fail(new CommsError(`${RETIRED_PREFIX} ${payload.recipient}; this reader stops and releases its lease`));
+            }
             // These refusals are per message: saved, acked and surfaced, never delivered. Failing the consumer
             // instead replays the same message on every start, so one bad record kills the reader for good
             // (2026-10-07: a retired desk session signed with its legacy identity after handover).
@@ -995,6 +1009,8 @@ export function createNetworkComms(options: {
   deskRecord?: NetworkRecordHandler;
   /** Which addressed sessions this reader accepts; default only its own. */
   accepts?: (recipient: string, session: string) => boolean;
+  /** This session's recorded successor: a retired reader hands the mailbox over. */
+  succeededBy?: (recipient: string, session: string) => boolean;
   /** Author session → identity for received payloads; default `recipient`. */
   author?: (author: string, senderDid: string) => Effect.Effect<string, CommsError>;
 }): CommsShape {
@@ -1039,6 +1055,7 @@ export function createNetworkComms(options: {
       return yield* consumeNetworkMailbox({ home: options.home, agent: sender.agent, session: sender.session, mailbox: service,
         senderAgent: (author, senderDid) => options.author ? options.author(author, senderDid) : options.recipient(author), receive,
         ...(options.accepts ? { accepts: options.accepts } : {}),
+        ...(options.succeededBy ? { succeededBy: options.succeededBy } : {}),
         // The sender hears of a refusal once, from the receiver, instead of resending into a quarantine forever.
         refused: refusal => claimRefusalNotice(options.home, sender.agent, refusal).pipe(Effect.flatMap(claimed => claimed === undefined ? Effect.void
           : send(`did:${refusal.senderDid.slice(4)}`, JSON.stringify({ type: "message", recipient: refusal.author, author: sender.session, body: refusalNotice(refusal, `${sender.agent} (session ${sender.session})`) })).pipe(

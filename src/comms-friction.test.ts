@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect, Schema, Stream } from "effect";
 import { describe, expect, it, vi } from "vitest";
 import { createComms, currentSuccessor, forkParentSession, isPredecessorSession, NetworkComms, recordSessionSuccessor } from "./comms.ts";
-import { claimRefusalNotice, consumeNetworkMailbox, networkConfigPath, networkProvisionName, preflipNotice, provisionPreflipRow, REFUSAL_PREFIX, seedNetworkIdentities, seedNetworkPeers, readNetworkPeers } from "./comms-network.ts";
+import { claimRefusalNotice, consumeNetworkMailbox, networkConfigPath, networkProvisionName, preflipNotice, provisionPreflipRow, REFUSAL_PREFIX, RETIRED_PREFIX, seedNetworkIdentities, seedNetworkPeers, readNetworkPeers } from "./comms-network.ts";
 import { reportedNetworkSend } from "./comms-fallback.ts";
 import { sendDesk } from "./desk-route.ts";
 import { loudDelivery, remoteInboxPull, sessionCommsSender } from "./extension-main.ts";
@@ -111,6 +111,24 @@ describe("comms friction: predecessors and rowless senders", () => {
     const stale = await run("stranger-session");
     expect(stale).toHaveLength(1);
     expect(stale[0]!.type === "message" && stale[0]!.body).toContain("addressed to session stranger-session, not this session (stale delivery refused)");
+  });
+
+  it("a retired session's reader stops before its successor's mail instead of refusing it, leaving it for the successor", async () => {
+    const { h } = await fixture();
+    const desk = reference(networkProvisionName("alpha/desk")); const worker = reference("worker");
+    seedNetworkIdentities(h.home, { "alpha/desk": desk, worker });
+    recordSessionSuccessor(h.home, { at: "2026-10-09T20:40:00Z", project: "alpha", row: "desk", from: "old-desk", to: "new-desk" });
+    const mailbox = await oneMessage(h.home, desk.did, "old-desk", worker.did, { type: "message", recipient: "new-desk", author: "worker-session", body: "For the successor." });
+    const got: NetworkPayload[] = [];
+    const result = await Effect.runPromise(Effect.result(consumeNetworkMailbox({ home: h.home, agent: "alpha/desk", session: "old-desk", mailbox,
+      accepts: (addressed, session) => isPredecessorSession(h.home, addressed, session),
+      succeededBy: (addressed, session) => isPredecessorSession(h.home, session, addressed),
+      senderAgent: () => Effect.succeed("worker"), receive: payload => Effect.sync(() => { got.push(payload); }) })));
+    expect(result._tag).toBe("Failure");
+    expect(String(result._tag === "Failure" ? (result.failure as Error).message : "")).toContain(RETIRED_PREFIX);
+    expect(got).toEqual([]);
+    expect(existsSync(join(h.home, ".local/state/muster/network-quarantine"))
+      ? readdirSync(join(h.home, ".local/state/muster/network-quarantine"), { recursive: true }).filter(name => String(name).endsWith(".json")) : []).toEqual([]);
   });
 
   it("reads a restart fork's parent from its journal header", () => {

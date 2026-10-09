@@ -346,6 +346,7 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
         ...(options.run ? { run: options.run } : {}),
         // A recorded predecessor of this session, or the session it was forked from, addresses this session.
         accepts: (addressed, session) => addressed === session || isPredecessorSession(options.home, addressed, session) || options.forkParent?.() === addressed,
+        succeededBy: (addressed, session) => isPredecessorSession(options.home, session, addressed),
         // Catalog peers first; then a predecessor speaks as its successor's row; then a rowless agent (a
         // MUSTER_AGENT owner) whose authenticated DID is its own cached identity.
         author: (author, senderDid) => recipient(author).pipe(Effect.catch(error => Effect.gen(function* () {
