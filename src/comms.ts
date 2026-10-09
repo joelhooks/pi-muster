@@ -2,7 +2,7 @@ import { Effect, Layer, Schema } from "effect";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { decodeAgentName, decodeSlug, decodeProject, decodeSessionSuccessor, type SessionSuccessor, type Policy } from "./domain.ts";
-import { networkCatalogPeer, networkRowIdentity } from "./desk-route.ts";
+import { networkCatalogPeer, networkRowIdentity, networkTargetRow } from "./desk-route.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
 import { exists, load, projectPath } from "./store.ts";
@@ -75,6 +75,7 @@ export function catalogNetworkPeers(dir: string) {
   return Object.fromEntries(project.agents.map(row => [row.sessionId, networkRowIdentity(project, row)]));
 }
 
+/** A launch hint only: selection follows the joined fact, which this value never overrides back to intercom. */
 export function remoteCommsEnvironment(project: Pick<import("./domain.ts").Project, "policy">, machine: Pick<import("./domain.ts").MachineConfig, "comms">): Record<string, string> {
   if (project.policy?.comms !== "network") return { MUSTER_COMMS: "intercom" };
   if (!machine.comms) throw new CommsError("network project requires a remote comms config block; launch refused");
@@ -189,8 +190,34 @@ export const IntercomCommsLayer = (transport: IntercomTransport, lookup: Paramet
 export const NetworkCommsLayer = Layer.succeed(Comms)(NetworkComms);
 
 /** Called by tools, never at extension startup. Re-read policy and catalog at operation time. */
-export function createComms(options: { deskRecord?: import("./comms-network.ts").NetworkRecordHandler; events: Parameters<typeof createIntercom>[0]; createId: () => string; home: string; projectDir: string; adapterEnv: () => string | undefined; followProjectPolicy?: boolean; networkConfig?: () => string | undefined; networkPeers?: () => Readonly<Record<string, string>>; networkSender?: () => { agent: string; session: string } | undefined }) {
+export function createComms(options: { deskRecord?: import("./comms-network.ts").NetworkRecordHandler; events: Parameters<typeof createIntercom>[0]; createId: () => string; home: string; projectDir: string; adapterEnv: () => string | undefined; followProjectPolicy?: boolean; networkConfig?: () => string | undefined; networkPeers?: () => Readonly<Record<string, string>>; networkSender?: () => { agent: string; session: string } | undefined;
+  /** This process runs on a remote machine: it never mints, and it joins only on a key Flagg pushed here. */
+  remote?: boolean; run?: import("./comms-network.ts").PrivateCommand }) {
   let transport: ReturnType<typeof createIntercom> | undefined;
+  // A join, once seen, holds for this process. A miss is rechecked after 20 s: the key check spawns the secrets CLI.
+  const joins = new Map<string, { joined: boolean; at: number }>();
+  const joinedFact = Effect.gen(function* () {
+    const sender = options.networkSender?.();
+    if (!sender) return false;
+    // Flagg's catalog is authoritative: an explicit intercom opts out, and only network projects or desks join.
+    // A remote copy of the catalog is not, so Flagg's policy reaches remote rows only through the key it pushes.
+    if (!options.remote) {
+      const explicit = exists(options.projectDir) ? explicitPolicyComms(options.projectDir) : undefined;
+      if (explicit === "intercom" || (explicit !== "network" && !sender.agent.includes("/"))) return false;
+    }
+    const key = `${sender.agent}\0${sender.session}`;
+    const seen = joins.get(key);
+    if (seen && (seen.joined || Date.now() - seen.at < 20_000)) return seen.joined;
+    const network = yield* Effect.tryPromise({ try: () => import("./comms-network.ts"), catch: () => new CommsError("NetworkComms adapter unavailable") });
+    // An older sibling module on disk has no join facts: stay on the launch hint.
+    const join = yield* Effect.try({ try: () => network.localJoinFacts, catch: () => undefined }).pipe(Effect.orElseSucceed(() => undefined));
+    if (typeof join !== "function") return false;
+    const facts = yield* Effect.promise(() => join({ home: options.home, agent: sender.agent, session: sender.session, remote: options.remote === true,
+      ...(options.networkConfig?.() ? { configPath: options.networkConfig()! } : {}), ...(options.run ? { run: options.run } : {}) }));
+    // Only the secrets listing costs a process; file-only misses are rechecked every time.
+    if (facts.joined || facts.key === false) joins.set(key, { joined: facts.joined, at: Date.now() });
+    return facts.joined;
+  });
   const project = (dir: string) => load(dir).pipe(Effect.mapError(error => new CommsError(error.message)));
   const lookup: Parameters<typeof IntercomComms>[1] = address => Effect.gen(function* () {
     const known = yield* Effect.try({ try: () => readRegistry(options.home).get(address.project), catch: error => new CommsError(`catalog registry unreadable: ${String(error)}`) });
@@ -201,6 +228,8 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
     return row.intercomAddress ?? row.sessionId;
   });
   const selection = Effect.gen(function* () {
+    // A launch's MUSTER_COMMS is a hint: it never overrides a joined fact back to intercom.
+    if (yield* joinedFact) return "network" as const;
     const env = options.adapterEnv();
     // An explicit override must not depend on a readable project catalog.
     const follow = env === "network" && options.followProjectPolicy && exists(options.projectDir);
@@ -221,6 +250,7 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
         home: options.home,
         configPath: options.networkConfig?.(),
         deskRecord: options.deskRecord,
+        ...(options.run ? { run: options.run } : {}),
         session: to => Effect.gen(function* () {
           const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
           if (address.kind === "alias") {
@@ -247,6 +277,17 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
         },
         recipient: to => Effect.gen(function* () {
           const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
+          // Identity on demand: Flagg mints an addressed row before the first send, or the send fails. Never the bare refusal.
+          const minted = (identity: string) => Effect.gen(function* () {
+            if (options.remote || address.kind === "did") return identity;
+            const cached = yield* Effect.try({ try: () => network.readNetworkIdentities(options.home)[identity], catch: () => new CommsError("NetworkComms identity cache invalid") });
+            if (cached) return identity;
+            const target = networkTargetRow(options.home, options.projectDir, address.kind === "alias" ? `${address.project}/${address.row}` : address.id);
+            if (!target || target.identity !== identity) return identity;
+            yield* network.provisionPreflipRow({ home: options.home, target, ...(options.run ? { run: options.run } : {}) }).pipe(
+              Effect.mapError(error => new CommsError(`NetworkComms could not mint ${identity} before the first send: ${error.message}; nothing sent, no intercom fallback`)));
+            return identity;
+          });
           if (address.kind === "alias") {
             // Validate project ownership before trusting a qualified cache key.
             yield* lookup(address);
@@ -254,12 +295,7 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
             const catalog = yield* project(known?.dir ?? options.projectDir);
             const row = catalog.agents.find(row => row.name === address.row);
             if (!row) return yield* Effect.fail(new CommsError("NetworkComms unknown alias"));
-            const identity = networkRowIdentity(catalog, row);
-            if (row.role === "desk") {
-              if (row.machine === "local") yield* network.provisionNetworkAgent({ home: options.home, agent: identity, configPath: options.networkConfig?.() });
-              // Remote desks are provisioned by desk_send through prepareRemoteNetworkAgent.
-            }
-            return identity;
+            return yield* minted(networkRowIdentity(catalog, row));
           }
           if (address.kind === "did") {
             const cache = yield* Effect.try({ try: () => network.readNetworkIdentities(options.home), catch: () => new CommsError("NetworkComms identity cache invalid") });
@@ -268,7 +304,7 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
             return agent;
           }
           const peer = yield* Effect.try({ try: () => exists(options.projectDir) ? networkCatalogPeer(options.home, options.projectDir, address.id) : undefined, catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms local catalog invalid") });
-          if (peer) return peer;
+          if (peer) return yield* minted(peer);
           const configuredPeer = options.networkPeers?.()[address.id];
           if (configuredPeer?.includes("/")) return configuredPeer;
           const deskPeer = yield* Effect.try({ try: () => network.readNetworkPeers(options.home)[address.id], catch: () => new CommsError("NetworkComms peer cache invalid") });
@@ -277,7 +313,7 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
           const catalog = yield* project(options.projectDir);
           const row = catalog.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id);
           if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.id}`));
-          return networkRowIdentity(catalog, row);
+          return yield* minted(networkRowIdentity(catalog, row));
         }),
       });
     }

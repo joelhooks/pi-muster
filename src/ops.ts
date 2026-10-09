@@ -3564,6 +3564,13 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const missingSpace = project.spaceId && !spaces.some(space => space.workspace_id === project.spaceId)
       ? `project ${project.slug}: workspace ${project.spaceId} is missing; space not rebuilt` : null;
     const recoveryNotes: string[] = [...handoverNotes, ...(missingSpace ? [missingSpace] : [])];
+    if (act && project.policy?.comms === "network") {
+      // Addressing a row needs its identity: the owner mints any of its live rows that lack one.
+      const { liveRows, provisionLiveRows, readNetworkIdentities } = yield* Effect.promise(() => import("./comms-network.ts"));
+      const known = (() => { try { return readNetworkIdentities(env.home); } catch { return undefined; } })();
+      const missing = known ? liveRows(project).filter(row => row.owner === env.sessionId && !known[networkRowIdentity(project, row)]) : [];
+      if (missing.length) recoveryNotes.push(...(yield* provisionLiveRows({ home: env.home, project, rows: missing })).map(note => `comms: ${note}`));
+    }
     const panes = yield* paneList();
     const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
     const byTerminal = new Map(panes.map((pane) => [pane.terminal_id, pane]));
@@ -4028,11 +4035,12 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     notes.push(`brain: ${yield* writeBrain(project)}`);
     notes.push(`roster: ${path ?? "built-in defaults"}`);
     if (before.policy?.comms !== "network" && project.policy?.comms === "network") {
-      // Their launch env predates the flip: no mailbox reader until a restart.
-      const stale = project.agents.filter(row => !(["planned", "closed", "interrupted", "failed"] as const).some(state => state === row.state) && row.restore?.env.MUSTER_COMMS !== "network").map(row => row.name);
-      notes.push(stale.length
-        ? `comms: network. Restart these rows to open their mailboxes (launched before comms: network): ${stale.join(", ")}.`
-        : "comms: network. No live row predates the switch.");
+      // Live rows join without a restart once their identity exists: mint here, push remote keys.
+      const { liveRows, provisionLiveRows } = yield* Effect.promise(() => import("./comms-network.ts"));
+      const live = liveRows(project);
+      notes.push(live.length
+        ? `comms: network. Provisioned live rows; on current pi-muster each joins its mailbox within 30 s, older ones need a restart: ${(yield* provisionLiveRows({ home: (yield* MusterEnv).home, project, rows: live })).join("; ")}.`
+        : "comms: network. No live rows to provision.");
     }
     return { project, policy: effectivePolicy(roster, project.policy, project.slug), notes };
   });

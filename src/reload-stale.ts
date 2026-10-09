@@ -25,6 +25,7 @@ export function musterToolNames(env: Readonly<NodeJS.ProcessEnv>): string[] {
     "owner_inbox",
     ...((worker || env.MUSTER_ROLE === "boss") && env.MUSTER_OWNER ? ["owner_note"] : []),
     "owner_reply",
+    "comms_doctor",
     ...(env.MUSTER_AGENT && env.MUSTER_PROJECT && env.MUSTER_OWNER ? ["packet_report"] : []),
     "skill_find",
     ...(worker ? ["context_mark"] : [

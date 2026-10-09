@@ -12,7 +12,7 @@ import { Type } from "typebox";
 
 import { registerCompaction } from "./compact.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
-import { MAX_CADENCE_MINUTES, decodeNetworkPeers, decodeNetworkDeskPeers } from "./domain.ts";
+import { MAX_CADENCE_MINUTES, decodeAgentRow, decodeNetworkPeers, decodeNetworkDeskPeers } from "./domain.ts";
 import { sendDesk } from "./desk-route.ts";
 import { createComms, catalogCommsSender, catalogNetworkPeers, retiredCatalogSession, retiredSessionReason } from "./comms.ts";
 import {
@@ -97,7 +97,24 @@ export function sessionCommsSender(dir: string, session: string, env: NodeJS.Pro
   // Receivers refuse a retired predecessor signing as the legacy bare identity; its sends fall back, reported.
   if (retiredCatalogSession(dir, env.MUSTER_AGENT, session)) return undefined;
   const peers = { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) };
-  return { agent: peers[session] ?? env.MUSTER_AGENT, session };
+  return { agent: peers[session] ?? remoteDeskIdentity(env) ?? env.MUSTER_AGENT, session };
+}
+
+/** A remote desk launched before comms: network has no peer env, but its row still names its qualified identity. */
+function remoteDeskIdentity(env: NodeJS.ProcessEnv) {
+  try {
+    const row = env.MUSTER_REMOTE_ROW ? decodeAgentRow(JSON.parse(env.MUSTER_REMOTE_ROW)) : undefined;
+    return row?.role === "desk" && env.MUSTER_PROJECT_SLUG ? `${env.MUSTER_PROJECT_SLUG}/${row.name}` : undefined;
+  } catch { return undefined; }
+}
+
+export const remoteMachineProcess = (env: NodeJS.ProcessEnv) => env.MUSTER_MACHINE !== undefined && env.MUSTER_MACHINE !== "local";
+
+export function commsDoctorText(report: import("./comms-network.ts").CommsDoctorReport) {
+  const mark = (ok: boolean | null) => ok === true ? "✓" : ok === false ? "✗" : "·";
+  return [`comms_doctor ${report.row} (${report.machine}, identity ${report.identity}): ${report.verdict}`,
+    ...report.checks.map(check => `${mark(check.ok)} ${check.name}: ${check.detail}`),
+    ...report.fixes.map(fix => `→ ${fix}`)].join("\n");
 }
 
 export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>, release: () => Promise<void> = async () => {}) {
@@ -153,7 +170,7 @@ export default function muster(host: ExtensionAPI) {
         let service = comms.get(key);
         if (!service) {
           service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir, adapterEnv: () => env.MUSTER_COMMS,
-            followProjectPolicy: true,
+            followProjectPolicy: true, remote: remoteMachineProcess(env),
             deskRecord: input => Effect.tryPromise({
               try: async () => {
                 const { dispatchDeskPhone } = await import("./desk-phone.ts");
@@ -238,6 +255,25 @@ export default function muster(host: ExtensionAPI) {
       const parent = findOwnerPost(session, params.uri);
       const body = capBody(params.text);
       return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
+    },
+  });
+
+  pi.registerTool({
+    name: "comms_doctor", label: "Muster comms doctor",
+    description: "Say whether a row is on the Rat King mailbox, or why not: identity, key, config, fence, reader, and launch hint vs joined fact. Default: this session. The row's owner on Flagg fixes what it may (mint the identity, push the key); everyone else gets a report.",
+    parameters: Type.Object({
+      row: Type.Optional(Type.String({ description: "Catalog row name. Default: this session." })),
+      project: ProjectParam,
+      fix: Type.Optional(Type.Boolean({ description: "Owner only. Default true: mint and push a missing identity or key." })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx) {
+      const dir = projectDir(ctx, params.project);
+      const session = ctx.sessionManager.getSessionId();
+      const { commsDoctor } = await import("./comms-network.ts");
+      const self = sessionCommsSender(dir, session, env);
+      return run(ctx, signal, commsDoctor({ home: homedir(), dir, session, remote: remoteMachineProcess(env),
+        ...(params.row ? { row: params.row } : {}), ...(self ? { self } : {}), ...(env.MUSTER_COMMS ? { launchHint: env.MUSTER_COMMS } : {}),
+        ...(env.MUSTER_NETWORK_CONFIG ? { configPath: env.MUSTER_NETWORK_CONFIG } : {}), ...(params.fix === undefined ? {} : { fix: params.fix }) }), commsDoctorText);
     },
   });
 

@@ -108,6 +108,7 @@ describe("qualified desk routing", () => {
     vi.doMock("./comms-network.ts", () => ({
       readNetworkConfig: () => config, seedNetworkPeers, readNetworkPeers,
       provisionNetworkAgent: () => Effect.succeed(reference("desk")),
+      readNetworkIdentities: () => ({}), provisionPreflipRow: () => Effect.void,
       createNetworkComms: (options: NonNullable<typeof adapter>) => { adapter = options; return { ...NetworkComms, mode: () => Effect.succeed("network" as const) }; },
     }));
     const options = { home: h.home, projectDir: dir, events: { emit() {}, on() {} }, createId: () => "id", adapterEnv: () => undefined, networkSender: () => ({ agent: "desk", session: "alpha-session" }) };
