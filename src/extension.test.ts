@@ -94,7 +94,7 @@ describe("extension modes", () => {
   it("gives a plain session the owner tools and no worker tool, and starts nothing", () => {
     const fake = fakePi();
     muster(fake.pi as never);
-    expect(fake.tools).toEqual(["owner_inbox", "owner_reply", "skill_find", ...OWNER_TOOLS]);
+    expect(fake.tools).toEqual(["owner_inbox", "owner_reply", "comms_doctor", "skill_find", ...OWNER_TOOLS]);
     expect(fake.tools).toEqual(musterToolNames(process.env));
     expect(fake.defs.get("project_status")).toMatchObject({ parameters: { properties: { takeover: { type: "boolean" } } } });
     expect(fake.flags).toEqual(["compact-at", "switchboard"]);
@@ -107,7 +107,7 @@ describe("extension modes", () => {
     Object.assign(process.env, { MUSTER_ROLE: "worker", MUSTER_AGENT: "w1", MUSTER_PROJECT: "/p", MUSTER_OWNER: "boss" });
     const fake = fakePi();
     muster(fake.pi as never);
-    expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "packet_report", "skill_find", "context_mark"]);
+    expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "comms_doctor", "packet_report", "skill_find", "context_mark"]);
     expect(fake.tools).toEqual(musterToolNames(process.env));
   });
 
@@ -115,7 +115,7 @@ describe("extension modes", () => {
     Object.assign(process.env, { MUSTER_ROLE: "boss", MUSTER_AGENT: "b1", MUSTER_PROJECT: "/p", MUSTER_OWNER: "hawk" });
     const fake = fakePi();
     muster(fake.pi as never);
-    expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "packet_report", "skill_find", ...OWNER_TOOLS]);
+    expect(fake.tools).toEqual(["owner_inbox", "owner_note", "owner_reply", "comms_doctor", "packet_report", "skill_find", ...OWNER_TOOLS]);
     expect(fake.tools).toEqual(musterToolNames(process.env));
   });
 });

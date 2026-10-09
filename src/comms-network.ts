@@ -7,7 +7,7 @@ import { Effect, Layer, Option, Schema, Semaphore, Stream } from "effect";
 import { createActor } from "xstate";
 import { networkLeaseMachine } from "./machines.ts";
 import { FetchHttpClient } from "effect/http";
-import { decodeOwnerSession, decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type AgentRow, type CommsIdentityReference, type Project } from "./domain.ts";
+import { decodeProject, decodeOwnerSession, decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type AgentRow, type CommsIdentityReference, type Project } from "./domain.ts";
 import { reportedNetworkSend } from "./comms-fallback.ts";
 import { CommsError, Herdr, MusterEnv, Proc, Unsupported, type CommsDelivery, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
@@ -158,6 +158,7 @@ export const networkIdentityPath = (home: string) => join(home, ".local/state/mu
 export const networkDeskIdentityPath = (home: string) => join(home, ".local/state/muster/network-desk-identities.json");
 export const networkPeersPath = (home: string) => join(home, ".local/state/muster/network-peers.json");
 export const networkDeskPeersPath = (home: string) => join(home, ".local/state/muster/network-desk-peers.json");
+export const networkProvisionLockPath = (home: string) => join(home, ".local/state/muster/network-provision.lock");
 const identityPath = (home: string, agent: string) => agent.includes("/") ? networkDeskIdentityPath(home) : networkIdentityPath(home);
 export const networkCursorPath = (home: string, agent: string) => join(home, ".local/state/muster", agent.includes("/") ? "network-desk-cursors" : "network-cursors", `${networkProvisionName(agent)}.json`);
 
@@ -274,9 +275,12 @@ export function provisionNetworkAgent(options: { home: string; agent: string; co
           return identities[agent];
         }
         let reference: CommsIdentityReference;
+        // Worker and desk caches lock separately; the wrapper's documents.json has one writer across both.
+        const minting = acquireCacheLock(networkProvisionLockPath(options.home), `NetworkComms provisioning busy: ${agent}; retry`, options.lockWaitMs ?? 60_000);
         try {
           reference = decodeCommsIdentityReference(JSON.parse(await (options.run ?? privateCommand)(config.provisionWrapper, ["provision", "--agent", provisionName, "--did", did])));
         } catch { throw new CommsError(`NetworkComms provisioning failed: ${agent} (output withheld)`); }
+        finally { releaseCacheLock(minting); }
         if (reference.did !== did || reference.document.id !== did) throw new CommsError(`NetworkComms provision identity mismatch: ${agent}`);
         const temp = `${path}.${process.pid}.tmp`;
         try {
@@ -297,7 +301,7 @@ const REMOTE_KEY_SCRIPT = 'S="$HOME/.local/bin/secrets"; [ -x "$S" ] || S="$(com
  * Fleet custody (Rat King, 2026-10-07): the operator key never leaves this machine. Provision here, copy only this
  * agent's identity entry to the remote secrets store over ssh stdin, and seed public references for its peers only.
  */
-export function prepareRemoteNetworkAgent(options: { home: string; agent: string; machineName: string; machine: import("./domain.ts").MachineConfig; peers?: readonly string[]; run?: PrivateCommand }) {
+export function prepareRemoteNetworkAgent(options: { home: string; agent: string; machineName: string; machine: import("./domain.ts").MachineConfig; peers?: readonly string[]; sessions?: Readonly<Record<string, string>>; run?: PrivateCommand }) {
   return Effect.gen(function* () {
     const configPath = options.machine.comms?.config;
     if (!configPath) return yield* Effect.fail(new CommsError(`machine ${options.machineName}: network project requires a comms config block; launch refused`));
@@ -317,8 +321,10 @@ export function prepareRemoteNetworkAgent(options: { home: string; agent: string
     const wanted = new Set([options.agent, ...(options.peers ?? [])]);
     const peers = Object.fromEntries(Object.entries(known).filter(([name]) => wanted.has(name)));
     const helper = join(options.machine.musterExtension, "src/comms-network.ts");
+    // A row launched before the flip has no peer env: its reader learns sessions from this cache, or refuses its owner's mail.
+    const sessions = Object.fromEntries(Object.entries(options.sessions ?? {}).filter(([, agent]) => wanted.has(agent)));
     yield* remoteNode(options.machineName, options.machine,
-      `import {homedir} from 'node:os'; import {seedNetworkIdentities} from ${JSON.stringify(helper)}; seedNetworkIdentities(process.env.HOME??homedir(),JSON.parse(process.argv[1]));`, [JSON.stringify(peers)]).pipe(Effect.mapError(() => new CommsError(`machine ${options.machineName}: public peer cache probe failed; launch refused`)));
+      `import {homedir} from 'node:os'; import {seedNetworkIdentities, seedNetworkPeers} from ${JSON.stringify(helper)}; const home=process.env.HOME??homedir(); seedNetworkIdentities(home,JSON.parse(process.argv[1])); const sessions=JSON.parse(process.argv[2]); if (Object.keys(sessions).length) seedNetworkPeers(home,sessions);`, [JSON.stringify(peers), JSON.stringify(sessions)]).pipe(Effect.mapError(() => new CommsError(`machine ${options.machineName}: public peer cache probe failed; launch refused`)));
     return `${options.machineName} holds ${reference.secret} (${copied.stdout.trim()})`;
   });
 }
@@ -342,12 +348,73 @@ export function retireRemoteNetworkKey(options: { home: string; agent: string; m
 /** A live catalog row a network send addresses. Built by desk-route's `networkTargetRow`. */
 export interface NetworkTarget { readonly project: Project; readonly row: AgentRow; readonly identity: string; readonly peers: readonly string[] }
 
-/** Remote launches pin MUSTER_COMMS, so a row pinned to intercom never reads its mailbox.
- * A local row follows policy but reads only once it has an identity. */
-export function preflipRow(home: string, target: Pick<NetworkTarget, "row" | "identity">): boolean {
-  return target.row.restore?.env.MUSTER_COMMS === "intercom" || readNetworkIdentities(home)[target.identity] === undefined;
+/** Whether the local secrets store lists one entry. Only names are read; a failed listing counts as absent. */
+export const localSecretPresent = (home: string, secret: string, secretsCommand?: string, run: PrivateCommand = privateCommand) =>
+  run(secretsCommand ?? join(home, ".local/bin/secrets"), ["--no-update-check", "list"])
+    .then(listed => listed.split(/"name":\s*/u).slice(1).some(part => part.startsWith(JSON.stringify(secret))), () => false);
+
+/** What this machine knows about one identity joining the mailbox. Keys and fences stay private: only booleans leave. */
+export interface JoinFacts {
+  readonly agent: string;
+  readonly config: string | null;
+  readonly identity: boolean;
+  readonly did: string | null;
+  /** Remote only: the key sits in this machine's secrets, and Flagg bound this session to the agent. */
+  readonly key: boolean | null;
+  readonly session: boolean | null;
+  readonly fence: "published" | "absent" | "invalid";
+  readonly joined: boolean;
+  readonly reason: string | null;
 }
-export const preflipNotice = (row: string, outcome: string) => `${row} has no mailbox reader (launched before comms: network); ${outcome}; restart the row to open its mailbox`;
+
+/** A process is joined when its own identity is usable here. On Flagg that is the cached identity and a readable
+ * config. A remote machine also needs the key Flagg pushed and the session binding Flagg seeded with it. */
+export async function localJoinFacts(options: { home: string; agent: string; session?: string; configPath?: string; remote: boolean; run?: PrivateCommand }): Promise<JoinFacts> {
+  let config: ReturnType<typeof readNetworkConfig> | undefined;
+  let configError: string | null = null;
+  try { config = readNetworkConfig(options.home, options.configPath); }
+  catch (error) { configError = error instanceof Error ? error.message : "NetworkComms config invalid"; }
+  let reference: CommsIdentityReference | undefined;
+  let identityError: string | undefined;
+  try { reference = readNetworkIdentities(options.home)[options.agent]; }
+  catch (error) { identityError = error instanceof Error ? error.message : "NetworkComms identity cache invalid"; }
+  let fence: JoinFacts["fence"] = "absent";
+  if (reference) { try { fence = readConsumerFence(options.home, reference.did) ? "published" : "absent"; } catch { fence = "invalid"; } }
+  let key: boolean | null = null;
+  let session: boolean | null = null;
+  if (options.remote) {
+    try { session = options.session !== undefined && readNetworkPeers(options.home)[options.session] === options.agent; } catch { session = false; }
+    if (reference && config) key = await localSecretPresent(options.home, reference.secret, config.secretsCommand, options.run);
+  }
+  const reason = configError ?? identityError ?? (!reference ? `no identity for ${options.agent} on this machine`
+    : key === false ? `key ${reference.secret} is not in this machine's secrets`
+    : session === false ? `session ${options.session ?? "unknown"} is not bound to ${options.agent} here; the owner pushes the binding with the key`
+    : null);
+  return { agent: options.agent, config: configError, identity: reference !== undefined, did: reference?.did ?? null, key, session, fence, joined: reason === null, reason };
+}
+
+/** The row's reader state, read from its fence file on the row's machine. Unknown when that machine cannot be read. */
+export const rowReaderFence = (home: string, target: Pick<NetworkTarget, "row" | "identity">) => Effect.gen(function* () {
+  const did = (() => { try { return readNetworkIdentities(home)[target.identity]?.did; } catch { return undefined; } })();
+  if (!did) return "absent" as const;
+  if (target.row.machine === "local") return yield* Effect.sync(() => { try { return readConsumerFence(home, did) ? "published" as const : "absent" as const; } catch { return "unknown" as const; } });
+  const { run, remote, machine } = yield* remoteMachine(target.row.machine);
+  const helper = join(machine.musterExtension, "src/comms-network.ts");
+  const stdout = yield* run(remote.remoteNode(target.row.machine, machine,
+    `import {homedir} from 'node:os'; import {readConsumerFence} from ${JSON.stringify(helper)}; console.log(readConsumerFence(process.env.HOME??homedir(),process.argv[1])?'published':'absent');`, [did], 15_000));
+  const state = stdout.trim().split("\n").at(-1);
+  return state === "published" || state === "absent" ? state : "unknown" as const;
+}).pipe(Effect.catch(() => Effect.succeed("unknown" as const)));
+
+/** A row with no identity, or launched with the intercom hint, has no reader until it joins.
+ * Herdr carries its sends only until the row's reader publishes its fence. */
+export const preflipRow = (home: string, target: Pick<NetworkTarget, "row" | "identity">) => Effect.gen(function* () {
+  const minted = (() => { try { return readNetworkIdentities(home)[target.identity] !== undefined; } catch { return false; } })();
+  if (!minted) return true;
+  if (target.row.restore?.env.MUSTER_COMMS !== "intercom") return false;
+  return (yield* rowReaderFence(home, target)) !== "published";
+});
+export const preflipNotice = (row: string, outcome: string) => `${row} has no mailbox reader yet (launched before comms: network); ${outcome}; on current pi-muster it joins its mailbox within 30 s, otherwise restart the row`;
 
 const musterRuntime = Effect.gen(function* () {
   const env = yield* Effect.serviceOption(MusterEnv);
@@ -365,11 +432,123 @@ const remoteMachine = (name: string) => Effect.gen(function* () {
 const preflipProvisioning = Semaphore.makeUnsafe(1);
 /** Launch's custody, on demand: a local mint, or a remote mint plus key copy. It finishes before any send. */
 export const provisionPreflipRow = (options: { home: string; target: NetworkTarget; run?: PrivateCommand }) => preflipProvisioning.withPermit(Effect.gen(function* () {
-  const { row, identity, peers } = options.target;
+  const { project, row, identity, peers } = options.target;
   if (row.machine === "local") return void (yield* provisionNetworkAgent({ home: options.home, agent: identity, ...(options.run ? { run: options.run } : {}) }));
   const { run, machine } = yield* remoteMachine(row.machine);
-  yield* run(prepareRemoteNetworkAgent({ home: options.home, agent: identity, machineName: row.machine, machine, peers, ...(options.run ? { run: options.run } : {}) }));
+  const { networkRowIdentity } = yield* Effect.promise(() => import("./desk-route.ts"));
+  const sessions = Object.fromEntries(project.agents.filter(other => other.state !== "closed").map(other => [other.sessionId, networkRowIdentity(project, other)]));
+  yield* run(prepareRemoteNetworkAgent({ home: options.home, agent: identity, machineName: row.machine, machine, peers, sessions, ...(options.run ? { run: options.run } : {}) }));
 }));
+
+const LIVE_EXCLUDED = new Set(["planned", "closed", "interrupted", "failed"]);
+export const liveRows = (project: Project) => project.agents.filter(row => !LIVE_EXCLUDED.has(row.state));
+
+/** Owner custody for a whole project: mint each row's identity here and push remote keys. One note per row; never fails. */
+export const provisionLiveRows = (options: { home: string; project: Project; rows: readonly AgentRow[]; run?: PrivateCommand }) => Effect.gen(function* () {
+  const { networkRowIdentity } = yield* Effect.promise(() => import("./desk-route.ts"));
+  const notes: string[] = [];
+  for (const row of options.rows) {
+    const identity = networkRowIdentity(options.project, row);
+    const peers = options.project.agents.filter(other => other.state !== "closed" && other.name !== row.name).map(other => networkRowIdentity(options.project, other));
+    const result = yield* provisionPreflipRow({ home: options.home, target: { project: options.project, row, identity, peers }, ...(options.run ? { run: options.run } : {}) }).pipe(Effect.result);
+    notes.push(result._tag === "Success" ? `${row.name}: identity ready${row.machine === "local" ? "" : `, key pushed to ${row.machine}`}` : `${row.name}: NOT provisioned: ${result.failure.message}`);
+  }
+  return notes;
+});
+
+export interface DoctorCheck { readonly name: string; readonly ok: boolean | null; readonly detail: string }
+export interface CommsDoctorReport {
+  readonly row: string; readonly machine: string; readonly identity: string;
+  readonly joined: boolean; readonly verdict: string;
+  readonly checks: readonly DoctorCheck[]; readonly fixes: readonly string[];
+}
+
+const probedFacts = (value: unknown): JoinFacts => {
+  const facts = value as JoinFacts;
+  if (facts === null || typeof facts !== "object" || typeof facts.joined !== "boolean" || typeof facts.identity !== "boolean" || !["published", "absent", "invalid"].includes(facts.fence)) throw new Error("probe shape");
+  return facts;
+};
+
+/** Why a row is or is not on the mailbox. Only the row's owner on Flagg fixes, and only by minting and pushing its key. */
+export const commsDoctor = (options: {
+  home: string; dir: string; session: string; row?: string;
+  /** This process runs on a remote machine: it reports itself only. */
+  remote: boolean;
+  self?: { agent: string; session: string }; launchHint?: string; configPath?: string; fix?: boolean; run?: PrivateCommand;
+}) => Effect.gen(function* () {
+  const { explicitPolicyComms } = yield* Effect.promise(() => import("./comms.ts"));
+  const { networkRowIdentity } = yield* Effect.promise(() => import("./desk-route.ts"));
+  const { projectPath } = yield* Effect.promise(() => import("./store.ts"));
+  const project = options.remote ? undefined : (() => { try { return decodeProject(JSON.parse(readFileSync(projectPath(options.dir), "utf8"))); } catch { return undefined; } })();
+  if (options.remote && options.row && options.row !== options.self?.agent) return yield* Effect.fail(new CommsError(`comms_doctor on a remote machine reports this process only; run comms_doctor row:${options.row} from its owner on Flagg`));
+  if (options.row && !project) return yield* Effect.fail(new CommsError(`comms_doctor: no readable catalog at ${options.dir}`));
+  const row = options.row ? project?.agents.find(row => row.name === options.row) : project?.agents.find(row => row.sessionId === options.session && row.state !== "closed");
+  if (options.row && !row) return yield* Effect.fail(new CommsError(`comms_doctor: no row ${options.row} in ${project!.slug}`));
+  if (!row) {
+    const self = options.self;
+    if (!self) return yield* Effect.fail(new CommsError("comms_doctor: this session has no row and no Muster agent; nothing to report"));
+    const facts = yield* Effect.promise(() => localJoinFacts({ home: options.home, agent: self.agent, session: self.session, remote: options.remote, ...(options.configPath ? { configPath: options.configPath } : {}), ...(options.run ? { run: options.run } : {}) }));
+    return report({ row: self.agent, machine: options.remote ? "this remote machine" : "local", identity: self.agent, facts, policy: undefined, hint: options.launchHint, remote: options.remote,
+      fixes: ["report only: identities are minted on Flagg and pushed by the row's owner (comms_doctor row:<name> from the owner)"] });
+  }
+  const identity = networkRowIdentity(project!, row);
+  const policy = explicitPolicyComms(options.dir);
+  const remoteRow = row.machine !== "local";
+  const probe = Effect.gen(function* () {
+    if (!remoteRow) return yield* Effect.promise(() => localJoinFacts({ home: options.home, agent: identity, session: row.sessionId, remote: false, ...(options.run ? { run: options.run } : {}) }));
+    const { run, remote, machine } = yield* remoteMachine(row.machine);
+    const helper = join(machine.musterExtension, "src/comms-network.ts");
+    const configPath = row.restore?.env.MUSTER_NETWORK_CONFIG ?? "";
+    const stdout = yield* run(remote.remoteNode(row.machine, machine,
+      `import {homedir} from 'node:os'; import {localJoinFacts} from ${JSON.stringify(helper)}; console.log(JSON.stringify(await localJoinFacts({home:process.env.HOME??homedir(),agent:process.argv[1],session:process.argv[2],remote:true,...(process.argv[3]?{configPath:process.argv[3]}:{})})));`,
+      [identity, row.sessionId, configPath], 30_000)).pipe(Effect.mapError(error => new CommsError(`probe of ${row.machine} failed: ${error.message.split("\n")[0]}`)));
+    return yield* Effect.try({ try: () => probedFacts(JSON.parse(stdout.trim().split("\n").at(-1) ?? "")), catch: () => new CommsError(`probe of ${row.machine} returned no join facts; its pi-muster predates comms_doctor`) });
+  });
+  const cached = () => { try { return readNetworkIdentities(options.home)[identity] !== undefined; } catch { return false; } };
+  let facts = yield* probe.pipe(Effect.result);
+  const fixes: string[] = [];
+  const owner = row.owner === options.session;
+  const wanted = !cached() || (facts._tag === "Success" && remoteRow && (facts.success.key === false || facts.success.session === false || !facts.success.identity));
+  if (!owner) fixes.push(`report only: session ${options.session} does not own ${row.name}; its owner fixes`);
+  else if (options.remote) fixes.push("report only: identities are minted on Flagg");
+  else if (policy === "intercom") fixes.push("no fix: project policy comms: intercom opts this project out");
+  else if (options.fix === false) { if (wanted) fixes.push("fix: false; would mint and push the key"); }
+  else if (wanted) {
+    const peers = project!.agents.filter(other => other.state !== "closed" && other.name !== row.name).map(other => networkRowIdentity(project!, other));
+    const minted = yield* provisionPreflipRow({ home: options.home, target: { project: project!, row, identity, peers }, ...(options.run ? { run: options.run } : {}) }).pipe(Effect.result);
+    fixes.push(minted._tag === "Success" ? `fixed: identity minted${remoteRow ? ` and key pushed to ${row.machine}` : ""}` : `fix failed: ${minted.failure.message}`);
+    facts = yield* probe.pipe(Effect.result);
+  }
+  return report({ row: row.name, machine: row.machine, identity, policy, hint: row.restore?.env.MUSTER_COMMS, remote: remoteRow, cachedHere: cached(), fixes,
+    facts: facts._tag === "Success" ? facts.success : undefined, probeError: facts._tag === "Failure" ? facts.failure.message : undefined });
+});
+
+function report(input: { row: string; machine: string; identity: string; facts: JoinFacts | undefined; probeError?: string; policy: "intercom" | "network" | undefined; hint: string | undefined; remote: boolean; cachedHere?: boolean; fixes: string[] }): CommsDoctorReport {
+  const { facts } = input;
+  const where = input.machine === "local" ? "Flagg" : input.machine;
+  const checks: DoctorCheck[] = [];
+  if (input.cachedHere !== undefined) checks.push({ name: "identity cached on Flagg", ok: input.cachedHere, detail: input.cachedHere ? input.identity : `no identity for ${input.identity}` });
+  if (input.policy !== undefined || input.cachedHere !== undefined) checks.push({ name: "project policy", ok: input.policy === "intercom" ? false : input.policy === "network" ? true : null, detail: `comms: ${input.policy ?? "unset (desks only)"}` });
+  if (!facts) checks.push({ name: `probe ${where}`, ok: false, detail: input.probeError ?? "no facts" });
+  else {
+    checks.push({ name: `identity on ${where}`, ok: facts.identity, detail: facts.did ?? "none" });
+    if (input.remote) {
+      checks.push({ name: `key on ${where}`, ok: facts.key, detail: facts.key === null ? "not checked: no identity or config" : facts.key ? "present in agent secrets" : "missing from agent secrets" });
+      checks.push({ name: `session bound on ${where}`, ok: facts.session, detail: facts.session ? "peer cache binds this session" : "peer cache lacks this session" });
+    }
+    checks.push({ name: `config readable on ${where}`, ok: facts.config === null, detail: facts.config ?? "ok" });
+    checks.push({ name: "fence published", ok: facts.fence === "published", detail: facts.fence === "published" ? "a reader holds the mailbox lease" : facts.fence === "invalid" ? "fence file invalid" : "no reader yet" });
+  }
+  const optedOut = input.policy === "intercom";
+  const joined = !optedOut && facts?.joined === true;
+  checks.push({ name: "launch hint vs joined fact", ok: null, detail: `MUSTER_COMMS=${input.hint ?? "unset"}; joined: ${joined}${joined && input.hint === "intercom" ? " (the joined fact wins over the hint)" : ""}` });
+  const verdict = optedOut ? "not joined: project policy comms: intercom opts this project out"
+    : !facts ? `unknown: ${input.probeError ?? "no facts"}`
+    : !facts.joined ? `not joined: ${facts.reason}`
+    : facts.fence === "published" ? "joined: a reader holds the mailbox"
+    : "joined, no reader yet: current pi-muster starts it within 30 s; older code needs a restart";
+  return { row: input.row, machine: input.machine, identity: input.identity, joined, verdict, checks, fixes: input.fixes };
+}
 
 const HERDR_PROMPT_MAX = 800;
 /** Owner only, into a pane Muster opened and still bound to its terminal. Bellwether's agent.prompt proves working. */
@@ -410,7 +589,7 @@ export const routedNetworkSend = <R>(options: {
   run?: PrivateCommand;
 }) => {
   const { target } = options;
-  const preflip = target !== undefined && (() => { try { return preflipRow(options.home, target); } catch { return false; } })();
+  return Effect.flatMap(target ? preflipRow(options.home, target) : Effect.succeed(false), preflip => {
   if (target && preflip) {
     let provisioned = false;
     return reportedNetworkSend({ ...options, fallbackPath: "herdr-prompt",
@@ -423,6 +602,7 @@ export const routedNetworkSend = <R>(options: {
   }
   const herdr = target !== undefined && target.row.machine !== "local" && target.row.owner === options.sender;
   return reportedNetworkSend({ ...options, ...(herdr ? { fallbackPath: "herdr-prompt" as const, fallback: () => herdrPromptRow({ row: target.row, sender: options.sender, text: options.text }) } : {}) });
+  });
 };
 
 export function networkRecipient(home: string, agent: string): CommsIdentityReference {
