@@ -688,7 +688,7 @@ export default function muster(host: ExtensionAPI) {
 
   const RolePolicyParam = Type.Optional(
     Type.Object({
-      model: Type.Optional(Type.String({ description: "an alias (opus, sol) or provider/model" })),
+      model: Type.Optional(Type.Union([Type.String(), Type.Null()], { description: "an alias (opus, sol) or provider/model; null clears the project pin (workers then follow a fresh fleet steer, then the roster)" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       compactAt: Type.Optional(Type.Union([Type.Integer(), Type.Null()], { description: "null turns compaction off" })),
       noSkills: Type.Optional(Type.Boolean()),

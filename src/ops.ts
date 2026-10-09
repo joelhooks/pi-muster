@@ -4110,13 +4110,45 @@ export interface UpdateInput {
   readonly policy?: unknown;
 }
 
+/** Roles whose `model` is explicitly null, and the policy without those keys. */
+export function splitClearedModels(policy: unknown): { policy: unknown; cleared: string[] } {
+  if (typeof policy !== "object" || policy === null || Array.isArray(policy)) return { policy, cleared: [] };
+  const roles = (policy as { roles?: unknown }).roles;
+  if (typeof roles !== "object" || roles === null || Array.isArray(roles)) return { policy, cleared: [] };
+  const cleared: string[] = [];
+  const kept: Record<string, unknown> = {};
+  for (const [role, value] of Object.entries(roles)) {
+    if (typeof value === "object" && value !== null && "model" in value && (value as { model?: unknown }).model === null) {
+      cleared.push(role);
+      const { model: _model, ...rest } = value as Record<string, unknown>;
+      kept[role] = rest;
+    } else kept[role] = value;
+  }
+  const next = { ...(policy as Record<string, unknown>), roles: kept };
+  const empty = Object.keys(next).every(key => key === "roles") && Object.values(kept).every(value => typeof value === "object" && value !== null && Object.keys(value).length === 0);
+  return { policy: empty && cleared.length ? undefined : next, cleared };
+}
+
+const clearModels = <P extends { roles?: Record<string, import("./domain.ts").RolePolicy> | undefined }>(policy: P, cleared: readonly string[]): P => {
+  if (!cleared.length || !policy.roles) return policy;
+  const roles = Object.fromEntries(Object.entries(policy.roles).map(([role, value]) => {
+    if (!cleared.includes(role)) return [role, value];
+    const { model: _model, ...rest } = value;
+    return [role, rest];
+  }));
+  return { ...policy, roles };
+};
+
 export const projectUpdate = (dir: string, params: UpdateInput) =>
   Effect.gen(function* () {
-    const patch = params.policy === undefined ? null : yield* decodeWith(decodePolicy, params.policy);
+    // `model: null` on a role clears the project's pin; it is not a policy value, so it is split off before decoding.
+    const { policy: requested, cleared } = splitClearedModels(params.policy);
+    const decoded = requested === undefined ? null : yield* decodeWith(decodePolicy, requested);
+    const patch = decoded === null && cleared.length ? {} : decoded;
     const { roster, path } = yield* loadRoster;
     const before = yield* load(dir);
     yield* Effect.try({
-      try: () => effectivePolicy(roster, patch ? mergePolicy(before.policy, patch) : before.policy, before.slug),
+      try: () => effectivePolicy(roster, patch ? clearModels(mergePolicy(before.policy, patch), cleared) : before.policy, before.slug),
       catch: (error) => input(String(error instanceof Error ? error.message : error)),
     });
     const label = params.label?.trim();
@@ -4129,7 +4161,7 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
           ...(params.boardType !== undefined ? { boardType: params.boardType } : {}),
           ...(params.nextAction?.trim() ? { nextAction: params.nextAction.trim() } : {}),
           ...(headline !== undefined ? { headline } : {}),
-          ...(patch ? { policy: mergePolicy(current.policy, patch) } : {}),
+          ...(patch ? { policy: clearModels(mergePolicy(current.policy, patch), cleared) } : {}),
         };
         return [next, next] as const;
       }),
