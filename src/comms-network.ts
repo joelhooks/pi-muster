@@ -3,12 +3,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { Effect, Layer, Schema, Stream } from "effect";
+import { Effect, Layer, Option, Schema, Semaphore, Stream } from "effect";
 import { createActor } from "xstate";
 import { networkLeaseMachine } from "./machines.ts";
 import { FetchHttpClient } from "effect/http";
-import { decodeOwnerSession, decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type CommsIdentityReference } from "./domain.ts";
-import { CommsError, MusterEnv, Proc, Unsupported, type CommsShape, type CommsTarget } from "./runtime.ts";
+import { decodeOwnerSession, decodeNetworkSendFence, decodeNetworkFenceLock, decodeNetworkIdentityName, decodeCommsIdentityCache, decodeNetworkIdentityCache, decodeNetworkDeskIdentityCache, decodeNetworkDeskCursors, decodeNetworkDeskPeers, decodeNetworkPeers, decodeNetworkPeerReferences, decodeCommsIdentityReference, decodeNetworkCommsConfig, decodeNetworkPayload, decodeNetworkCursors, type AgentRow, type CommsIdentityReference, type Project } from "./domain.ts";
+import { reportedNetworkSend } from "./comms-fallback.ts";
+import { CommsError, Herdr, MusterEnv, Proc, Unsupported, type CommsDelivery, type CommsShape, type CommsTarget } from "./runtime.ts";
 import type { Batch, LeaseFence } from "./vendor/rat-king-mailbox-client/index.ts";
 
 /** Wait without touching the mailbox or acquiring the old DID's lease.
@@ -337,6 +338,92 @@ export function retireRemoteNetworkKey(options: { home: string; agent: string; m
     return `KEY NOT DELETED: ${reference.secret} on ${options.machineName}; delete it by hand`;
   });
 }
+
+/** A live catalog row a network send addresses. Built by desk-route's `networkTargetRow`. */
+export interface NetworkTarget { readonly project: Project; readonly row: AgentRow; readonly identity: string; readonly peers: readonly string[] }
+
+/** Remote launches pin MUSTER_COMMS, so a row pinned to intercom never reads its mailbox.
+ * A local row follows policy but reads only once it has an identity. */
+export function preflipRow(home: string, target: Pick<NetworkTarget, "row" | "identity">): boolean {
+  return target.row.restore?.env.MUSTER_COMMS === "intercom" || readNetworkIdentities(home)[target.identity] === undefined;
+}
+export const preflipNotice = (row: string, outcome: string) => `${row} has no mailbox reader (launched before comms: network); ${outcome}; restart the row to open its mailbox`;
+
+const musterRuntime = Effect.gen(function* () {
+  const env = yield* Effect.serviceOption(MusterEnv);
+  const proc = yield* Effect.serviceOption(Proc);
+  if (Option.isNone(env) || Option.isNone(proc)) return yield* Effect.fail(new CommsError("Muster runtime unavailable for a remote row"));
+  return <A, E>(effect: Effect.Effect<A, E, MusterEnv | Proc>) => effect.pipe(Effect.provideService(MusterEnv, env.value), Effect.provideService(Proc, proc.value));
+});
+const remoteMachine = (name: string) => Effect.gen(function* () {
+  const run = yield* musterRuntime;
+  const remote = yield* Effect.promise(() => import("./remote.ts"));
+  return { run, remote, machine: yield* run(remote.machineConfig(name)).pipe(Effect.mapError(error => new CommsError(error.message))) };
+});
+
+/** The cache lock waits synchronously; a second fiber in this process would freeze the loop the first one awaits on. */
+const preflipProvisioning = Semaphore.makeUnsafe(1);
+/** Launch's custody, on demand: a local mint, or a remote mint plus key copy. It finishes before any send. */
+export const provisionPreflipRow = (options: { home: string; target: NetworkTarget; run?: PrivateCommand }) => preflipProvisioning.withPermit(Effect.gen(function* () {
+  const { row, identity, peers } = options.target;
+  if (row.machine === "local") return void (yield* provisionNetworkAgent({ home: options.home, agent: identity, ...(options.run ? { run: options.run } : {}) }));
+  const { run, machine } = yield* remoteMachine(row.machine);
+  yield* run(prepareRemoteNetworkAgent({ home: options.home, agent: identity, machineName: row.machine, machine, peers, ...(options.run ? { run: options.run } : {}) }));
+}));
+
+const HERDR_PROMPT_MAX = 800;
+/** Owner only, into a pane Muster opened and still bound to its terminal. Bellwether's agent.prompt proves working. */
+export const herdrPromptRow = (options: { row: AgentRow; sender: string; text: string }): Effect.Effect<CommsDelivery> => Effect.gen(function* () {
+  const { row } = options;
+  if (row.owner !== options.sender) return { status: "failed" as const, detail: `herdr-prompt refused: session ${options.sender} does not own ${row.name}; no text typed` };
+  const pane = row.pane;
+  if (!pane?.openedByMuster) return { status: "failed" as const, detail: `herdr-prompt refused: Muster did not open a pane for ${row.name}; no text typed` };
+  const herdr = yield* Effect.promise(() => import("./herdr.ts"));
+  const { HERDR_TRANSPORT_GRACE_MS } = yield* Effect.promise(() => import("@joelhooks/pi-bellwether/herdr-client"));
+  const client = row.machine === "local"
+    ? yield* Effect.serviceOption(Herdr).pipe(Effect.flatMap(client => Option.isSome(client) ? Effect.succeed(client.value) : Effect.fail(new CommsError("Herdr unavailable"))))
+    : yield* remoteMachine(row.machine).pipe(Effect.flatMap(({ run, remote, machine }) => run(remote.remoteClient(row.machine, machine)).pipe(Effect.mapError(error => new CommsError(error.message)))));
+  // Pi submits on newline, so the prompt is one line, attributed, and bounded like any inline prompt.
+  const suffix = ` [Muster herdr-prompt from session ${options.sender}, not Joel.]`;
+  const flat = options.text.replace(/\s*\n\s*/gu, " ⏎ ");
+  const room = HERDR_PROMPT_MAX - suffix.length;
+  const text = `${flat.length > room ? `${flat.slice(0, room - 16)}… [truncated]` : flat}${suffix}`;
+  return yield* Effect.gen(function* () {
+    const bound = yield* herdr.paneGet(pane.paneId);
+    if (!bound || bound.terminal_id !== pane.terminalId) return { status: "failed" as const, detail: `herdr-prompt refused: ${row.name}'s pane ${pane.paneId} no longer holds its terminal; no text typed` };
+    const refusal = herdr.agentReadinessRefusal(yield* herdr.agentGet(pane.paneId), row.name);
+    if (refusal) return { status: "failed" as const, detail: `herdr-prompt refused: Herdr readiness ${refusal}; no text typed` };
+    const result = yield* herdr.call({ method: "agent.prompt", params: { target: pane.paneId, text, wait: { until: ["working"], timeout_ms: herdr.PROOF_OF_LIFE_MS } }, timeoutMs: herdr.PROOF_OF_LIFE_MS + HERDR_TRANSPORT_GRACE_MS });
+    return result.agent.agent_status === "working"
+      ? { status: "delivered" as const, detail: `typed into ${row.machine} pane ${pane.paneId}; Herdr observed working${flat.length > room ? "; text truncated" : ""}` }
+      : { status: "accepted" as const, detail: `typed into ${row.machine} pane ${pane.paneId}; Herdr did not observe working; read the pane before resending` };
+  }).pipe(Effect.provideService(Herdr, client));
+}).pipe(Effect.catch(error => Effect.succeed({ status: "failed" as const, detail: `herdr-prompt failed: ${error.message}` })));
+
+/** Network sends to catalog rows. A pre-flip row is provisioned first and prompted through Herdr, never intercom.
+ * A remote row its sender owns skips intercom, which cannot reach the remote broker. Non-rows keep the plain path. */
+export const routedNetworkSend = <R>(options: {
+  home: string; sender: string; to: string; id: string; at: string; text: string;
+  target: NetworkTarget | undefined;
+  network: Effect.Effect<CommsDelivery, never, R>;
+  fallback: () => Effect.Effect<CommsDelivery | undefined, never, R>;
+  run?: PrivateCommand;
+}) => {
+  const { target } = options;
+  const preflip = target !== undefined && (() => { try { return preflipRow(options.home, target); } catch { return false; } })();
+  if (target && preflip) {
+    let provisioned = false;
+    return reportedNetworkSend({ ...options, fallbackPath: "herdr-prompt",
+      network: provisionPreflipRow({ home: options.home, target, ...(options.run ? { run: options.run } : {}) }).pipe(
+        Effect.map(() => { provisioned = true; return { status: "failed" as const, detail: `${target.row.name} has no mailbox reader; network send skipped` }; }),
+        Effect.catch(error => Effect.succeed({ status: "failed" as const, detail: `${target.row.name} has no mailbox reader and provisioning did not finish: ${error.message}; nothing sent, no intercom fallback` }))),
+      fallback: () => provisioned ? herdrPromptRow({ row: target.row, sender: options.sender, text: options.text }) : Effect.succeed(undefined),
+      notice: fallback => preflipNotice(target.row.name, fallback && fallback.status !== "failed" ? "delivered via herdr-prompt" : "not delivered"),
+    });
+  }
+  const herdr = target !== undefined && target.row.machine !== "local" && target.row.owner === options.sender;
+  return reportedNetworkSend({ ...options, ...(herdr ? { fallbackPath: "herdr-prompt" as const, fallback: () => herdrPromptRow({ row: target.row, sender: options.sender, text: options.text }) } : {}) });
+};
 
 export function networkRecipient(home: string, agent: string): CommsIdentityReference {
   const reference = readNetworkIdentities(home)[decodeNetworkIdentityName(agent)];

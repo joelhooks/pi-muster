@@ -110,7 +110,7 @@ const RouteDelivery = Schema.Struct({ status: Schema.String, detail: Schema.opti
 });
 export const DeskRouteReceipt = Schema.Struct({
   id: Schema.String, at: Schema.String, to: Schema.String, sender: SessionId,
-  path: Schema.Literals(["network", "intercom-fallback"]),
+  path: Schema.Literals(["network", "intercom-fallback", "herdr-prompt"]),
   network: RouteDelivery,
   fallback: Schema.optionalKey(RouteDelivery),
 });

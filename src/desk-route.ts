@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { reportedNetworkSend, networkReceiptPath } from "./comms-fallback.ts";
+import { networkReceiptPath } from "./comms-fallback.ts";
 import { Effect } from "effect";
 import { assertCurrentSession, commsAddress } from "./comms.ts";
 import { decodeProject, type AgentRow, type Project } from "./domain.ts";
@@ -29,12 +29,14 @@ export function sendDesk(options: {
 }) {
   return Effect.gen(function* () {
     const target = yield* Effect.try({ try: () => resolveDeskRoute(options.home, options.dir, options.to), catch: error => error instanceof CommsError ? error : new CommsError(`desk_send refused alias ${options.to}: unknown, foreign, or non-desk row`) });
+    const peers = rowPeers(target.project, target.row);
     const prepared = target.row.machine === "local" ? Effect.succeed(undefined) : Effect.gen(function* () {
       const { prepareRemoteNetworkAgent } = yield* Effect.promise(() => import("./comms-network.ts"));
       const { machineConfig } = yield* Effect.promise(() => import("./remote.ts"));
-      yield* prepareRemoteNetworkAgent({ home: options.home, agent: target.identity, machineName: target.row.machine, machine: yield* machineConfig(target.row.machine), peers: target.project.agents.filter(row => row.state !== "closed" && row.name !== target.row.name).map(row => networkRowIdentity(target.project, row)) });
+      yield* prepareRemoteNetworkAgent({ home: options.home, agent: target.identity, machineName: target.row.machine, machine: yield* machineConfig(target.row.machine), peers });
     }).pipe(Effect.mapError(() => new CommsError("desk_send remote provisioning failed (private output withheld)")));
-    return yield* reportedNetworkSend({ ...options,
+    const { routedNetworkSend } = yield* Effect.promise(() => import("./comms-network.ts"));
+    return yield* routedNetworkSend({ ...options, target: { ...target, peers },
       network: prepared.pipe(Effect.flatMap(() => options.comms.send(options.to, options.text)), Effect.catch(error => Effect.succeed({ status: "failed" as const, detail: error.message }))),
       fallback: () => options.comms.relay ? options.comms.relay(options.to, options.text) : Effect.succeed({ status: "failed" as const, detail: "intercom fallback unavailable" }),
     });
@@ -43,6 +45,34 @@ export function sendDesk(options: {
 
 export function networkRowIdentity(project: Project, row: AgentRow): string {
   return row.role === "desk" ? `${project.slug}/${row.name}` : row.name;
+}
+
+/** Identities a remote row may hold public references for: its project's other open rows. */
+const rowPeers = (project: Project, row: AgentRow) => project.agents.filter(other => other.state !== "closed" && other.name !== row.name).map(other => networkRowIdentity(project, other));
+
+/** The open catalog row a network send addresses, in this catalog first, then registered ones.
+ * Undefined for DIDs and anything that is not a row: those keep the plain network path and its refusal. */
+export function networkTargetRow(home: string, dir: string, to: string) {
+  let address;
+  try { address = commsAddress(to); } catch { return undefined; }
+  if (address.kind === "did") return undefined;
+  const catalogs: Project[] = [];
+  try { catalogs.push(decodeProject(JSON.parse(readFileSync(projectPath(dir), "utf8")))); } catch { /* a slug, or a remote worker without the catalog */ }
+  try {
+    for (const entry of readRegistry(home).values()) {
+      try {
+        const project = decodeProject(JSON.parse(readFileSync(projectPath(entry.dir), "utf8")));
+        if (project.slug === entry.slug && !catalogs.some(known => known.slug === project.slug)) catalogs.push(project);
+      } catch { /* an unreadable foreign catalog has no row to offer */ }
+    }
+  } catch { /* no registry */ }
+  for (const [index, project] of catalogs.entries()) {
+    const row = project.agents.find(row => row.state !== "closed" && (address.kind === "alias"
+      ? project.slug === address.project && row.name === address.row
+      : row.sessionId === address.id || row.intercomAddress === address.id || (index === 0 && row.name === address.id)));
+    if (row) return { project, row, identity: networkRowIdentity(project, row), peers: rowPeers(project, row) };
+  }
+  return undefined;
 }
 
 /** Old launch readers see bare names only; new readers have a separate desk channel. */

@@ -6,17 +6,22 @@ import { CommsError, type CommsDelivery } from "./runtime.ts";
 
 export const networkReceiptPath = (home: string) => join(home, ".local/state/muster/network-route-receipts.jsonl");
 
-/** One explicit network → intercom fallback policy for desks and owner notices. */
+/** One explicit network → fallback policy for desks and owner notices. A fallback of undefined means none ran. */
 export function reportedNetworkSend<R>(options: {
   home: string; sender: string; to: string; id: string; at: string;
   network: Effect.Effect<CommsDelivery, never, R>;
-  fallback: () => Effect.Effect<CommsDelivery, never, R>;
+  fallback: () => Effect.Effect<CommsDelivery | undefined, never, R>;
+  /** Herdr types into a Muster-opened pane; intercom is the default. */
+  fallbackPath?: "intercom-fallback" | "herdr-prompt";
+  /** Plain words leading the returned detail, such as why a row needs a restart. */
+  notice?: (fallback: CommsDelivery | undefined) => string | undefined;
 }) {
   return Effect.gen(function* () {
     const network = yield* options.network;
     const fallback = network.status === "failed" || network.status === "expired" ? yield* options.fallback() : undefined;
+    const path = fallback ? options.fallbackPath ?? "intercom-fallback" : "network";
     const record = decodeDeskRouteReceipt({ id: options.id, at: options.at, to: options.to, sender: options.sender,
-      path: fallback ? "intercom-fallback" : "network", network, ...(fallback ? { fallback } : {}),
+      path, network, ...(fallback ? { fallback } : {}),
     });
     const receipt = networkReceiptPath(options.home);
     yield* Effect.try({ try: () => {
@@ -28,7 +33,10 @@ export function reportedNetworkSend<R>(options: {
         writeSync(fd, `${JSON.stringify(record)}\n`);
       } finally { closeSync(fd); }
     }, catch: () => new CommsError("NetworkComms sent but receipt write failed; do not retry blindly") });
-    const delivery = fallback ? { ...fallback, detail: `intercom fallback: ${fallback.status}${fallback.id ? `; intercom id: ${fallback.id}` : ""}; network: ${network.status}${network.detail ? ` (${network.detail})` : ""}${fallback.detail ? `; fallback: ${fallback.detail}` : ""}; receipt: ${receipt}#${options.id}` } : network;
+    const label = path === "herdr-prompt" ? "herdr-prompt" : "intercom fallback";
+    const routed = fallback ? { ...fallback, detail: `${label}: ${fallback.status}${fallback.id ? `; intercom id: ${fallback.id}` : ""}; network: ${network.status}${network.detail ? ` (${network.detail})` : ""}${fallback.detail ? `; ${path === "herdr-prompt" ? "herdr" : "fallback"}: ${fallback.detail}` : ""}; receipt: ${receipt}#${options.id}` } : network;
+    const notice = options.notice?.(fallback);
+    const delivery = notice ? { ...routed, detail: `${notice}${routed.detail ? `; ${routed.detail}` : ""}` } : routed;
     return { ...record, receipt, delivery };
   });
 }

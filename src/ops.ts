@@ -4027,5 +4027,12 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     notes.push(yield* publishTokens(project));
     notes.push(`brain: ${yield* writeBrain(project)}`);
     notes.push(`roster: ${path ?? "built-in defaults"}`);
+    if (before.policy?.comms !== "network" && project.policy?.comms === "network") {
+      // Their launch env predates the flip: no mailbox reader until a restart.
+      const stale = project.agents.filter(row => !(["planned", "closed", "interrupted", "failed"] as const).some(state => state === row.state) && row.restore?.env.MUSTER_COMMS !== "network").map(row => row.name);
+      notes.push(stale.length
+        ? `comms: network. Restart these rows to open their mailboxes (launched before comms: network): ${stale.join(", ")}.`
+        : "comms: network. No live row predates the switch.");
+    }
     return { project, policy: effectivePolicy(roster, project.policy, project.slug), notes };
   });

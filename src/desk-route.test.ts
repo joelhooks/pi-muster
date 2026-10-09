@@ -193,6 +193,8 @@ describe("qualified desk routing", () => {
   });
   it("records every fallback, without sending unknown aliases or retrying an accepted message", async () => {
     const { h, dir } = await fixture(); const relay = vi.fn(() => Effect.succeed({ status: "delivered" as const, id: "muster-outbox-fixture" }));
+    // A provisioned desk: one with no identity is provisioned first and never falls back to intercom.
+    seedNetworkIdentities(h.home, { "beta/desk": reference(networkProvisionName("beta/desk")) });
     const send = vi.fn(() => Effect.succeed({ status: "failed" as const, detail: "network unavailable" }));
     const opts = { home: h.home, dir, to: "beta/desk", text: "One concrete ask.", sender: "alpha-session", id: "receipt-1", at: "2026-10-06T20:00:00Z", comms: { ...NetworkComms, send, relay } };
     const result = await runWith(h, sendDesk(opts));
@@ -202,6 +204,15 @@ describe("qualified desk routing", () => {
     expect(send).toHaveBeenCalledOnce(); expect(relay).toHaveBeenCalledOnce();
     const accepted = await runWith(h, sendDesk({ ...opts, id: "receipt-2", comms: { ...opts.comms, send: () => Effect.succeed({ status: "accepted" as const }) } }));
     expect(accepted.path).toBe("network"); expect(relay).toHaveBeenCalledOnce();
+  });
+  it("provisions an unregistered desk before any send; a failed mint sends nothing and never falls back to intercom", async () => {
+    // 2026-10-07: 24 of 25 fallbacks were sends to an unregistered DID.
+    const { h, dir } = await fixture(); const relay = vi.fn(() => Effect.succeed({ status: "delivered" as const }));
+    const send = vi.fn(() => Effect.succeed({ status: "accepted" as const }));
+    const result = await runWith(h, sendDesk({ home: h.home, dir, to: "beta/desk", text: "ask", sender: "alpha-session", id: "receipt-3", at: "2026-10-09T00:00:00Z", comms: { ...NetworkComms, send, relay } }));
+    expect(result.path).toBe("network"); expect(result.delivery.status).toBe("failed");
+    expect(result.delivery.detail).toContain("provisioning did not finish"); expect(result.delivery.detail).toContain("no intercom fallback");
+    expect(send).not.toHaveBeenCalled(); expect(relay).not.toHaveBeenCalled();
   });
   it.each(["alpha/desk", "worker"])("receives %s through the real consumer callback, including legacy bare worker authentication", async senderKey => {
     const { h } = await fixture();
