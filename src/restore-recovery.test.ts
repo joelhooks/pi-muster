@@ -141,3 +141,12 @@ it("launch into an open lane whose root pane is gone reopens it instead of refus
   expect(result.row.pane?.tabId).toBe(reopened.tabId);
   expect(result.notes.join("\n")).toContain("launch: lane work reopened");
 });
+
+it.each(["reported", "verified", "landed"] as const)("restore of a %s row whose pane died interrupts it and restores", async state => {
+  const { h, dir, row } = await setup();
+  await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(agent => ({ ...agent, state })) }, undefined] as const)));
+  h.herdr.panes.delete(row.pane!.paneId);
+  const result = await runWith(h, agentLaunchForeground(dir, { action: "restore", name: "worker" }));
+  expect(result.row.state).toBe("running"); expect(result.row.owner).toBe(row.owner);
+  expect(result.notes.join("\n")).toContain("gone; interrupted before restore");
+});

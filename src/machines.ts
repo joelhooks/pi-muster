@@ -111,7 +111,7 @@ export const agentMachine = setup({
     nudged: { on: { RESTART: "restarted", ACTIVE: "running", ...WORKING } },
     restarted: { on: { ACTIVE: "running", SILENT: "silent", ...WORKING } },
     reported: { on: { REPORT: { target: "reported", guard: "paneLive" }, RESTARTED: "running", VERIFY: "verified", REWORK: "running", LAND: "landed", PANE_GONE: "interrupted", ...CLOSABLE } },
-    verified: { on: { REPORT: { target: "reported", guard: "paneLive" }, LAND: "landed", RESTARTED: "running", REWORK: "running", ...CLOSABLE } },
+    verified: { on: { REPORT: { target: "reported", guard: "paneLive" }, LAND: "landed", PANE_GONE: "interrupted", RESTARTED: "running", REWORK: "running", ...CLOSABLE } },
     landed: { on: { REPORT: { target: "reported", guard: "paneLive" }, PANE_GONE: "interrupted", RESTARTED: "running", REWORK: "running", ...CLOSABLE } },
     interrupted: { on: { QUEUE_RESTORE: "launching", ADOPT: "running", LAUNCH: "launching", RESTORE: "restoring", ...CLOSABLE } },
     restoring: { on: { STARTED: "running", LAUNCH_FAILED: "failed", PANE_GONE: "interrupted" } },
@@ -258,4 +258,6 @@ export const stepProject = (id: string, from: ProjectState, event: ProjectEvent)
 /** States with a live Pi process Muster expects to be working. */
 export const PROCESS_STATES: readonly AgentState[] = ["launching", "running", "silent", "nudged", "restarted", "restoring"];
 /** States where a row still holds a pane or a claim on work. */
+/** States whose pane death a restore may record: a reported row can die mid-merge with work in its clone. */
+export const PANE_GONE_STATES: readonly AgentState[] = [...PROCESS_STATES, "reported", "verified", "landed"];
 export const LIVE_STATES: readonly AgentState[] = [...PROCESS_STATES, "reported", "verified", "landed", "interrupted", "failed"];

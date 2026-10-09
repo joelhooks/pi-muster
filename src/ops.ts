@@ -54,7 +54,7 @@ import {
 } from "./herdr.ts";
 import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
-import { PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
+import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
 import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
@@ -817,7 +817,7 @@ const paneProvesSession = (pane: PaneInfo, row: AgentRow) => pane.agent === "pi"
 
 /** Catalog-only recovery. A live session anywhere on this machine vetoes interruption. */
 const recoverGoneRestore = (row: AgentRow) => Effect.gen(function* () {
-  if (!row.pane || !PROCESS_STATES.includes(row.state)) return row;
+  if (!row.pane || !PANE_GONE_STATES.includes(row.state)) return row;
   if (yield* locatePane(row.pane)) return row;
   if ((yield* paneList()).some(pane => paneProvesSession(pane, row))) return row;
   const env = yield* MusterEnv;
