@@ -20,6 +20,17 @@ import { createActor, type ActorRefFrom } from "xstate";
 import { networkConsumerMachine } from "./machines.ts";
 
 /** Missing, malformed and foreign activation markers all hold feeds, without advancing cursors. */
+/** The failure's class or mailbox error code, never its private output. */
+const failureKind = (error: unknown) => {
+  if (typeof error !== "object" || error === null) return "unknown";
+  const coded = (error as { error?: unknown }).error;
+  return typeof coded === "string" && /^[A-Za-z]+$/.test(coded) ? coded : String((error as { _tag?: unknown })._tag ?? (error as Error).name ?? "unknown");
+};
+/** Credentials do not heal by waiting; they wait for a toggle or a fix. */
+const authFailure = (error: unknown) => /Auth|Forbidden|Unauthori[sz]ed/.test(`${failureKind(error)} ${error instanceof Error ? error.message : ""}`);
+/** How long a failed network consumer waits before the next refresh starts it again. */
+export const RETRY_FAILED_MS = 60_000;
+
 export function restartFeedActivated(session: string, env: Readonly<Record<string, string | undefined>>): boolean {
   const gate = env.MUSTER_RESTART_GATE;
   if (!gate) return true;
@@ -96,10 +107,19 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     const startedAt = new Date().toISOString(); readerStartedAt = startedAt;
     const actor = network ? createActor(networkConsumerMachine).start() : undefined;
     networkActor = actor;
+    // A CommsError (config, key, binding) waits for a toggle; anything else (a predecessor's live lease,
+    // a transport fault) is retried, and announced once.
+    let retryAt: number | undefined;
+    let retryAnnounced = false;
     const failed = (error?: unknown) => {
       if (!actor || networkActor !== actor || actor.getSnapshot().value === "failed") return;
       actor.send({ type: "FAILURE" }); consumer?.abort(); consumer = undefined;
-      const detail = error instanceof CommsError ? error.message : "NetworkComms consumer stopped. Check its config, identity lease and recipient binding (private output withheld).";
+      retryAt = error instanceof CommsError || authFailure(error) ? undefined : Date.now() + RETRY_FAILED_MS;
+      if (retryAt !== undefined && retryAnnounced) return;
+      if (retryAt !== undefined) retryAnnounced = true;
+      // The class names the cause (a predecessor's live lease, a transport error) without its private output.
+      const kind = failureKind(error);
+      const detail = error instanceof CommsError ? error.message : `NetworkComms consumer stopped (${kind}); it retries every ${Math.round(RETRY_FAILED_MS / 1000)} s. Check its config, identity lease and recipient binding (private output withheld).`;
       if (!restartFeedActivated(id, env)) return;
       pi.sendMessage({ customType: "muster-network-error", content: `${detail} No intercom fallback occurred. If this journal was resumed twice, run /fork in the unbound pane before starting another reader. Otherwise, after fixing the cause, restart this session (agent_launch action "restart", or /quit and relaunch the same session); never /reload.`, display: true }, { triggerTurn: true });
     };
@@ -119,6 +139,8 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
       void Promise.all([network.mode?.(ctx) ?? Promise.resolve("network"), checkDuplicate()]).then(([mode, duplicated]) => {
         if (networkActor !== actor || duplicated) return;
         if (mode === "intercom") { actor.send({ type: "INTERCOM" }); consumer?.abort(); consumer = undefined; return; }
+        // A failed consumer is retried, not left dead: a predecessor's lease expires, an outage passes.
+        if (actor.getSnapshot().value === "failed" && retryAt !== undefined && Date.now() >= retryAt) actor.send({ type: "INTERCOM" });
         if (actor.getSnapshot().value !== "off") return;
         actor.send({ type: "NETWORK" });
         const controller = new AbortController(); consumer = controller;

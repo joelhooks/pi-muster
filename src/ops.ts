@@ -2174,6 +2174,7 @@ export function openUntilWatches(journal: string): string[] {
 const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const notes: string[] = [];
+  const touched: string[] = [dir];
   const entries = yield* Effect.sync(() => { try { return [...readRegistry(env.home).values()].filter(entry => resolve(entry.dir) !== resolve(dir)); } catch { return []; } });
   for (const entry of entries) {
     const moved = yield* mutate(entry.dir, current => Effect.gen(function* () {
@@ -2184,8 +2185,30 @@ const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(func
     })).pipe(Effect.result);
     if (moved._tag === "Failure") { notes.push(`owner handover in ${entry.slug} needs repair: ${moved.failure.message}; run project_status takeover: true there`); continue; }
     if (moved.success === 0) continue;
+    touched.push(entry.dir);
     const forward = yield* recordOwnerForward(from, to, entry.slug, env).pipe(Effect.result);
     notes.push(forward._tag === "Success" ? `moved ${moved.success} row(s) in ${entry.slug} to the new owner` : `moved ${moved.success} row(s) in ${entry.slug}; scoped owner forward needs repair: ${forward.failure.message}`);
+  }
+  notes.push(...yield* pushRemoteBindings(touched));
+  return notes;
+});
+
+/** A remote reader knows authors only by the session bindings Flagg pushed it. After a restart, push the
+ * successor's binding to every live remote row of a network catalog, or its replies are refused as unknown. */
+const pushRemoteBindings = (dirs: readonly string[]) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const notes: string[] = [];
+  const network = yield* Effect.promise(() => import("./comms-network.ts"));
+  const { explicitPolicyComms } = yield* Effect.promise(() => import("./comms.ts"));
+  for (const dir of dirs) {
+    if (explicitPolicyComms(dir) !== "network") continue;
+    const current = yield* load(dir).pipe(Effect.result);
+    if (current._tag === "Failure") continue;
+    const rows = network.liveRows(current.success).filter(row => row.machine !== "local");
+    if (!rows.length) continue;
+    const pushed = yield* network.provisionLiveRows({ home: env.home, project: current.success, rows });
+    const failed = pushed.filter(note => note.includes("NOT provisioned"));
+    notes.push(failed.length ? `session bindings in ${current.success.slug}: ${failed.join("; ")}` : `session bindings pushed to ${rows.length} remote row(s) in ${current.success.slug}`);
   }
   return notes;
 });
