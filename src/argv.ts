@@ -2,6 +2,11 @@ import { fileURLToPath } from "node:url";
 import type { AgentRow, LaunchProfile, Project, Role, RoleDefaults } from "./domain.ts";
 import { ROLE_DEFAULTS } from "./domain.ts";
 
+/** Loaders that keep function names (tsx, esbuild keepNames) wrap a serialized function's inner
+ * functions in `__name(...)`. A bare remote `node -e` has no such helper, so every script that
+ * embeds `fn.toString()` starts with this shim. */
+export const NAME_SHIM = "globalThis.__name ??= (fn) => fn;";
+
 export type LaunchKind = "launch" | "fork" | "restore";
 
 /** Flags that shrink the tool registry. They silently drop unknown names, so Muster never emits them. */

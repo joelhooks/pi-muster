@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { Effect } from "effect";
+import { NAME_SHIM } from "./argv.ts";
 
 import type { AgentRow, CheckOutcome, Lane, Packet, Project } from "./domain.ts";
 import { Proc, git, type ProcShape } from "./runtime.ts";
@@ -40,6 +41,7 @@ export function isTranscriptPath(path: string): boolean {
  * Walk ignored and tracked files too. Never follow transcript symlinks or
  * overwrite a rescue. Verify the complete manifest again just before retirement. */
 export const transcriptRescueScript = () => `
+${NAME_SHIM}
 try {
 const fs=require('node:fs'), p=require('node:path'), crypto=require('node:crypto');
 const isTranscriptPath=${isTranscriptPath.toString()};

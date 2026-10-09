@@ -130,3 +130,14 @@ it("non-owner status recovers a launching row too", async () => {
   await runWith(h, projectStatus(dir, { act: true }));
   expect((await runWith(h, load(dir))).agents[0]?.state).toBe("interrupted");
 });
+
+it("launch into an open lane whose root pane is gone reopens it instead of refusing", async () => {
+  const { h, dir } = await setup();
+  const lane = (await runWith(h, load(dir))).lanes.find(lane => lane.slug === "work")!;
+  h.herdr.panes.delete(lane.root!.paneId); h.herdr.tabs.delete(lane.tabId!);
+  const result = await runWith(h, agentLaunchForeground(dir, { action: "launch", name: "boss", role: "boss", lane: "work", label: "boss", cwd: dir, model: "sol", prompt: "start" }));
+  const reopened = (await runWith(h, load(dir))).lanes.find(lane => lane.slug === "work")!;
+  expect(reopened.tabId).not.toBe(lane.tabId);
+  expect(result.row.pane?.tabId).toBe(reopened.tabId);
+  expect(result.notes.join("\n")).toContain("launch: lane work reopened");
+});

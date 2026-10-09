@@ -8,7 +8,7 @@ import { createHerdrClient, type HerdrClient } from "@joelhooks/pi-bellwether/he
 import { AgentName, Slug, SessionId, decodeAgentRow, decodeOwnerItem, decodeAgentName, decodeMachines, type MachineConfig, type OwnerItem } from "./domain.ts";
 import { ProcError, InputError } from "./errors.ts";
 import { Herdr, MusterEnv, Proc, type ProcShape } from "./runtime.ts";
-import { shellQuote } from "./argv.ts";
+import { NAME_SHIM, shellQuote } from "./argv.ts";
 
 const decodeNoteEnvelope = Schema.decodeUnknownSync(Schema.Struct({ project: Slug, machine: AgentName, agent: AgentName, lane: Slug, owner: SessionId, item: Schema.Unknown }));
 export function decodeRemoteNote(value: unknown) {
@@ -24,6 +24,7 @@ export const sidecarRoots = (cwd: string) => resolveSidecarRoots(cwd, execFileSy
 /** Same resolver for bounded remote Node probes. */
 export const sidecarRootsScript = `import {execFileSync} from 'node:child_process';
 import {join,resolve} from 'node:path';
+${NAME_SHIM}
 const sidecarRoots = cwd => (${resolveSidecarRoots.toString()})(cwd,execFileSync,join,resolve);`;
 
 export const remotePullReceipt = (comms?: string): string[] => comms === "network" ? [] : ["remote notes reach the owner only when it runs owner_inbox or project_status; for push, set policy comms network only after the owner and its desk run pi-muster 6ec5d32 or later (older owners publish no consumer fence, so launch brief sends fail with LeaseMismatch)"];

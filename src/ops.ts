@@ -2757,10 +2757,11 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
 
     const failLaunch = () => patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void));
     let lane = yield* findLane(project, row.lane);
-    if (params.action === "restore" && !params.pane && !(row.pane && (yield* locatePane(row.pane))) && lane.state === "open" && (!lane.root || !(yield* locatePane(lane.root)))) {
+    // Closing the agent that held an open lane's root pane closes that pane; launch and restore reopen it.
+    if ((params.action === "restore" || params.action === "launch") && !params.pane && !(row.pane && (yield* locatePane(row.pane))) && lane.state === "open" && (!lane.root || !(yield* locatePane(lane.root)))) {
       const reopened = yield* laneOpen(dir, { slug: lane.slug }).pipe(Effect.tapError(failLaunch));
       lane = reopened.lane;
-      skillNotes.push(`restore: lane ${lane.slug} reopened; ${reopened.note ?? `opened tab ${lane.tabId} pane ${lane.root?.paneId}`}`);
+      skillNotes.push(`${params.action}: lane ${lane.slug} reopened; ${reopened.note ?? `opened tab ${lane.tabId} pane ${lane.root?.paneId}`}`);
     }
     const picked = yield* pickPane(project, lane, row, params).pipe(Effect.tapError(failLaunch));
     // Claim and release stale bindings together, before sending anything to the shell.

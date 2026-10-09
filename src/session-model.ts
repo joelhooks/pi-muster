@@ -2,6 +2,7 @@ import { Schema } from "effect";
 import { Thinking } from "./domain.ts";
 import type { LaunchProfile, Roster, Role } from "./domain.ts";
 import { resolveModel } from "./models.ts";
+import { NAME_SHIM } from "./argv.ts";
 
 export interface SessionModel {
   readonly model?: string;
@@ -73,6 +74,7 @@ function projectRestoreEntries(raw: unknown[]): Entry[] {
 export const SESSION_MODEL_READ_SCRIPT = `
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
+${NAME_SHIM}
 const entries = [];
 const restoreEntry = ${restoreEntry.toString()};
 for await (const line of createInterface({ input: createReadStream(process.argv[1]), crlfDelay: Infinity })) {
