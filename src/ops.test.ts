@@ -1025,6 +1025,15 @@ describe("follow-up packets", () => {
     expect((await failWith(h, packetLand(dir, { id: first, outcome: "rejected" }))).message).toContain("already committed");
   });
 
+  it("refuses a second row reporting another row's commit, leaving that row's packet untouched", async () => {
+    const { h, dir, clone, first } = await verifiedWorker();
+    await runWith(h, mutate(dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...p.agents[0]!, name: "judge", role: "judge" as const, sessionId: "judge-session", state: "running" as const }] }, undefined] as const)));
+    const error = await failWith(h, packetReport({ dir, agent: "judge", owner: "o", cwd: clone, commit: first, summary: "verdict", checks: [] }));
+    expect(error.message).toContain("already probe_w's packet; a reviewer reports its verdict as an artifact");
+    const project = await runWith(h, load(dir));
+    expect(project.packets.map(packet => [packet.agent, packet.state])).toEqual([["probe_w", "verified"]]);
+  });
+
   it("refuses a non-ancestor without changing the earlier packet or row", async () => {
     const { h, dir, clone, first } = await verifiedWorker();
     sh(clone, "checkout", "-q", "-b", "unrelated", `${first}^`);

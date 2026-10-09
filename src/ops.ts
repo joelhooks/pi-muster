@@ -3079,6 +3079,11 @@ export const packetReport = (params: PacketReportInput) =>
       Effect.gen(function* () {
         const latest = yield* findRow(current, params.agent);
         const prior = current.packets.find((packet) => packet.id === id);
+        // A packet's id is its commit, so a second row naming the same commit would overwrite the first
+        // row's packet (drovr: a read-only judge reviewing a worker's head). A reviewer reports its verdict file.
+        if (prior && prior.agent !== latest.name) {
+          return yield* new GuardFailed({ guard: "packet-owner", message: `commit ${id.slice(0, 12)} is already ${prior.agent}'s packet; a reviewer reports its verdict as an artifact (packet_report artifact: <absolute path>), not the commit it reviewed` });
+        }
         if (prior && TERMINAL_PACKET_STATES.includes(prior.state)) {
           return yield* input(`packet ${id.slice(0, 12)} is already ${prior.state}; commit a new change for rework`);
         }
