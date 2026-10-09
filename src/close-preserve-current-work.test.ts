@@ -80,9 +80,9 @@ async function fixture(remote: boolean) {
 }
 
 for (const remote of [false, true]) describe(remote ? "SSH preservation" : "local preservation", () => {
-  it.each(["ignored", "untracked", "tracked"])("rescues %s transcripts before retiring, with byte proof and a durable receipt", async kind => {
+  it.each(["ignored", "untracked", "tracked", "git metadata"])("rescues %s transcripts before retiring, with byte proof and a durable receipt", async kind => {
     const f = await fixture(remote);
-    const path = ".pi-subagents/artifacts/x_transcript.jsonl";
+    const path = kind === "git metadata" ? ".git/muster/session_transcript.jsonl" : ".pi-subagents/artifacts/x_transcript.jsonl";
     const bytes = Buffer.from(' {"private":"session"}\n\u0000');
     mkdirSync(join(f.row.cwd, path, ".."), { recursive: true });
     writeFileSync(join(f.row.cwd, path), bytes);

@@ -48,7 +48,6 @@ const hash=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).diges
 const files=[];
 function walk(dir,relative='') {
   for(const name of fs.readdirSync(dir).sort()) {
-    if(name==='.git')continue;
     const path=relative?relative+'/'+name:name, full=p.join(root,path), stat=fs.lstatSync(full);
     if(stat.isSymbolicLink()) {
       if(isTranscriptPath(path))throw new Error('transcript symlink refuses retirement: '+path);
