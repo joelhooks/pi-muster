@@ -61,17 +61,26 @@ export interface VersionSkew {
   check(): Promise<string | undefined>;
 }
 
+function readVersion(root: string, files: readonly string[]): Version | undefined {
+  try { const git = gitVersion(root); if (git) return git; } catch { /* package install */ }
+  try { return packageVersion(root, files); } catch { return; }
+}
+
+export interface LoadedVersion { readonly version: Version | undefined; readonly files: readonly string[] }
+
+/** Call at module evaluation: the version of the code this module graph was read from. A factory that runs
+ * later (a session switch reuses the cached graph) must not take whatever is on disk by then as "loaded". */
+export function loadedVersion(root: string): LoadedVersion {
+  const version = readVersion(root, []);
+  if (version) return { version, files: [] };
+  try { const files = loadedFiles(root); return { version: readVersion(root, files), files }; } catch { return { version: undefined, files: [] }; }
+}
+
 /** Best effort only. One snapshot per minute; concurrent tools share the same check. */
-export function createVersionSkew({ root, now = Date.now }: { root: string; now?: () => number }): VersionSkew {
-  let files: string[] = [];
-  const read = (): Version | undefined => {
-    try { const git = gitVersion(root); if (git) return git; } catch { /* package install */ }
-    try { return packageVersion(root, files); } catch { return; }
-  };
-  let loaded = read();
-  if (!loaded) {
-    try { files = loadedFiles(root); loaded = read(); } catch { /* no useful version */ }
-  }
+export function createVersionSkew({ root, now = Date.now, loaded: evaluated = loadedVersion(root) }: { root: string; now?: () => number; loaded?: LoadedVersion }): VersionSkew {
+  const files = evaluated.files;
+  const read = (): Version | undefined => readVersion(root, files);
+  const loaded = evaluated.version;
   let checkedAt = -Infinity;
   let warning: string | undefined;
   let pending: Promise<string | undefined> | undefined;

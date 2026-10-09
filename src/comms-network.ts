@@ -301,7 +301,9 @@ const REMOTE_KEY_SCRIPT = 'S="$HOME/.local/bin/secrets"; [ -x "$S" ] || S="$(com
  * Fleet custody (Rat King, 2026-10-07): the operator key never leaves this machine. Provision here, copy only this
  * agent's identity entry to the remote secrets store over ssh stdin, and seed public references for its peers only.
  */
-export function prepareRemoteNetworkAgent(options: { home: string; agent: string; machineName: string; machine: import("./domain.ts").MachineConfig; peers?: readonly string[]; sessions?: Readonly<Record<string, string>>; run?: PrivateCommand }) {
+export function prepareRemoteNetworkAgent(options: { home: string; agent: string; machineName: string; machine: import("./domain.ts").MachineConfig; peers?: readonly string[]; sessions?: Readonly<Record<string, string>>; run?: PrivateCommand;
+  /** The row's session there: its reader rechecks its join at once instead of on its next tick. */
+  kick?: string }) {
   return Effect.gen(function* () {
     const configPath = options.machine.comms?.config;
     if (!configPath) return yield* Effect.fail(new CommsError(`machine ${options.machineName}: network project requires a comms config block; launch refused`));
@@ -323,8 +325,10 @@ export function prepareRemoteNetworkAgent(options: { home: string; agent: string
     const helper = join(options.machine.musterExtension, "src/comms-network.ts");
     // A row launched before the flip has no peer env: its reader learns sessions from this cache, or refuses its owner's mail.
     const sessions = Object.fromEntries(Object.entries(options.sessions ?? {}).filter(([, agent]) => wanted.has(agent)));
+    const kick = options.kick === undefined ? "" : decodeOwnerSession(options.kick);
+    // The kick path is spelled out, not imported: an older pi-muster there must still seed.
     yield* remoteNode(options.machineName, options.machine,
-      `import {homedir} from 'node:os'; import {seedNetworkIdentities, seedNetworkPeers} from ${JSON.stringify(helper)}; const home=process.env.HOME??homedir(); seedNetworkIdentities(home,JSON.parse(process.argv[1])); const sessions=JSON.parse(process.argv[2]); if (Object.keys(sessions).length) seedNetworkPeers(home,sessions);`, [JSON.stringify(peers), JSON.stringify(sessions)]).pipe(Effect.mapError(() => new CommsError(`machine ${options.machineName}: public peer cache probe failed; launch refused`)));
+      `import {homedir} from 'node:os'; import {mkdirSync, writeFileSync} from 'node:fs'; import {join} from 'node:path'; import {seedNetworkIdentities, seedNetworkPeers} from ${JSON.stringify(helper)}; const home=process.env.HOME??homedir(); seedNetworkIdentities(home,JSON.parse(process.argv[1])); const sessions=JSON.parse(process.argv[2]); if (Object.keys(sessions).length) seedNetworkPeers(home,sessions); if (process.argv[3]) { const dir=join(home,'.local/state/muster/owner-queue'); mkdirSync(dir,{recursive:true,mode:0o700}); writeFileSync(join(dir,process.argv[3]+'.comms-kick'),new Date().toISOString(),{mode:0o600}); }`, [JSON.stringify(peers), JSON.stringify(sessions), kick]).pipe(Effect.mapError(() => new CommsError(`machine ${options.machineName}: public peer cache probe failed; launch refused`)));
     return `${options.machineName} holds ${reference.secret} (${copied.stdout.trim()})`;
   });
 }
@@ -414,7 +418,7 @@ export const preflipRow = (home: string, target: Pick<NetworkTarget, "row" | "id
   if (target.row.restore?.env.MUSTER_COMMS !== "intercom") return false;
   return (yield* rowReaderFence(home, target)) !== "published";
 });
-export const preflipNotice = (row: string, outcome: string) => `${row} has no mailbox reader yet (launched before comms: network); ${outcome}; on current pi-muster it joins its mailbox within 30 s, otherwise restart the row`;
+export const preflipNotice = (row: string, outcome: string) => `${row} has no mailbox reader yet (launched before comms: network); ${outcome}; on current pi-muster it joins its mailbox within about a minute, otherwise restart the row`;
 
 const musterRuntime = Effect.gen(function* () {
   const env = yield* Effect.serviceOption(MusterEnv);
@@ -433,11 +437,17 @@ const preflipProvisioning = Semaphore.makeUnsafe(1);
 /** Launch's custody, on demand: a local mint, or a remote mint plus key copy. It finishes before any send. */
 export const provisionPreflipRow = (options: { home: string; target: NetworkTarget; run?: PrivateCommand }) => preflipProvisioning.withPermit(Effect.gen(function* () {
   const { project, row, identity, peers } = options.target;
-  if (row.machine === "local") return void (yield* provisionNetworkAgent({ home: options.home, agent: identity, ...(options.run ? { run: options.run } : {}) }));
+  if (row.machine === "local") {
+    yield* provisionNetworkAgent({ home: options.home, agent: identity, ...(options.run ? { run: options.run } : {}) });
+    // A kick is a hint: a row without a reader yet ignores it, and a failed write only waits for the next tick.
+    const { kickComms } = yield* Effect.promise(() => import("./owner-queue.ts"));
+    yield* Effect.sync(() => { try { kickComms(row.sessionId, options.home); } catch { /* next tick */ } });
+    return;
+  }
   const { run, machine } = yield* remoteMachine(row.machine);
   const { networkRowIdentity } = yield* Effect.promise(() => import("./desk-route.ts"));
   const sessions = Object.fromEntries(project.agents.filter(other => other.state !== "closed").map(other => [other.sessionId, networkRowIdentity(project, other)]));
-  yield* run(prepareRemoteNetworkAgent({ home: options.home, agent: identity, machineName: row.machine, machine, peers, sessions, ...(options.run ? { run: options.run } : {}) }));
+  yield* run(prepareRemoteNetworkAgent({ home: options.home, agent: identity, machineName: row.machine, machine, peers, sessions, kick: row.sessionId, ...(options.run ? { run: options.run } : {}) }));
 }));
 
 const LIVE_EXCLUDED = new Set(["planned", "closed", "interrupted", "failed"]);
@@ -546,7 +556,7 @@ function report(input: { row: string; machine: string; identity: string; facts: 
     : !facts ? `unknown: ${input.probeError ?? "no facts"}`
     : !facts.joined ? `not joined: ${facts.reason}`
     : facts.fence === "published" ? "joined: a reader holds the mailbox"
-    : "joined, no reader yet: current pi-muster starts it within 30 s; older code needs a restart";
+    : "joined, no reader yet: current pi-muster starts it within about a minute (longer while a predecessor's lease runs out); older code needs a restart";
   return { row: input.row, machine: input.machine, identity: input.identity, joined, verdict, checks, fixes: input.fixes };
 }
 
@@ -683,6 +693,31 @@ export function seedNetworkIdentities(home: string, value: unknown) {
 
 const UNDECODABLE = Symbol("undecodable");
 
+export const REFUSAL_PREFIX = "NetworkComms refused your message";
+export interface NetworkRefusal {
+  readonly kind: "stale-recipient" | "unknown-author" | "sender-mismatch";
+  readonly reason: string; readonly seq: number; readonly messageId: string;
+  readonly senderDid: string; readonly author: string; readonly recipient: string;
+}
+export const refusalNotice = (refusal: NetworkRefusal, receiver: string) =>
+  `${REFUSAL_PREFIX} ${refusal.messageId} (seq ${refusal.seq}) to ${refusal.recipient}: ${receiver} saved it unread: ${refusal.reason}. ` +
+  (refusal.kind === "stale-recipient" ? "That session is retired; send to the row's project/row alias instead. "
+    : refusal.kind === "unknown-author" ? "The receiver cannot bind your session to an identity; run comms_doctor, or ask your owner to restart you onto current pi-muster. "
+    : "Your signing identity does not match your session; run comms_doctor. ") +
+  "Resending it unchanged will be refused again. This notice is sent once.";
+
+/** Claims the one notice per sender session, refusal kind and receiver. False when it was already sent. */
+export const claimRefusalNotice = (home: string, agent: string, refusal: NetworkRefusal) => Effect.tryPromise({
+  try: async () => {
+    const dir = join(home, ".local/state/muster/network-quarantine", createHash("sha256").update(agent).digest("hex").slice(0, 16));
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, `refusal-${createHash("sha256").update(`${refusal.senderDid}\0${refusal.author}\0${refusal.kind}`).digest("hex").slice(0, 24)}.notice`);
+    try { await writeFile(path, JSON.stringify({ at: new Date().toISOString(), ...refusal }), { mode: 0o600, flag: "wx" }); }
+    catch (error) { if (error instanceof Error && "code" in error && error.code === "EEXIST") return undefined; throw error; }
+    return path;
+  }, catch: () => new CommsError("NetworkComms refusal notice record failed"),
+});
+
 /** Private evidence for an authenticated message the consumer could not decode. */
 export const quarantineNetworkMessage = (home: string, agent: string, record: { seq: number; messageId: string; senderDid: string; reason: string; body: string }) => Effect.tryPromise({
   try: async () => {
@@ -709,8 +744,12 @@ export function consumeNetworkMailbox(options: {
   mailbox: Pick<Effect.Success<ReturnType<typeof openNetworkMailbox>>, "watch" | "lease" | "open" | "deliver" | "ack">;
   open?: (envelope: Parameters<Effect.Success<ReturnType<typeof openNetworkMailbox>>["open"]>[0]) => Effect.Effect<import("./vendor/rat-king-mailbox-client/index.ts").OpenedMessage, CommsError | import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError>;
   deskRecord?: (input: Omit<Parameters<NetworkRecordHandler>[0], "mailbox">) => Effect.Effect<string, CommsError>;
-  senderAgent: (author: string) => Effect.Effect<string, CommsError>;
+  senderAgent: (author: string, senderDid: string) => Effect.Effect<string, CommsError>;
   receive: (payload: import("./domain.ts").NetworkPayload) => Effect.Effect<void, CommsError>;
+  /** Whether a payload addressed to `recipient` belongs to this session: itself, or a recorded predecessor. */
+  accepts?: (recipient: string, session: string) => boolean;
+  /** Tell an authenticated sender, once, that its message was refused. Failures never stop the reader. */
+  refused?: (refusal: NetworkRefusal) => Effect.Effect<void, CommsError>;
   /** Outage length before the agent is told; default five minutes. */
   outageNoticeMs?: number;
 }) {
@@ -850,12 +889,22 @@ export function consumeNetworkMailbox(options: {
             // instead replays the same message on every start, so one bad record kills the reader for good
             // (2026-10-07: a retired desk session signed with its legacy identity after handover).
             const author = payload.type === "owner" ? payload.item.author : payload.author;
-            const agent = payload.recipient !== options.session ? undefined : yield* options.senderAgent(author).pipe(Effect.catch(() => Effect.succeed(undefined)));
+            // Mail to a recorded predecessor follows its successor; any other session's mail is stale.
+            const addressed = payload.recipient === options.session || (options.accepts?.(payload.recipient, options.session) ?? false);
+            const agent = !addressed ? undefined : yield* options.senderAgent(author, opened.senderDid).pipe(Effect.catch(() => Effect.succeed(undefined)));
             const expected = agent === undefined ? undefined : yield* Effect.try({ try: () => networkRecipient(options.home, agent).did, catch: () => undefined }).pipe(Effect.catch(() => Effect.succeed(undefined)));
-            if (payload.recipient !== options.session) yield* undecodable(`addressed to session ${payload.recipient}, not this session (stale delivery refused)`);
-            else if (agent === undefined) yield* undecodable(`payload author ${author} is not a known agent (refused)`);
-            else if (expected !== opened.senderDid) yield* undecodable(`authenticated sender differs from payload author ${author} (expected ${expected ?? "unknown"}; refused)`);
-            else yield* options.receive(payload);
+            const refusal = !addressed ? { kind: "stale-recipient" as const, reason: `addressed to session ${payload.recipient}, not this session (stale delivery refused)` }
+              : agent === undefined ? { kind: "unknown-author" as const, reason: `payload author ${author} is not a known agent (refused)` }
+              : expected !== opened.senderDid ? { kind: "sender-mismatch" as const, reason: `authenticated sender differs from payload author ${author} (expected ${expected ?? "unknown"}; refused)` }
+              : undefined;
+            if (!refusal) yield* options.receive(payload);
+            else {
+              yield* undecodable(refusal.reason);
+              // A refusal of a refusal notice is never answered: two strangers must not ping-pong.
+              const notice = payload.type === "message" && payload.body.startsWith(REFUSAL_PREFIX);
+              if (options.refused && !notice) yield* options.refused({ ...refusal, seq: event.seq, messageId: opened.tid, senderDid: opened.senderDid, author, recipient: payload.recipient }).pipe(
+                Effect.timeout("10 seconds"), Effect.ignore);
+            }
             }
           }
         }
@@ -944,6 +993,10 @@ export function createNetworkComms(options: {
   configPath?: string;
   session?: (to: CommsTarget) => Effect.Effect<string, CommsError>;
   deskRecord?: NetworkRecordHandler;
+  /** Which addressed sessions this reader accepts; default only its own. */
+  accepts?: (recipient: string, session: string) => boolean;
+  /** Author session → identity for received payloads; default `recipient`. */
+  author?: (author: string, senderDid: string) => Effect.Effect<string, CommsError>;
 }): CommsShape {
   const mailbox = Effect.suspend(() => {
     const sender = options.sender();
@@ -984,7 +1037,13 @@ export function createNetworkComms(options: {
       yield* awaitRestartActivation(sender.session);
       const service = yield* mailbox;
       return yield* consumeNetworkMailbox({ home: options.home, agent: sender.agent, session: sender.session, mailbox: service,
-        senderAgent: author => options.recipient(author), receive,
+        senderAgent: (author, senderDid) => options.author ? options.author(author, senderDid) : options.recipient(author), receive,
+        ...(options.accepts ? { accepts: options.accepts } : {}),
+        // The sender hears of a refusal once, from the receiver, instead of resending into a quarantine forever.
+        refused: refusal => claimRefusalNotice(options.home, sender.agent, refusal).pipe(Effect.flatMap(claimed => claimed === undefined ? Effect.void
+          : send(`did:${refusal.senderDid.slice(4)}`, JSON.stringify({ type: "message", recipient: refusal.author, author: sender.session, body: refusalNotice(refusal, `${sender.agent} (session ${sender.session})`) })).pipe(
+            Effect.flatMap(delivery => delivery.status === "failed" || delivery.status === "expired"
+              ? Effect.promise(() => unlink(claimed).catch(() => {})) : Effect.void)))),
         deskRecord: sender.agent === "switchboard" && options.deskRecord ? input => options.deskRecord!({ ...input, mailbox: service }) : undefined,
         // Static client documents are snapshots. New workers provision after the desk starts.
         open: envelope => mailbox.pipe(Effect.flatMap(fresh => fresh.open(envelope))),

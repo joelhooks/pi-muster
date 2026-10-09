@@ -22,6 +22,13 @@ export const mentions = (item: OwnerItem, reader: string) => item.facets?.some(f
 export const wakeKind = (kind: OwnerKind) => kind === "question" || kind === "blocked" || kind === "action";
 export const ownerPath = (session: string, home = homedir()) => join(home, ".local/state/muster/owner-queue", `${decodeOwnerSession(session)}.jsonl`);
 const readerPath = (session: string, home: string) => ownerPath(session, home).replace(/jsonl$/, "reader");
+/** Beside the queue the owner feed already watches: touching it makes that session recheck its mailbox join now. */
+export const commsKickPath = (session: string, home = homedir()) => ownerPath(session, home).replace(/jsonl$/, "comms-kick");
+export function kickComms(session: string, home = homedir()): void {
+  const path = commsKickPath(session, home);
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, new Date().toISOString(), { mode: 0o600 });
+}
 export const capBody = (body: string) => {
   let bytes = 0; let result = "";
   for (const char of body) { bytes += Buffer.byteLength(char); if (bytes > 4096) break; result += char; }
@@ -389,7 +396,7 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
     const woke = ["delivered", "acked"].includes(delivery.status) && mentions(item, owner);
     const path = result.path === "herdr-prompt" ? "herdr-prompt" as const : result.fallback ? "intercom" as const : "network" as const;
     relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path, itemId: item.uri }, params.home);
-    return { id: item.uri, uri: item.uri, queued, woke, path, delivery, owner, resolution, pendingPull: false };
+    return { id: item.uri, uri: item.uri, queued, woke, path, delivery, owner, resolution, pendingPull: false, lost: result.lost };
   }
   let item: OwnerItem | undefined;
   let queueError: unknown;
@@ -406,5 +413,5 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   if (!logged && woke) path = "intercom";
   const delivery = path === "intercom" ? yield* params.send(owner, params.message ?? `Owner notice from ${params.item.author} (${params.item.lane ?? ""}): [${params.item.kind}] ${params.item.title.slice(0, 200)}${params.item.body ? `\n${capBody(params.item.body)}` : ""}${params.item.refs?.length ? `\nrefs: ${params.item.refs.join(", ")}` : ""}`) : { status: "queued" as const, detail: "owner queue" };
   const pendingPull = remote && delivery.status !== "delivered" && delivery.status !== "acked";
-  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke: pendingPull ? false : woke, path, delivery: pendingPull ? { status: "queued" as const, detail: "Queued for the Flagg owner to pull on the next status pass; not delivered." } : delivery, owner, resolution, ...(remote ? { pendingPull } : {}) };
+  return { id: item?.uri ?? null, uri: item?.uri ?? null, queued: !!item, woke: pendingPull ? false : woke, path, lost: false, delivery: pendingPull ? { status: "queued" as const, detail: "Queued for the Flagg owner to pull on the next status pass; not delivered." } : delivery, owner, resolution, ...(remote ? { pendingPull } : {}) };
 });

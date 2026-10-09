@@ -153,7 +153,7 @@ describe("thinking_set", () => {
 const JOINED = "Collectionfence4/4behavior/propertytests";
 const PLAIN = "Collection fence: all four behavior and property tests passed.";
 const HINT = "Rewrite in plain sentences with spaces between words; put code, paths and ids in backticks.";
-const notice = { id: "uri", uri: "uri", queued: true, woke: false, path: "queue" as const, delivery: { status: "delivered" as const }, owner: "boss", resolution: "explicit recipient" };
+const notice = { id: "uri", uri: "uri", queued: true, woke: false, path: "queue" as const, delivery: { status: "delivered" as const }, owner: "boss", resolution: "explicit recipient", lost: false };
 const cleanReport = { commit: "HEAD", summary: PLAIN, body: PLAIN, checks: [{ name: "Unit tests", outcome: "pass", detail: PLAIN }] };
 const refusalCases: Array<[string, Record<string, unknown>]> = [
   ["packet_report", { ...cleanReport, summary: JOINED }],

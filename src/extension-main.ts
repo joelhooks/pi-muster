@@ -14,7 +14,8 @@ import { registerCompaction } from "./compact.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
 import { MAX_CADENCE_MINUTES, decodeAgentRow, decodeNetworkPeers, decodeNetworkDeskPeers } from "./domain.ts";
 import { sendDesk } from "./desk-route.ts";
-import { createComms, catalogCommsSender, catalogNetworkPeers, retiredCatalogSession, retiredSessionReason } from "./comms.ts";
+import { createComms, catalogCommsSender, catalogNetworkPeers, forkParentSession, retiredCatalogSession, retiredSessionReason, successorRowSender } from "./comms.ts";
+import { lostDeliveryText } from "./comms-fallback.ts";
 import {
   pullRemoteOwnerInbox,
   agentClose,
@@ -38,17 +39,19 @@ import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "./
 import { registerDeskFeed } from "./desk-feed-ext.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "./owner-view.ts";
-import { capBody, deliverOwnerItem, findOwnerPost } from "./owner-queue.ts";
+import { capBody, deliverOwnerItem, findOwnerPost, kickComms } from "./owner-queue.ts";
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
 import { deskPhone } from "./switchboard-ops.ts";
 import { CommsError } from "./runtime.ts";
 import { findSkills, skillIndex } from "./skills.ts";
-import { createVersionSkew, withVersionSkew } from "./version-skew.ts";
+import { createVersionSkew, loadedVersion, withVersionSkew } from "./version-skew.ts";
 import { squashed } from "./readable.ts";
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
+/** Read once, as this module graph evaluates: the stale-tools warning names the code that is running. */
+const LOADED_VERSION = loadedVersion(MUSTER_ROOT);
 const DEFAULT_WORKER_WORKTREE = join(homedir(), "Code", "joelhooks", "dark-wizard", "scripts", "worker-worktree.sh");
 const MUSTER_BIN = join(MUSTER_ROOT, "bin");
 process.env.PATH = [MUSTER_BIN, ...(process.env.PATH === undefined ? [] : process.env.PATH.split(":").filter(path => path !== MUSTER_BIN))].join(":");
@@ -89,12 +92,13 @@ type RestartExit = { sessionId: string; dir: string; restart: Parameters<typeof 
 
 /** No durable flag: only a proven self-restart in this process can arm its exit. */
 /** A catalog row signs as its row; a rowless owner (MUSTER_AGENT, e.g. a project owner) signs as that agent.
- * A session whose own row moved to a successor is retired and gets no sender. */
+ * A session whose own row moved to a recorded successor signs as that row: receivers resolve a predecessor
+ * author through the same successor history, so a self-restart's handover brief has a sender. */
 export function sessionCommsSender(dir: string, session: string, env: NodeJS.ProcessEnv) {
-  const local = catalogCommsSender(dir, session);
+  const local = catalogCommsSender(dir, session) ?? successorRowSender(dir, session, env.HOME ?? homedir());
   if (local) return local;
   if (!env.MUSTER_AGENT) return undefined;
-  // Receivers refuse a retired predecessor signing as the legacy bare identity; its sends fall back, reported.
+  // A retired session with no recorded successor has no identity left; its sends fall back, reported.
   if (retiredCatalogSession(dir, env.MUSTER_AGENT, session)) return undefined;
   const peers = { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) };
   return { agent: peers[session] ?? remoteDeskIdentity(env) ?? env.MUSTER_AGENT, session };
@@ -109,6 +113,17 @@ function remoteDeskIdentity(env: NodeJS.ProcessEnv) {
 }
 
 export const remoteMachineProcess = (env: NodeJS.ProcessEnv) => env.MUSTER_MACHINE !== undefined && env.MUSTER_MACHINE !== "local";
+
+/** A routed send that reached no one is an error result, led by plain words, never a quiet receipt. */
+export function loudDelivery<T extends { content: Array<{ type: "text"; text: string }> }>(result: T, lost: boolean): T | (T & { isError: true }) {
+  if (!lost) return result;
+  const [first, ...rest] = result.content;
+  return { ...result, content: [{ type: "text" as const, text: `${lostDeliveryText(undefined)}\n${first?.text ?? ""}` }, ...rest], isError: true as const };
+}
+
+/** The owner catalog and its sidecars live on Flagg; a remote row has nothing to pull. */
+export const remoteInboxPull = <C>(env: NodeJS.ProcessEnv, pull: (ctx: C) => Promise<readonly string[]>) =>
+  remoteMachineProcess(env) ? undefined : pull;
 
 export function commsDoctorText(report: import("./comms-network.ts").CommsDoctorReport) {
   const mark = (ok: boolean | null) => ok === true ? "✓" : ok === false ? "✗" : "·";
@@ -138,11 +153,16 @@ export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pendin
 }
 
 export default function muster(host: ExtensionAPI) {
-  const pi = withDeskWrites(withVersionSkew(host, createVersionSkew({ root: MUSTER_ROOT })));
+  const pi = withDeskWrites(withVersionSkew(host, createVersionSkew({ root: MUSTER_ROOT, loaded: LOADED_VERSION })));
   const env = process.env;
   const role = env.MUSTER_ROLE;
   const worker = role === "worker";
   const comms = new Map<string, ReturnType<typeof createComms>>();
+  const rejoinComms = () => { for (const service of comms.values()) service.rejoin(); };
+  const kickSelf = (ctx: ExtensionContext) => {
+    rejoinComms();
+    try { kickComms(ctx.sessionManager.getSessionId()); } catch { /* the next poll rechecks */ }
+  };
   const armRestartExit = registerRestartExit(pi, async (pending, ctx) => {
     await Effect.runPromise(finishRestart(pending.dir, pending.restart).pipe(Effect.provide(layer(ctx))));
   }, () => stopOwnerFeed());
@@ -183,6 +203,7 @@ export default function muster(host: ExtensionAPI) {
               catch { return { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) }; }
             },
             networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
+            forkParent: () => forkParentSession(ctx.sessionManager.getHeader()),
           });
           comms.set(key, service);
         }
@@ -190,9 +211,9 @@ export default function muster(host: ExtensionAPI) {
       })()),
     );
 
-  const run = async <A>(ctx: ExtensionContext, signal: AbortSignal | undefined, program: Effect.Effect<A, unknown, Services>, render: (value: A) => string) => {
+  const run = async <A>(ctx: ExtensionContext, signal: AbortSignal | undefined, program: Effect.Effect<A, unknown, Services>, render: (value: A) => string, lost?: (value: A) => boolean) => {
     const exit = await watchEntries.run(ctx.sessionManager.getBranch(), () => Effect.runPromiseExit(program.pipe(Effect.provide(layer(ctx))), signal ? { signal } : undefined));
-    if (Exit.isSuccess(exit)) return text(render(exit.value), JSON.parse(JSON.stringify(exit.value)) as unknown);
+    if (Exit.isSuccess(exit)) return loudDelivery(text(render(exit.value), JSON.parse(JSON.stringify(exit.value)) as unknown), lost?.(exit.value) === true);
     return failure(exit.cause);
   };
 
@@ -218,7 +239,8 @@ export default function muster(host: ExtensionAPI) {
     comms.clear();
   });
 
-  const stopOwnerFeed = registerOwnerFeed(pi, env, { pull: ctx => Effect.runPromise(pullRemoteOwnerInbox(env.MUSTER_PROJECT).pipe(Effect.provide(layer(ctx)))), mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
+  const pull = remoteInboxPull(env, (ctx: ExtensionContext) => Effect.runPromise(pullRemoteOwnerInbox(env.MUSTER_PROJECT).pipe(Effect.provide(layer(ctx)))));
+  const stopOwnerFeed = registerOwnerFeed(pi, env, { ...(pull ? { pull } : {}), rejoin: () => rejoinComms(), mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
 
   if ((worker || role === "boss") && env.MUSTER_OWNER) {
     pi.registerTool({
@@ -235,7 +257,7 @@ export default function muster(host: ExtensionAPI) {
         if (error) return error;
         const session = ctx.sessionManager.getSessionId();
         if (params.replyTo) findOwnerPost(session, params.replyTo);
-        return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${result.pendingPull ? "🐦 Queued for the Flagg owner to pull; not delivered." : ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
+        return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${result.pendingPull ? "🐦 Queued for the Flagg owner to pull; not delivered." : ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
       },
     });
   }
@@ -254,7 +276,7 @@ export default function muster(host: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionId();
       const parent = findOwnerPost(session, params.uri);
       const body = capBody(params.text);
-      return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`);
+      return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
     },
   });
 
@@ -271,9 +293,12 @@ export default function muster(host: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionId();
       const { commsDoctor } = await import("./comms-network.ts");
       const self = sessionCommsSender(dir, session, env);
-      return run(ctx, signal, commsDoctor({ home: homedir(), dir, session, remote: remoteMachineProcess(env),
+      const result = await run(ctx, signal, commsDoctor({ home: homedir(), dir, session, remote: remoteMachineProcess(env),
         ...(params.row ? { row: params.row } : {}), ...(self ? { self } : {}), ...(env.MUSTER_COMMS ? { launchHint: env.MUSTER_COMMS } : {}),
         ...(env.MUSTER_NETWORK_CONFIG ? { configPath: env.MUSTER_NETWORK_CONFIG } : {}), ...(params.fix === undefined ? {} : { fix: params.fix }) }), commsDoctorText);
+      // Whatever the doctor found or fixed, this session rechecks its own join now; a fixed row was kicked by provisioning.
+      kickSelf(ctx);
+      return result;
     },
   });
 
@@ -312,7 +337,8 @@ export default function muster(host: ExtensionAPI) {
           signal,
           packetReport({ dir: project, agent, owner, cwd: ctx.cwd, ...params }),
           (result) =>
-            `Packet ${result.packet.id.slice(0, 12)} reported (${result.packet.state}). Report: ${result.packet.report}. Owner notified: ${result.delivery.status}${result.delivery.detail ? ` (${result.delivery.detail})` : ""}.`,
+            `Packet ${result.packet.id.slice(0, 12)} reported (${result.packet.state}). Report: ${result.packet.report}. Owner notified: ${result.delivery.status}${result.delivery.detail ? ` (${result.delivery.detail})` : ""}.${result.notice.lost ? " The packet is recorded; do not report it again. Tell your owner another way." : ""}`,
+          (result) => result.notice.lost,
         );
       },
     });
@@ -350,7 +376,7 @@ export default function muster(host: ExtensionAPI) {
       try {
         return await run(ctx, signal, sendDesk({ home: homedir(), dir, to: params.to, text: params.text,
           sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms: service,
-        }), result => `delivery: ${result.path} · network: ${result.network.status}${result.network.recipientDid ? ` · DID: ${result.network.recipientDid}` : ""}${result.network.detail ? ` (${result.network.detail})` : ""}${result.fallback ? ` · FALLBACK intercom: ${result.fallback.status}${result.fallback.id ? ` · intercom id: ${result.fallback.id}` : ""}${result.fallback.detail ? ` (${result.fallback.detail})` : ""}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`);
+        }), result => `delivery: ${result.path} · network: ${result.network.status}${result.network.recipientDid ? ` · DID: ${result.network.recipientDid}` : ""}${result.network.detail ? ` (${result.network.detail})` : ""}${result.fallback ? ` · FALLBACK intercom: ${result.fallback.status}${result.fallback.id ? ` · intercom id: ${result.fallback.id}` : ""}${result.fallback.detail ? ` (${result.fallback.detail})` : ""}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`, result => result.lost);
       } finally { service.dispose(); }
     },
   });
@@ -699,9 +725,12 @@ export default function muster(host: ExtensionAPI) {
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;
-      return run(ctx, signal, projectUpdate(projectDir(ctx, project), rest), (result) =>
+      const result = await run(ctx, signal, projectUpdate(projectDir(ctx, project), rest), (result) =>
         [`${result.project.label}: now "${result.project.headline ?? result.project.nextAction}"`, `policy: ${JSON.stringify(result.policy)}`, ...result.notes].join("\n"),
       );
+      // A comms flip takes effect in this session now; provisioning already kicked the project's rows.
+      if (rest.policy?.comms !== undefined && !("isError" in result && result.isError)) kickSelf(ctx);
+      return result;
     },
   });
 

@@ -253,6 +253,54 @@ describe("restart by fork", () => {
     expect(s.host.panes.has(old.pane!.paneId)).toBe(false);
   });
 
+  it("a self-restart moves the two workers it owns, here and in another registered catalog, before any mail can name the old owner", async () => {
+    const s = await setup(false, "desk");
+    const old = s.launch.row;
+    s.h.sessionId = old.sessionId;
+    const worker = (name: string, sessionId: string) => ({ ...old, name, role: "worker" as const, sessionId, owner: old.sessionId, pane: null, state: "running" as const, restore: { cwd: old.cwd, argv: [], env: { MUSTER_OWNER: old.sessionId } } });
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents.map(row => ({ ...row, owner: old.sessionId })), worker("w1", "w1-session"), worker("w2", "w2-session")] }, undefined] as const)));
+    const other = makeRepo(join(s.h.root, "other"));
+    await s.run(projectOpen({ dir: other, slug: "other", outcome: "o", reviewTrigger: "weekly", nextAction: "n", criticalPath: [], space: "w1", sidebar: false, ephemeral: true }));
+    // Only durable projects register; the old owner's rows there must still follow it.
+    await s.run(mutate(other, p => Effect.succeed([{ ...p, ephemeral: false, agents: [{ ...worker("x1", "x1-session"), cwd: other }, { ...worker("x2", "x2-session"), cwd: other }, { ...worker("kept", "kept-session"), owner: "someone-else", cwd: other }] }, undefined] as const)));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    const id = result.row.sessionId;
+    const here = await s.run(load(s.dir));
+    expect(here.agents.filter(row => row.name.startsWith("w")).map(row => [row.owner, row.restore?.env.MUSTER_OWNER])).toEqual([[id, id], [id, id], [id, id]]);
+    const there = await s.run(load(other));
+    expect(there.agents.map(row => [row.name, row.owner, row.restore?.env.MUSTER_OWNER])).toEqual([["x1", id, id], ["x2", id, id], ["kept", "someone-else", old.sessionId]]);
+    expect(ownerRoute(old.sessionId, s.h.home, "other").owner).toBe(id);
+    expect(result.notes.join("\n")).toContain("moved 2 row(s) in other to the new owner");
+  });
+
+  it("lists the parent's open pi-until watches in the receipt and the successor's prompt; finished ones are not listed", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    const entry = (customType: string, data: unknown) => JSON.stringify({ type: "custom", customType, data, id: customType, parentId: null, timestamp: s.h.now.toISOString() });
+    appendFileSync(old.sessionFile!, [
+      entry("pi-until-started", { receipt: { id: "cad1", label: "owner pass", kind: "recurring", intervalMs: 600_000 }, snapshot: { quickRef: "project_status act" } }),
+      entry("pi-until-started", { receipt: { id: "gate2", label: "gate done", kind: "until", intervalMs: 30_000 } }),
+      entry("pi-until-finished", { id: "gate2", status: "done" }),
+    ].join("\n") + "\n");
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    const receipt = result.notes.join("\n");
+    expect(receipt).toContain("pi-until watches not carried into the fork");
+    expect(receipt).toContain('cad1 "owner pass" (recurring, every 600 s; project_status act)');
+    expect(receipt).not.toContain("gate2");
+    expect(s.host.initialPrompts.at(-1)).toContain("re-arm the ones still needed: cad1");
+  });
+
+  it("refusals for another owner's row name project_status takeover, the only takeover restart and adopt have", async () => {
+    const s = await setup();
+    s.h.sessionId = "outsider";
+    const restart = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.result));
+    const adopt = await s.run(agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.launch.row.pane!.paneId }).pipe(Effect.result));
+    for (const outcome of [restart, adopt]) {
+      expect(outcome).toMatchObject({ _tag: "Failure", failure: { message: expect.stringContaining("run project_status takeover: true") } });
+      expect(outcome).not.toMatchObject({ failure: { message: expect.stringContaining("to this call") } });
+    }
+  });
+
   it.each([false, true])("failed fresh-turn proof keeps the original catalog and pane (remote %s)", async remote => {
     const s = await setup(remote);
     const before = await s.run(load(s.dir));

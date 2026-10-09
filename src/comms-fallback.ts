@@ -6,6 +6,11 @@ import { CommsError, type CommsDelivery } from "./runtime.ts";
 
 export const networkReceiptPath = (home: string) => join(home, ".local/state/muster/network-route-receipts.jsonl");
 
+const undelivered = (delivery: CommsDelivery | undefined) => !delivery || delivery.status === "failed" || delivery.status === "expired";
+
+/** A routed send that reached no one: the tool result must be an error, never a quiet receipt. */
+export const lostDeliveryText = (detail: string | undefined) => `NOT DELIVERED: the network send and its fallback both failed; nothing reached the recipient. Do not assume it was read.${detail ? ` ${detail}` : ""}`;
+
 /** One explicit network → fallback policy for desks and owner notices. A fallback of undefined means none ran. */
 export function reportedNetworkSend<R>(options: {
   home: string; sender: string; to: string; id: string; at: string;
@@ -37,6 +42,8 @@ export function reportedNetworkSend<R>(options: {
     const routed = fallback ? { ...fallback, detail: `${label}: ${fallback.status}${fallback.id ? `; intercom id: ${fallback.id}` : ""}; network: ${network.status}${network.detail ? ` (${network.detail})` : ""}${fallback.detail ? `; ${path === "herdr-prompt" ? "herdr" : "fallback"}: ${fallback.detail}` : ""}; receipt: ${receipt}#${options.id}` } : network;
     const notice = options.notice?.(fallback);
     const delivery = notice ? { ...routed, detail: `${notice}${routed.detail ? `; ${routed.detail}` : ""}` } : routed;
-    return { ...record, receipt, delivery };
+    // Network failed and the fallback failed or never ran: the message is lost, and the sender must hear it.
+    const lost = undelivered(network) && undelivered(fallback);
+    return { ...record, receipt, delivery, lost };
   });
 }
