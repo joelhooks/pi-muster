@@ -444,7 +444,10 @@ export function consumeNetworkMailbox(options: {
   deskRecord?: (input: Omit<Parameters<NetworkRecordHandler>[0], "mailbox">) => Effect.Effect<string, CommsError>;
   senderAgent: (author: string) => Effect.Effect<string, CommsError>;
   receive: (payload: import("./domain.ts").NetworkPayload) => Effect.Effect<void, CommsError>;
+  /** Outage length before the agent is told; default five minutes. */
+  outageNoticeMs?: number;
 }) {
+  const outageNoticeMs = options.outageNoticeMs ?? 5 * 60_000;
   const failure = () => new CommsError("NetworkComms consumer failed (private output withheld)");
   return Effect.gen(function* () {
     if (networkModuleSkew()) return yield* Effect.fail(new CommsError(NETWORK_SKEW));
@@ -474,15 +477,23 @@ export function consumeNetworkMailbox(options: {
     const bounded = <A>(effect: Effect.Effect<A, import("./vendor/rat-king-mailbox-client/error.ts").MailboxClientError>, ms = 10_000) => effect.pipe(
       Effect.timeoutOrElse({ duration: Math.max(1, ms), orElse: () => Effect.fail(new MailboxClientError({ reason: "Mailbox request timed out" })) }));
     const notice = (body: string) => options.receive({ type: "message", recipient: options.session, author: "NetworkComms (local)", body });
+    // Each notice wakes the agent for a full turn. Mailbox restarts and backups are routine, so only an
+    // outage that outlasts the notice window is announced, and recovery only when degradation was.
+    // Every retry calls degrade(), so the announcement lands within one backoff of the window.
+    let degradedAt: number | undefined;
+    let announced = false;
     const degrade = () => Effect.gen(function* () {
-      const previous = lifecycle.getSnapshot().value;
       lifecycle.send({ type: "DEGRADE" });
-      if (previous === "live" || previous === "acquiring") yield* notice("NetworkComms reader degraded: mailbox unavailable or lease expired. Retrying without a session restart; no intercom fallback.");
+      degradedAt ??= Date.now();
+      if (announced || Date.now() - degradedAt < outageNoticeMs) return;
+      announced = true;
+      yield* notice(`NetworkComms reader degraded for ${Math.round((Date.now() - degradedAt) / 60_000)} min: mailbox unavailable or lease expired. Retrying without a session restart; no intercom fallback.`);
     });
     const active = () => Effect.gen(function* () {
-      const previous = lifecycle.getSnapshot().value;
       lifecycle.send({ type: "ACTIVE" });
-      if (previous === "degraded" || previous === "reacquiring") yield* notice("NetworkComms reader recovered: mailbox lease active; queued intake resumed.");
+      const wasAnnounced = announced;
+      degradedAt = undefined; announced = false;
+      if (wasAnnounced) yield* notice("NetworkComms reader recovered: mailbox lease active; queued intake resumed.");
     });
     const acquire = () => bounded(options.mailbox.lease.acquire({ did: ownDid,
       harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: options.session }, expiresAt: new Date(Date.now() + 60 * 60_000).toISOString(),

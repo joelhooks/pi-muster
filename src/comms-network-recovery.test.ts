@@ -84,15 +84,34 @@ describe("pinned-client recovery policy with controlled time", () => {
       return Stream.succeed({ events: [], throughSeq: 1 });
     });
     const run = Effect.runPromise(consumeNetworkMailbox({ ...a.options, mailbox: { ...unused, lease: { ...a.lease, acquire }, watch } }));
-    await vi.waitFor(() => expect(a.notices).toHaveLength(1)); await advance(5_000); await run;
-    expect(acquire).toHaveBeenCalledOnce(); expect(watch).toHaveBeenCalledOnce(); expect(a.notices).toHaveLength(2);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce()); await advance(5_000); await run;
+    expect(acquire).toHaveBeenCalledOnce(); expect(watch).toHaveBeenCalledOnce();
+    // A blip shorter than the notice window never wakes the agent.
+    expect(a.notices).toEqual([]);
+  });
+
+  it("a short outage never wakes the agent; a long one announces once and its recovery once", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(start);
+    const a = authority();
+    const watch = vi.fn((_after: number, fence: { generation: number }) => fence.generation === 1 ? Stream.never : Stream.succeed({ events: [], throughSeq: 7 }));
+    const run = Effect.runPromise(consumeNetworkMailbox({ ...a.options, mailbox: { ...unused, lease: a.lease, watch } }));
+    await vi.waitFor(() => expect(readConsumerFence(a.options.home, did)?.generation).toBe(1));
+    a.outage("transport");
+    for (let i = 0; i < 12; i++) await advance(10_000);
+    expect(a.notices).toEqual([]);
+    for (let i = 0; i < 63; i++) await advance(10_000);
+    expect(a.notices).toHaveLength(1); expect(a.notices[0]).toMatch(/degraded for \d+ min/);
+    a.outage(undefined);
+    for (let i = 0; i < 10 && a.lease.acquire.mock.calls.length < 2; i++) await advance(10_000);
+    await run;
+    expect(a.notices).toHaveLength(2); expect(a.notices[1]).toContain("recovered");
   });
 
   it("retries watch transport failures with the same live lease, not resolve then acquire", async () => {
     vi.useFakeTimers(); vi.setSystemTime(start);
     const a = authority(); let attempts = 0;
     const watch = vi.fn(() => ++attempts < 4 ? Stream.fail(new MailboxClientError({ reason: "connection refused" })) : Stream.succeed({ events: [], throughSeq: 2 }));
-    const run = Effect.runPromise(consumeNetworkMailbox({ ...a.options, mailbox: { ...unused, lease: a.lease, watch } }));
+    const run = Effect.runPromise(consumeNetworkMailbox({ ...a.options, outageNoticeMs: 0, mailbox: { ...unused, lease: a.lease, watch } }));
     await vi.waitFor(() => expect(a.notices).toHaveLength(1));
     for (let i = 0; i < 10 && attempts < 4; i++) await advance(5_000);
     await run;
