@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { appendFileSync, fsyncSync, closeSync, openSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -2190,7 +2190,11 @@ const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(func
   return notes;
 });
 
-const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(`restart-${old.name.slice(0, 23)}`, Effect.gen(function* () {
+/** One restart per project row at a time. Every project has a row named desk, so the key carries the project. */
+export const restartLockName = (project: string, row: string) =>
+  `r-${createHash("sha256").update(`${project}\0${row}`).digest("hex").slice(0, 8)}-${row.slice(0, 21)}`;
+
+const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
   if (!self) yield* requireOwner(old, env.sessionId, false, project.slug, false);
