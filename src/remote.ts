@@ -187,6 +187,11 @@ pi --version`;
 });
 
 /** Fleet-compute owns capability/auth checks. Explicit off keeps the legacy prerequisite fallback. */
+/** The last bounded line of a failed probe's output, so its own verdict reaches the operator. */
+const receiptTail = (text: string, label: string) => {
+  const line = text.trim().split("\n").filter(Boolean).at(-1)?.slice(0, 400);
+  return line ? `; ${label}: ${line}` : "";
+};
 export const readyForRemoteLaunch = (name: string, machine: MachineConfig, source: string, model: string, timeoutMs = 300_000, launchEnv: Readonly<Record<string, string>> = {}) => Effect.gen(function* () {
   if (machine.env.MUSTER_FLEET_COMPUTE === "off") return [`machine ${name}: fleet capability check disabled by machine.env.MUSTER_FLEET_COMPUTE=off; prerequisite fallback only`];
   const env = yield* MusterEnv;
@@ -200,7 +205,7 @@ export const readyForRemoteLaunch = (name: string, machine: MachineConfig, sourc
     const elapsed = Math.max(waited, env.now().getTime() - started);
     if (lastBusy && elapsed >= timeoutMs) return yield* new InputError({ message: `machine ${name}: fleet capability busy after ${elapsed} ms: ${lastBusy}` });
     const result = yield* proc.run("fleet-compute", ["ready", "--machine", name, "--repo", source, "--model", model, "--json"], { cwd: "/", timeoutMs: Math.max(1, Math.min(30_000, timeoutMs - elapsed)), env: launchEnv });
-    const receipt = yield* Effect.try({ try: () => decode(JSON.parse(result.stdout)), catch: error => new InputError({ message: `machine ${name}: invalid fleet capability receipt (${result.code}): ${String(error)}` }) });
+    const receipt = yield* Effect.try({ try: () => decode(JSON.parse(result.stdout)), catch: error => new InputError({ message: `machine ${name}: fleet-compute ready exited ${result.code} without a receipt (${String(error)})${receiptTail(result.stderr, "stderr")}${receiptTail(result.stdout, "stdout")}` }) });
     if (receipt.machine !== name || result.code !== ({ ready: 0, busy: 75, "not-ready": 69 })[receipt.verdict]) return yield* new InputError({ message: `machine ${name}: fleet capability receipt identity or exit code disagrees` });
     if (receipt.verdict === "ready") return [`machine ${name}: fleet capability ready${waited ? ` after waiting ${Math.max(waited, env.now().getTime() - started)} ms` : ""}`];
     const reason = receipt.verdict === "busy" ? receipt.busy.join("; ") : receipt.checks.filter(check => !check.ok).map(check => `${check.name}: ${check.detail}`).join("; ");

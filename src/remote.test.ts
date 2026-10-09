@@ -151,6 +151,27 @@ describe("remote launch hygiene", () => {
     expect(readyCalls[0]).toContain("'cliproxy-codex/gpt-6.1-sol:medium'"); expect(readyCalls[0]).toContain("PROBE_VALUE='launch-env'");
     expect(s.remote.calls).toEqual([]); expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("'create'"))).toBe(false);
   });
+  it("restore resolves a model alias and maps its provider before the capability probe", async () => {
+    const s = setup(); await s.open(); const { row } = await s.launch();
+    s.remote.panes.delete(row.pane!.paneId);
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, env: {}, providerMap: { "openai-codex": "cliproxy-codex" } }) });
+    const original = s.proc.run;
+    const readyCalls: string[] = [];
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => {
+      if (command === "ssh" && args.at(-1)?.includes("'fleet-compute' 'ready'")) { readyCalls.push(args.at(-1)!); return Effect.succeed({ code: 69, stdout: JSON.stringify({ machine: "remote", verdict: "not-ready", checks: [{ name: "stop", ok: false, detail: "probe only" }], busy: [] }), stderr: "" }); }
+      return original(command, args, options);
+    });
+    await expect(s.run(agentLaunch(s.dir, { action: "restore", name: row.name, model: "sol" }))).rejects.toThrow("probe only");
+    expect(readyCalls).toHaveLength(1);
+    expect(readyCalls[0]).toContain("'cliproxy-codex/gpt-6.1-sol");
+    expect(readyCalls[0]).not.toMatch(/'--model' 'sol'/);
+  });
+  it("names the exit code and stderr when fleet-compute ready prints no receipt", async () => {
+    const s = setup();
+    const proc: ProcShape = { run: () => Effect.succeed({ code: 2, stdout: "", stderr: "usage: fleet-compute ready\n--model must be provider/id\n" }) };
+    await expect(s.run(readyForRemoteLaunch("remote", config({ env: {} }), "/repo", "sol", 1000).pipe(Effect.provideService(Proc, proc))))
+      .rejects.toThrow("fleet-compute ready exited 2 without a receipt (SyntaxError: Unexpected end of JSON input); stderr: --model must be provider/id");
+  });
   it("waits for fleet busy and passes the resolved model and source before clone allocation", async () => {
     const s = setup(); const receipts = [
       { machine: "remote", verdict: "busy", checks: [], busy: ["gate held"] },

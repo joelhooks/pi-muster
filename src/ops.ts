@@ -170,7 +170,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
     ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
   }, yield* decodeWith(value => roleDefaults(roster, project.policy, role, model, project.slug), null));
-  const selected = params.action === "restore" ? { model: profile.model } : yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
+  // Restore resolves too: a row or param may carry an alias (sol, opus) that a remote probe cannot read.
+  const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
   const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
