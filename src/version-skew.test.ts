@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createVersionSkew, withVersionSkew } from "./version-skew.ts";
+import { createVersionSkew, loadedVersion, withVersionSkew } from "./version-skew.ts";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -31,6 +31,16 @@ function clock(root: string) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("version skew", () => {
+  it("names the sha the running module graph was read from, not HEAD when the factory runs later", async () => {
+    // A session switch reruns the cached factory over the already-evaluated graph; HEAD may have moved by then.
+    const root = repo();
+    const running = git(root, "rev-parse", "HEAD");
+    const evaluated = loadedVersion(root);
+    const disk = commit(root);
+    const warning = await createVersionSkew({ root, loaded: evaluated }).check();
+    expect(warning).toContain(`loaded ${running.slice(0, 7)}, on disk ${disk.slice(0, 7)}`);
+  });
+
   it("adds nothing at the loaded commit, then names both shas and the distance", async () => {
     const root = repo();
     const loaded = git(root, "rev-parse", "HEAD");

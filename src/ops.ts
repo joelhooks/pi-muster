@@ -784,7 +784,7 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
     slug = project.slug;
     const latest = yield* findRow(project, row.name);
     // Exact identity repair records evidence, not pane control or ownership.
-    if (!paneProvesSession(pane, latest)) yield* requireOwner(latest, env.sessionId, false, project.slug);
+    if (!paneProvesSession(pane, latest)) yield* requireOwner(latest, env.sessionId, false, project.slug, false);
     if (latest.state !== row.state || latest.sessionId !== row.sessionId || latest.sessionFile !== row.sessionFile ||
         latest.pane?.terminalId !== row.pane?.terminalId || latest.machine !== row.machine) return yield* input("row changed during adoption; retry");
     const holder = adoptionHolder(project, latest, pane);
@@ -2044,7 +2044,7 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     if (params.side !== true) return yield* input("adopt requires side: true and from: the parent desk");
     const parent = yield* sideParent(project, params.from, env.sessionId);
     const row = yield* findRow(project, params.name);
-    yield* requireOwner(row, env.sessionId, false, project.slug);
+    yield* requireOwner(row, env.sessionId, false, project.slug, false);
     if (row.name === parent.name || row.state !== "running" || !row.pane) return yield* input("adopt needs an existing running row with its own pane");
     const lane = yield* findLane(project, params.lane ?? parent.lane);
     if (lane.slug !== parent.lane || lane.state !== "open") return yield* input("adopt lane must be the parent desk's open lane");
@@ -2057,7 +2057,7 @@ const adoptSideDesk = (dir: string, project: Project, params: AgentLaunchInput) 
     yield* guardPaneBinding(project, row, binding);
     const adopted = yield* mutate(dir, current => Effect.gen(function* () {
       const latest = yield* findRow(current, row.name);
-      yield* requireOwner(latest, env.sessionId, false, project.slug);
+      yield* requireOwner(latest, env.sessionId, false, project.slug, false);
       if (latest.state !== "running" || latest.lane !== row.lane || !latest.pane || !sharesPane(binding, latest.pane)) return yield* input("row changed during adoption; retry");
       const latestParent = yield* sideParent(current, parent.name, env.sessionId);
       const latestLane = yield* findLane(current, lane.slug);
@@ -2138,10 +2138,61 @@ export function claimedLabel(home: string, project: string, agent: string, role:
   return found ? `${found.emoji} ${found.callsign} · ${role ?? agent}` : undefined;
 }
 
+/** Prints only pi-until session entries: a remote journal never crosses ssh whole. */
+const UNTIL_LINES_SCRIPT = "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8').split('\\n').filter(line=>line.includes('\"pi-until-')).join('\\n'))";
+
+/** pi-until watches a journal started and never finished, one short line each. A cancel writes no
+ * receipt, so a listed watch may already be gone: the successor checks before re-arming. */
+export function openUntilWatches(journal: string): string[] {
+  const open = new Map<string, string>();
+  const describe = (id: string, label: unknown, kind: unknown, interval: unknown, quickRef?: unknown) =>
+    `${id} "${String(label ?? "").slice(0, 80)}" (${String(kind ?? "until")}${typeof interval === "number" ? `, every ${Math.round(interval / 1000)} s` : ""}${typeof quickRef === "string" && quickRef ? `; ${quickRef.slice(0, 120)}` : ""})`;
+  for (const line of journal.split("\n")) {
+    if (!line.includes("\"pi-until-")) continue;
+    let entry: { type?: unknown; customType?: unknown; data?: Record<string, unknown> };
+    try { entry = JSON.parse(line); } catch { continue; }
+    if (entry.type !== "custom" || typeof entry.data !== "object" || entry.data === null) continue;
+    const data = entry.data;
+    if (entry.customType === "pi-until-started") {
+      const receipt = data.receipt as Record<string, unknown> | undefined;
+      const snapshot = data.snapshot as Record<string, unknown> | undefined;
+      if (typeof receipt?.id === "string") open.set(receipt.id, describe(receipt.id, receipt.label, receipt.kind, receipt.intervalMs, snapshot?.quickRef));
+    } else if (entry.customType === "pi-until-suspended" && Array.isArray(data.watches)) {
+      for (const watch of data.watches as Array<{ definition?: Record<string, unknown>; facts?: Record<string, unknown> }>) {
+        const id = watch.facts?.id;
+        const snapshot = watch.definition?.snapshot as Record<string, unknown> | undefined;
+        if (typeof id === "string") open.set(id, describe(id, watch.definition?.label, watch.definition?.kind, watch.definition?.intervalMs, snapshot?.quickRef));
+      }
+    } else if (entry.customType === "pi-until-finished" && typeof data.id === "string") open.delete(data.id);
+  }
+  return [...open.values()].slice(-12);
+}
+
+/** Move every row `from` owns in other registered catalogs to `to`, with a scoped owner forward per project.
+ * Never fails the restart: the row is already rebound; a failure is a note naming the catalog to repair. */
+const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const notes: string[] = [];
+  const entries = yield* Effect.sync(() => { try { return [...readRegistry(env.home).values()].filter(entry => resolve(entry.dir) !== resolve(dir)); } catch { return []; } });
+  for (const entry of entries) {
+    const moved = yield* mutate(entry.dir, current => Effect.gen(function* () {
+      const owned = current.agents.filter(other => other.owner === from && other.state !== "closed");
+      if (!owned.length) return [current, 0] as const;
+      const next = { ...current, agents: current.agents.map(other => other.owner === from && other.state !== "closed" ? ownerSynced({ ...other, owner: to, updatedAt: iso(env) }) : other) };
+      return [next, owned.length] as const;
+    })).pipe(Effect.result);
+    if (moved._tag === "Failure") { notes.push(`owner handover in ${entry.slug} needs repair: ${moved.failure.message}; run project_status takeover: true there`); continue; }
+    if (moved.success === 0) continue;
+    const forward = yield* recordOwnerForward(from, to, entry.slug, env).pipe(Effect.result);
+    notes.push(forward._tag === "Success" ? `moved ${moved.success} row(s) in ${entry.slug} to the new owner` : `moved ${moved.success} row(s) in ${entry.slug}; scoped owner forward needs repair: ${forward.failure.message}`);
+  }
+  return notes;
+});
+
 const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(`restart-${old.name.slice(0, 23)}`, Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
-  if (!self) yield* requireOwner(old, env.sessionId, false, project.slug);
+  if (!self) yield* requireOwner(old, env.sessionId, false, project.slug, false);
   if (!old.sessionFile) return yield* input("restart needs a live pane and current session file");
   const matches = (yield* paneList()).filter(pane => paneProvesSession(pane, old));
   const pane = matches.length === 1 ? matches[0] : matches.find(pane => pane.pane_id === old.pane?.paneId && pane.terminal_id === old.pane?.terminalId);
@@ -2165,11 +2216,13 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
     yield* must("git", ["fetch", "--no-tags", "--", source, "HEAD"], { cwd: old.cwd, timeoutMs: 30_000 });
     notes.push(`machine ${old.machine}: restart fetched its base objects from mapped source ${source}`);
   }
-  const sha = (yield* git(machine?.musterExtension ?? env.musterRoot, "rev-parse", "HEAD")).trim();
+  // Name the code the replacement will run: the checkout it loads, not necessarily this owner's.
+  const loadsFrom = machine?.musterExtension ?? project.musterExtension ?? env.musterRoot;
+  const sha = (yield* git(loadsFrom, "rev-parse", "HEAD").pipe(Effect.catch(() => git(env.musterRoot, "rev-parse", "HEAD")))).trim();
+  if (loadsFrom !== (machine?.musterExtension ?? env.musterRoot)) notes.push(`the replacement loads pi-muster from ${loadsFrom} at ${sha.slice(0, 7)}, not this owner's checkout`);
   let row: AgentRow = { ...old, profile: selected.profile, sessionId: `${mintSessionId(old.name, env.now())}-${randomUUID().slice(0, 8)}`, sessionFile: null, parentSessionFile: old.sessionFile, pane: null };
   if (row.owner === old.sessionId) row = { ...row, owner: row.sessionId };
   const profile = extensionsFor(launchProject, row);
-  const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.`;
   // provisional → proven → rebound → activated. Failed provisional forks never
   // acquire the identity lease. Network work is submitted only after activation.
   const network = project.policy?.comms === "network";
@@ -2187,6 +2240,13 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   // Use the executing checkout's helper locally (the install root can be older).
   if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile!, snapshot], { cwd: old.cwd });
   else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
+  // pi-until persists live watches only when Pi quits or reloads, so a fork cannot carry them. Name them instead.
+  const watchLines = remote
+    ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, snapshot], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))
+    : yield* Effect.sync(() => { try { return readFileSync(snapshot, "utf8"); } catch { return ""; } });
+  const watches = openUntilWatches(watchLines);
+  if (watches.length) notes.push(`pi-until watches not carried into the fork (re-arm in the successor): ${watches.join("; ")}`);
+  const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.${watches.length ? ` Your parent session's pi-until watches did not carry across this fork; re-arm the ones still needed: ${watches.join("; ")}.` : ""}`;
   const inherited = yield* inheritedStartEntries(snapshot);
   const gate = join(launchDir, `restart-${row.sessionId}.ready`);
   environment.MUSTER_RESTART_GATE = gate;
@@ -2229,7 +2289,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       row = yield* mutate(dir, current => Effect.gen(function* () {
         const latest = yield* findRow(current, old.name);
         if (latest.sessionId !== old.sessionId || latest.sessionFile !== recorded.sessionFile || latest.owner !== old.owner || latest.state !== old.state || latest.pane?.terminalId !== recorded.pane?.terminalId) return yield* input("row changed during restart; old agent untouched, retry");
-        if (!self) yield* requireOwner(latest, env.sessionId, false, project.slug);
+        if (!self) yield* requireOwner(latest, env.sessionId, false, project.slug, false);
         yield* guardPaneBinding(current, latest, binding);
         const next = withRow(current, row);
         const agents = next.agents.map(other => other.owner === old.sessionId ? { ...other, owner: id, restore: other.restore ? { ...other.restore, env: { ...other.restore.env, MUSTER_OWNER: id } } : null, updatedAt: iso(env) } : other);
@@ -2245,6 +2305,8 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
         return rebound;
       })));
       phase = "rebound";
+      // Rows this session owns in other registered catalogs move too, before any mail can name the old owner.
+      notes.push(...yield* moveOwnedRows(dir, old.sessionId, id));
       yield* recordRebind(project.slug, old.name, old.sessionId, row.sessionId);
       // Install scoped owner forwarding before telling the replacement to read
       // its inbox, and never before the authoritative catalog write.
@@ -2501,7 +2563,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         return yield* adoptSideDesk(dir, project, params);
       }
       const row = yield* findRow(project, name);
-      yield* requireOwner(row, env.sessionId, false, project.slug);
+      yield* requireOwner(row, env.sessionId, false, project.slug, false);
       if (!params.pane) return yield* input("adopt requires name and pane");
       if (row.state === "closed") return yield* input(`cannot adopt a ${row.state} row`);
       const adopt = Effect.gen(function* () {
@@ -2804,7 +2866,8 @@ export interface AgentCloseInput {
   readonly takeover?: boolean | undefined;
 }
 
-const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined, project: string) =>
+/** `callTakeover` is false where the calling tool has no takeover flag (adopt, restart): the refusal names the one that does. */
+const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined, project: string, callTakeover = true) =>
   Effect.gen(function* () {
     if (row.owner === sessionId || takeover) return;
     // Closed rows retain their historical owner. A project-scoped forward gives
@@ -2819,7 +2882,7 @@ const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | unde
     }
     return yield* new GuardFailed({
       guard: "owner",
-      message: `${row.name} belongs to owner session ${row.owner}. Only its owner acts on its pane; pass takeover: true to adopt it.`,
+      message: `${row.name} belongs to owner session ${row.owner}. Only its owner acts on its pane. To adopt it, run project_status takeover: true (moves every open row of ${project} to this session)${callTakeover ? ", or pass takeover: true to this call" : ""}.`,
     });
   });
 
@@ -4039,7 +4102,7 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
       const { liveRows, provisionLiveRows } = yield* Effect.promise(() => import("./comms-network.ts"));
       const live = liveRows(project);
       notes.push(live.length
-        ? `comms: network. Provisioned live rows; on current pi-muster each joins its mailbox within 30 s, older ones need a restart: ${(yield* provisionLiveRows({ home: (yield* MusterEnv).home, project, rows: live })).join("; ")}.`
+        ? `comms: network. Provisioned live rows; on current pi-muster each joins its mailbox within about a minute, older ones need a restart: ${(yield* provisionLiveRows({ home: (yield* MusterEnv).home, project, rows: live })).join("; ")}.`
         : "comms: network. No live rows to provision.");
     }
     return { project, policy: effectivePolicy(roster, project.policy, project.slug), notes };

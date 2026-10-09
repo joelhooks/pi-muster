@@ -3,7 +3,7 @@
 import { lstatSync, mkdirSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createHerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
 import type { PaneInfo } from "./herdr.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,7 +11,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { OWNER_NOTE, ownerFeed } from "./owner-feed.ts";
 import { OwnerTimelineView, ownerInboxText, ownerLine, readOwnerTimelineData } from "./owner-view.ts";
-import { ownerPath, writeReaderAsync, retireReader, ingestOwnerItem } from "./owner-queue.ts";
+import { commsKickPath, ownerPath, writeReaderAsync, retireReader, ingestOwnerItem } from "./owner-queue.ts";
 
 import { Effect } from "effect";
 import { decodeOwnerSession, decodeProject, decodeAgentRow, type AgentRow, type NetworkPayload } from "./domain.ts";
@@ -52,6 +52,8 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
   pull?: (ctx: ExtensionContext) => Promise<readonly string[]>;
   mode?: (ctx: ExtensionContext) => Promise<"intercom" | "network">;
   consume: (ctx: ExtensionContext, signal: AbortSignal, receive: (payload: NetworkPayload) => Effect.Effect<void, CommsError>) => Promise<void>;
+  /** Forget remembered join misses, so the next selection reads the identity, key and policy again. */
+  rejoin?: () => void;
 }, duplicate: (session: string, env: Readonly<Record<string, string | undefined>>) => Promise<boolean> = ownDuplicate) {
   let feed: ReturnType<typeof ownerFeed> | undefined;
   let session: string | undefined;
@@ -164,7 +166,12 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     const path = ownerPath(id, home());
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      watcher = watch(dirname(path), (_event, name) => { if (current.queueEvent(name === null ? undefined : String(name))) schedule(); });
+      // An owner's comms fix or a policy flip touches this session's kick file: recheck the join now, not in 50 s.
+      const kick = basename(commsKickPath(id, home()));
+      watcher = watch(dirname(path), (_event, name) => {
+        if (name !== null && String(name) === kick) { network?.rejoin?.(); schedule(); return; }
+        if (current.queueEvent(name === null ? undefined : String(name))) schedule();
+      });
       poll = setInterval(tick, 30000); poll.unref?.(); tick();
     } catch { stop(); /* unavailable reader: writers retain the outbox fallback */ }
   });

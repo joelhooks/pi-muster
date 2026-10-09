@@ -72,7 +72,7 @@ describe("network sends to rows launched before comms: network", () => {
     f.local.handle = (method, params) => { if (method === "agent.prompt") identityAtPrompt = readNetworkIdentities(f.h.home).worker; return handle(method, params); };
     const result = await f.reply();
     expect(result.delivery.detail).not.toContain("provision it first");
-    expect(result.delivery.detail).toContain("worker has no mailbox reader yet (launched before comms: network); delivered via herdr-prompt; on current pi-muster it joins its mailbox within 30 s, otherwise restart the row");
+    expect(result.delivery.detail).toContain("worker has no mailbox reader yet (launched before comms: network); delivered via herdr-prompt; on current pi-muster it joins its mailbox within about a minute, otherwise restart the row");
     expect(result.delivery.status).toBe("delivered"); expect(result.path).toBe("herdr-prompt");
     // The mint finished before any text was typed.
     expect(readNetworkIdentities(f.h.home).worker?.did).toBe("did:web:worker.example.invalid"); expect(identityAtPrompt).toBeDefined();
@@ -156,7 +156,7 @@ describe("network sends to rows launched before comms: network", () => {
       { ...f.row, name: "far", sessionId: "far-session", machine: "pennywise", restore: { cwd: f.dir, argv: ["pi"], env: { MUSTER_COMMS: "intercom" } } },
       { ...f.row, name: "gone", sessionId: "gone-session", state: "closed" as const }] }, undefined] as const)));
     const result = await f.run(projectUpdate(f.dir, { policy: { comms: "network" } }));
-    expect(result.notes.join("\n")).toContain("comms: network. Provisioned live rows; on current pi-muster each joins its mailbox within 30 s, older ones need a restart: worker: identity ready; far: identity ready, key pushed to pennywise.");
+    expect(result.notes.join("\n")).toContain("comms: network. Provisioned live rows; on current pi-muster each joins its mailbox within about a minute, older ones need a restart: worker: identity ready; far: identity ready, key pushed to pennywise.");
     expect(Object.keys(readNetworkIdentities(f.h.home)).sort()).toEqual(["far", "worker"]);
     // One key copy, for the remote row only. The leased key rides stdin; no ssh argument carries it.
     const copies = f.ssh.flatMap((line, index) => line.includes("muster-key") ? [index] : []);
@@ -205,7 +205,7 @@ describe("comms_doctor", () => {
     const report = await doctor(f);
     expect(report.fixes).toEqual(["fixed: identity minted"]);
     expect(report.joined).toBe(true);
-    expect(report.verdict).toBe("joined, no reader yet: current pi-muster starts it within 30 s; older code needs a restart");
+    expect(report.verdict).toBe("joined, no reader yet: current pi-muster starts it within about a minute (longer while a predecessor's lease runs out); older code needs a restart");
     expect(report.checks.find(check => check.name === "identity cached on Flagg")).toMatchObject({ ok: true });
     expect(report.checks.find(check => check.name === "fence published")).toMatchObject({ ok: false, detail: "no reader yet" });
   });
