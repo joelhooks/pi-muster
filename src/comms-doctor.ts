@@ -11,11 +11,13 @@ import { CommsError } from "./runtime.ts";
 export type RatkingProbe = ReturnType<typeof ratkingStateProbe>;
 export function doctorReport(expected: string, session: string, machine: string, probe: RatkingProbe, live?: ReturnType<typeof decodeRatkingStatus>) {
   const claimed = live?.name ?? probe.name;
-  const mismatch = claimed !== expected || probe.session !== session || !probe.alive;
+  // pi-ratking writes claims only for names it derives, never for an env-given RATKING_NAME, so a cursor with no claim is unknown.
+  const unknown = !live && probe.session === null && probe.afterSeq !== null;
+  const mismatch = !unknown && (claimed !== expected || probe.session !== session || !probe.alive);
   return { expected, claimed, session, machine, did: live?.did ?? probe.did,
-    reader: live?.reader ?? (probe.alive ? "claimed process alive; reader state unavailable" : "no live claimant"),
+    reader: live?.reader ?? (probe.alive ? "claimed process alive; reader state unavailable" : unknown ? "unknown: no claim for an env-given name; this pi-ratking reports no status" : "no live claimant"),
     lease: live?.lease ?? "unavailable (pi-ratking owns the lease)", claim: probe,
-    mismatch, verdict: mismatch ? "mismatch: restart the row with its expected RATKING_NAME" : "claim matches; lease is pi-ratking's",
+    mismatch, verdict: unknown ? "unknown: the name has a cursor but no claim; reader state needs pi-ratking's status event" : mismatch ? "mismatch: restart the row with its expected RATKING_NAME" : "claim matches; lease is pi-ratking's",
   };
 }
 interface Bus { emit(event: string, value: unknown): void; on(event: string, listener: (value: unknown) => void): void | (() => void) }

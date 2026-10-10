@@ -26,6 +26,13 @@ describe("pi-ratking doctor", () => {
     expect(report.mismatch).toBe(true); expect(report.verdict).toContain("restart");
     expect(report).not.toHaveProperty("fixes");
   });
+  it("calls an env-given name with a cursor but no claim unknown, not mismatch", () => {
+    const h = harness(); const state = join(h.home, ".local/state/rat-king/pi");
+    json(join(state, "cursors/pilot.worker.json"), { afterSeq: 4 });
+    const report = doctorReport("pilot/worker", "worker-session", "local", ratkingStateProbe(h.home, "pilot/worker"));
+    expect(report).toMatchObject({ mismatch: false, claim: { session: null, afterSeq: 4 } });
+    expect(report.verdict).toMatch(/^unknown:/);
+  });
   it("takes in-process status when available and flags an expected-versus-claimed name mismatch", async () => {
     const events = createEventBus(); const h = harness();
     events.on("ratking/status", value => events.emit("ratking/status:result", { ...(value as object), name: "wrong-name", did: "did:web:wrong.example.invalid", reader: "running", lease: { expiresAt: "later" } }));
