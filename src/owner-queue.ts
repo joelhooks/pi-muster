@@ -12,7 +12,7 @@ import { projectPath } from "./store.ts";
 import { StoreError } from "./errors.ts";
 import { POST_NSID, MENTION_NSID } from "./owner-lexicon.ts";
 import type { CommsDelivery, CommsShape } from "./runtime.ts";
-import { readRemoteBinding } from "./remote.ts";
+import { readRemoteBinding, writeRemoteNoteSidecar } from "./remote.ts";
 
 export interface OwnerNoteInput { author: string; project?: string; lane?: string; kind: OwnerKind; title: string; body?: string; refs?: readonly string[]; replyTo?: string; mention?: string; text?: string; signed?: unknown }
 export const mentions = (item: OwnerItem, reader: string) => item.facets?.some(f => Number.isInteger(f.index.byteStart) && Number.isInteger(f.index.byteEnd) && f.index.byteStart >= 0 && f.index.byteEnd > f.index.byteStart && f.index.byteEnd <= Buffer.byteLength(item.text) && f.features.some(feature => feature.$type === MENTION_NSID && feature.did === reader)) ?? false;
@@ -154,6 +154,8 @@ export function retireReader(owner: string, home: string, startedAt: string) {
   try { const reader = decodeOwnerReader(JSON.parse(readFileSync(readerPath(owner, home), "utf8"))); if (reader.pid === process.pid && reader.startedAt === startedAt) writeReader(owner, home, 0, process.pid, startedAt); }
   catch { /* missing or replaced presence is not ours */ }
 }
+/** The short code in a `NOT DELIVERED: <code>: ...` detail. */
+export const sendFailureCode = (detail: string | undefined) => (detail ?? "").replace(/^NOT DELIVERED:\s*/, "").split(/:| \(/)[0]?.trim().slice(0, 60) || "unknown";
 /** All posts, including silent notes and replies, cross pi-ratking. No local delivery fallback. */
 export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; home: string; session: string; project: string; item: OwnerNoteInput; comms?: CommsShape; send: (to: string, message: string) => Effect.Effect<CommsDelivery, never, R>; message?: string }) => Effect.gen(function* () {
   const { owner, resolution } = resolveOwner(params);
@@ -162,5 +164,11 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   const delivery = params.comms?.postOwner ? yield* params.comms.postOwner(owner, item) : { status: "failed" as const, detail: "pi-ratking not loaded" };
   const { ratkingReceipt } = yield* Effect.promise(() => import("./comms-ratking.ts"));
   const result = yield* ratkingReceipt({ home: params.home, id: item.uri, at: new Date().toISOString(), to: owner, sender: params.session, delivery }).pipe(Effect.mapError(error => new StoreError({ path: "ratking receipt", message: error.message })));
-  return { id: item.uri, uri: item.uri, queued: !result.lost, woke: delivery.status === "delivered" && mentions(item, owner), path: "ratking" as const, delivery, owner, resolution, pendingPull: false, lost: result.lost };
+  // A failed send must not lose the note: park it where the owner's next pass reads it. Same URI as the send, so a later delivery dedupes.
+  const failureCode = result.lost ? sendFailureCode(delivery.detail) : undefined;
+  const remote = process.env.MUSTER_MACHINE !== undefined && process.env.MUSTER_MACHINE !== "" && process.env.MUSTER_MACHINE !== "local";
+  const stored = !result.lost ? undefined : remote
+    ? (writeRemoteNoteSidecar(process.env, { project: item.project ?? ownerProject(params.project), owner, item, sendFailed: failureCode! }) ? "sidecar" as const : undefined)
+    : (() => { try { ingestOwnerItem(owner, item, params.home); return "local-queue" as const; } catch { return undefined; } })();
+  return { id: item.uri, uri: item.uri, queued: !result.lost || stored !== undefined, woke: delivery.status === "delivered" && mentions(item, owner), path: "ratking" as const, delivery, owner, resolution, pendingPull: false, lost: result.lost && stored === undefined, ...(stored ? { stored } : {}), ...(failureCode ? { failureCode } : {}) };
 });

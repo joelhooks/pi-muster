@@ -10,10 +10,23 @@ import { ProcError, InputError } from "./errors.ts";
 import { Herdr, MusterEnv, Proc, type ProcShape } from "./runtime.ts";
 import { NAME_SHIM, shellQuote } from "./argv.ts";
 
-const decodeNoteEnvelope = Schema.decodeUnknownSync(Schema.Struct({ project: Slug, machine: AgentName, agent: AgentName, lane: Slug, owner: SessionId, item: Schema.Unknown }));
+const decodeNoteEnvelope = Schema.decodeUnknownSync(Schema.Struct({ project: Slug, machine: AgentName, agent: AgentName, lane: Slug, owner: SessionId, item: Schema.Unknown, sendFailed: Schema.optionalKey(Schema.String) }));
 export function decodeRemoteNote(value: unknown) {
   const envelope = decodeNoteEnvelope(value);
   return { ...envelope, item: decodeOwnerItem(envelope.item) };
+}
+/** A worker whose Rat King send failed leaves the note here; the owner pass ingests it. Publishing is temp file then rename. */
+export function writeRemoteNoteSidecar(env: Readonly<Record<string, string | undefined>>, input: { project: string; owner: string; item: OwnerItem; sendFailed: string }): string | undefined {
+  if (!env.MUSTER_MACHINE || env.MUSTER_MACHINE === "local") return undefined;
+  try {
+    const row = decodeAgentRow(JSON.parse(env.MUSTER_REMOTE_ROW ?? "null"));
+    if (row.machine !== env.MUSTER_MACHINE || input.item.author !== row.sessionId) return undefined;
+    const sidecar = decodeRemoteNote({ project: input.project, machine: row.machine, agent: row.name, lane: row.lane, owner: input.owner, item: input.item, sendFailed: input.sendFailed });
+    const root = join(sidecarRoots(row.cwd)[0]!, "notes"); mkdirSync(root, { recursive: true });
+    const path = join(root, `${input.item.uri.split("/").at(-1)}.json`), temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify(sidecar), { mode: 0o600 }); renameSync(temporary, path);
+    return path;
+  } catch { return undefined; }
 }
 /** Use the worktree's own git directory, never the shared common directory. */
 function resolveSidecarRoots(cwd: string, exec: typeof execFileSync, pathJoin: typeof join, pathResolve: typeof resolve): string[] {
