@@ -52,42 +52,6 @@ export const SessionId = Schema.String.check(
   Schema.isPattern(SESSION_ID_RE, { message: "invalid Pi session id" }),
 );
 
-// slice B: legacy phone configuration, read only until the record API lands.
-export const NetworkCommsConfig = Schema.Struct({
-  endpoint: Schema.String.check(Schema.isPattern(/^https?:\/\//u)),
-  serviceDid: Schema.String.check(Schema.isPattern(/^did:[^#]+$/u)),
-  provisionWrapper: Schema.String.check(Schema.isPattern(/^\//u)),
-  didTemplate: Schema.String.check(Schema.isPattern(/^did:web:[^#]*\{agent\}[^#]*$/u)),
-  /** Only an exact provision-name match overrides the template; unrelated keys are inert. */
-  didOverrides: Schema.optionalKey(Schema.Record(Schema.String, Schema.String.check(Schema.isPattern(/^did:web:[^#]+$/u)))),
-  secretsCommand: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\//u))),
-});
-export type NetworkCommsConfig = typeof NetworkCommsConfig.Type;
-export const decodeNetworkCommsConfig = Schema.decodeUnknownSync(NetworkCommsConfig);
-// slice B: the phone borrows an existing fence; Muster starts no reader.
-export const NetworkSendFence = Schema.Struct({
-  did: Schema.String.check(Schema.isPattern(/^did:[^#]+$/u)),
-  leaseId: Schema.String.check(Schema.isMinLength(1)),
-  generation: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
-});
-export const decodeNetworkSendFence = Schema.decodeUnknownSync(NetworkSendFence);
-const PublicCommsKey = Schema.Struct({ kty: Schema.Literal("EC"), crv: Schema.Literal("P-256"), x: Schema.String, y: Schema.String, d: Schema.optionalKey(Schema.Never) });
-const CommsDocument = Schema.Struct({
-  id: Schema.String,
-  verificationMethod: Schema.Array(Schema.Struct({ id: Schema.String, controller: Schema.String, publicKeyJwk: PublicCommsKey })),
-  authentication: Schema.Array(Schema.String),
-  keyAgreement: Schema.Array(Schema.String),
-});
-export const CommsIdentityReference = Schema.Struct({
-  did: Schema.String.check(Schema.isPattern(/^did:web:/u)),
-  secret: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_.:-]+$/u)),
-  document: CommsDocument,
-});
-export type CommsIdentityReference = typeof CommsIdentityReference.Type;
-export const decodeCommsIdentityReference = Schema.decodeUnknownSync(CommsIdentityReference);
-// slice B: read-only legacy phone identity cache; no writer or provisioning path.
-export const decodeCommsIdentityCache = Schema.decodeUnknownSync(Schema.Record(AgentName, CommsIdentityReference));
-
 const RouteDelivery = Schema.Struct({ status: Schema.String, detail: Schema.optionalKey(Schema.String),
   id: Schema.optionalKey(Schema.String), senderDid: Schema.optionalKey(Schema.String), recipientDid: Schema.optionalKey(Schema.String),
   seq: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
@@ -156,7 +120,12 @@ export const decodeRatkingSettings = Schema.decodeUnknownSync(Schema.Struct({ st
 export const decodeRatkingClaims = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Struct({ pid: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)), session: Schema.String })));
 export const decodeRatkingDirectory = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Struct({ did: Schema.String })));
 export const decodeRatkingCursor = Schema.decodeUnknownSync(Schema.Struct({ afterSeq: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)) }));
-export const decodeRatkingStatus = Schema.decodeUnknownSync(Schema.Struct({ name: Schema.optionalKey(Schema.String), did: Schema.optionalKey(Schema.String), reader: Schema.optionalKey(Schema.Unknown), lease: Schema.optionalKey(Schema.Unknown) }));
+export const decodeRatkingStatus = Schema.decodeUnknownSync(Schema.Struct({
+  requestId: Schema.String, name: Schema.NullOr(Schema.String), did: Schema.NullOr(Schema.String),
+  reader: Schema.Literals(["live", "acquiring", "retired", "off", "send-only"]),
+  leaseGeneration: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
+  leaseUntil: Schema.optionalKey(Schema.String),
+}));
 export const decodeRatkingProbe = Schema.decodeUnknownSync(Schema.Struct({ name: Schema.String, did: Schema.NullOr(Schema.String), session: Schema.NullOr(Schema.String), pid: Schema.NullOr(Schema.Number), alive: Schema.Boolean, afterSeq: Schema.NullOr(Schema.Number) }));
 const Iso = Schema.String;
 const Path = Schema.String;
@@ -792,19 +761,53 @@ export const DeskInboxIdentities = Schema.Struct({ switchboard: DeskInboxDid, ph
 export type DeskInboxIdentities = typeof DeskInboxIdentities.Type;
 export const decodeDeskInboxIdentities = Schema.decodeUnknownSync(DeskInboxIdentities);
 export const decodeDeskPhoneCards = Schema.decodeUnknownSync(DeskReport.fields.items);
-/** Vendor validators load only at the private sidecar boundary, never at extension startup. */
-async function deskPhoneStateSchema() {
-  const [{ Main: Item }, { Output: Receipt }] = await Promise.all([
-    import("./vendor/rat-king-lexicon/desk.item.ts"), import("./vendor/rat-king-lexicon/mailbox.send.ts"),
-  ]);
-  const facts = { item: Item, page: Schema.String };
-  const sent = { ...facts, messageTid: Schema.String, receipt: Receipt };
+export const DeskRecordItem = Schema.Struct({
+  $type: Schema.Literal("sh.mschf.ratking.desk.item"), project: Schema.String, itemId: Schema.String,
+  kind: Schema.Literals(["decision", "approval", "blocked", "done", "fyi"]), title: Schema.String,
+  why: Schema.String, body: Schema.String, createdAt: Iso, refs: Schema.Array(Schema.String),
+  choices: Schema.Array(Schema.Struct({ key: Schema.String, label: Schema.String, suggest: Schema.String,
+    options: Schema.Array(Schema.Struct({ id: Schema.String, label: Schema.String, outcome: Schema.String })).check(Schema.isMinLength(1)),
+  })),
+  rows: Schema.optionalKey(Schema.Struct({ key: Schema.String, label: Schema.String,
+    items: Schema.Array(Schema.Struct({ v: Schema.String, label: Schema.String, on: Schema.Boolean })),
+  })), supersedes: Schema.optionalKey(Schema.String),
+});
+export type DeskRecordItem = typeof DeskRecordItem.Type;
+export const decodeDeskRecordItem = Schema.decodeUnknownSync(DeskRecordItem);
+export const DeskRecordAnswer = Schema.Struct({
+  $type: Schema.Literal("sh.mschf.ratking.desk.answer"), project: Schema.String, itemId: Schema.String,
+  inReplyTo: Schema.String, values: Schema.Record(Schema.String, Schema.Unknown),
+  rows: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)), note: Schema.optionalKey(Schema.String),
+});
+export const decodeDeskRecordAnswer = Schema.decodeUnknownSync(DeskRecordAnswer);
+export const DeskRecordUpdate = Schema.Struct({
+  $type: Schema.Literal("sh.mschf.ratking.desk.update"), project: Schema.String, itemId: Schema.String,
+  state: Schema.Literals(["resolved", "superseded", "followup"]), text: Schema.optionalKey(Schema.String),
+});
+export type DeskRecordUpdate = typeof DeskRecordUpdate.Type;
+export const decodeDeskRecordUpdate = Schema.decodeUnknownSync(DeskRecordUpdate);
+export const DeskRecordReceipt = Schema.Struct({ status: Schema.Literal("delivered"), id: Schema.String,
+  seq: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))),
+});
+export const decodeDeskRecordReceipt = Schema.decodeUnknownSync(DeskRecordReceipt);
+/** Read compatibility for existing pending threads; no legacy transport or receipt writer. */
+export const LegacyDeskReceipt = Schema.Struct({ receipt: Schema.Struct({ state: Schema.String,
+  message: Schema.Struct({ messageId: Schema.String }),
+}) });
+export const decodeRatkingRecord = Schema.decodeUnknownSync(Schema.Struct({
+  id: Schema.String, from: Schema.String, did: Schema.String, verified: Schema.Literal(true),
+  record: Schema.Unknown, replyTo: Schema.optionalKey(Schema.String),
+}));
+export type RatkingRecord = ReturnType<typeof decodeRatkingRecord>;
+function deskPhoneStateSchema() {
+  const facts = { item: DeskRecordItem, page: Schema.String };
+  const sent = { ...facts, messageTid: Schema.String, receipt: Schema.Union([DeskRecordReceipt, LegacyDeskReceipt]) };
   const entry = Schema.Union([
     Schema.Struct({ ...facts, state: Schema.Literal("sending") }),
     Schema.Struct({ ...sent, state: Schema.Literal("pending") }),
     Schema.Struct({ ...sent, state: Schema.Literal("answered"), answer: Schema.Struct({ tid: Schema.String, text: Schema.String }) }),
     Schema.Struct({ ...sent, state: Schema.Literal("resolved") }),
-    Schema.Struct({ ...sent, state: Schema.Literal("closed"), updateReceipt: Receipt }),
+    Schema.Struct({ ...sent, state: Schema.Literal("closed"), updateReceipt: Schema.Union([DeskRecordReceipt, LegacyDeskReceipt]) }),
   ]);
   return Schema.Struct({ identities: DeskInboxIdentities, entries: Schema.Record(Schema.String, entry) });
 }
@@ -818,21 +821,6 @@ export async function encodeDeskPhoneState(value: DeskPhoneState) {
 }
 export type DeskPhoneState = Awaited<ReturnType<typeof decodeDeskPhoneState>>;
 export type DeskPhoneEntry = DeskPhoneState["entries"][string];
-async function deskPhoneQuarantineSchema() {
-  const { MessageEvent } = await import("./vendor/rat-king-lexicon/defs.ts");
-  return Schema.Struct({ event: MessageEvent, reason: Schema.String });
-}
-export async function decodeDeskPhoneQuarantine(value: unknown) {
-  return Schema.decodeUnknownSync(await deskPhoneQuarantineSchema())(value);
-}
-export async function encodeDeskPhoneQuarantine(value: unknown) {
-  const schema = await deskPhoneQuarantineSchema();
-  return Schema.encodeSync(schema)(Schema.decodeUnknownSync(Schema.toType(schema))(value));
-}
-/** Only the vendored mailbox's authenticated open path may supply this value. */
-export const decodeDeskOpenedMessage = Schema.decodeUnknownSync(Schema.Struct({
-  senderDid: Schema.String, tid: Schema.String, body: Schema.String, verified: Schema.Literal(true),
-}));
 export const decodeAgentName = Schema.decodeUnknownSync(AgentName);
 export const decodeSlug = Schema.decodeUnknownSync(Slug);
 

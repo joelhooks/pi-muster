@@ -3,6 +3,8 @@ import { Effect } from "effect";
 import { decodeRatkingProbe, decodeRatkingStatus } from "./domain.ts";
 import { ratkingStateProbe } from "./comms-probe.ts";
 export { ratkingStateProbe } from "./comms-probe.ts";
+import { ratkingStatus } from "./ratking-status.ts";
+export { ratkingStatus } from "./ratking-status.ts";
 import { ratkingConfigPath, rowRatkingName } from "./comms-ratking.ts";
 import { machineConfig, remoteNode } from "./remote.ts";
 import { load } from "./store.ts";
@@ -10,31 +12,20 @@ import { CommsError } from "./runtime.ts";
 
 export type RatkingProbe = ReturnType<typeof ratkingStateProbe>;
 export function doctorReport(expected: string, session: string, machine: string, probe: RatkingProbe, live?: ReturnType<typeof decodeRatkingStatus>) {
-  const claimed = live?.name ?? probe.name;
-  // pi-ratking writes claims only for names it derives, never for an env-given RATKING_NAME, so a cursor with no claim is unknown.
+  const claimed = live ? live.name : probe.name;
+  // Env-given names have no claim. Status from this Pi is authoritative over absent/stale claims.
   const unknown = !live && probe.session === null && probe.afterSeq !== null;
-  const mismatch = !unknown && (claimed !== expected || probe.session !== session || !probe.alive);
-  return { expected, claimed, session, machine, did: live?.did ?? probe.did,
+  const mismatch = live ? claimed !== expected || ["retired", "off", "send-only"].includes(live.reader)
+    : !unknown && (claimed !== expected || probe.session !== session || !probe.alive);
+  return { expected, claimed, session, machine, did: live ? live.did : probe.did,
     reader: live?.reader ?? (probe.alive ? "claimed process alive; reader state unavailable" : unknown ? "unknown: no claim for an env-given name; this pi-ratking reports no status" : "no live claimant"),
-    lease: live?.lease ?? "unavailable (pi-ratking owns the lease)", claim: probe,
-    mismatch, verdict: unknown ? "unknown: the name has a cursor but no claim; reader state needs pi-ratking's status event" : mismatch ? "mismatch: restart the row with its expected RATKING_NAME" : "claim matches; lease is pi-ratking's",
+    leaseGeneration: live?.leaseGeneration ?? null, leaseUntil: live?.leaseUntil ?? null, claim: probe,
+    mismatch, verdict: unknown ? "unknown: the name has a cursor but no claim; reader state needs pi-ratking's status event"
+      : mismatch ? "mismatch: restart the row with its expected RATKING_NAME"
+      : live ? `name matches; reader ${live.reader}` : "claim matches; lease is pi-ratking's",
   };
 }
 interface Bus { emit(event: string, value: unknown): void; on(event: string, listener: (value: unknown) => void): void | (() => void) }
-/** Opportunistic live status. Older pi-ratking has no event and falls back after 2 seconds. */
-export function ratkingStatus(events: Bus, requestId: string, timeoutMs = 2000): Effect.Effect<ReturnType<typeof decodeRatkingStatus> | undefined> {
-  return Effect.callback(resume => {
-    let done = false;
-    const finish = (status?: ReturnType<typeof decodeRatkingStatus>) => { if (done) return; done = true; clearTimeout(timer); if (typeof off === "function") off(); resume(Effect.succeed(status)); };
-    const off = events.on("ratking/status:result", value => {
-      if (typeof value !== "object" || value === null || !("requestId" in value) || value.requestId !== requestId) return;
-      try { finish(decodeRatkingStatus(value)); } catch { finish(); }
-    });
-    const timer = setTimeout(() => finish(), timeoutMs);
-    events.emit("ratking/status", { requestId });
-    return Effect.sync(() => { clearTimeout(timer); if (typeof off === "function") off(); });
-  });
-}
 export const commsDoctor = (options: { home: string; dir: string; session: string; row?: string; env: Readonly<Record<string, string | undefined>>; events: Bus }) => Effect.gen(function* () {
   const project = yield* load(options.dir).pipe(Effect.orElseSucceed(() => undefined));
   const row = project?.agents.find(row => options.row ? row.name === options.row : row.sessionId === options.session);
@@ -46,7 +37,6 @@ export const commsDoctor = (options: { home: string; dir: string; session: strin
   const remote = row && row.machine !== "local" && row.machine !== options.env.MUSTER_MACHINE;
   if (remote) {
     const config = yield* machineConfig(row.machine);
-    // Execute the same read-only probe and domain decoders in the deployed Muster package.
     const script = `import {homedir} from 'node:os'; import {pathToFileURL} from 'node:url';
 const {ratkingStateProbe}=await import(pathToFileURL(process.argv[1]).href);
 process.stdout.write(JSON.stringify(ratkingStateProbe(homedir(),process.argv[2],process.argv[3]||undefined)));`;
@@ -60,7 +50,7 @@ process.stdout.write(JSON.stringify(ratkingStateProbe(homedir(),process.argv[2],
 });
 export const commsDoctorText = (report: ReturnType<typeof doctorReport>) => [
   `comms_doctor ${report.expected} (${report.machine}): ${report.verdict}`,
-  `expected: ${report.expected} · claimed: ${report.claimed} · DID: ${report.did ?? "unknown"}`,
-  `reader: ${JSON.stringify(report.reader)} · lease: ${JSON.stringify(report.lease)}`,
+  `expected: ${report.expected} · claimed: ${report.claimed ?? "none"} · DID: ${report.did ?? "unknown"}`,
+  `reader: ${JSON.stringify(report.reader)} · lease generation: ${report.leaseGeneration ?? "unknown"} · lease until: ${report.leaseUntil ?? "unknown"}`,
   `claim session: ${report.claim.session ?? "none"} · pid: ${report.claim.pid ?? "none"} · alive: ${report.claim.alive} · cursor: ${report.claim.afterSeq ?? "none"}`,
 ].join("\n");

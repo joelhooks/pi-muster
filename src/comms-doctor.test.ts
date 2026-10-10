@@ -35,10 +35,23 @@ describe("pi-ratking doctor", () => {
   });
   it("takes in-process status when available and flags an expected-versus-claimed name mismatch", async () => {
     const events = createEventBus(); const h = harness();
-    events.on("ratking/status", value => events.emit("ratking/status:result", { ...(value as object), name: "wrong-name", did: "did:web:wrong.example.invalid", reader: "running", lease: { expiresAt: "later" } }));
+    events.on("ratking/status", value => events.emit("ratking/status:result", { ...(value as object), name: "wrong-name", did: "did:web:wrong.example.invalid", reader: "live", leaseGeneration: 3, leaseUntil: "later" }));
     const live = await Effect.runPromise(ratkingStatus(events, "request"));
     const probe = { name: "pilot/worker", did: null, session: "worker-session", pid: process.pid, alive: true, afterSeq: 0 };
-    expect(doctorReport("pilot/worker", "worker-session", "local", probe, live)).toMatchObject({ mismatch: true, claimed: "wrong-name", reader: "running", lease: { expiresAt: "later" } });
+    expect(doctorReport("pilot/worker", "worker-session", "local", probe, live)).toMatchObject({ mismatch: true, claimed: "wrong-name", reader: "live", leaseGeneration: 3, leaseUntil: "later" });
+  });
+  it.each(["live", "acquiring", "retired", "off", "send-only"] as const)("decodes real %s status, including null names and optional lease facts", async reader => {
+    const events = createEventBus(); const h = harness();
+    events.on("ratking/status", value => events.emit("ratking/status:result", { ...(value as object), name: null, did: null, reader }));
+    const live = await Effect.runPromise(ratkingStatus(events, "null-state"));
+    expect(live).toMatchObject({ name: null, did: null, reader });
+    expect(doctorReport("pilot/worker", "s", "local", ratkingStateProbe(h.home, "pilot/worker"), live)).toMatchObject({ mismatch: true, claimed: null, did: null, reader });
+  });
+  it("trusts this Pi's matching live status over a missing file claim", async () => {
+    const events = createEventBus(); const h = harness();
+    events.on("ratking/status", value => events.emit("ratking/status:result", { ...(value as object), name: "pilot/worker", did: "did:web:worker.example.invalid", reader: "live", leaseGeneration: 7, leaseUntil: "later" }));
+    const live = await Effect.runPromise(ratkingStatus(events, "matching"));
+    expect(doctorReport("pilot/worker", "s", "local", ratkingStateProbe(h.home, "pilot/worker"), live)).toMatchObject({ mismatch: false, leaseGeneration: 7, leaseUntil: "later" });
   });
   it("bounds an older pi-ratking with no status event and unregisters its listener", async () => {
     const events = createEventBus();

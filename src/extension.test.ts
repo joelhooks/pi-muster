@@ -13,7 +13,6 @@ import { deskRecord } from "./desk.ts";
 import { POST_NSID } from "./owner-lexicon.ts";
 
 import muster, { failure as toolFailure } from "./extension-main.ts";
-import { MailboxClientError } from "./vendor/rat-king-mailbox-client/error.ts";
 import { musterToolNames } from "./reload-stale.ts";
 
 function fakePi() {
@@ -249,7 +248,7 @@ describe("readable message boundaries", () => {
 
 describe("tool failure text", () => {
   it("names a schema error's code, reason and status instead of an empty message", () => {
-    const text = toolFailure(Cause.fail(new MailboxClientError({ error: "LeaseNotFound", reason: "LeaseNotFound", status: 404 }))).content[0]!.text;
+    const text = toolFailure(Cause.fail({ _tag: "MailboxClientError", error: "LeaseNotFound", reason: "LeaseNotFound", status: 404 })).content[0]!.text;
     expect(text).toBe("MailboxClientError: LeaseNotFound · status 404");
   });
 });

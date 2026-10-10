@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Effect, Semaphore } from "effect";
-import { decodeDeskInboxIdentities, decodeDeskPhoneState, encodeDeskPhoneState, encodeDeskPhoneQuarantine, type DeskInboxIdentities, type DeskPhoneState, type DeskPhoneEntry } from "./domain.ts";
+import { decodeDeskInboxIdentities, decodeDeskPhoneState, encodeDeskPhoneState, type DeskInboxIdentities, type DeskPhoneState, type DeskPhoneEntry } from "./domain.ts";
 import { DeskInboxError } from "./desk-inbox.ts";
 
 export const deskPhoneConfigPath = (home: string) => join(home, ".config", "muster", "desk-inbox.json");
 export const deskPhoneStatePath = (home: string) => join(home, ".local", "state", "muster", "desk-inbox", "pending.json");
 const failed = (message: string) => () => new DeskInboxError(message);
-// Tool calls and the existing mailbox callback share a module instance. Queue them without a clock;
+// Tool calls and the ratking/record callback share a module instance. Queue them without a clock;
 // the file lock still fences other processes and fails visibly after a crashed writer.
 const operations = Semaphore.makeUnsafe(1);
 const missing = (error: unknown) => error instanceof Error && "code" in error && error.code === "ENOENT";
@@ -17,19 +17,6 @@ async function privateJson(path: string): Promise<unknown> {
   if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("Private file must be a regular 0600 file");
   return JSON.parse(await readFile(path, "utf8"));
 }
-export const quarantineDeskPhoneEnvelope = (home: string, event: unknown, reason: string) => Effect.tryPromise({
-  try: async () => {
-    const encoded = await encodeDeskPhoneQuarantine({ event, reason });
-    const dir = join(dirname(deskPhoneStatePath(home)), "quarantine");
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    const path = join(dir, `${encoded.event.receipt.message.messageId}-${randomUUID()}.json`);
-    const file = await open(path, "wx", 0o600);
-    try { await file.writeFile(JSON.stringify(encoded)); await file.sync(); }
-    finally { await file.close(); }
-    return path;
-  }, catch: failed("desk_phone could not quarantine unauthenticated envelope; no ack permitted"),
-});
-
 export const readDeskPhoneConfig = (home: string) => Effect.tryPromise({
   try: async () => {
     const config = decodeDeskInboxIdentities(await privateJson(deskPhoneConfigPath(home)));

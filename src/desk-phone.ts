@@ -1,19 +1,18 @@
 import { Effect } from "effect";
-import { deskInbox, deskInboxItem, consumeDeskAnswer, DeskInboxError, type DeskInboxMailbox } from "./desk-inbox.ts";
-import { decodeDeskOpenedMessage, decodeDeskPhoneCards, type DeskInboxIdentities, type DeskPhoneEntry } from "./domain.ts";
+import { deskInbox, deskInboxItem, consumeDeskAnswer, DeskInboxError, type DeskInboxTransport } from "./desk-inbox.ts";
+import { decodeDeskRecordReceipt, decodeDeskPhoneCards, type DeskInboxIdentities, type DeskPhoneEntry } from "./domain.ts";
 import { queuePath, readDesk } from "./desk.ts";
 import { openDeskItems } from "./tokens.ts";
 import { deskAnswer } from "./switchboard-ops.ts";
 import { stepDeskPhone } from "./machines.ts";
 import { readDeskPhoneConfig, withDeskPhoneState } from "./desk-phone-store.ts";
-import type { OpenedMessage } from "./vendor/rat-king-mailbox-client/index.ts";
 
 export const PHONE_PROJECT = "rats-nest";
 const refuse = (message: string) => new DeskInboxError(`desk_phone refused: ${message}`);
 const boundary = <A>(f: () => A) => Effect.try({ try: f, catch: error => error instanceof DeskInboxError ? error : refuse("invalid input or queue") });
-type PhoneContext = { home: string; mailbox: DeskInboxMailbox; identities: DeskInboxIdentities };
+type PhoneContext = { home: string; comms: DeskInboxTransport; identities: DeskInboxIdentities };
 const queue = (home: string) => boundary(() => openDeskItems(readDesk(queuePath(PHONE_PROJECT, home))));
-const accepted = (receipt: { state: string }) => ["accepted", "queued", "delivered", "acked"].includes(receipt.state);
+const accepted = (receipt: { status: string; id?: string }) => receipt.status === "delivered" && typeof receipt.id === "string" && receipt.id.length > 0;
 const pending = (entry: Exclude<DeskPhoneEntry, { state: "sending" }>) => ({ item: entry.item, page: entry.page, messageTid: entry.messageTid });
 
 /** Only explicit sends create cards. A send intent with no receipt is uncertain and is never retried blindly. */
@@ -35,9 +34,9 @@ export function sendDeskPhone(options: PhoneContext & { card: unknown; page: str
     state.entries[item.id] = { state: "sending", item: record, page: options.page };
     yield* save();
     const receipt = yield* deskInbox(options).sendItem({ project: PHONE_PROJECT, queueItem: item, card }).pipe(Effect.mapError(() => refuse("item send failed; sending intent retained with no confirmed receipt; reconcile the mailbox before retrying")));
-    if (!accepted(receipt.receipt)) return yield* Effect.fail(refuse(`item send returned ${receipt.receipt.state}; receipt ${JSON.stringify(receipt.receipt)}; inspect pending.json before retrying`));
+    if (!accepted(receipt)) return yield* Effect.fail(refuse(`item send returned ${receipt.status}; ${receipt.detail ?? "no confirmed receipt"}; inspect pending.json before retrying`));
     yield* stepDeskPhone("sending", { type: "SENT" }, "pending");
-    const entry: DeskPhoneEntry = { state: "pending", item: record, page: options.page, messageTid: receipt.receipt.message.messageId, receipt };
+    const entry: DeskPhoneEntry = { state: "pending", item: record, page: options.page, messageTid: receipt.id!, receipt: yield* boundary(() => decodeDeskRecordReceipt(receipt)) };
     state.entries[item.id] = entry;
     yield* save();
     return { action: "sent" as const, entry };
@@ -64,9 +63,9 @@ export function syncDeskPhone(options: PhoneContext) {
         yield* save();
       }
       const updateReceipt = yield* deskInbox(options).sendUpdate({ project: PHONE_PROJECT, itemId: id, state: "resolved", text: "Resolved in the desk queue; owner notification follows the existing desk answer path." }).pipe(Effect.mapError(() => refuse("update send failed; queue resolution retained; run sync to retry the phone update")));
-      if (!accepted(updateReceipt.receipt)) return yield* Effect.fail(refuse(`update send returned ${updateReceipt.receipt.state}; receipt ${JSON.stringify(updateReceipt.receipt)}; run sync to retry`));
+      if (!accepted(updateReceipt)) return yield* Effect.fail(refuse(`update send returned ${updateReceipt.status}; ${updateReceipt.detail ?? "no confirmed receipt"}; run sync to retry`));
       yield* stepDeskPhone("resolved", { type: "UPDATE" }, "closed");
-      state.entries[id] = { ...entry, state: "closed", updateReceipt };
+      state.entries[id] = { ...entry, state: "closed", updateReceipt: yield* boundary(() => decodeDeskRecordReceipt(updateReceipt)) };
       yield* save();
       updates.push({ itemId: id, updateReceipt });
     }
@@ -74,18 +73,13 @@ export function syncDeskPhone(options: PhoneContext) {
   }));
 }
 
-/** Called only with the existing consumer's authenticated envelope and opened message. */
-export function receiveDeskPhone(options: PhoneContext & {
-  envelope: Parameters<DeskInboxMailbox["open"]>[0]; opened: OpenedMessage;
-}) {
+/** pi-ratking delivers the opened record; configured DID and verified flag remain mandatory. */
+export function receiveDeskPhone(options: PhoneContext & { event: unknown }) {
   return Effect.gen(function* () {
     const result = yield* withDeskPhoneState(options.home, options.identities, (state, save) => Effect.gen(function* () {
-      const opened = yield* boundary(() => decodeDeskOpenedMessage(options.opened));
-      if (opened.senderDid !== options.identities.phone || options.envelope.aad.recipientDid !== options.identities.switchboard) return yield* Effect.fail(refuse("answer signer or recipient is not allowlisted"));
-      // Validate the record, reference, axes and ruling even on replays. The library owns this translation.
+      // Validate signer, reference, axes and ruling even on replays.
       const candidates = Object.values(state.entries).filter(entry => entry.state !== "sending").map(pending);
-      const answer = yield* consumeDeskAnswer({ identities: options.identities, envelope: options.envelope,
-        mailbox: { open: () => Effect.succeed(options.opened) }, pending: candidates });
+      const answer = yield* consumeDeskAnswer({ identities: options.identities, event: options.event, pending: candidates });
       if (answer.deskAnswer.project !== PHONE_PROJECT) return yield* Effect.fail(refuse("only rats-nest is enabled"));
       const id = answer.deskAnswer.id;
       const entry = state.entries[id];
@@ -103,16 +97,14 @@ export function receiveDeskPhone(options: PhoneContext & {
 }
 
 export function deskPhoneSnapshot(home: string, identities: DeskInboxIdentities) {
-  return withDeskPhoneState(home, identities, state => Effect.succeed({ entries: state.entries, receiving: "The existing NetworkComms consumer receives answers; poll starts no second consumer or lease." }));
+  return withDeskPhoneState(home, identities, state => Effect.succeed({ entries: state.entries, receiving: "pi-ratking receives answers on ratking/record; poll starts no consumer or lease." }));
 }
 
 /** Dispatch never treats a phone answer as agent text. A refusal is surfaced to the Switchboard, not thrown into its consumer. */
-export function dispatchDeskPhone(options: { home: string; ownDid: string; mailbox: DeskInboxMailbox;
-  envelope: Parameters<DeskInboxMailbox["open"]>[0]; opened: OpenedMessage;
-}) {
+export function dispatchDeskPhone(options: { home: string; ownDid: string; comms: DeskInboxTransport; event: unknown }) {
   return Effect.gen(function* () {
     const identities = yield* readDeskPhoneConfig(options.home);
-    if (identities.switchboard !== options.ownDid) return yield* Effect.fail(refuse("desk answers belong to the configured Switchboard consumer"));
+    if (identities.switchboard !== options.ownDid) return yield* Effect.fail(refuse("desk answers belong to the configured Switchboard DID"));
     const result = yield* receiveDeskPhone({ ...options, identities });
     return `desk_phone ${result.action}: ${PHONE_PROJECT}#${result.itemId}. Updates: ${result.updates.length}.`;
   }).pipe(Effect.catch(error => Effect.succeed(`desk_phone answer failed: ${error instanceof DeskInboxError ? error.message : "queue or transport unavailable; recorded rulings and resolved updates can be retried with sync"}. Inspect the private sidecar and run desk_phone sync; never decide for Joel.`)));
