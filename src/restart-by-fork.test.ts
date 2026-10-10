@@ -461,6 +461,18 @@ describe("restart by fork", () => {
     finish(); await shutdown; expect(order).toEqual(["release-start", "released", "close"]);
   });
 
+  // A lingering old Pi read the name's mail into the dying session; arming retires pi-ratking's reader at once.
+  it("arming a restart retires the reader once, before the turn ends", () => {
+    const hooks = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    const retire = vi.fn();
+    const arm = registerRestartExit({ on: (name: string, callback: (event: unknown, ctx: unknown) => unknown) => { hooks.set(name, callback); } } as never, vi.fn(async () => {}), async () => {}, retire);
+    const binding = { paneId: "p1", terminalId: "terminal", tabId: "tab", openedByMuster: true };
+    const pending = { sessionId: "old", dir: "/project", restart: { oldPane: binding, replacementPane: { ...binding, paneId: "p2" }, name: "desk" } };
+    expect(retire).not.toHaveBeenCalled();
+    arm(pending); arm(pending);
+    expect(retire).toHaveBeenCalledOnce();
+  });
+
   it("unarmed, wrong-session and repeated agent_end cannot quit a process", async () => {
     const hooks = new Map<string, (event: unknown, ctx: unknown) => unknown>();
     const close = vi.fn(async () => {});

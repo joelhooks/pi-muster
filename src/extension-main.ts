@@ -133,7 +133,12 @@ export function commsDoctorText(report: import("./comms-network.ts").CommsDoctor
     ...report.fixes.map(fix => `→ ${fix}`)].join("\n");
 }
 
-export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>, release: () => Promise<void> = async () => {}) {
+/**
+ * The handover is committed when a restart is armed: the successor holds the row. From then on this Pi must
+ * not read the name's mail, or it acks messages into a dying session, so pi-ratking's reader retires now
+ * (rat-king 1f2141a), not when the turn ends and the process exits.
+ */
+export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>, release: () => Promise<void> = async () => {}, retire: () => void = () => {}) {
   let ending: RestartExit | undefined;
   let closing: RestartExit | undefined;
   pi.on("agent_end", (_event, ctx) => {
@@ -150,7 +155,11 @@ export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pendin
     await release();
     await close(pending, ctx);
   });
-  return (pending: RestartExit) => { ending ??= pending; };
+  return (pending: RestartExit) => {
+    if (ending) return;
+    ending = pending;
+    try { retire(); } catch { /* the old reader still stops at shutdown */ }
+  };
 }
 
 export default function muster(host: ExtensionAPI) {
@@ -173,7 +182,7 @@ export default function muster(host: ExtensionAPI) {
   };
   const armRestartExit = registerRestartExit(pi, async (pending, ctx) => {
     await Effect.runPromise(finishRestart(pending.dir, pending.restart).pipe(Effect.provide(layer(ctx))));
-  }, () => stopOwnerFeed());
+  }, () => stopOwnerFeed(), () => { pi.events.emit("ratking/retire", { requestId: `muster-retire-${randomUUID()}` }); });
 
   registerCompaction(pi, env);
 
