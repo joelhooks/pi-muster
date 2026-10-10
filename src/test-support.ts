@@ -37,6 +37,8 @@ export class FakeHerdr {
   calls: Array<{ method: string; params: Record<string, unknown> }> = [];
   tokens = new Map<string, Record<string, string | null>>();
   promptWorking = true;
+  /** Status reported for an agent pane with no explicit status. Silence tests model a turn hung mid-call as working. */
+  agentStatus: "idle" | "working" = "idle";
   startSessions = true;
   lazyJournal = false;
   deferredJournals = new Map<string, string>();
@@ -88,7 +90,7 @@ export class FakeHerdr {
       focused: false,
       cwd: pane.cwd,
       foreground_cwd: pane.cwd,
-      agent_status: pane.agent_status ?? (pane.agent ? "idle" : "unknown"),
+      agent_status: pane.agent_status ?? (pane.agent ? this.agentStatus : "unknown"),
       revision: 1,
       ...(pane.label ? { label: pane.label } : {}),
       ...(pane.agent ? { agent: pane.agent } : {}),
@@ -96,7 +98,7 @@ export class FakeHerdr {
     };
   }
 
-  private agentInfo(pane: FakePane, status = pane.agent_status ?? (pane.agent ? "idle" : "unknown")) {
+  private agentInfo(pane: FakePane, status = pane.agent_status ?? (pane.agent ? this.agentStatus : "unknown")) {
     return { ...this.paneInfo(pane), ...(pane.name ? { name: pane.name } : {}), agent_status: status, interactive_ready: true };
   }
 

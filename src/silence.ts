@@ -17,8 +17,14 @@ const NONE: SilenceDecision = { events: [], action: "none" };
  * (default 30 minutes) the owner sends `esc` and a note; at the restart limit
  * (default 60, or never) it starts a fresh session and re-prompts from the
  * brief. Fresh activity returns a silent row to running.
+ *
+ * A quiet session is only suspect while its turn runs. A Pi that Herdr reports idle, done or
+ * blocked has ended its turn and is waiting (on its owner, on Joel, on a watch); nudging or
+ * restarting it rebuilds its whole context for nothing. Unknown status keeps the file-age check.
  */
-export function silenceDecision(state: AgentState, silentForMs: number, limits: SilenceLimits = silenceLimits(undefined)): SilenceDecision {
+export function silenceDecision(state: AgentState, silentForMs: number, limits: SilenceLimits = silenceLimits(undefined), paneStatus?: string): SilenceDecision {
+  if (paneStatus === "idle" || paneStatus === "done" || paneStatus === "blocked")
+    return state === "silent" || state === "nudged" ? { events: [{ type: "ACTIVE" }], action: "none" } : NONE;
   const quiet = silentForMs >= limits.nudgeMs;
   switch (state) {
     case "running":

@@ -910,7 +910,7 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
     const mtime = current.sessionFile ? mtimes.get(`${row.machine}:${current.sessionFile}`) ?? null : null;
     const silent = mtime === null ? null : Math.max(0, env.now().getTime() - mtime);
     if (rebinding.kind === "none" && !reAdoption && pane && silent !== null && ["running", "silent", "nudged", "restarted"].includes(current.state)) {
-      const decision = silenceDecision(current.state, silent, silenceLimits(project.policy));
+      const decision = silenceDecision(current.state, silent, silenceLimits(project.policy), pane.agent_status);
       if (decision.action !== "none") {
         action = `${decision.action} due on ${row.machine}`;
         if (act && mine && (decision.action !== "nudge" || current.pane?.openedByMuster)) {
@@ -3874,7 +3874,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       }
 
       if (silentFor !== null && pane && working && !capture) {
-        const decision = silenceDecision(current.state, silentFor, limits);
+        const decision = silenceDecision(current.state, silentFor, limits, pane.agent_status);
         const mine = current.owner === env.sessionId;
         if (decision.action !== "none" && !(act && mine && (decision.action !== "nudge" || current.pane?.openedByMuster))) {
           action = `${decision.action} due (${mine ? "act: false" : `owner ${current.owner}`})`;

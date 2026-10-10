@@ -78,6 +78,8 @@ async function launchedWorker(h: Harness) {
 
 /** Route the fake /muster install git probe to the fixture, not to real fleet code. */
 function restartCode(h: Harness, dir: string) {
+  // These rows are silent mid-turn (hung), not idle and waiting.
+  h.herdr.agentStatus = "working";
   const run = h.proc.run;
   h.proc = { run: (command, args, options) => run(command, args, command === "git" && options.cwd === "/muster" ? { ...options, cwd: dir } : options) };
 }
@@ -2286,4 +2288,20 @@ describe("project_status autoland", () => {
     f.h.now = new Date(f.h.now.getTime() + 1);
     await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(22);
   }, 20_000);
+});
+
+// Roland, 2026-10-10: an idle worker waiting on a Joel call was restarted every hour, each time rebuilding its cache.
+describe("silence spares a waiting Pi", () => {
+  it.each(["idle", "done", "blocked"] as const)("never nudges or restarts a row whose pane is %s, however old its session file", async status => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    h.herdr.panes.get(launched.row.pane!.paneId)!.agent_status = status;
+    const old = new Date(h.now.getTime() - 3 * 60 * 60_000);
+    utimesSync(launched.row.sessionFile!, old, old);
+    const boundary = h.herdr.calls.length;
+    const first = await runWith(h, projectStatus(dir));
+    const second = await runWith(h, projectStatus(dir));
+    for (const status of [first, second]) { expect(status.agents[0]?.action ?? "").not.toMatch(/nudge|restart/); expect(status.agents[0]?.state).toBe("running"); }
+    expect(h.herdr.calls.slice(boundary).some(call => ["pane.send_keys", "pane.send_input", "agent.prompt"].includes(call.method))).toBe(false);
+  });
 });

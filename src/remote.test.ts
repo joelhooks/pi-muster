@@ -445,6 +445,7 @@ describe("remote owner operations", () => {
   it("rebinds moved remote sessions before the next pass can nudge", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const pane = s.remote.panes.get(launched.row.pane!.paneId)!;
+    pane.agent_status = "working"; // silent mid-turn, not waiting
     s.remote.panes.delete(pane.pane_id); pane.pane_id = "moved"; s.remote.panes.set("moved", pane);
     const old = new Date(s.h.now.getTime() - 35*60000); utimesSync(launched.row.sessionFile!, old, old);
     const status = await s.run(projectStatus(s.dir));
