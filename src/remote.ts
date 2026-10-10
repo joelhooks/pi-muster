@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Effect, Schema } from "effect";
 import { createHerdrClient, type HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
-import { AgentName, Slug, SessionId, decodeAgentRow, decodeOwnerItem, decodeAgentName, decodeMachines, type MachineConfig, type OwnerItem } from "./domain.ts";
+import { AgentName, Slug, SessionId, decodeAgentRow, decodeOwnerItem, decodeAgentName, decodeMachines, type MachineConfig, type OwnerItem, type AgentRow, type Project } from "./domain.ts";
 import { ProcError, InputError } from "./errors.ts";
 import { Herdr, MusterEnv, Proc, type ProcShape } from "./runtime.ts";
 import { NAME_SHIM, shellQuote } from "./argv.ts";
@@ -27,21 +27,32 @@ import {join,resolve} from 'node:path';
 ${NAME_SHIM}
 const sidecarRoots = cwd => (${resolveSidecarRoots.toString()})(cwd,execFileSync,join,resolve);`;
 
-export const remotePullReceipt = (comms?: string): string[] => comms === "network" || comms === "ratking" ? [] : ["remote notes reach the owner only when it runs owner_inbox or project_status; for push, set policy comms ratking (or leave it unset) once the owner and its rows load pi-ratking"];
+export const remotePullReceipt = (_comms?: string): string[] => [];
 
-/** Remote workers retain the exact queue record; publish last so interrupted writes stay invisible. */
-export function writeRemoteOwnerItem(owner: string, item: OwnerItem, session: string) {
-  const row = decodeAgentRow(JSON.parse(process.env.MUSTER_REMOTE_ROW ?? "null"));
-  if (row.machine !== process.env.MUSTER_MACHINE || row.sessionId !== session || item.author !== session || item.lane !== row.lane) throw new Error("remote note identity differs from the launch row");
-  const sidecar = decodeRemoteNote({ project: process.env.MUSTER_PROJECT_SLUG, machine: row.machine, agent: row.name, lane: row.lane, owner, item });
-  const root = join(sidecarRoots(row.cwd)[0]!, "notes");
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  const path = join(root, `${createHash("sha256").update(item.cid).digest("hex")}.json`);
-  const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(temporary, JSON.stringify(sidecar), { mode: 0o600 });
-  renameSync(temporary, path);
-  return path;
+/** Orchestration binding only. No identities or keys cross machines. */
+export const remoteBindingPath = (cwd: string, name: string) => join(sidecarRoots(cwd)[0]!, "bindings", `${decodeAgentName(name)}.json`);
+export function readRemoteBinding(env: Readonly<Record<string, string | undefined>>, name = env.MUSTER_AGENT): AgentRow | undefined {
+  if (!env.MUSTER_MACHINE || env.MUSTER_MACHINE === "local" || !name) return undefined;
+  try {
+    const launch = decodeAgentRow(JSON.parse(env.MUSTER_REMOTE_ROW ?? "null"));
+    const row = decodeAgentRow(JSON.parse(readFileSync(remoteBindingPath(launch.cwd, name), "utf8")));
+    return row.name === name && row.machine === env.MUSTER_MACHINE && row.sessionId === launch.sessionId ? row : undefined;
+  } catch { return undefined; }
 }
+export const pushRemoteBinding = (project: Project, row: AgentRow) => Effect.gen(function* () {
+  const machine = yield* machineConfig(row.machine);
+  const runner = yield* Proc;
+  const env = yield* MusterEnv;
+  const script = `${sidecarRootsScript}
+import fs from 'node:fs';
+const row=JSON.parse(fs.readFileSync(0,'utf8'));
+const root=join(sidecarRoots(row.cwd)[0],'bindings'); fs.mkdirSync(root,{recursive:true,mode:0o700});
+const path=join(root,row.name+'.json'),temp=path+'.'+process.pid+'.tmp';
+fs.writeFileSync(temp,JSON.stringify(row),{mode:0o600}); fs.renameSync(temp,path);
+process.stdout.write('binding pushed');`;
+  const result = yield* sshProc(row.machine, machine, runner, env.home).run("node", ["--input-type=module", "-e", script], { cwd: "/", timeoutMs: 30_000, input: JSON.stringify(decodeAgentRow(row)) });
+  if (result.code !== 0) return yield* new InputError({ message: `binding ${project.slug}/${row.name}: push failed (private output withheld)` });
+});
 
 /** Serializes capacity reservations across registered projects on this owner machine. */
 export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.Effect<A, E, R>, note: (text: string) => void = () => {}, timeoutMs = 300_000) => Effect.gen(function* () {

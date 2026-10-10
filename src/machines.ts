@@ -23,31 +23,6 @@ export const ownerFeedMachine = setup({ types: { events: {} as { type: "START" |
   states: { idle: { on: { START: "busy" } }, busy: { on: { END: "idle" } } },
 });
 
-/** Session-scoped transport ownership, separate from the feed's idle/busy lifecycle. */
-export const networkConsumerMachine = setup({ types: { events: {} as { type: "NETWORK" | "INTERCOM" | "FAILURE" | "STOP" } } }).createMachine({
-  initial: "off",
-  on: { STOP: ".stopped" },
-  states: {
-    off: { on: { NETWORK: "running", FAILURE: "failed" } },
-    running: { on: { INTERCOM: "off", FAILURE: "failed" } },
-    failed: { on: { INTERCOM: "off" } },
-    stopped: { type: "final" },
-  },
-});
-
-/** Temporary pinned-client lease policy. The host consumer stays running during recovery. */
-export const networkLeaseMachine = setup({ types: { events: {} as { type: "ACTIVE" | "DEGRADE" | "EXPIRE" | "FAIL" | "STOP" } } }).createMachine({
-  initial: "acquiring",
-  on: { FAIL: ".failed", STOP: ".stopped" },
-  states: {
-    acquiring: { on: { ACTIVE: "live", DEGRADE: "degraded", EXPIRE: "reacquiring" } },
-    live: { on: { DEGRADE: "degraded", EXPIRE: "reacquiring" } },
-    degraded: { on: { ACTIVE: "live", EXPIRE: "reacquiring" } },
-    reacquiring: { on: { ACTIVE: "live" } },
-    failed: { type: "final" }, stopped: { type: "final" },
-  },
-});
-
 /** Desk phone outbox: persist intent before send, feedback before resolution, and update receipts last. */
 export const deskPhoneMachine = setup({ types: { events: {} as { type: "SENT" | "ANSWER" | "RESOLVE" | "UPDATE" } } }).createMachine({
   initial: "sending",

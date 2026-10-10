@@ -5,12 +5,11 @@ import { createEventBus, type ToolDefinition } from "@earendil-works/pi-coding-a
 import { Effect, Layer } from "effect";
 import { Comms } from "./runtime.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createComms, explicitPolicyComms, selectComms } from "./comms.ts";
-import { NetworkComms } from "./comms.ts";
-import { RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, intercomLoaded, ratkingLoaded, ratkingTarget, registeredCatalogs, reservedRatkingDids, subscribedSwitchboards } from "./comms-ratking.ts";
+import { createComms, selectComms } from "./comms.ts";
+import { RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, ratkingLoaded, ratkingTarget, registeredCatalogs, subscribedSwitchboards } from "./comms-ratking.ts";
 import { decodeProject, roleDefaults } from "./domain.ts";
 import muster from "./extension-main.ts";
-import { OUTBOX_REQUEST_EVENT } from "./intercom.ts";
+const OUTBOX_REQUEST_EVENT = "intercom:outbox:request";
 import { ingestOwnerItem } from "./owner-queue.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate, pullRemoteOwnerInbox } from "./ops.ts";
 import { dataDir, load, mutate, projectPath } from "./store.ts";
@@ -65,15 +64,14 @@ describe("ratking is the default", { timeout: 30_000 }, () => {
     writeRaw(dir, { ...raw(dir), policy: { comms: "carrier-pigeon" } });
     expect(decodeProject(raw(dir)).policy?.comms).toBe("carrier-pigeon");
     expect(selectComms(undefined, (await runWith(h, load(dir))).policy)).toBe("ratking");
-    expect(explicitPolicyComms(dir)).toBe("ratking");
     // Routing still finds the project's rows, and the owner inbox pull reads the file.
     expect(registeredCatalogs(h.home, dir).map(project => project.slug)).toEqual(["pilot"]);
     expect(await runWith(h, pullRemoteOwnerInbox(dir))).toEqual([]);
-    const service = createComms({ events: createEventBus(), createId: () => "id", home: h.home, projectDir: dir, adapterEnv: () => undefined, followProjectPolicy: true });
+    const service = createComms({});
     expect(await Effect.runPromise(service.mode!())).toBe("ratking");
     const updated = await runWith(h, projectUpdate(dir, { policy: { nudgeAfterMin: 20 } }));
     expect(updated.policy.comms).toBe("ratking");
-    expect(updated.notes.join("\n")).toContain('comms: "carrier-pigeon" is unknown to this Muster; it runs as ratking');
+    expect(updated.notes.join("\n")).toContain('comms: "carrier-pigeon" is ignored by this Muster; it runs as ratking');
     expect(raw(dir).policy?.comms).toBe("carrier-pigeon");
     expect((await runWith(h, projectStatus(dir, { act: false }))).notes.join("\n")).toContain("carrier-pigeon");
   });
@@ -91,10 +89,8 @@ describe("detection", () => {
     const ratking = [{ name: "intercom", sourceInfo: { path: "/home/joel/Code/joelhooks/rat-king/packages/pi-ratking/src/extension.ts", source: "local" } }];
     expect(ratkingLoaded(ratking)).toBe(true);
     expect(ratkingLoaded(ratking, "intercom")).toBe(true);
-    expect(intercomLoaded(ratking)).toBe(false);
     const intercom = [{ name: "intercom", sourceInfo: { path: "/n/pi-intercom/index.ts", source: "npm:pi-intercom" } }];
     expect(ratkingLoaded(intercom)).toBe(false);
-    expect(intercomLoaded(intercom)).toBe(true);
   });
 });
 
@@ -107,12 +103,11 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
     fake.events.on(OUTBOX_REQUEST_EVENT, request => outbox.push(request));
     const ratking = RatkingComms({ events: fake.events, createId: () => "id", sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) });
     const options = { events: fake.events, createId: () => "id", home: h.home, projectDir: dir, adapterEnv: () => undefined, followProjectPolicy: true };
-    const withRatking = createComms({ ...options, ratking: () => ratking, intercom: () => false });
+    const withRatking = createComms({ ratking: () => ratking });
     expect(await Effect.runPromise(withRatking.mode!())).toBe("ratking");
     expect(await Effect.runPromise(withRatking.send("desk-session", "hi"))).toMatchObject({ status: "delivered" });
-    expect(await Effect.runPromise(withRatking.relay!("desk-session", "hi"))).toMatchObject({ status: "delivered" });
-    expect(fake.requests).toHaveLength(2);
-    const neither = createComms({ ...options, ratking: () => undefined, intercom: () => false });
+    expect(fake.requests).toHaveLength(1);
+    const neither = createComms({ ratking: () => undefined });
     expect(await Effect.runPromise(neither.send("desk-session", "hi"))).toMatchObject({ status: "failed", detail: expect.stringContaining("pi-ratking not loaded") });
     expect(outbox).toEqual([]);
   });
@@ -180,73 +175,7 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
   });
 });
 
-describe("legacy drain and reserved names", { timeout: 30_000 }, () => {
-  it("with pi-ratking loaded and switchboard refused, desk_phone records still reach deskRecord through the legacy consumer", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ratking-phone-"));
-    process.env.RATKING_CONFIG = join(home, "pi.json");
-    writeFileSync(process.env.RATKING_CONFIG, JSON.stringify({ reserved: { switchboard: { did: "did:web:switchboard.example.invalid" } }, refuse: ["switchboard"] }));
-    const record = { ownDid: "did:web:switchboard.example.invalid", envelope: {}, opened: { $type: "sh.mschf.ratking.desk.answer" } };
-    vi.doMock("./comms-network.ts", () => ({
-      localJoinFacts: async () => ({ agent: "switchboard", config: null, identity: true, did: "did:web:switchboard.example.invalid", key: null, session: null, fence: "absent", joined: true, reason: null }),
-      readNetworkConfig: () => ({}), seedNetworkPeers: () => {}, readNetworkPeers: () => ({}), readNetworkIdentities: () => ({}),
-      // The legacy consumer hands a desk.answer record to the deskRecord handler Muster gave it.
-      createNetworkComms: (options: { deskRecord?: (input: unknown) => Effect.Effect<string> }) => ({ ...NetworkComms,
-        consume: (receive: (payload: unknown) => Effect.Effect<void>) => Effect.flatMap(options.deskRecord!(record), body => receive({ type: "message", author: "desk_phone (local dispatch)", body })) }),
-    }));
-    try {
-      const deskRecord = vi.fn(() => Effect.succeed("desk_phone answer recorded"));
-      const received: unknown[] = [];
-      // The Switchboard joins the legacy network from a network catalog; Muster's own traffic rides ratking.
-      const catalog = join(home, "switchboard"); mkdirSync(dataDir(catalog), { recursive: true });
-      writeFileSync(projectPath(catalog), JSON.stringify({ policy: { comms: "network" } }));
-      const service = createComms({ events: createEventBus(), createId: () => "id", home, projectDir: catalog, adapterEnv: () => "ratking", deskRecord: deskRecord as never,
-        networkSender: () => ({ agent: "switchboard", session: "switchboard-session" }), intercom: () => false,
-        ratking: () => RatkingComms({ events: createEventBus(), createId: () => "id", sender: () => "me", target: () => ({ name: "ernestine", session: "me" }) }) });
-      expect(await Effect.runPromise(service.mode!())).toBe("ratking");
-      expect(await Effect.runPromise(service.legacyDrain!())).toBe(true);
-      await Effect.runPromise(service.consume!(payload => Effect.sync(() => { received.push(payload); })));
-      expect(deskRecord).toHaveBeenCalledWith(record);
-      expect(received).toEqual([expect.objectContaining({ body: "desk_phone answer recorded" })]);
-    } finally { vi.doUnmock("./comms-network.ts"); }
-  });
-
-  const sender = () => ({ agent: "pilot/desk", session: "desk-session" });
-  const mockNetwork = (did: string, consume: () => Effect.Effect<void>) => vi.doMock("./comms-network.ts", () => ({
-    localJoinFacts: async () => ({ agent: "pilot/desk", config: null, identity: true, did, key: null, session: null, fence: "absent", joined: true, reason: null }),
-    readNetworkConfig: () => ({}), seedNetworkPeers: () => {}, readNetworkPeers: () => ({}), readNetworkIdentities: () => ({}),
-    createNetworkComms: () => ({ ...NetworkComms, consume }),
-  }));
-
-  it("the legacy reader never consumes a DID pi-ratking reserves; a missing, unreadable or refusing config reserves nothing", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ratking-reserved-"));
-    const config = join(home, "pi.json");
-    process.env.RATKING_CONFIG = config;
-    const drained = async (did: string) => {
-      const consume = vi.fn(() => Effect.void);
-      mockNetwork(did, consume);
-      try {
-        const service = createComms({ events: createEventBus(), createId: () => "id", home, projectDir: join(home, "none"), adapterEnv: () => "ratking", networkSender: sender,
-          ratking: () => RatkingComms({ events: createEventBus(), createId: () => "id", sender: () => "me", target: () => ({ name: "pilot/desk", session: "me" }) }) });
-        const drain = await Effect.runPromise(service.legacyDrain!());
-        await Effect.runPromise(service.consume!(() => Effect.void));
-        expect(consume).toHaveBeenCalledTimes(drain ? 1 : 0);
-        return drain;
-      } finally { vi.doUnmock("./comms-network.ts"); }
-    };
-    expect(await drained("did:web:switchboard.example.invalid")).toBe(true); // no config file
-    writeFileSync(config, "{not json");
-    expect(await drained("did:web:switchboard.example.invalid")).toBe(true);
-    writeFileSync(config, JSON.stringify({ reserved: { switchboard: { did: "did:web:switchboard.example.invalid" }, "fleet-owner": { did: "did:web:owner.example.invalid" } }, refuse: ["fleet-owner"] }));
-    expect(reservedRatkingDids(home)).toEqual(new Set(["did:web:switchboard.example.invalid"]));
-    expect(await drained("did:web:switchboard.example.invalid")).toBe(false);
-    expect(await drained("did:web:owner.example.invalid")).toBe(true); // refused: pi-ratking does not read it
-    expect(await drained("did:web:pilot.desk.example.invalid")).toBe(true);
-    delete process.env.RATKING_CONFIG;
-    mkdirSync(join(home, ".config/rat-king"), { recursive: true });
-    writeFileSync(join(home, ".config/rat-king/pi.json"), JSON.stringify({ reserved: { "pilot-desk": { did: "did:web:pilot.desk.example.invalid" } } }));
-    expect(await drained("did:web:pilot.desk.example.invalid")).toBe(false);
-  });
-});
+;
 
 describe("Switchboard nudge", { timeout: 30_000 }, () => {
   it("goes to the subscribed Switchboard's recorded Rat King name, and is skipped with a note when none is recorded", async () => {
@@ -254,7 +183,7 @@ describe("Switchboard nudge", { timeout: 30_000 }, () => {
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, sidebar: "off" as const }, undefined] as const)));
     const fake = fakeRatking();
     const ratking = () => RatkingComms({ events: fake.events, createId: () => "id", sender: () => "me", target: to => ratkingTarget(to, { catalogs: [], env: {}, switchboards: subscribedSwitchboards(h.home) }) });
-    const comms = createComms({ events: fake.events, createId: () => "id", home: h.home, projectDir: dir, adapterEnv: () => undefined, followProjectPolicy: true, ratking, intercom: () => false });
+    const comms = createComms({ ratking });
     const post = (title: string) => Effect.runPromise(deskPost(dir, { kind: "decision", title }).pipe(Effect.provide(Layer.succeed(Comms)(comms)), Effect.provide(h.layer)));
     const unregister = registerSwitchboardSession(h.home, "switchboard-session");
     const skipped = await post("no name yet");

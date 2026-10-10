@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { deskWriteId, watchEntries, withDeskWrites } from "./relay-events.ts";
+import { deskWriteId, watchEntries, withDeskWrites } from "./desk-local.ts";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,11 +12,10 @@ import { Type } from "typebox";
 
 import { registerCompaction } from "./compact.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
-import { MAX_CADENCE_MINUTES, decodeAgentRow, decodeNetworkPeers, decodeNetworkDeskPeers } from "./domain.ts";
-import { sendDesk } from "./desk-route.ts";
-import { createComms, catalogCommsSender, catalogNetworkPeers, forkParentSession, retiredCatalogSession, retiredSessionReason, successorRowSender } from "./comms.ts";
-import { lostDeliveryText } from "./comms-fallback.ts";
-import { RATKING_MESSAGE, RatkingComms, intercomLoaded, ownerAliases, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking, subscribedSwitchboards } from "./comms-ratking.ts";
+import { MAX_CADENCE_MINUTES } from "./domain.ts";
+import { createComms, catalogCommsSender } from "./comms.ts";
+import { commsDoctor, commsDoctorText } from "./comms-doctor.ts";
+import { RATKING_MESSAGE, RatkingComms, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking, subscribedSwitchboards } from "./comms-ratking.ts";
 import {
   pullRemoteOwnerInbox,
   agentClose,
@@ -40,7 +39,7 @@ import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "./
 import { registerDeskFeed } from "./desk-feed-ext.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "./owner-view.ts";
-import { capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem, kickComms } from "./owner-queue.ts";
+import { capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem } from "./owner-queue.ts";
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
@@ -92,26 +91,11 @@ function unreadable(fields: readonly (string | undefined)[]) {
 type RestartExit = { sessionId: string; dir: string; restart: Parameters<typeof finishRestart>[1] };
 
 /** No durable flag: only a proven self-restart in this process can arm its exit. */
-/** A catalog row signs as its row; a rowless owner (MUSTER_AGENT, e.g. a project owner) signs as that agent.
- * A session whose own row moved to a recorded successor signs as that row: receivers resolve a predecessor
- * author through the same successor history, so a self-restart's handover brief has a sender. */
+/** A catalog row signs as its row; a rowless owner uses its pi-ratking name. */
 export function sessionCommsSender(dir: string, session: string, env: NodeJS.ProcessEnv) {
-  const local = catalogCommsSender(dir, session) ?? successorRowSender(dir, session, env.HOME ?? homedir());
-  if (local) return local;
-  if (!env.MUSTER_AGENT) return undefined;
-  // A retired session with no recorded successor has no identity left; its sends fall back, reported.
-  if (retiredCatalogSession(dir, env.MUSTER_AGENT, session)) return undefined;
-  const peers = { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) };
-  return { agent: peers[session] ?? remoteDeskIdentity(env) ?? env.MUSTER_AGENT, session };
+  return catalogCommsSender(dir, session) ?? (env.RATKING_NAME ? { agent: env.RATKING_NAME, session } : undefined);
 }
 
-/** A remote desk launched before comms: network has no peer env, but its row still names its qualified identity. */
-function remoteDeskIdentity(env: NodeJS.ProcessEnv) {
-  try {
-    const row = env.MUSTER_REMOTE_ROW ? decodeAgentRow(JSON.parse(env.MUSTER_REMOTE_ROW)) : undefined;
-    return row?.role === "desk" && env.MUSTER_PROJECT_SLUG ? `${env.MUSTER_PROJECT_SLUG}/${row.name}` : undefined;
-  } catch { return undefined; }
-}
 
 export const remoteMachineProcess = (env: NodeJS.ProcessEnv) => env.MUSTER_MACHINE !== undefined && env.MUSTER_MACHINE !== "local";
 
@@ -119,19 +103,14 @@ export const remoteMachineProcess = (env: NodeJS.ProcessEnv) => env.MUSTER_MACHI
 export function loudDelivery<T extends { content: Array<{ type: "text"; text: string }> }>(result: T, lost: boolean): T | (T & { isError: true }) {
   if (!lost) return result;
   const [first, ...rest] = result.content;
-  return { ...result, content: [{ type: "text" as const, text: `${lostDeliveryText(undefined)}\n${first?.text ?? ""}` }, ...rest], isError: true as const };
+  return { ...result, content: [{ type: "text" as const, text: `NOT DELIVERED: no fallback\n${first?.text ?? ""}` }, ...rest], isError: true as const };
 }
 
 /** The owner catalog and its sidecars live on Flagg; a remote row has nothing to pull. */
 export const remoteInboxPull = <C>(env: NodeJS.ProcessEnv, pull: (ctx: C) => Promise<readonly string[]>) =>
   remoteMachineProcess(env) ? undefined : pull;
 
-export function commsDoctorText(report: import("./comms-network.ts").CommsDoctorReport) {
-  const mark = (ok: boolean | null) => ok === true ? "✓" : ok === false ? "✗" : "·";
-  return [`comms_doctor ${report.row} (${report.machine}, identity ${report.identity}): ${report.verdict}`,
-    ...report.checks.map(check => `${mark(check.ok)} ${check.name}: ${check.detail}`),
-    ...report.fixes.map(fix => `→ ${fix}`)].join("\n");
-}
+export { commsDoctorText } from "./comms-doctor.ts";
 
 /**
  * The handover is committed when a restart is armed: the successor holds the row. From then on this Pi must
@@ -170,16 +149,12 @@ export default function muster(host: ExtensionAPI) {
   const comms = new Map<string, ReturnType<typeof createComms>>();
   // pi-ratking registers at load; Muster asks at call time and never starts a reader on the ratking name.
   const ratkingHere = () => { try { return ratkingLoaded(pi.getAllTools(), env.RATKING_TOOL); } catch { return false; } };
-  const intercomHere = () => { try { return intercomLoaded(pi.getAllTools()); } catch { return false; } };
+
   // pi-ratking's transport whenever it is loaded; createComms decides at call time whether ratking is selected.
   const ratkingFor = (dir: string, ctx: ExtensionContext) => ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
     sender: () => ctx.sessionManager.getSessionId(),
-    target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, aliases: ownerAliases(homedir()), self: { session: ctx.sessionManager.getSessionId(), name: env.RATKING_NAME }, switchboards: subscribedSwitchboards(homedir()) }) }) : undefined;
-  const rejoinComms = () => { for (const service of comms.values()) service.rejoin(); };
-  const kickSelf = (ctx: ExtensionContext) => {
-    rejoinComms();
-    try { kickComms(ctx.sessionManager.getSessionId()); } catch { /* the next poll rechecks */ }
-  };
+    target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, self: { session: ctx.sessionManager.getSessionId(), name: env.RATKING_NAME }, switchboards: subscribedSwitchboards(homedir()) }) }) : undefined;
+
   const armRestartExit = registerRestartExit(pi, async (pending, ctx) => {
     await Effect.runPromise(finishRestart(pending.dir, pending.restart).pipe(Effect.provide(layer(ctx))));
   }, () => stopOwnerFeed(), () => { pi.events.emit("ratking/retire", { requestId: `muster-retire-${randomUUID()}` }); });
@@ -206,24 +181,7 @@ export default function muster(host: ExtensionAPI) {
         const key = `${dir}\0${ctx.sessionManager.getSessionId()}`;
         let service = comms.get(key);
         if (!service) {
-          service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir, adapterEnv: () => env.MUSTER_COMMS,
-            followProjectPolicy: true, remote: remoteMachineProcess(env),
-            deskRecord: input => Effect.tryPromise({
-              try: async () => {
-                const { dispatchDeskPhone } = await import("./desk-phone.ts");
-                return Effect.runPromise(dispatchDeskPhone({ ...input, home: homedir() }).pipe(Effect.provide(layer(ctx))));
-              }, catch: () => new CommsError("desk_phone record dispatch unavailable; inspect the private sidecar and retry sync"),
-            }),
-            networkConfig: () => env.MUSTER_NETWORK_CONFIG,
-            networkPeers: () => {
-              try { return catalogNetworkPeers(dir); }
-              catch { return { ...decodeNetworkPeers(JSON.parse(env.MUSTER_NETWORK_PEERS ?? "{}")), ...decodeNetworkDeskPeers(JSON.parse(env.MUSTER_NETWORK_DESK_PEERS ?? "{}")) }; }
-            },
-            networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
-            forkParent: () => forkParentSession(ctx.sessionManager.getHeader()),
-            ratking: () => ratkingFor(dir, ctx),
-            intercom: intercomHere,
-          });
+          service = createComms({ ratking: () => ratkingFor(dir, ctx) });
           comms.set(key, service);
         }
         return service;
@@ -241,12 +199,7 @@ export default function muster(host: ExtensionAPI) {
 
   pi.on("tool_call", event => {
     if (event.toolName !== "intercom") return;
-    if (["send", "ask", "reply", "handover"].includes(String(event.input.action)) && typeof event.input.to === "string") {
-      try {
-        const reason = retiredSessionReason(homedir(), event.input.to);
-        if (reason) return { block: true, reason };
-      } catch (error) { return { block: true, reason: String(error) }; }
-    }
+
     if (!env.MUSTER_AGENT || !env.MUSTER_PROJECT || !env.MUSTER_ROLE) return;
     if (!["send", "ask", "reply"].includes(String(event.input.action)) || typeof event.input.message !== "string") return;
     const error = unreadable([event.input.message]);
@@ -277,8 +230,7 @@ export default function muster(host: ExtensionAPI) {
   });
 
   const pull = remoteInboxPull(env, (ctx: ExtensionContext) => Effect.runPromise(pullRemoteOwnerInbox(env.MUSTER_PROJECT).pipe(Effect.provide(layer(ctx)))));
-  const stopOwnerFeed = registerOwnerFeed(pi, env, { ...(pull ? { pull } : {}), rejoin: () => rejoinComms(), mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))),
-    legacyDrain: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.legacyDrain ? service.legacyDrain() : Effect.succeed(false)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
+  const stopOwnerFeed = registerOwnerFeed(pi, env, { ...(pull ? { pull } : {}) });
 
   if ((worker || role === "boss") && env.MUSTER_OWNER) {
     pi.registerTool({
@@ -320,23 +272,16 @@ export default function muster(host: ExtensionAPI) {
 
   pi.registerTool({
     name: "comms_doctor", label: "Muster comms doctor",
-    description: "Say whether a row is on the Rat King mailbox, or why not: identity, key, config, fence, reader, and launch hint vs joined fact. Default: this session. The row's owner on Flagg fixes what it may (mint the identity, push the key); everyone else gets a report.",
+    description: "Report pi-ratking's name, DID, reader and lease. Flag a row name or session claim mismatch. Remote rows are probed on their own machine. Never mints or pushes keys.",
     parameters: Type.Object({
       row: Type.Optional(Type.String({ description: "Catalog row name. Default: this session." })),
       project: ProjectParam,
-      fix: Type.Optional(Type.Boolean({ description: "Owner only. Default true: mint and push a missing identity or key." })),
+
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const dir = projectDir(ctx, params.project);
       const session = ctx.sessionManager.getSessionId();
-      const { commsDoctor } = await import("./comms-network.ts");
-      const self = sessionCommsSender(dir, session, env);
-      const result = await run(ctx, signal, commsDoctor({ home: homedir(), dir, session, remote: remoteMachineProcess(env),
-        ...(params.row ? { row: params.row } : {}), ...(self ? { self } : {}), ...(env.MUSTER_COMMS ? { launchHint: env.MUSTER_COMMS } : {}),
-        ...(env.MUSTER_NETWORK_CONFIG ? { configPath: env.MUSTER_NETWORK_CONFIG } : {}), ...(params.fix === undefined ? {} : { fix: params.fix }) }), commsDoctorText);
-      // Whatever the doctor found or fixed, this session rechecks its own join now; a fixed row was kicked by provisioning.
-      kickSelf(ctx);
-      return result;
+      return run(ctx, signal, commsDoctor({ home: homedir(), dir, session, env, events: pi.events, ...(params.row ? { row: params.row } : {}) }), commsDoctorText);
     },
   });
 
@@ -407,21 +352,9 @@ export default function muster(host: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const error = unreadable([params.text]); if (error) return error;
       const dir = resolve(env.MUSTER_PROJECT ?? ctx.cwd);
-      // Ratking is the default; pi-ratking absent fails loudly here, never over intercom.
-      const mode = await Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("ratking" as const)).pipe(
-        Effect.provide(layer(ctx)), Effect.orElseSucceed(() => "network" as const)));
-      if (mode === "ratking") return run(ctx, signal, Effect.flatMap(Comms, comms => sendDeskRatking({ home: homedir(), dir, to: params.to, text: params.text,
+      return run(ctx, signal, Effect.flatMap(Comms, comms => sendDeskRatking({ home: homedir(), dir, to: params.to, text: params.text,
         sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms,
       })), result => `delivery: ratking · ${result.network.status}${result.network.detail ? ` (${result.network.detail})` : ""}${result.network.id ? ` · ratking id: ${result.network.id}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`, result => result.lost);
-      const service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir,
-        adapterEnv: () => "network", networkConfig: () => env.MUSTER_NETWORK_CONFIG,
-        networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
-      });
-      try {
-        return await run(ctx, signal, sendDesk({ home: homedir(), dir, to: params.to, text: params.text,
-          sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms: service,
-        }), result => `delivery: ${result.path} · network: ${result.network.status}${result.network.recipientDid ? ` · DID: ${result.network.recipientDid}` : ""}${result.network.detail ? ` (${result.network.detail})` : ""}${result.fallback ? ` · FALLBACK intercom: ${result.fallback.status}${result.fallback.id ? ` · intercom id: ${result.fallback.id}` : ""}${result.fallback.detail ? ` (${result.fallback.detail})` : ""}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`, result => result.lost);
-      } finally { service.dispose(); }
     },
   });
 
@@ -446,7 +379,7 @@ export default function muster(host: ExtensionAPI) {
   registerSwitchboard(pi, { env, layer, run });
   pi.registerTool({
     name: "desk_phone", label: "Desk phone",
-    description: "Route one open rats-nest desk card to Joel's allowlisted phone (send); inspect durable pending state (poll); retry recorded rulings and close resolved threads (sync). Uses this Switchboard session's existing network consumer and lease. Supply one desk-report card with marked suggestions; never decide for Joel.",
+    description: "Route one open rats-nest desk card to Joel's allowlisted phone (send); inspect durable pending state (poll); retry recorded rulings and close resolved threads (sync). Slice B compatibility path uses an existing phone mailbox fence; Muster starts no consumer. Supply one desk-report card with marked suggestions; never decide for Joel.",
     parameters: Type.Object({ action: StringEnum(["send", "poll", "sync"] as const), card: Type.Optional(Type.Unknown({ description: "One muster-desk-report.items.v1 card, including id, why, choices with suggest, and report context. Required for send." })), page: Type.Optional(Type.String()) }),
     execute: (_id, params, signal, _onUpdate, ctx) => run(ctx, signal, deskPhone(params), result => JSON.stringify(result)),
   });
@@ -773,7 +706,7 @@ export default function muster(host: ExtensionAPI) {
         [`${result.project.label}: now "${result.project.headline ?? result.project.nextAction}"`, `policy: ${JSON.stringify(result.policy)}`, ...result.notes].join("\n"),
       );
       // A comms flip takes effect in this session now; provisioning already kicked the project's rows.
-      if (rest.policy?.comms !== undefined && !("isError" in result && result.isError)) kickSelf(ctx);
+
       return result;
     },
   });

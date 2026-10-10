@@ -5,21 +5,12 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { deskFeed, CURSOR_ENTRY } from "./desk-feed.ts";
-import { deskWriteId, relayEvent, selfPosts, SELF_ENTRY, watchFallback, withDeskWrites } from "./relay-events.ts";
+import { deskWriteId, selfPosts, SELF_ENTRY, watchFallback, withDeskWrites } from "./desk-local.ts";
 
 const home = () => mkdtempSync(join(tmpdir(), "relay-events-"));
-const logs = (dir: string) => readFileSync(join(dir, ".local/state/muster/relay-events.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
 const item = (id: string) => ({ id, ts: new Date().toISOString(), from: "same sender label", kind: "fyi", title: "notice", body: "private body" });
 
-describe("relay diet", () => {
-  it("projects metadata only and survives a failed write", () => {
-    const dir = home();
-    const event = { ts: "now", session: "s", kind: "packet_report" as const, project: "p", packetId: "hash", body: "private body", title: "private title", refs: ["private ref"] };
-    relayEvent(event, dir);
-    expect(logs(dir)).toEqual([{ ts: "now", session: "s", kind: "packet_report", project: "p", packetId: "hash" }]);
-    writeFileSync(join(dir, "not-a-directory"), "x");
-    expect(() => relayEvent(event, join(dir, "not-a-directory"))).not.toThrow();
-  });
+describe("desk local suppression", () => {
 
   it.each(["flush", "beforeTurn"] as const)("skips this session's posts in %s but delivers foreign posts with the same label", (mode) => {
     const dir = home();
@@ -38,8 +29,6 @@ describe("relay diet", () => {
       expect(feed.beforeTurn()?.message.details.items.map((record) => record.id)).toEqual(["foreign"]);
       expect(feed.turnEnded()).toBe(0);
     }
-    expect(logs(dir).map((record) => [record.kind, record.itemId])).toEqual([["desk_note_skipped_self", "own"], ["desk_note", "foreign"]]);
-    expect(JSON.stringify(logs(dir))).not.toContain("private body");
     expect(feed.flush()).toBe(0);
   });
 

@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 // Remote scripts run these with plain node, which refuses to strip types under node_modules.
 // Bellwether ships .ts there, so none of them may reach it through a value import.
-const REMOTE_MODULES = ["src/restart-snapshot.ts", "src/session-tree.ts", "src/comms-network.ts"];
+const REMOTE_MODULES = ["src/restart-snapshot.ts", "src/session-tree.ts", "src/comms-probe.ts"];
 
 function graph(entry: string) {
   const visited = new Set<string>(); const packages = new Set<string>();

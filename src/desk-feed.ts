@@ -7,7 +7,7 @@ import { decodeProject } from "./domain.ts";
 import { readRegistry } from "./registry.ts";
 
 import type { DeskItem } from "./domain.ts";
-import { relayEvent, selfPosts } from "./relay-events.ts";
+import { selfPosts } from "./desk-local.ts";
 import { formatAge } from "./switchboard.ts";
 import { backlog, flowLine, openDeskItems, openSlots } from "./tokens.ts";
 
@@ -111,10 +111,7 @@ export function deskFeed(deps: FeedDeps) {
     } catch { return undefined; }
   };
   const posted = selfPosts(deps.session ?? "");
-  const count = (kind: "desk_note" | "desk_note_skipped_self", itemId: string) => {
-    if (deps.session === undefined) return;
-    relayEvent({ ts: new Date(now()).toISOString(), session: deps.session, project: deps.project, kind, itemId }, deps.home);
-  };
+  const count = (_kind: "desk_note" | "desk_note_skipped_self", _itemId: string) => {};
 
   const note = (items: readonly DeskItem[]): NoteMessage => {
     const inbox = inboxSummary(readSince(deps.path, 0).items, now());

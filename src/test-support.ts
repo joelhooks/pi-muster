@@ -9,7 +9,7 @@ import type { HerdrClient, HerdrRequest } from "@joelhooks/pi-bellwether/herdr-c
 
 import { sessionDirFor } from "./argv.ts";
 import type { ProcShape } from "./runtime.ts";
-import { IntercomComms } from "./comms.ts";
+import { fakeRatking } from "./ratking-fake.ts";
 import { readRegistry } from "./registry.ts";
 import { load, projectPath } from "./store.ts";
 import { decodeProject } from "./domain.ts";
@@ -383,17 +383,7 @@ export function harness(): Harness {
           startupLoad: () => h.startupLoad,
           emitPaneClose: h.emitPaneClose,
         }),
-        Layer.succeed(Comms)(IntercomComms({
-          send: (to, message) =>
-            Effect.sync(() => {
-              sent.push({ to, message });
-              return { status: "sent" as const };
-            }),
-          sessions: () => Effect.succeed(h.live),
-        }, address => load(readRegistry(home).get(address.project)?.dir ?? "").pipe(
-          Effect.map(project => project.agents.find(row => row.name === address.row)?.sessionId ?? ""),
-          Effect.mapError(error => new CommsError(error.message)),
-        ))),
+        Layer.succeed(Comms)({ ...fakeRatking(home, () => h.sessionId, sent).service, sessions: () => Effect.succeed(h.live) }),
       );
     },
   };

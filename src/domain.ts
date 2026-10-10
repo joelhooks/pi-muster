@@ -51,15 +51,8 @@ export const Slug = Schema.String.check(
 export const SessionId = Schema.String.check(
   Schema.isPattern(SESSION_ID_RE, { message: "invalid Pi session id" }),
 );
-/** Private append-only history of committed row rebinds. */
-export const SessionSuccessor = Schema.Struct({
-  at: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T/u)),
-  project: Slug, row: AgentName, from: SessionId, to: SessionId,
-});
-export type SessionSuccessor = typeof SessionSuccessor.Type;
-export const decodeSessionSuccessor = Schema.decodeUnknownSync(SessionSuccessor);
 
-/** Private machine configuration, never a catalog or package artifact. */
+// slice B: legacy phone configuration, read only until the record API lands.
 export const NetworkCommsConfig = Schema.Struct({
   endpoint: Schema.String.check(Schema.isPattern(/^https?:\/\//u)),
   serviceDid: Schema.String.check(Schema.isPattern(/^did:[^#]+$/u)),
@@ -71,16 +64,13 @@ export const NetworkCommsConfig = Schema.Struct({
 });
 export type NetworkCommsConfig = typeof NetworkCommsConfig.Type;
 export const decodeNetworkCommsConfig = Schema.decodeUnknownSync(NetworkCommsConfig);
-/** Private consumer snapshot borrowed by detached senders; never a lease acquisition. */
+// slice B: the phone borrows an existing fence; Muster starts no reader.
 export const NetworkSendFence = Schema.Struct({
   did: Schema.String.check(Schema.isPattern(/^did:[^#]+$/u)),
   leaseId: Schema.String.check(Schema.isMinLength(1)),
   generation: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)),
 });
 export const decodeNetworkSendFence = Schema.decodeUnknownSync(NetworkSendFence);
-export const decodeNetworkFenceLock = Schema.decodeUnknownSync(Schema.Struct({
-  pid: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)), token: Schema.String,
-}));
 const PublicCommsKey = Schema.Struct({ kty: Schema.Literal("EC"), crv: Schema.Literal("P-256"), x: Schema.String, y: Schema.String, d: Schema.optionalKey(Schema.Never) });
 const CommsDocument = Schema.Struct({
   id: Schema.String,
@@ -95,14 +85,8 @@ export const CommsIdentityReference = Schema.Struct({
 });
 export type CommsIdentityReference = typeof CommsIdentityReference.Type;
 export const decodeCommsIdentityReference = Schema.decodeUnknownSync(CommsIdentityReference);
-/** Identity-cache extension only: catalogs retain their existing row schema. */
-export const NetworkIdentityName = Schema.String.check(Schema.isPattern(/^(?:[a-z0-9]+(?:-[a-z0-9]+)*\/)?[a-z][a-z0-9_-]{0,31}$/u));
-export const decodeNetworkIdentityName = Schema.decodeUnknownSync(NetworkIdentityName);
-export const NetworkDeskName = NetworkIdentityName.check(Schema.isPattern(/\//u));
-/** Shared-file decoders retain the exact legacy schema. */
+// slice B: read-only legacy phone identity cache; no writer or provisioning path.
 export const decodeCommsIdentityCache = Schema.decodeUnknownSync(Schema.Record(AgentName, CommsIdentityReference));
-export const decodeNetworkIdentityCache = Schema.decodeUnknownSync(Schema.Record(NetworkIdentityName, CommsIdentityReference));
-export const decodeNetworkDeskIdentityCache = Schema.decodeUnknownSync(Schema.Record(NetworkDeskName, CommsIdentityReference));
 
 const RouteDelivery = Schema.Struct({ status: Schema.String, detail: Schema.optionalKey(Schema.String),
   id: Schema.optionalKey(Schema.String), senderDid: Schema.optionalKey(Schema.String), recipientDid: Schema.optionalKey(Schema.String),
@@ -143,15 +127,10 @@ export const decodeNetworkPayload = Schema.decodeUnknownSync(Schema.Union([
   Schema.Struct({ type: Schema.Literal("message"), recipient: SessionId, author: SessionId, body: Schema.String }),
 ]));
 export type NetworkPayload = ReturnType<typeof decodeNetworkPayload>;
-export const decodeNetworkPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, AgentName));
-export const decodeNetworkDeskPeers = Schema.decodeUnknownSync(Schema.Record(SessionId, NetworkDeskName));
-export const decodeNetworkPeerReferences = Schema.decodeUnknownSync(Schema.Record(SessionId, NetworkIdentityName));
 /** One fleet callsign claim, appended by desks to the Switchboard's callsigns.jsonl. Unknown fields are kept out. */
 export const CallsignClaim = Schema.Struct({ project: Schema.String, agent: Schema.String, callsign: Schema.String.check(Schema.isPattern(/^\S+$/u)), emoji: Schema.String.check(Schema.isMinLength(1)) });
 export const decodeCallsignClaim = Schema.decodeUnknownSync(CallsignClaim);
 export const decodeCallsignRelease = Schema.decodeUnknownSync(Schema.Struct({ project: Schema.String, released: Schema.String }));
-export const decodeNetworkCursors = Schema.decodeUnknownSync(Schema.Record(AgentName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
-export const decodeNetworkDeskCursors = Schema.decodeUnknownSync(Schema.Record(NetworkDeskName, Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
 const decodeOwnerRecord = Schema.decodeUnknownSync(OwnerItem);
 /** Normalize legacy receipt metadata on read; never rewrite the JSONL or its CID. */
 export function decodeOwnerItem(input: unknown): OwnerItem {
@@ -168,11 +147,17 @@ export const decodeOwnerReader = Schema.decodeUnknownSync(OwnerReader);
 export const OwnerRouting = Schema.Struct({ via: Schema.Record(Schema.String, SessionId), mentioned: Schema.Array(Schema.String) });
 export const decodeOwnerRouting = Schema.decodeUnknownSync(OwnerRouting);
 const OwnerLine = Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0));
-export const OwnerForward = Schema.Struct({ to: SessionId, at: Schema.String, project: Schema.String, cursor: OwnerLine, heartbeatAt: Schema.optional(Schema.String) });
-export const decodeOwnerForward = Schema.decodeUnknownSync(OwnerForward);
 export const OwnerCursor = Schema.Struct({ cursor: OwnerLine, delivered: Schema.Array(Schema.String), sources: Schema.optional(Schema.Record(SessionId, OwnerLine)) });
 export const decodeOwnerCursor = Schema.decodeUnknownSync(OwnerCursor);
 export const decodeOwnerSession = Schema.decodeUnknownSync(SessionId);
+
+/** Read-only projections of pi-ratking's state. Muster never writes these files. */
+export const decodeRatkingSettings = Schema.decodeUnknownSync(Schema.Struct({ state: Schema.optionalKey(Schema.String) }));
+export const decodeRatkingClaims = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Struct({ pid: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)), session: Schema.String })));
+export const decodeRatkingDirectory = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Struct({ did: Schema.String })));
+export const decodeRatkingCursor = Schema.decodeUnknownSync(Schema.Struct({ afterSeq: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)) }));
+export const decodeRatkingStatus = Schema.decodeUnknownSync(Schema.Struct({ name: Schema.optionalKey(Schema.String), did: Schema.optionalKey(Schema.String), reader: Schema.optionalKey(Schema.Unknown), lease: Schema.optionalKey(Schema.Unknown) }));
+export const decodeRatkingProbe = Schema.decodeUnknownSync(Schema.Struct({ name: Schema.String, did: Schema.NullOr(Schema.String), session: Schema.NullOr(Schema.String), pid: Schema.NullOr(Schema.Number), alive: Schema.Boolean, afterSeq: Schema.NullOr(Schema.Number) }));
 const Iso = Schema.String;
 const Path = Schema.String;
 
@@ -539,13 +524,13 @@ export const COMMS_MODES = ["intercom", "network", "ratking"] as const;
 export type CommsMode = typeof COMMS_MODES[number];
 const isCommsMode = (value: unknown): value is CommsMode => (COMMS_MODES as readonly unknown[]).includes(value);
 /** The comms mode in force: unset is ratking, and so is a value this Muster does not know. */
-export const policyComms = (policy: { readonly comms?: string | undefined } | undefined): CommsMode => isCommsMode(policy?.comms) ? policy.comms : "ratking";
+export const policyComms = (_policy: { readonly comms?: string | undefined } | undefined): CommsMode => "ratking";
 /** A recorded comms value this Muster does not know, for the note that says it runs as ratking. */
 export const unknownComms = (policy: { readonly comms?: string | undefined } | undefined): string | undefined =>
-  policy?.comms !== undefined && !isCommsMode(policy.comms) ? policy.comms : undefined;
+  policy?.comms !== undefined && policy.comms !== "ratking" ? policy.comms : undefined;
 export const unknownCommsNote = (policy: { readonly comms?: string | undefined } | undefined): string[] => {
   const value = unknownComms(policy);
-  return value === undefined ? [] : [`comms: ${JSON.stringify(value)} is unknown to this Muster; it runs as ratking. The file keeps the value.`];
+  return value === undefined ? [] : [`comms: ${JSON.stringify(value)} is ignored by this Muster; it runs as ratking. The file keeps the value.`];
 };
 
 const ProjectFields = Schema.Struct({
@@ -753,8 +738,7 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
   for (const [role, value] of Object.entries(patch.roles ?? {})) roles[role] = { ...(roles[role] ?? {}), ...value };
   return {
     ...(base ?? {}),
-    // Never fill in an unset comms: an older Muster rejects a file over a value it does not know.
-    ...(patch.comms !== undefined ? { comms: patch.comms } : {}),
+    // Ignore comms patches; preserve only the value already on disk.
     ...(patch.deployLevel !== undefined ? { deployLevel: patch.deployLevel } : {}),
     ...(patch.wipLimit !== undefined ? { wipLimit: patch.wipLimit } : {}),
     ...(patch.flowStallMin !== undefined ? { flowStallMin: patch.flowStallMin } : {}),
@@ -777,8 +761,8 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
   return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
-/** A policy patch from project_update: it may only set a comms mode this Muster knows. */
-export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(COMMS_MODES)) }));
+/** Legacy comms hints decode tolerantly; mergePolicy never writes them. */
+export const decodePolicy = Schema.decodeUnknownSync(Policy);
 export const decodeProject = Schema.decodeUnknownSync(Project);
 export const decodeDeskItem = Schema.decodeUnknownSync(DeskItem);
 const DeskInboxDid = Schema.String.check(Schema.isPattern(/^did:[a-z0-9]+:[^\s]+$/u));

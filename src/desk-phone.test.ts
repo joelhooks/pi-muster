@@ -7,7 +7,7 @@ import { sendDeskPhone, syncDeskPhone, receiveDeskPhone, dispatchDeskPhone, desk
 import { deskPhoneConfigPath, deskPhoneStatePath, readDeskPhoneConfig } from "./desk-phone-store.ts";
 import { decodeDeskPhoneState, decodeDeskPhoneQuarantine } from "./domain.ts";
 import { appendDesk, queuePath, readDesk } from "./desk.ts";
-import { consumeNetworkMailbox, networkFencePath, networkIdentityPath } from "./comms-network.ts";
+import { networkFencePath } from "./phone-mailbox.ts";
 import { CommsError } from "./runtime.ts";
 import { Output as ListOutput } from "./vendor/rat-king-lexicon/mailbox.list.ts";
 import { Main as Lease } from "./vendor/rat-king-lexicon/runtime.lease.ts";
@@ -141,87 +141,9 @@ describe("desk phone routing", () => {
     chmodSync(deskPhoneStatePath(s.h.home), 0o644);
     await expect(Effect.runPromise(deskPhoneSnapshot(s.h.home, identities))).rejects.toThrow("not private");
   });
-  it.each([false, true])("shares one consumer and lease with ordinary network messages, handler failure=%s", async failed => {
-    const s = setup(); await s.sendItem();
-    const reference = (did: string) => ({ did, secret: "test-key", document: { id: did, verificationMethod: [], authentication: [], keyAgreement: [] } });
-    privateFile(networkIdentityPath(s.h.home), { switchboard: reference(identities.switchboard), worker: reference(identities.phone) });
-    const event = Schema.decodeUnknownSync(Schema.toType(MessageEvent))(Schema.decodeUnknownSync(ListOutput)(fixture("list.output")).events[0]);
-    const base = { ...event, $type: "sh.mschf.ratking.defs#messageEvent" as const, envelope, receipt: { ...event.receipt, message: { ...event.receipt.message, messageId: opened.tid, senderDid: opened.senderDid } } };
-    const lease = Schema.decodeUnknownSync(Lease)({ did: identities.switchboard, leaseId: "3m5abcde23456", generation: 1, expiresAt: "2099-10-07T00:00:00.000Z", harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: s.h.sessionId } });
-    const acquire = vi.fn(() => Effect.succeed(lease)); const release = vi.fn(() => Effect.void);
-    const deliver = vi.fn(() => Effect.succeed({ receipt: base.receipt })); const ack = vi.fn(() => Effect.succeed({ receipt: base.receipt }));
-    const networkOpened = { ...opened, body: JSON.stringify({ type: "message", recipient: s.h.sessionId, author: "worker-session", body: "normal payload still arrives" }) };
-    const open = vi.fn(() => Effect.succeed(opened)).mockImplementationOnce(() => Effect.succeed(opened)).mockImplementationOnce(() => Effect.succeed(networkOpened));
-    const mailbox = { ...s.context.mailbox, open, lease: { acquire, release, resolve: () => Effect.succeed(lease), renew: () => Effect.succeed(lease) }, watch: () => Stream.succeed({ events: [base, base], throughSeq: 2 }), deliver, ack };
-    const notices: string[] = [];
-    await Effect.runPromise(consumeNetworkMailbox({ home: s.h.home, agent: "switchboard", session: s.h.sessionId, mailbox,
-      senderAgent: () => Effect.succeed("worker"),
-      deskRecord: input => failed ? Effect.fail(new CommsError("fixture refused")) : Effect.promise(() => runWith(s.h, dispatchDeskPhone({ ...input, home: s.h.home, mailbox }))),
-      receive: payload => Effect.sync(() => { if (payload.type === "message") notices.push(payload.body); }),
-    }));
-    expect(acquire).toHaveBeenCalledOnce(); expect(release).toHaveBeenCalledOnce(); expect(open).toHaveBeenCalledTimes(2);
-    expect(deliver).toHaveBeenCalledTimes(2); expect(ack).toHaveBeenCalledTimes(2);
-    expect(notices[0]).toContain(failed ? "answer failed" : "desk_phone recorded");
-    expect(notices[1]).toBe("normal payload still arrives");
-    expect((await s.state()).entries[item.itemId]?.state).toBe(failed ? "pending" : "closed");
-  });
-  it("saves and acks an authenticated plain-text or non-payload body instead of stopping the consumer forever", async () => {
-    // Live case: a "traffic feed check" sent to the Switchboard replayed from seq 0 and killed its reader on every start.
-    const s = setup();
-    privateFile(networkIdentityPath(s.h.home), { switchboard: { did: identities.switchboard, secret: "key", document: { id: identities.switchboard, verificationMethod: [], authentication: [], keyAgreement: [] } }, worker: { did: identities.phone, secret: "key", document: { id: identities.phone, verificationMethod: [], authentication: [], keyAgreement: [] } } });
-    const event = Schema.decodeUnknownSync(Schema.toType(MessageEvent))(Schema.decodeUnknownSync(ListOutput)(fixture("list.output")).events[0]);
-    const base = { ...event, $type: "sh.mschf.ratking.defs#messageEvent" as const, envelope, receipt: { ...event.receipt, message: { ...event.receipt.message, messageId: opened.tid, senderDid: opened.senderDid } } };
-    const lease = Schema.decodeUnknownSync(Lease)({ did: identities.switchboard, leaseId: "3m5abcde23456", generation: 1, expiresAt: "2099-10-07T00:00:00.000Z", harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: s.h.sessionId } });
-    const bodies = ["traffic feed check", JSON.stringify({ hello: "not a payload" }), JSON.stringify({ type: "message", recipient: s.h.sessionId, author: "worker-session", body: "good network message" })];
-    const open = vi.fn((_envelope: typeof envelope): Effect.Effect<OpenedMessage, MailboxClientError> => Effect.succeed({ ...opened, body: bodies.shift()! }));
-    const notices: string[] = []; let acks = 0;
-    const mailbox = { open, lease: { acquire: () => Effect.succeed(lease), release: () => Effect.void, resolve: () => Effect.succeed(lease), renew: () => Effect.succeed(lease) },
-      watch: () => Stream.succeed({ events: [base, base, base], throughSeq: 3 }), deliver: () => Effect.succeed({ receipt: base.receipt }),
-      ack: () => Effect.sync(() => { acks += 1; return { receipt: base.receipt }; }) };
-    await Effect.runPromise(consumeNetworkMailbox({ home: s.h.home, agent: "switchboard", session: s.h.sessionId, mailbox, senderAgent: () => Effect.succeed("worker"),
-      receive: payload => Effect.sync(() => { if (payload.type === "message") notices.push(payload.body); }) }));
-    expect(acks).toBe(3);
-    expect(notices[0]).toContain("body is not JSON"); expect(notices[1]).toContain("not a Muster network payload"); expect(notices[2]).toBe("good network message");
-    const saved = notices[0]!.match(/Saved before ack: (.+)\.$/)![1]!;
-    expect(statSync(saved).mode & 0o777).toBe(0o600);
-    expect(JSON.parse(readFileSync(saved, "utf8")).body).toBe("traffic feed check");
-  });
-  it.each(["signature", "AuthRequired", "LeaseMismatch", "without-hook", "save-fails"] as const)("quarantines only envelope failures before ack, mode=%s", async mode => {
-    const s = setup();
-    privateFile(networkIdentityPath(s.h.home), { switchboard: { did: identities.switchboard, secret: "key", document: { id: identities.switchboard, verificationMethod: [], authentication: [], keyAgreement: [] } }, worker: { did: identities.phone, secret: "key", document: { id: identities.phone, verificationMethod: [], authentication: [], keyAgreement: [] } } });
-    const event = Schema.decodeUnknownSync(Schema.toType(MessageEvent))(Schema.decodeUnknownSync(ListOutput)(fixture("list.output")).events[0]);
-    const base = { ...event, $type: "sh.mschf.ratking.defs#messageEvent" as const, envelope, receipt: { ...event.receipt, message: { ...event.receipt.message, messageId: opened.tid, senderDid: opened.senderDid } } };
-    const lease = Schema.decodeUnknownSync(Lease)({ did: identities.switchboard, leaseId: "3m5abcde23456", generation: 1, expiresAt: "2099-10-07T00:00:00.000Z", harness: { $type: "sh.mschf.ratking.runtime.lease#pi", sessionId: s.h.sessionId } });
-    const dir = join(dirname(deskPhoneStatePath(s.h.home)), "quarantine");
-    if (mode === "save-fails") { mkdirSync(dirname(dir), { recursive: true }); writeFileSync(dir, "not a directory"); }
-    const normal = { ...opened, body: JSON.stringify({ type: "message", recipient: s.h.sessionId, author: "worker-session", body: "good network message" }) };
-    const open = vi.fn((_envelope: typeof envelope): Effect.Effect<OpenedMessage, MailboxClientError> => Effect.succeed(normal));
-    open.mockImplementationOnce(() => Effect.succeed(normal)).mockImplementationOnce(() => Effect.fail(new MailboxClientError({ reason: "verification failed", ...(mode === "AuthRequired" || mode === "LeaseMismatch" ? { error: mode } : {}) })));
-    const notices: string[] = []; let acks = 0;
-    const acquire = vi.fn(() => Effect.succeed(lease)); const release = vi.fn(() => Effect.void);
-    const mailbox = { open, lease: { acquire, release, resolve: () => Effect.succeed(lease), renew: () => Effect.succeed(lease) },
-      watch: () => Stream.succeed({ events: [base, base, base], throughSeq: 3 }), deliver: () => Effect.succeed({ receipt: base.receipt }),
-      ack: () => Effect.promise(async () => {
-        acks += 1;
-        if (acks === 2) {
-          const path = join(dir, readdirSync(dir)[0]!);
-          expect(statSync(path).mode & 0o777).toBe(0o600);
-          const saved = await decodeDeskPhoneQuarantine(JSON.parse(readFileSync(path, "utf8")));
-          expect(saved.event.envelope).toEqual(envelope);
-          expect(saved.event.receipt.message.messageId).toBe(opened.tid);
-          expect(saved.reason).toBe("Envelope verification or decryption failed");
-        }
-        return { receipt: base.receipt };
-      }),
-    };
-    const operation = Effect.runPromise(consumeNetworkMailbox({ home: s.h.home, agent: "switchboard", session: s.h.sessionId, mailbox, senderAgent: () => Effect.succeed("worker"), deskRecord: mode === "without-hook" ? undefined : () => Effect.succeed("unused record hook"), receive: payload => Effect.sync(() => { if (payload.type === "message") notices.push(payload.body); }) }));
-    if (mode === "signature") {
-      await operation; expect(acks).toBe(3);
-      expect(notices).toHaveLength(3); expect(notices[0]).toBe("good network message"); expect(notices[2]).toBe("good network message");
-      expect(notices[1]).toContain(`claimed sender ${identities.phone}`); expect(notices[1]).toContain("verification or decryption failed");
-    } else { await expect(operation).rejects.toThrow(); expect(acks).toBe(1); expect(notices).toEqual(["good network message"]); }
-    expect(acquire).toHaveBeenCalledOnce(); expect(release).toHaveBeenCalledOnce();
-  });
+  ;
+  ;
+  ;
   it("refuses absent, unrelated and unmarked cards before sending", async () => {
     const s = setup();
     await expect(runWith(s.h, sendDeskPhone({ ...s.context, card: { ...card, id: "unknown" }, page: "page" }))).rejects.toThrow("open rats-nest");

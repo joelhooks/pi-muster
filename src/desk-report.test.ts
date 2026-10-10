@@ -244,7 +244,7 @@ describe("desk report tools", () => {
   it("desk_rulings resolves each open item a ruling covers, skips the rest, and drafts one owner message", async () => {
     const { h, items } = setup();
     const feedback = JSON.stringify({ schema: FEEDBACK_SCHEMA, page: report.slug, items: { p1: { stack: "yes" }, o1: { void: ["a"] } } });
-    registerSwitchboardSession(h.home, "switchboard-session");
+    registerSwitchboardSession(h.home, "switchboard-session", "switchboard-session");
     h.live = ["switchboard-session"];
 
     const preview = await runWith(h, deskRulings({ project: "probe", report: items, feedback, dryRun: true, cwd: h.root }));
