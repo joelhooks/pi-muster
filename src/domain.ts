@@ -510,7 +510,7 @@ export const Policy = Schema.Struct({
   wipLimit: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)))),
   flowStallMin: Schema.optionalKey(Minutes),
   landWaitMin: Schema.optionalKey(Minutes),
-  comms: Schema.Literals(["intercom", "network"]).pipe(Schema.withDecodingDefaultKey(Effect.succeed("intercom" as const))),
+  comms: Schema.Literals(["intercom", "network", "ratking"]).pipe(Schema.withDecodingDefaultKey(Effect.succeed("intercom" as const))),
   /** Quiet minutes before the owner pass sends `esc` and a note. */
   nudgeAfterMin: Schema.optionalKey(Minutes),
   /** Quiet minutes before `/new` plus a re-prompt; null never restarts on its own. */
@@ -750,7 +750,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
   return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policy?.comms ?? "intercom", aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
-export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(["intercom", "network"])) }));
+export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(["intercom", "network", "ratking"])) }));
 export const decodeProject = Schema.decodeUnknownSync(Project);
 export const decodeDeskItem = Schema.decodeUnknownSync(DeskItem);
 const DeskInboxDid = Schema.String.check(Schema.isPattern(/^did:[a-z0-9]+:[^\s]+$/u));

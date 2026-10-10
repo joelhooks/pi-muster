@@ -161,7 +161,8 @@ export default function muster(host: ExtensionAPI) {
   const comms = new Map<string, ReturnType<typeof createComms>>();
   // pi-ratking registers at load; Muster asks at call time and never starts a reader on the ratking name.
   const ratkingHere = () => { try { return ratkingLoaded(pi.getAllTools(), env.RATKING_TOOL); } catch { return false; } };
-  const ratkingFor = (dir: string, ctx: ExtensionContext) => ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
+  // Opt-in: a Pi rides ratking only when launched with MUSTER_COMMS=ratking and pi-ratking is loaded. The fleet stays mixed.
+  const ratkingFor = (dir: string, ctx: ExtensionContext) => env.MUSTER_COMMS === "ratking" && ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
     sender: () => ctx.sessionManager.getSessionId(),
     target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, aliases: ownerAliases(homedir()) }) }) : undefined;
   const rejoinComms = () => { for (const service of comms.values()) service.rejoin(); };
@@ -741,7 +742,7 @@ export default function muster(host: ExtensionAPI) {
       policy: Type.Optional(
         Type.Object({
           deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Set fallback deploy permission on the 0 locked to 3 jfdi scale." })),
-          comms: Type.Optional(StringEnum(["intercom", "network"] as const)),
+          comms: Type.Optional(StringEnum(["intercom", "network", "ratking"] as const)),
           wipLimit: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
           flowStallMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
           landWaitMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),

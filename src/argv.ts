@@ -109,6 +109,7 @@ export function agentEnv(project: Project, row: AgentRow): Record<string, string
     ...(row.ownerName ? { MUSTER_OWNER_NAME: row.ownerName } : {}),
     MUSTER_LANE: row.lane,
     MUSTER_ROLE: row.role,
+    ...(project.policy?.comms === "ratking" ? { MUSTER_COMMS: "ratking" } : {}),
     // pi-ratking claims this name; Muster mints nothing.
     RATKING_NAME: `${project.slug}/${row.name}`,
   };
