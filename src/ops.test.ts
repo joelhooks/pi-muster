@@ -116,7 +116,7 @@ describe("side desks", () => {
     const prompt = h.herdr.initialPrompts.at(-1)!;
     expect(prompt).toContain("Discuss patterns");
     expect(prompt).toContain("never prompts or launches lanes or workers");
-    expect(prompt).toContain("intercom");
+    expect(prompt).toContain("desk_send");
     expect(workPrompt(result.row, undefined)).toContain("never acts on prod");
   });
 
@@ -937,9 +937,11 @@ describe("field-use regressions", () => {
     vi.stubEnv("HOME", h.home);
     vi.stubEnv("MUSTER_ROLE", "worker"); vi.stubEnv("MUSTER_OWNER", "owner-session");
     vi.stubEnv("MUSTER_PROJECT", dir); vi.stubEnv("MUSTER_AGENT", "probe_w");
+    // The legacy intercom queue path, with pi-intercom loaded.
+    vi.stubEnv("MUSTER_COMMS", "intercom");
     const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
     const host = { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => tools.set(t.name, t),
-      on: () => {}, registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {},
+      on: () => {}, registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {}, getAllTools: () => [{ name: "intercom", sourceInfo: { source: "npm:pi-intercom" } }],
       getFlag: () => undefined, registerMessageRenderer: () => {}, events: { emit: () => {}, on: () => () => {} } };
     await muster(host as never);
     writeReader("new-owner", h.home);

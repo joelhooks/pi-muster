@@ -181,7 +181,7 @@ describe("selection", () => {
     expect(ratkingLoaded([{ name: "rk" }], "rk")).toBe(true);
   });
 
-  it("with pi-ratking and MUSTER_COMMS=ratking every send goes through it; without pi-ratking the intercom path is unchanged", async () => {
+  it("with pi-ratking and MUSTER_COMMS=ratking every send goes through it; without pi-ratking it fails loudly, never over intercom", async () => {
     const home = mkdtempSync(join(tmpdir(), "ratking-select-"));
     const fake = fakeRatking(() => ({ status: "delivered", id: "m", seq: 1 }));
     const ratking = RatkingComms({ events: fake.events, createId, sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) });
@@ -191,44 +191,48 @@ describe("selection", () => {
     expect(await Effect.runPromise(withRatking.mode!())).toBe("ratking");
     expect(await Effect.runPromise(withRatking.send("desk-session", "hi"))).toMatchObject({ status: "delivered" });
     expect(fake.requests).toHaveLength(1);
-    expect(withRatking.relay).toBeUndefined();
 
     const without = createComms({ events, createId, home, projectDir: home, adapterEnv: () => "ratking", ratking: () => undefined });
-    expect(await Effect.runPromise(without.mode!())).toBe("intercom");
-    expect(without.legacyDrain).toBeUndefined();
+    expect(await Effect.runPromise(without.mode!())).toBe("ratking");
+    expect(await Effect.runPromise(without.send("desk-session", "hi"))).toMatchObject({ status: "failed", detail: expect.stringContaining("pi-ratking not loaded") });
+    expect(intercom).toEqual([]);
   });
 });
 
-describe("opt-in", () => {
-  it("pi-ratking loaded but MUSTER_COMMS unset or network keeps today's path and emits no ratking/send", async () => {
+describe("default", () => {
+  it("MUSTER_COMMS=network keeps the network path; unset rides ratking", async () => {
     const home = mkdtempSync(join(tmpdir(), "ratking-optin-"));
     const fake = fakeRatking(() => ({ status: "delivered", id: "m", seq: 1 }));
     const ratking = vi.fn(() => RatkingComms({ events: fake.events, createId, sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) }));
     const intercom: Array<Record<string, unknown>> = [];
     const events = { emit: (_event: string, payload: unknown) => { intercom.push(payload as Record<string, unknown>); }, on: () => () => {} };
-    const unset = createComms({ events, createId, home, projectDir: home, adapterEnv: () => undefined, ratking });
-    expect(await Effect.runPromise(unset.mode!())).toBe("intercom");
-    await Effect.runPromise(unset.send("desk-session", "hi").pipe(Effect.timeout(50), Effect.ignore));
-    expect(intercom.length).toBeGreaterThan(0);
     const network = createComms({ events, createId, home, projectDir: home, adapterEnv: () => "network", ratking });
     const mode = await Effect.runPromise(network.mode!().pipe(Effect.orElseSucceed(() => "network-unconfigured")));
     expect(mode).not.toBe("ratking");
     const sent = await Effect.runPromise(network.send("desk-session", "hi").pipe(Effect.orElseSucceed(() => ({ status: "failed" as const, detail: "network path" }))));
     // Today's network path: it reads the network config, which this home lacks.
     expect(sent.detail).toContain("NetworkComms");
-    expect(network.legacyDrain).toBeUndefined();
     expect(fake.requests).toEqual([]);
     expect(ratking).not.toHaveBeenCalled();
+    const unset = createComms({ events, createId, home, projectDir: home, adapterEnv: () => undefined, ratking });
+    expect(await Effect.runPromise(unset.mode!())).toBe("ratking");
+    expect(await Effect.runPromise(unset.send("desk-session", "hi"))).toMatchObject({ status: "delivered" });
+    expect(fake.requests).toHaveLength(1);
+    expect(intercom).toEqual([]);
   });
 
-  it("a ratking project opts its launched rows in; other policies do not", () => {
+  it("launched rows ride ratking unless the project chose network or intercom", () => {
     const worker = { ...row({ name: "worker" }), profile: { env: {} }, lane: "work", role: "worker" } as AgentRow;
     expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "ratking" } } as unknown as Project, worker).MUSTER_COMMS).toBe("ratking");
+    expect(agentEnv({ slug: "pilot", dir: "/p" } as Project, worker).MUSTER_COMMS).toBe("ratking");
+    expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "carrier-pigeon" } } as unknown as Project, worker).MUSTER_COMMS).toBe("ratking");
     expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "network" } } as unknown as Project, worker).MUSTER_COMMS).toBeUndefined();
-    expect(agentEnv({ slug: "pilot", dir: "/p" } as Project, worker).MUSTER_COMMS).toBeUndefined();
+    expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "intercom" } } as unknown as Project, worker).MUSTER_COMMS).toBeUndefined();
     expect(remoteCommsEnvironment({ policy: { comms: "ratking" } } as never, {} as never)).toEqual({ MUSTER_COMMS: "ratking" });
+    expect(remoteCommsEnvironment({ policy: undefined } as never, {} as never)).toEqual({ MUSTER_COMMS: "ratking" });
     expect(decodePolicy({ deployLevel: 1, wipLimit: 3, flowStallMin: 120, landWaitMin: 30, comms: "ratking" }).comms).toBe("ratking");
-    expect(selectComms("ratking")).toBe("intercom");
+    expect(selectComms("ratking")).toBe("ratking");
+    expect(selectComms(undefined)).toBe("ratking");
   });
 });
 

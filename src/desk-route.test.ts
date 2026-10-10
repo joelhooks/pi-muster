@@ -102,7 +102,7 @@ describe("qualified desk routing", () => {
     expect(result.delivery.detail).toContain("LeaseMismatch"); expect(result.delivery.detail).toContain("receipt:");
     expect(relay).toHaveBeenCalledOnce(); expect(readOwnerQueue("owner-session", h.home).items).toHaveLength(1);
   });
-  it("routes aliases through the call-time network adapter and defaults a desk with no comms policy to network", async () => {
+  it("routes aliases through the call-time network adapter for a network desk", async () => {
     const { h, dir } = await fixture();
     let adapter: Parameters<typeof import("./comms-network.ts").createNetworkComms>[0] | undefined;
     vi.doMock("./comms-network.ts", () => ({
@@ -111,7 +111,7 @@ describe("qualified desk routing", () => {
       readNetworkIdentities: () => ({}), provisionPreflipRow: () => Effect.void,
       createNetworkComms: (options: NonNullable<typeof adapter>) => { adapter = options; return { ...NetworkComms, mode: () => Effect.succeed("network" as const) }; },
     }));
-    const options = { home: h.home, projectDir: dir, events: { emit() {}, on() {} }, createId: () => "id", adapterEnv: () => undefined, networkSender: () => ({ agent: "desk", session: "alpha-session" }) };
+    const options = { home: h.home, projectDir: dir, events: { emit() {}, on() {} }, createId: () => "id", adapterEnv: () => "network", networkSender: () => ({ agent: "desk", session: "alpha-session" }) };
     try {
       // The real extension uses catalogCommsSender; legacy injected bare context is qualified too.
       const service = createComms({ ...options, networkSender: () => catalogCommsSender(dir, "alpha-session") });

@@ -96,11 +96,17 @@ export const nudgeSwitchboards = (project: string, record: { id: string; kind: s
     const dir = switchboardSessionsDir(env.home);
     const named = process.env.MUSTER_SWITCHBOARD_SESSION?.trim();
     const targets = new Set([...(named ? [named] : []), ...(existsSync(dir) ? readdirSync(dir).map(decodeURIComponent) : [])]);
+    const text = `☎️ Desk queue changed: [${project}#${record.resolves ?? record.id}] ${record.resolves ? "resolved" : record.kind}. Read desk_inbox for the current fleet; don't answer without Joel.`;
+    const mode = intercom.mode ? yield* intercom.mode().pipe(Effect.orElseSucceed(() => "intercom" as const)) : "intercom";
+    if (mode === "ratking") {
+      // One send to the reserved name: whoever holds the Switchboard's lease reads it. Never to this Switchboard itself.
+      if (targets.size > 0 && !targets.has(env.sessionId) && process.env.MUSTER_SWITCHBOARD !== "1") yield* intercom.send("switchboard", text);
+      return;
+    }
     const live = yield* intercom.sessions();
     for (const target of targets) {
       if (target === env.sessionId || (live && !live.includes(target))) continue;
-      yield* (intercom.relay ?? intercom.send)(target, `☎️ Desk queue changed: [${project}#${record.resolves ?? record.id}] ${record.resolves ? "resolved" : record.kind}. Read desk_inbox for the current fleet; don't answer without Joel.`)
-        .pipe(Effect.catchCause(() => Effect.void));
+      yield* (intercom.relay ?? intercom.send)(target, text).pipe(Effect.catchCause(() => Effect.void));
     }
   }).pipe(Effect.catchCause(() => Effect.void));
 
@@ -152,7 +158,7 @@ export interface DeskAnswerInput {
 
 /**
  * Resolve one open item in its own project's queue, then nudge that project's
- * desk over intercom when Muster knows it. The queue line is the answer; the
+ * desk by name when Muster knows it. The queue line is the answer; the
  * nudge only saves the desk a wait for its next turn.
  */
 export const deskAnswer = (params: DeskAnswerInput) =>
@@ -173,8 +179,8 @@ export const deskAnswer = (params: DeskAnswerInput) =>
     const known = readRegistry(env.home).get(params.project);
     const project = known ? yield* load(known.dir).pipe(Effect.catch(() => Effect.succeed(null))) : null;
     const desks = project?.agents.filter((agent) => agent.role === "desk" && PROCESS_STATES.includes(agent.state)) ?? [];
-    // pi-intercom queues a send to a session that isn't connected and still
-    // reports "sent", so liveness comes from the session list, not the result.
+    // Legacy intercom queues a send to a session that isn't connected and still reports "sent",
+    // so liveness comes from the session list when there is one. Under ratking there is none.
     const live = desks.length ? yield* intercom.sessions().pipe(Effect.catchCause(() => Effect.succeed(undefined))) : undefined;
     const nudged: string[] = [];
     for (const desk of desks) {

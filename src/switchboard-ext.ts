@@ -340,7 +340,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     name: "desk_answer",
     label: "Switchboard answer",
     description:
-      "Answer one open item for Joel: writes a resolving line into that project's own desk queue and nudges the project's Muster desk over intercom when there is one. Use Joel's words; do not decide for him.",
+      "Answer one open item for Joel: writes a resolving line into that project's own desk queue and nudges the project's Muster desk over Rat King when there is one. Use Joel's words; do not decide for him.",
     parameters: Type.Object({
       project: Type.String(),
       id: Type.String({ description: "Item id, the part after # in [project#id]" }),

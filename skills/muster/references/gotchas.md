@@ -22,9 +22,9 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 - To park a lane, use `lane_open open: false`; `lane_close discard: true` drops proposed work from the backlog without counting it as finished work.
 
-- Intercom delivers when the recipient's turn ends. To steer a running turn in a pane you own, type into it.
-- Address agents by `<project>/<row>` through Muster's Comms tools; the alias follows rebinds. Never keep a cached session id. Raw intercom needs the current exact id from the catalog, never cwd.
-- Chatty intercom drowns owners: in one pilot, 34 of about 985 messages were results. FYI, progress and done go to `owner_note`, not intercom. Questions go to `owner_note kind=question`; answers thread through `owner_reply`.
+- Messages deliver when the recipient's turn ends. To steer a running turn in a pane you own, type into it.
+- Address agents by `<project>/<row>` through Muster's Comms tools; the alias follows rebinds. Never keep a cached session id. Rat King addresses rows by `<project>/<row>` name, never a session id.
+- Chatty messages drown owners: in one pilot, 34 of about 985 messages were results. FYI, progress and done go to `owner_note`, not the intercom tool. Questions go to `owner_note kind=question`; answers thread through `owner_reply`.
 - Never tell a worker to `/quit`. In a tiny pane it arrived as the chat message "quit". Close the pane after sign-off with `agent_close`. With current Bellwether pane-close bus support, Muster retires the owner's matching watches before closing and reports `watches retired: <ids>`. On older Bellwether, cancel watches first with `herdr_watch action=cancel`, including named targets; fallback receipts name candidates, not confirmed live watches.
 - Pi 0.79.10 (Muster's development pin) ignores `triggerTurn: false` while streaming: `sendCustomMessage` queues default delivery as steering, including at `agent_end`. Custom cards become user messages at the model boundary, so the bridge sees prompt input, not the trigger flag. Newer fleet Pi explicitly keeps non-triggering streaming messages out of steering. Check the desk's loaded Pi version before blaming the bridge. Self-post suppression removes our own cards before either path; foreign delivery is unchanged.
 

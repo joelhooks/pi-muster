@@ -1,7 +1,8 @@
 import { Effect, Layer, Schema } from "effect";
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { decodeAgentName, decodeSlug, decodeProject, decodeSessionSuccessor, type SessionSuccessor, type Policy } from "./domain.ts";
+import { COMMS_MODES, decodeAgentName, decodeSlug, decodeProject, decodeSessionSuccessor, policyComms, type CommsMode, type SessionSuccessor, type Policy } from "./domain.ts";
+import { RatkingMissing, reservedRatkingDids } from "./comms-ratking.ts";
 import { networkCatalogPeer, networkCatalogPeers, networkRowIdentity, networkTargetRow } from "./desk-route.ts";
 import { createIntercom } from "./intercom.ts";
 import { readRegistry } from "./registry.ts";
@@ -108,11 +109,11 @@ export function retiredCatalogSession(dir: string, name: string, session: string
     return row !== undefined && row.sessionId !== session;
   } catch { return false; }
 }
-/** Decoded policies default comms to intercom; only the raw catalog tells an explicit choice from an unset one. */
-export function explicitPolicyComms(dir: string): "intercom" | "network" | undefined {
+/** The catalog's recorded comms choice, undefined when unset. A value this Muster does not know is ratking. */
+export function explicitPolicyComms(dir: string): CommsMode | undefined {
   try {
     const comms = (JSON.parse(readFileSync(projectPath(dir), "utf8")) as { policy?: { comms?: unknown } }).policy?.comms;
-    return comms === "intercom" || comms === "network" ? comms : undefined;
+    return typeof comms === "string" ? policyComms({ comms }) : undefined;
   } catch { return undefined; }
 }
 export function catalogNetworkPeers(dir: string) {
@@ -122,18 +123,17 @@ export function catalogNetworkPeers(dir: string) {
 
 /** A launch hint only: selection follows the joined fact, which this value never overrides back to intercom. */
 export function remoteCommsEnvironment(project: Pick<import("./domain.ts").Project, "policy">, machine: Pick<import("./domain.ts").MachineConfig, "comms">): Record<string, string> {
-  if (project.policy?.comms === "ratking") return { MUSTER_COMMS: "ratking" };
-  if (project.policy?.comms !== "network") return { MUSTER_COMMS: "intercom" };
+  const mode = policyComms(project.policy);
+  if (mode !== "network") return { MUSTER_COMMS: mode };
   if (!machine.comms) throw new CommsError("network project requires a remote comms config block; launch refused");
   return { MUSTER_COMMS: "network", MUSTER_NETWORK_CONFIG: machine.comms.config };
 }
 
-export type CommsAdapter = "intercom" | "network";
-export function selectComms(env: string | undefined, policy?: Pick<Policy, "comms">): CommsAdapter {
-  const selected = env ?? policy?.comms ?? "intercom";
-  if (selected !== "intercom" && selected !== "network" && selected !== "ratking") throw new CommsError(`invalid MUSTER_COMMS: ${selected}; expected intercom, network or ratking`);
-  // ratking rides pi-ratking when it is loaded (createComms); a Pi without it keeps today's intercom path.
-  return selected === "ratking" ? "intercom" : selected;
+/** MUSTER_COMMS wins, then the project policy; unset is ratking. */
+export function selectComms(env: string | undefined, policy?: Pick<Policy, "comms">): CommsMode {
+  if (env === undefined) return policyComms(policy);
+  if (!(COMMS_MODES as readonly string[]).includes(env)) throw new CommsError(`invalid MUSTER_COMMS: ${env}; expected intercom, network or ratking`);
+  return env as CommsMode;
 }
 
 export function commsAddress(identity: CommsTarget): CommsAddress {
@@ -242,33 +242,40 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
   remote?: boolean; run?: import("./comms-network.ts").PrivateCommand;
   /** The session this one was forked from (a restart fork's parent): mail addressed to it is this session's. */
   forkParent?: () => string | undefined;
-  /** pi-ratking's transport when it is loaded in this Pi and MUSTER_COMMS=ratking opts in. It then carries every send; the network module only drains. */
-  ratking?: () => CommsShape | undefined }) {
+  /** pi-ratking's transport when it is loaded in this Pi. When ratking is selected it carries every send; the network module only drains. */
+  ratking?: () => CommsShape | undefined;
+  /** Whether pi-intercom is loaded in this Pi. When it is not, an intercom selection rides ratking. Unset: loaded. */
+  intercom?: () => boolean }) {
   let transport: ReturnType<typeof createIntercom> | undefined;
   // A join, once seen, holds for this process. A miss is rechecked after 20 s: the key check spawns the secrets CLI.
-  const joins = new Map<string, { joined: boolean; at: number }>();
-  const joinedFact = Effect.gen(function* () {
+  const joins = new Map<string, { joined: boolean; did: string | null; at: number }>();
+  const joinFacts = Effect.gen(function* () {
+    const none = { joined: false, did: null as string | null };
     const sender = options.networkSender?.();
-    if (!sender) return false;
+    if (!sender) return none;
     // Flagg's catalog is authoritative: an explicit intercom opts out, and only network projects or desks join.
     // A remote copy of the catalog is not, so Flagg's policy reaches remote rows only through the key it pushes.
     if (!options.remote) {
       const explicit = exists(options.projectDir) ? explicitPolicyComms(options.projectDir) : undefined;
-      if (explicit === "intercom" || (explicit !== "network" && !sender.agent.includes("/"))) return false;
+      if (explicit === "intercom" || (explicit !== "network" && !sender.agent.includes("/"))) return none;
     }
     const key = `${sender.agent}\0${sender.session}`;
     const seen = joins.get(key);
-    if (seen && (seen.joined || Date.now() - seen.at < 20_000)) return seen.joined;
+    if (seen && (seen.joined || Date.now() - seen.at < 20_000)) return { joined: seen.joined, did: seen.did };
     const network = yield* Effect.tryPromise({ try: () => import("./comms-network.ts"), catch: () => new CommsError("NetworkComms adapter unavailable") });
     // An older sibling module on disk has no join facts: stay on the launch hint.
     const join = yield* Effect.try({ try: () => network.localJoinFacts, catch: () => undefined }).pipe(Effect.orElseSucceed(() => undefined));
-    if (typeof join !== "function") return false;
+    if (typeof join !== "function") return none;
     const facts = yield* Effect.promise(() => join({ home: options.home, agent: sender.agent, session: sender.session, remote: options.remote === true,
       ...(options.networkConfig?.() ? { configPath: options.networkConfig()! } : {}), ...(options.run ? { run: options.run } : {}) }));
+    const did = typeof facts.did === "string" ? facts.did : null;
     // Only the secrets listing costs a process; file-only misses are rechecked every time.
-    if (facts.joined || facts.key === false) joins.set(key, { joined: facts.joined, at: Date.now() });
-    return facts.joined;
+    if (facts.joined || facts.key === false) joins.set(key, { joined: facts.joined, did, at: Date.now() });
+    return { joined: facts.joined, did };
   });
+  const joinedFact = joinFacts.pipe(Effect.map(facts => facts.joined));
+  /** Under ratking the legacy reader drains an existing legacy identity, unless pi-ratking reserves that DID: then it is pi-ratking's. */
+  const legacyDrain = () => joinFacts.pipe(Effect.map(facts => facts.joined && !(facts.did !== null && reservedRatkingDids(options.home).has(facts.did))));
   const project = (dir: string) => load(dir).pipe(Effect.mapError(error => new CommsError(error.message)));
   const lookup: Parameters<typeof IntercomComms>[1] = address => Effect.gen(function* () {
     const known = yield* Effect.try({ try: () => readRegistry(options.home).get(address.project), catch: error => new CommsError(`catalog registry unreadable: ${String(error)}`) });
@@ -279,149 +286,150 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
     return row.intercomAddress ?? row.sessionId;
   });
   const selection = Effect.gen(function* () {
-    // A launch's MUSTER_COMMS is a hint: it never overrides a joined fact back to intercom.
-    if (yield* joinedFact) return "network" as const;
     const env = options.adapterEnv();
     // An explicit override must not depend on a readable project catalog.
     const follow = env === "network" && options.followProjectPolicy && exists(options.projectDir);
     const policy = (env === undefined || follow) && exists(options.projectDir) ? (yield* project(options.projectDir)).policy : undefined;
     // Following policy lets an explicit project opt-out win; an unset policy never overrides explicit env.
     const fromEnv = follow ? (explicitPolicyComms(options.projectDir) === undefined ? env : undefined) : env;
-    const selected = yield* Effect.try({ try: () => selectComms(fromEnv, policy?.comms === undefined && options.networkSender?.()?.agent.includes("/") ? { ...policy, comms: "network" } : policy), catch: error => new CommsError(String(error)) });
-    return selected;
+    const selected = yield* Effect.try({ try: () => selectComms(fromEnv, policy), catch: error => new CommsError(String(error)) });
+    if (selected !== "intercom") return selected;
+    // pi-intercom is leaving the fleet, and older catalogs recorded intercom by default: without it, intercom rides ratking.
+    if (options.intercom && !options.intercom()) return "ratking" as const;
+    // A launch's MUSTER_COMMS is a hint: it never overrides a joined fact back to intercom.
+    return (yield* joinedFact) ? "network" as const : "intercom" as const;
   });
-  const adapter = Effect.gen(function* () {
-    const selected = yield* selection;
-    if (selected === "network") {
-      const network = yield* Effect.tryPromise({ try: () => import("./comms-network.ts"), catch: () => new CommsError("NetworkComms adapter unavailable") });
-      yield* Effect.try({ try: () => network.readNetworkConfig(options.home, options.networkConfig?.()), catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms config invalid") });
-      const configuredPeers = options.networkPeers?.() ?? {};
-      yield* Effect.try({ try: () => network.seedNetworkPeers(options.home, configuredPeers), catch: () => new CommsError("NetworkComms peer cache unavailable") });
-      const recipient = (to: CommsTarget) => Effect.gen(function* () {
-          const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
-          // Identity on demand: Flagg mints an addressed row before the first send, or the send fails. Never the bare refusal.
-          const minted = (identity: string) => Effect.gen(function* () {
-            if (options.remote || address.kind === "did") return identity;
-            const cached = yield* Effect.try({ try: () => network.readNetworkIdentities(options.home)[identity], catch: () => new CommsError("NetworkComms identity cache invalid") });
-            if (cached) return identity;
-            const target = networkTargetRow(options.home, options.projectDir, address.kind === "alias" ? `${address.project}/${address.row}` : address.id);
-            if (!target || target.identity !== identity) return identity;
-            yield* network.provisionPreflipRow({ home: options.home, target, ...(options.run ? { run: options.run } : {}) }).pipe(
-              Effect.mapError(error => new CommsError(`NetworkComms could not mint ${identity} before the first send: ${error.message}; nothing sent, no intercom fallback`)));
-            return identity;
-          });
-          if (address.kind === "alias") {
-            // Validate project ownership before trusting a qualified cache key.
-            yield* lookup(address);
-            const known = readRegistry(options.home).get(address.project);
-            const catalog = yield* project(known?.dir ?? options.projectDir);
-            const row = catalog.agents.find(row => row.name === address.row);
-            if (!row) return yield* Effect.fail(new CommsError("NetworkComms unknown alias"));
-            return yield* minted(networkRowIdentity(catalog, row));
-          }
-          if (address.kind === "did") {
-            const cache = yield* Effect.try({ try: () => network.readNetworkIdentities(options.home), catch: () => new CommsError("NetworkComms identity cache invalid") });
-            const agent = Object.entries(cache).find(([, entry]) => entry.did === address.did)?.[0];
-            if (!agent) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.did}`));
-            return agent;
-          }
-          const peer = yield* Effect.try({ try: () => exists(options.projectDir) ? networkCatalogPeer(options.home, options.projectDir, address.id) : undefined, catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms local catalog invalid") });
-          if (peer) return yield* minted(peer);
-          const configuredPeer = options.networkPeers?.()[address.id];
-          if (configuredPeer?.includes("/")) return configuredPeer;
-          const deskPeer = yield* Effect.try({ try: () => network.readNetworkPeers(options.home)[address.id], catch: () => new CommsError("NetworkComms peer cache invalid") });
-          if (deskPeer) return deskPeer;
-          if (configuredPeer) return configuredPeer;
-          const catalog = yield* project(options.projectDir);
-          const row = catalog.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id);
-          if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.id}`));
-          return yield* minted(networkRowIdentity(catalog, row));
+  const networkAdapter = Effect.gen(function* () {
+    const network = yield* Effect.tryPromise({ try: () => import("./comms-network.ts"), catch: () => new CommsError("NetworkComms adapter unavailable") });
+    yield* Effect.try({ try: () => network.readNetworkConfig(options.home, options.networkConfig?.()), catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms config invalid") });
+    const configuredPeers = options.networkPeers?.() ?? {};
+    yield* Effect.try({ try: () => network.seedNetworkPeers(options.home, configuredPeers), catch: () => new CommsError("NetworkComms peer cache unavailable") });
+    const recipient = (to: CommsTarget) => Effect.gen(function* () {
+        const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
+        // Identity on demand: Flagg mints an addressed row before the first send, or the send fails. Never the bare refusal.
+        const minted = (identity: string) => Effect.gen(function* () {
+          if (options.remote || address.kind === "did") return identity;
+          const cached = yield* Effect.try({ try: () => network.readNetworkIdentities(options.home)[identity], catch: () => new CommsError("NetworkComms identity cache invalid") });
+          if (cached) return identity;
+          const target = networkTargetRow(options.home, options.projectDir, address.kind === "alias" ? `${address.project}/${address.row}` : address.id);
+          if (!target || target.identity !== identity) return identity;
+          yield* network.provisionPreflipRow({ home: options.home, target, ...(options.run ? { run: options.run } : {}) }).pipe(
+            Effect.mapError(error => new CommsError(`NetworkComms could not mint ${identity} before the first send: ${error.message}; nothing sent, no intercom fallback`)));
+          return identity;
         });
-      /** Identities some row holds. A rowless author may never claim one: rows bind to their sessions. */
-      const rowIdentities = () => {
-        const rows = new Set<string>([...Object.values(options.networkPeers?.() ?? {}), ...Object.values(network.readNetworkPeers(options.home))]);
-        if (exists(options.projectDir)) for (const identity of Object.values(networkCatalogPeers(options.home, options.projectDir))) rows.add(identity);
-        return rows;
-      };
-      return network.createNetworkComms({
-        home: options.home,
-        configPath: options.networkConfig?.(),
-        deskRecord: options.deskRecord,
-        ...(options.run ? { run: options.run } : {}),
-        // A recorded predecessor of this session, or the session it was forked from, addresses this session.
-        accepts: (addressed, session) => addressed === session || isPredecessorSession(options.home, addressed, session) || options.forkParent?.() === addressed,
-        succeededBy: (addressed, session) => isPredecessorSession(options.home, session, addressed),
-        // Catalog peers first; then a predecessor speaks as its successor's row; then a rowless agent (a
-        // MUSTER_AGENT owner) whose authenticated DID is its own cached identity.
-        author: (author, senderDid) => recipient(author).pipe(Effect.catch(error => Effect.gen(function* () {
-          const successor = currentSuccessor(options.home, author);
-          if (successor) return yield* recipient(successor);
-          const rowless = yield* Effect.try({ try: () => {
-            const named = Object.entries(network.readNetworkIdentities(options.home)).find(([, entry]) => entry.did === senderDid)?.[0];
-            return named && !rowIdentities().has(named) ? named : undefined;
-          }, catch: () => new CommsError("NetworkComms identity cache invalid") });
-          if (rowless) return rowless;
-          return yield* Effect.fail(error);
-        }))),
-        session: to => Effect.gen(function* () {
-          const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
-          if (address.kind === "alias") {
-            const known = yield* Effect.try({ try: () => readRegistry(options.home).get(address.project), catch: () => new CommsError("NetworkComms registry unreadable") });
-            const catalog = yield* project(known?.dir ?? options.projectDir);
-            const row = catalog.slug === address.project ? catalog.agents.find(row => row.name === address.row) : undefined;
-            if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.project}/${address.row}`));
-            return row.sessionId;
-          }
-          if (address.kind === "session") {
-            const catalog = yield* project(options.projectDir).pipe(Effect.option);
-            const row = catalog._tag === "Some" ? catalog.value.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id) : undefined;
-            if (row) return row.sessionId;
-            const peers = options.networkPeers?.() ?? {};
-            return Object.entries(peers).find(([session, agent]) => session === address.id || agent === address.id)?.[0] ?? address.id;
-          }
-          return yield* Effect.fail(new Unsupported("NetworkComms direct DID send needs a recipient session"));
-        }),
-        sender: () => {
-          const sender = options.networkSender?.();
-          if (!sender) return undefined;
-          // Catalog binding wins over a launch environment's legacy bare name.
-          return catalogCommsSender(options.projectDir, sender.session) ?? sender;
-        },
-        recipient,
+        if (address.kind === "alias") {
+          // Validate project ownership before trusting a qualified cache key.
+          yield* lookup(address);
+          const known = readRegistry(options.home).get(address.project);
+          const catalog = yield* project(known?.dir ?? options.projectDir);
+          const row = catalog.agents.find(row => row.name === address.row);
+          if (!row) return yield* Effect.fail(new CommsError("NetworkComms unknown alias"));
+          return yield* minted(networkRowIdentity(catalog, row));
+        }
+        if (address.kind === "did") {
+          const cache = yield* Effect.try({ try: () => network.readNetworkIdentities(options.home), catch: () => new CommsError("NetworkComms identity cache invalid") });
+          const agent = Object.entries(cache).find(([, entry]) => entry.did === address.did)?.[0];
+          if (!agent) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.did}`));
+          return agent;
+        }
+        const peer = yield* Effect.try({ try: () => exists(options.projectDir) ? networkCatalogPeer(options.home, options.projectDir, address.id) : undefined, catch: error => error instanceof CommsError ? error : new CommsError("NetworkComms local catalog invalid") });
+        if (peer) return yield* minted(peer);
+        const configuredPeer = options.networkPeers?.()[address.id];
+        if (configuredPeer?.includes("/")) return configuredPeer;
+        const deskPeer = yield* Effect.try({ try: () => network.readNetworkPeers(options.home)[address.id], catch: () => new CommsError("NetworkComms peer cache invalid") });
+        if (deskPeer) return deskPeer;
+        if (configuredPeer) return configuredPeer;
+        const catalog = yield* project(options.projectDir);
+        const row = catalog.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id);
+        if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.id}`));
+        return yield* minted(networkRowIdentity(catalog, row));
       });
-    }
+    /** Identities some row holds. A rowless author may never claim one: rows bind to their sessions. */
+    const rowIdentities = () => {
+      const rows = new Set<string>([...Object.values(options.networkPeers?.() ?? {}), ...Object.values(network.readNetworkPeers(options.home))]);
+      if (exists(options.projectDir)) for (const identity of Object.values(networkCatalogPeers(options.home, options.projectDir))) rows.add(identity);
+      return rows;
+    };
+    return network.createNetworkComms({
+      home: options.home,
+      configPath: options.networkConfig?.(),
+      deskRecord: options.deskRecord,
+      ...(options.run ? { run: options.run } : {}),
+      // A recorded predecessor of this session, or the session it was forked from, addresses this session.
+      accepts: (addressed, session) => addressed === session || isPredecessorSession(options.home, addressed, session) || options.forkParent?.() === addressed,
+      succeededBy: (addressed, session) => isPredecessorSession(options.home, session, addressed),
+      // Catalog peers first; then a predecessor speaks as its successor's row; then a rowless agent (a
+      // MUSTER_AGENT owner) whose authenticated DID is its own cached identity.
+      author: (author, senderDid) => recipient(author).pipe(Effect.catch(error => Effect.gen(function* () {
+        const successor = currentSuccessor(options.home, author);
+        if (successor) return yield* recipient(successor);
+        const rowless = yield* Effect.try({ try: () => {
+          const named = Object.entries(network.readNetworkIdentities(options.home)).find(([, entry]) => entry.did === senderDid)?.[0];
+          return named && !rowIdentities().has(named) ? named : undefined;
+        }, catch: () => new CommsError("NetworkComms identity cache invalid") });
+        if (rowless) return rowless;
+        return yield* Effect.fail(error);
+      }))),
+      session: to => Effect.gen(function* () {
+        const address = yield* Effect.try({ try: () => commsAddress(to), catch: () => new CommsError("NetworkComms invalid recipient") });
+        if (address.kind === "alias") {
+          const known = yield* Effect.try({ try: () => readRegistry(options.home).get(address.project), catch: () => new CommsError("NetworkComms registry unreadable") });
+          const catalog = yield* project(known?.dir ?? options.projectDir);
+          const row = catalog.slug === address.project ? catalog.agents.find(row => row.name === address.row) : undefined;
+          if (!row) return yield* Effect.fail(new CommsError(`NetworkComms unknown recipient: ${address.project}/${address.row}`));
+          return row.sessionId;
+        }
+        if (address.kind === "session") {
+          const catalog = yield* project(options.projectDir).pipe(Effect.option);
+          const row = catalog._tag === "Some" ? catalog.value.agents.find(row => row.sessionId === address.id || row.intercomAddress === address.id || row.name === address.id) : undefined;
+          if (row) return row.sessionId;
+          const peers = options.networkPeers?.() ?? {};
+          return Object.entries(peers).find(([session, agent]) => session === address.id || agent === address.id)?.[0] ?? address.id;
+        }
+        return yield* Effect.fail(new Unsupported("NetworkComms direct DID send needs a recipient session"));
+      }),
+      sender: () => {
+        const sender = options.networkSender?.();
+        if (!sender) return undefined;
+        // Catalog binding wins over a launch environment's legacy bare name.
+        return catalogCommsSender(options.projectDir, sender.session) ?? sender;
+      },
+      recipient,
+    });
+  });
+  const intercomAdapter = Effect.sync(() => {
     transport ??= createIntercom(options.events, options.createId);
     return IntercomComms(transport, lookup);
   });
+  const adapter = selection.pipe(Effect.flatMap(selected => selected === "network" ? networkAdapter : intercomAdapter));
   const current = (to: CommsTarget) => Effect.try({ try: () => assertCurrentSession(options.home, to), catch: error => error instanceof CommsError ? error : new CommsError(String(error)) });
-  const ratking = options.adapterEnv() === "ratking" ? options.ratking?.() : undefined;
-  if (ratking) {
-    // The legacy consumer drains an existing legacy identity only; it never mints one or reads the ratking name.
-    const legacyDrain = () => joinedFact;
-    const shaped: CommsShape = {
-      ...ratking,
-      legacyDrain,
-      send: (to, message) => current(to).pipe(Effect.flatMap(() => ratking.send(to, message)), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: `NOT DELIVERED: ${error.message} (ratking; no fallback)` }))),
-      postOwner: (to, item) => current(to).pipe(Effect.flatMap(() => ratking.postOwner ? ratking.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "ratking owner transport unavailable" })), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: `NOT DELIVERED: ${error.message} (ratking; no fallback)` }))),
-      consume: receive => joinedFact.pipe(Effect.flatMap(joined => joined ? adapter.pipe(Effect.flatMap(service => service.consume ? service.consume(receive) : Effect.void)) : Effect.void)),
-    };
-    return { ...shaped, dispose: () => { transport?.dispose(); transport = undefined; },
-      rejoin: () => { for (const [key, seen] of joins) if (!seen.joined) joins.delete(key); } };
-  }
+  const ratking = () => options.ratking?.() ?? RatkingMissing;
+  const failed = (error: CommsError): CommsDelivery => ({ status: "failed", detail: error.message });
+  /** Ratking when selected, else the legacy path. pi-ratking absent is a loud failure from RatkingMissing, never intercom. */
+  const route = <A, E>(onRatking: (service: CommsShape) => Effect.Effect<A, E>, legacy: Effect.Effect<A, E | CommsError>) =>
+    selection.pipe(Effect.flatMap(selected => selected === "ratking" ? onRatking(ratking()) : legacy));
   const service: CommsShape = {
-    relay: (to, message) => current(to).pipe(Effect.flatMap(() => Effect.suspend(() => {
+    // The explicit intercom path; under ratking it is a ratking send, and without pi-intercom it fails at once.
+    relay: (to, message) => current(to).pipe(Effect.flatMap(() => route(service => service.send(to, message), Effect.suspend(() => {
+      if (options.intercom && !options.intercom()) return Effect.succeed<CommsDelivery>({ status: "failed", detail: "pi-intercom not loaded; no intercom fallback" });
       transport ??= createIntercom(options.events, options.createId);
       return IntercomComms(transport, lookup).send(to, message);
-    })), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: error.message }))),
-    mode: () => selection.pipe(Effect.flatMap(selected => selected === "intercom" ? Effect.succeed("intercom" as const) : adapter.pipe(Effect.flatMap(service => service.mode ? service.mode() : Effect.succeed("network" as const))))),
-    postOwner: (to, item) => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.postOwner ? service.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "owner mailbox not selected" })), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: error.message }))),
-    consume: receive => adapter.pipe(Effect.flatMap(service => service.consume ? service.consume(payload => adapter.pipe(Effect.flatMap(current => current.consume ? receive(payload) : Effect.fail(new CommsError("NetworkComms disabled by project policy; consumer stopped"))))) : Effect.void)),
-    send: (to, message) => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.send(to, message)), Effect.catchCause(cause => Effect.succeed<CommsDelivery>({ status: "failed", detail: String(cause) }))),
-    ask: (to, message, opts) => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.ask(to, message, opts))),
-    reply: (id, message) => adapter.pipe(Effect.flatMap(service => service.reply(id, message))),
-    wake: to => current(to).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.wake(to))),
-    resolve: identity => current(identity).pipe(Effect.flatMap(() => adapter), Effect.flatMap(service => service.resolve(identity))),
-    sessions: () => adapter.pipe(Effect.flatMap(service => service.sessions())),
+    }))), Effect.catch(error => Effect.succeed(failed(error)))),
+    mode: () => selection.pipe(Effect.flatMap(selected => selected === "network" ? adapter.pipe(Effect.flatMap(service => service.mode ? service.mode() : Effect.succeed("network" as const))) : Effect.succeed(selected))),
+    legacyDrain,
+    postOwner: (to, item) => current(to).pipe(Effect.flatMap(() => route(service => service.postOwner ? service.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "ratking owner transport unavailable" }),
+      adapter.pipe(Effect.flatMap(service => service.postOwner ? service.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "owner mailbox not selected" }))))),
+      Effect.catch(error => Effect.succeed(failed(error)))),
+    // Under ratking the legacy consumer only drains an existing legacy identity; it never mints one or reads the ratking name.
+    consume: receive => route(() => legacyDrain().pipe(Effect.flatMap(drain => drain ? networkAdapter.pipe(Effect.flatMap(service => service.consume ? service.consume(receive) : Effect.void)) : Effect.void)),
+      adapter.pipe(Effect.flatMap(service => service.consume ? service.consume(payload => adapter.pipe(Effect.flatMap(current => current.consume ? receive(payload) : Effect.fail(new CommsError("NetworkComms disabled by project policy; consumer stopped"))))) : Effect.void))),
+    send: (to, message) => current(to).pipe(Effect.flatMap(() => route(service => service.send(to, message), adapter.pipe(Effect.flatMap(service => service.send(to, message))))),
+      Effect.catchCause(cause => Effect.succeed<CommsDelivery>({ status: "failed", detail: String(cause) }))),
+    ask: (to, message, opts) => current(to).pipe(Effect.flatMap(() => route(service => service.ask(to, message, opts), adapter.pipe(Effect.flatMap(service => service.ask(to, message, opts)))))),
+    reply: (id, message) => route(service => service.reply(id, message), adapter.pipe(Effect.flatMap(service => service.reply(id, message)))),
+    wake: to => current(to).pipe(Effect.flatMap(() => route(service => service.wake(to), adapter.pipe(Effect.flatMap(service => service.wake(to)))))),
+    resolve: identity => current(identity).pipe(Effect.flatMap(() => route(service => service.resolve(identity), adapter.pipe(Effect.flatMap(service => service.resolve(identity)))))),
+    sessions: () => route(service => service.sessions(), adapter.pipe(Effect.flatMap(service => service.sessions()))),
   };
   return { ...service, dispose: () => { transport?.dispose(); transport = undefined; },
     /** Forget join misses: a fix or a policy flip takes effect on the next selection, not after the 20 s recheck. */

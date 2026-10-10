@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import type { AgentRow, LaunchProfile, Project, Role, RoleDefaults } from "./domain.ts";
-import { ROLE_DEFAULTS } from "./domain.ts";
+import { ROLE_DEFAULTS, policyComms } from "./domain.ts";
 
 /** Loaders that keep function names (tsx, esbuild keepNames) wrap a serialized function's inner
  * functions in `__name(...)`. A bare remote `node -e` has no such helper, so every script that
@@ -109,7 +109,8 @@ export function agentEnv(project: Project, row: AgentRow): Record<string, string
     ...(row.ownerName ? { MUSTER_OWNER_NAME: row.ownerName } : {}),
     MUSTER_LANE: row.lane,
     MUSTER_ROLE: row.role,
-    ...(project.policy?.comms === "ratking" ? { MUSTER_COMMS: "ratking" } : {}),
+    // Unset policy is ratking, so rows ride pi-ratking by default.
+    ...(policyComms(project.policy) === "ratking" ? { MUSTER_COMMS: "ratking" } : {}),
     // pi-ratking claims this name; Muster mints nothing.
     RATKING_NAME: `${project.slug}/${row.name}`,
   };

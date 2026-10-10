@@ -60,9 +60,10 @@ it("network aliases and remote intercom addresses bind to the real Pi session, n
 });
 
 describe("launch guards", () => {
-  it("remote env follows project policy: intercom ignores the block, network requires it and passes only its path", () => {
+  it("remote env follows project policy: unset is ratking, intercom ignores the block, network requires it and passes only its path", () => {
     expect(remoteCommsEnvironment({ policy: { comms: "intercom" } }, { comms: { config: "/private/network.json" } })).toEqual({ MUSTER_COMMS: "intercom" });
-    expect(remoteCommsEnvironment({ policy: undefined }, {})).toEqual({ MUSTER_COMMS: "intercom" });
+    expect(remoteCommsEnvironment({ policy: undefined }, {})).toEqual({ MUSTER_COMMS: "ratking" });
+    expect(remoteCommsEnvironment({ policy: { comms: "carrier-pigeon" } }, {})).toEqual({ MUSTER_COMMS: "ratking" });
     expect(() => remoteCommsEnvironment({ policy: { comms: "network" } }, {})).toThrow("config block");
     expect(remoteCommsEnvironment({ policy: { comms: "network" } }, { comms: { config: "/private/network.json" } })).toEqual({ MUSTER_COMMS: "network", MUSTER_NETWORK_CONFIG: "/private/network.json" });
   });

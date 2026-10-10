@@ -16,7 +16,7 @@ import { MAX_CADENCE_MINUTES, decodeAgentRow, decodeNetworkPeers, decodeNetworkD
 import { sendDesk } from "./desk-route.ts";
 import { createComms, catalogCommsSender, catalogNetworkPeers, forkParentSession, retiredCatalogSession, retiredSessionReason, successorRowSender } from "./comms.ts";
 import { lostDeliveryText } from "./comms-fallback.ts";
-import { RATKING_MESSAGE, RatkingComms, ownerAliases, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking } from "./comms-ratking.ts";
+import { RATKING_MESSAGE, RatkingComms, intercomLoaded, ownerAliases, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking } from "./comms-ratking.ts";
 import {
   pullRemoteOwnerInbox,
   agentClose,
@@ -161,8 +161,9 @@ export default function muster(host: ExtensionAPI) {
   const comms = new Map<string, ReturnType<typeof createComms>>();
   // pi-ratking registers at load; Muster asks at call time and never starts a reader on the ratking name.
   const ratkingHere = () => { try { return ratkingLoaded(pi.getAllTools(), env.RATKING_TOOL); } catch { return false; } };
-  // Opt-in: a Pi rides ratking only when launched with MUSTER_COMMS=ratking and pi-ratking is loaded. The fleet stays mixed.
-  const ratkingFor = (dir: string, ctx: ExtensionContext) => env.MUSTER_COMMS === "ratking" && ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
+  const intercomHere = () => { try { return intercomLoaded(pi.getAllTools()); } catch { return false; } };
+  // pi-ratking's transport whenever it is loaded; createComms decides at call time whether ratking is selected.
+  const ratkingFor = (dir: string, ctx: ExtensionContext) => ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
     sender: () => ctx.sessionManager.getSessionId(),
     target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, aliases: ownerAliases(homedir()) }) }) : undefined;
   const rejoinComms = () => { for (const service of comms.values()) service.rejoin(); };
@@ -212,6 +213,7 @@ export default function muster(host: ExtensionAPI) {
             networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
             forkParent: () => forkParentSession(ctx.sessionManager.getHeader()),
             ratking: () => ratkingFor(dir, ctx),
+            intercom: intercomHere,
           });
           comms.set(key, service);
         }
@@ -337,7 +339,7 @@ export default function muster(host: ExtensionAPI) {
       name: "packet_report",
       label: "Muster packet report",
       description:
-        "Report your one finished packet to your owner: a commit (or an artifact file) plus the checks you ran. Writes the report file, records the packet, and queues an action mentioning your owner (intercom fallback for old or unavailable readers). Call it once, after committing. It is your only report channel.",
+        "Report your one finished packet to your owner: a commit (or an artifact file) plus the checks you ran. Writes the report file, records the packet, and queues an action mentioning your owner over Rat King. Call it once, after committing. It is your only report channel.",
       promptSnippet: "packet_report: report your committed result and checks to your owner, once",
       parameters: Type.Object({
         commit: Type.Optional(Type.String({ description: "Commit id or ref in your checkout" })),
@@ -391,15 +393,17 @@ export default function muster(host: ExtensionAPI) {
 
   pi.registerTool({
     name: "desk_send", label: "Fleet desk send",
-    description: "Send to a registered project/row desk or role over the fleet mailbox. Any intercom fallback is reported with a private receipt. Accepted is not acked.",
+    description: "Send to a registered project/row desk or role over Rat King by name, with a private receipt. Not delivered fails loudly, with no fallback. Accepted is not acked.",
     parameters: Type.Object({ to: Type.String(), text: Type.String() }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const error = unreadable([params.text]); if (error) return error;
       const dir = resolve(env.MUSTER_PROJECT ?? ctx.cwd);
-      const ratking = ratkingFor(dir, ctx);
-      if (ratking) return run(ctx, signal, sendDeskRatking({ home: homedir(), dir, to: params.to, text: params.text,
-        sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms: ratking,
-      }), result => `delivery: ratking · ${result.network.status}${result.network.detail ? ` (${result.network.detail})` : ""}${result.network.id ? ` · ratking id: ${result.network.id}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`, result => result.lost);
+      // Ratking is the default; pi-ratking absent fails loudly here, never over intercom.
+      const mode = await Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("ratking" as const)).pipe(
+        Effect.provide(layer(ctx)), Effect.orElseSucceed(() => "network" as const)));
+      if (mode === "ratking") return run(ctx, signal, Effect.flatMap(Comms, comms => sendDeskRatking({ home: homedir(), dir, to: params.to, text: params.text,
+        sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms,
+      })), result => `delivery: ratking · ${result.network.status}${result.network.detail ? ` (${result.network.detail})` : ""}${result.network.id ? ` · ratking id: ${result.network.id}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`, result => result.lost);
       const service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir,
         adapterEnv: () => "network", networkConfig: () => env.MUSTER_NETWORK_CONFIG,
         networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),

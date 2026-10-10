@@ -24,7 +24,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { LaunchJob, AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, silenceLimits } from "./domain.ts";
+import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
 import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
 import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
@@ -344,7 +344,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
-      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(project.policy?.comms), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
+      return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(policyComms(project.policy)), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
@@ -1258,6 +1258,8 @@ export const projectOpen = (params: ProjectOpenInput) =>
         deskExtension:
           params.deskExtension === undefined ? (existsSync(DEFAULT_DESK_EXTENSION) ? DEFAULT_DESK_EXTENSION : null) : params.deskExtension,
         cadenceMinutes: params.cadenceMinutes ?? null,
+        // A new project records ratking. Existing files are never given a comms value they lack.
+        policy: { comms: "ratking" },
         state: "setup",
         lanes: [],
         agents: [],
@@ -2016,7 +2018,7 @@ const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaun
   });
 
 const sideDeskFence = (parent: string) =>
-  `You are a side desk of ${parent}. Talk with Joel and evolve designs. Write briefs and decision notes, and hand them to the parent desk over intercom. A side desk never prompts or launches lanes or workers, never lands packets, and never acts on prod.`;
+  `You are a side desk of ${parent}. Talk with Joel and evolve designs. Write briefs and decision notes, and hand them to the parent desk with desk_send. A side desk never prompts or launches lanes or workers, never lands packets, and never acts on prod.`;
 
 /** The default first prompt fits the role; a supplied side-desk prompt cannot omit its fence. */
 export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
@@ -2040,7 +2042,7 @@ const guardSideDesk = (project: Project, sessionId: string, tool: string) =>
     const ownDir = process.env.MUSTER_PROJECT;
     const own = ownDir && resolve(ownDir) !== resolve(project.dir) ? yield* load(ownDir) : project;
     const side = own.agents.find(row => row.sessionId === sessionId && row.side);
-    if (side) return yield* new GuardFailed({ guard: "side-desk", message: `side desk ${side.name} cannot use ${tool}; discuss designs and hand briefs to ${side.side?.parent} over intercom` });
+    if (side) return yield* new GuardFailed({ guard: "side-desk", message: `side desk ${side.name} cannot use ${tool}; discuss designs and hand briefs to ${side.side?.parent} with desk_send` });
   });
 
 const sideParent = (project: Project, from: string | undefined, sessionId: string) =>
@@ -3982,7 +3984,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
     const tracer = yield* traceProjectTasks(final, panes, ingestion.failedMachines);
-    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : [])] };
+    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : []), ...unknownCommsNote(final.policy)] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
@@ -4196,5 +4198,6 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
         ? `comms: network. Provisioned live rows; on current pi-muster each joins its mailbox within about a minute, older ones need a restart: ${(yield* provisionLiveRows({ home: (yield* MusterEnv).home, project, rows: live })).join("; ")}.`
         : "comms: network. No live rows to provision.");
     }
+    notes.push(...unknownCommsNote(project.policy));
     return { project, policy: effectivePolicy(roster, project.policy, project.slug), notes };
   });

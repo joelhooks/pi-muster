@@ -22,7 +22,7 @@ Retros run only after an incident (a bad landing, outage or lost work), friction
 pi install git:github.com/joelhooks/pi-muster
 ```
 
-Muster expects [Herdr](https://herdr.dev), pi-intercom, and pi-until in the same Pi install. Two paths default to the author's rig and can be pointed elsewhere:
+Muster expects [Herdr](https://herdr.dev), pi-ratking (`@rat-king/pi-ratking`) and pi-until in the same Pi install. Muster traffic rides Rat King by name; pi-intercom is not needed. An unset `policy.comms`, or a value this Muster does not know, means ratking; without pi-ratking loaded, Muster sends fail loudly instead of falling back. Two paths default to the author's rig and can be pointed elsewhere:
 
 - `MUSTER_WORKER_WORKTREE`: the script that allocates, harvests, and removes worker clones.
 - `MUSTER_DESK_EXTENSION`: the Pi extension a desk agent loads to read its queue.
@@ -130,7 +130,7 @@ Only a mention wakes a reader, and only when idle; busy arrivals ride on the nex
 
 Storage is private local JSONL at `~/.local/state/muster/owner-queue/<session>.jsonl`, separate from Joel's desk queue. Lines use `dev.muster.note.post` records with local `muster://` URIs, time-sortable keys, truncated canonical-JSON SHA-256 cids, session authors and UTF-8 mention facets. Titles cap at 200 characters, bodies at 4096 bytes. NSIDs and the local lexicon live in `src/owner-lexicon.ts` and `.json`. This is not a PDS: follows, a public timeline and real atproto transport are deferred.
 
-A watch plus a 30-second poll delivers mentions. Session custom entries persist the cursor and delivered URIs across reload. A reader presence heartbeat expires after two minutes; a missing, stale or dead reader, queue failure or telemetry failure uses intercom for waking posts, while retaining the queued copy when possible. Tool results identify the path. Relay counters record metadata only, never titles or bodies.
+A watch plus a 30-second poll delivers mentions. Session custom entries persist the cursor and delivered URIs across reload. A reader presence heartbeat expires after two minutes; under the legacy intercom policy, a missing, stale or dead reader, queue failure or telemetry failure sends waking posts directly, while retaining the queued copy when possible. Under ratking, the default, every post rides Rat King. Tool results identify the path. Relay counters record metadata only, never titles or bodies.
 
 ## Switchboard
 
@@ -139,14 +139,14 @@ One inbox over every project's desk queue. It reads and routes; project desks st
 - The collapsed widget is a theme-colored flame graph, at most eight lines: four to six flame rows, project labels (`☠` means a dead desk), and one open-count summary. Blocked/approval/decision weights are 3/2/1; logarithmic age adds height and heat. Quiet projects show dim embers and yield space first. Below 40 columns, with `NO_COLOR`, `TERM=dumb`, or an uncolored theme, it shows only the plain summary.
 - Flames flicker deterministically at about 7 fps, flare for 1.5 seconds on arrivals, and settle for 2 seconds on resolutions. Only the active visible Switchboard animates; the overlay pauses it. After 60 seconds without queue changes or input it freezes, resuming on either. Pi-tui 0.84.3 exposes no terminal-focus notification API; incoming CSI focus reports are honored if the host supplies them. Animation only invalidates the widget and requests a TUI render, never a model turn.
 - The expanded `alt+s` overlay keeps the ranked `project#id` asks and ticker in its header, above the navigable project rows. It keeps the newest five queue events for an hour; resolutions show `✓ resolved`. On short terminals the header yields room to navigation.
-- Queue changes repaint without a model turn, with a one-second timer as the watch backstop. Queue reads retain byte offsets and reset on truncation or replacement; ages tick from cached records. Fleet topology and desk liveness refresh every 30 seconds or on registry changes. `☠ no live desk` means no catalog desk or owner is in the live intercom session list; an unavailable session list shows no marker. The first refresh failure is logged with its message.
+- Queue changes repaint without a model turn, with a one-second timer as the watch backstop. Queue reads retain byte offsets and reset on truncation or replacement; ages tick from cached records. Fleet topology and desk liveness refresh every 30 seconds or on registry changes. `☠ no live desk` means no catalog desk or owner is in the live session list; an unavailable session list, as under ratking, shows no marker. The first refresh failure is logged with its message.
 - Nudges are only a courtesy: writes before Switchboard registration, old extension versions, and external queue writers can miss them. Activation and filesystem reads show the entire open queue anyway.
 - `alt+s` or `/switchboard` browses everything: `j`/`k` move, `space` folds, `enter` puts an `[project#id]` reference in the editor, `a` answers, `d` marks done.
 - `desk_inbox` lists open items ranked blocked, approval, decision, oldest first. It is read-only; only `subscribe: true`, `--switchboard`, or `/switchboard` makes a session the Switchboard that is paged on every queue change, and never one Muster launched (any `MUSTER_ROLE`). `desk_answer` appends a resolving line to the item's own queue and nudges that project's desk.
 
 ## Relay diet
 
-Packet reports still send one actionable intercom message to the owner. The owner must verify and land them.
+Packet reports still send one actionable owner-queue message to the owner. The owner must verify and land them.
 
 The Muster desk feed suppresses ids created by this session's `desk_post`, `desk_answer`, and `desk_rulings` tools. It reserves the queue id before writing, keeps it in memory, and saves a `muster-desk-self-post` custom session entry for reload. A failed attempt may leave an unused reserved id. Other sessions' items still arrive, even when their sender label matches. The queue and inbox remain unchanged; only self-delivery is suppressed.
 
