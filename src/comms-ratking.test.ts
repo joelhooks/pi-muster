@@ -6,7 +6,7 @@ import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentEnv } from "./argv.ts";
 import { createComms, remoteCommsEnvironment, selectComms } from "./comms.ts";
-import { networkReceiptPath } from "./comms-fallback.ts";
+const networkReceiptPath = (home: string) => join(home, ".local/state/muster/ratking-receipts.jsonl");
 import { RATKING_MESSAGE, RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, ownerName, ownerSelfName, ratkingInbound, ratkingLoaded, ratkingSend, ratkingTarget } from "./comms-ratking.ts";
 import { decodePolicy, type AgentRow, type Project } from "./domain.ts";
 import muster from "./extension-main.ts";
@@ -187,12 +187,12 @@ describe("selection", () => {
     const ratking = RatkingComms({ events: fake.events, createId, sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) });
     const intercom: Array<Record<string, unknown>> = [];
     const events = { emit: (_event: string, payload: unknown) => { intercom.push(payload as Record<string, unknown>); }, on: () => () => {} };
-    const withRatking = createComms({ events, createId, home, projectDir: home, adapterEnv: () => "ratking", ratking: () => ratking });
+    const withRatking = createComms({ ratking: () => ratking });
     expect(await Effect.runPromise(withRatking.mode!())).toBe("ratking");
     expect(await Effect.runPromise(withRatking.send("desk-session", "hi"))).toMatchObject({ status: "delivered" });
     expect(fake.requests).toHaveLength(1);
 
-    const without = createComms({ events, createId, home, projectDir: home, adapterEnv: () => "ratking", ratking: () => undefined });
+    const without = createComms({ ratking: () => undefined });
     expect(await Effect.runPromise(without.mode!())).toBe("ratking");
     expect(await Effect.runPromise(without.send("desk-session", "hi"))).toMatchObject({ status: "failed", detail: expect.stringContaining("pi-ratking not loaded") });
     expect(intercom).toEqual([]);
@@ -200,34 +200,33 @@ describe("selection", () => {
 });
 
 describe("default", () => {
-  it("MUSTER_COMMS=network keeps the network path; unset rides ratking", async () => {
+  it("MUSTER_COMMS=network is ignored; unset rides ratking", async () => {
     const home = mkdtempSync(join(tmpdir(), "ratking-optin-"));
     const fake = fakeRatking(() => ({ status: "delivered", id: "m", seq: 1 }));
     const ratking = vi.fn(() => RatkingComms({ events: fake.events, createId, sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) }));
     const intercom: Array<Record<string, unknown>> = [];
     const events = { emit: (_event: string, payload: unknown) => { intercom.push(payload as Record<string, unknown>); }, on: () => () => {} };
-    const network = createComms({ events, createId, home, projectDir: home, adapterEnv: () => "network", ratking });
+    const network = createComms({ ratking });
     const mode = await Effect.runPromise(network.mode!().pipe(Effect.orElseSucceed(() => "network-unconfigured")));
-    expect(mode).not.toBe("ratking");
+    expect(mode).toBe("ratking");
     const sent = await Effect.runPromise(network.send("desk-session", "hi").pipe(Effect.orElseSucceed(() => ({ status: "failed" as const, detail: "network path" }))));
-    // Today's network path: it reads the network config, which this home lacks.
-    expect(sent.detail).toContain("NetworkComms");
-    expect(fake.requests).toEqual([]);
-    expect(ratking).not.toHaveBeenCalled();
-    const unset = createComms({ events, createId, home, projectDir: home, adapterEnv: () => undefined, ratking });
+    expect(sent.status).toBe("delivered");
+    expect(fake.requests).toHaveLength(1);
+    expect(ratking).toHaveBeenCalled();
+    const unset = createComms({ ratking });
     expect(await Effect.runPromise(unset.mode!())).toBe("ratking");
     expect(await Effect.runPromise(unset.send("desk-session", "hi"))).toMatchObject({ status: "delivered" });
-    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests).toHaveLength(2);
     expect(intercom).toEqual([]);
   });
 
-  it("launched rows ride ratking unless the project chose network or intercom", () => {
+  it("launched rows always ride ratking, including legacy policies", () => {
     const worker = { ...row({ name: "worker" }), profile: { env: {} }, lane: "work", role: "worker" } as AgentRow;
     expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "ratking" } } as unknown as Project, worker).MUSTER_COMMS).toBe("ratking");
     expect(agentEnv({ slug: "pilot", dir: "/p" } as Project, worker).MUSTER_COMMS).toBe("ratking");
     expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "carrier-pigeon" } } as unknown as Project, worker).MUSTER_COMMS).toBe("ratking");
-    expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "network" } } as unknown as Project, worker).MUSTER_COMMS).toBeUndefined();
-    expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "intercom" } } as unknown as Project, worker).MUSTER_COMMS).toBeUndefined();
+    expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "network" } } as unknown as Project, worker).MUSTER_COMMS).toBe("ratking");
+    expect(agentEnv({ slug: "pilot", dir: "/p", policy: { comms: "intercom" } } as unknown as Project, worker).MUSTER_COMMS).toBe("ratking");
     expect(remoteCommsEnvironment({ policy: { comms: "ratking" } } as never, {} as never)).toEqual({ MUSTER_COMMS: "ratking" });
     expect(remoteCommsEnvironment({ policy: undefined } as never, {} as never)).toEqual({ MUSTER_COMMS: "ratking" });
     expect(decodePolicy({ deployLevel: 1, wipLimit: 3, flowStallMin: 120, landWaitMin: 30, comms: "ratking" }).comms).toBe("ratking");
@@ -236,33 +235,4 @@ describe("default", () => {
   });
 });
 
-describe("legacy drain", () => {
-  it("under pi-ratking the network module never starts a consumer without an existing legacy identity", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ratking-drain-"));
-    const ratking = RatkingComms({ events: createEventBus(), createId, sender: () => "me", target: () => ({ name: "pilot/desk", session: "me" }) });
-    const service = createComms({ events: createEventBus(), createId, home, projectDir: home, adapterEnv: () => "ratking",
-      networkSender: () => ({ agent: "pilot/desk", session: "me" }), ratking: () => ratking });
-    expect(await Effect.runPromise(service.legacyDrain!())).toBe(false);
-    const receive = vi.fn(() => Effect.void);
-    await Effect.runPromise(service.consume!(receive));
-    expect(receive).not.toHaveBeenCalled();
-  });
-
-  it("the owner feed starts the legacy consumer under ratking only while a legacy identity needs draining", async () => {
-    for (const drain of [false, true]) {
-      const home = mkdtempSync(join(tmpdir(), "ratking-feed-"));
-      const handlers = new Map<string, (...args: unknown[]) => unknown>();
-      const pi = { on: (name: string, fn: (...args: unknown[]) => unknown) => handlers.set(name, fn), registerTool() {}, registerMessageRenderer() {}, appendEntry() {}, sendMessage() {}, sendUserMessage() {} };
-      const ctx = { isIdle: () => false, sessionManager: { getSessionId: () => "reader", getBranch: () => [] } };
-      const consume = vi.fn(async () => {});
-      const legacyDrain = vi.fn(async () => drain);
-      registerOwnerFeed(pi as never, { HOME: home }, { mode: async () => "ratking", legacyDrain, consume }, async () => false);
-      try {
-        handlers.get("session_start")!({}, ctx);
-        await vi.waitFor(() => expect(legacyDrain).toHaveBeenCalled());
-        await new Promise(resolve => setTimeout(resolve, 20));
-        if (drain) expect(consume).toHaveBeenCalled(); else expect(consume).not.toHaveBeenCalled();
-      } finally { await handlers.get("session_shutdown")!(); }
-    }
-  });
-});
+;

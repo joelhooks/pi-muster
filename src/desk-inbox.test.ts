@@ -6,7 +6,7 @@ import { Effect, Layer, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { describe, expect, it, vi } from "vitest";
 import { consumeDeskAnswer, deskInbox, openDeskInbox, deskInboxCard, deskInboxItem, deskInboxUpdate } from "./desk-inbox.ts";
-import { networkFencePath } from "./comms-network.ts";
+import { networkFencePath } from "./phone-mailbox.ts";
 import { Main as Item } from "./vendor/rat-king-lexicon/desk.item.ts";
 import { Main as Answer } from "./vendor/rat-king-lexicon/desk.answer.ts";
 import { Main as Update } from "./vendor/rat-king-lexicon/desk.update.ts";

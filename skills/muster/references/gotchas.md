@@ -65,7 +65,7 @@ When a larger squash changes the same paths, a dirty clone fails verification, o
 
 A manually resumed desk does not need another restore. Run `project_status act: true` and read the board's session identity evidence. A resumed pane does not inherit the launch-profile receipt or close authority. Re-check `until list` and `herdr_watch list` before re-arming watches.
 
-If the same journal was resumed twice, fork the unbound copy with `/fork` to keep its context under a new session id, or launch a named fork from the bound row. Do not repeatedly restore or adopt the duplicate; that does not create a new identity. The duplicate's own feed asks it to fork, and a second network reader must not run on the row's DID.
+If the same journal was resumed twice, fork the unbound copy with `/fork` to keep its context under a new session id, or launch a named fork from the bound row. Do not repeatedly restore or adopt the duplicate; that does not create a new identity. The duplicate's own feed asks it to fork. pi-ratking owns the row name's single reader; Muster starts none. Use `comms_doctor` to check the expected name against its session claim.
 
 Restore is not an ownership handover. To take the catalog's open rows explicitly, use `project_status takeover: true`. A session can restart itself even when another session owns its row. Other actors must own the row before restarting it.
 

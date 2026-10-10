@@ -6,13 +6,12 @@ import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetRe
 import { load, mutate, projectPath } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { Comms, MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
-import { appendOwnerItem, ingestOwnerItem, ownerRoute } from "./owner-queue.ts";
+import { appendOwnerItem, ingestOwnerItem } from "./owner-queue.ts";
 import { ownerFeed } from "./owner-feed.ts";
 import muster, { registerRestartExit } from "./extension-main.ts";
 import * as ops from "./ops.ts";
 import { InputError } from "./errors.ts";
-import { NetworkComms, sessionSuccessorsPath, retiredSessionReason } from "./comms.ts";
-import { decodeSessionSuccessor } from "./domain.ts";
+const sessionSuccessorsPath = (home: string) => join(home, ".local/state/muster/session-successors.jsonl");
 import { snapshotRestartSession } from "./herdr.ts";
 import { existsSync } from "node:fs";
 
@@ -89,40 +88,9 @@ describe("restart by fork", () => {
     expect(result.row.owner).toBe("original-owner");
     expect((await s.run(load(s.dir))).agents[0]?.owner).toBe("original-owner");
   });
-  it.each([false, true])("network restart activates after rebind and proves mailbox continuation (remote %s)", async remote => {
-    const s = await setup(remote);
-    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, policy: { ...p.policy!, comms: "network" } }, undefined] as const)));
-    const sent = vi.fn((id: import("./runtime.ts").CommsTarget, message: string) => Effect.sync(() => {
-      const p = JSON.parse(readFileSync(projectPath(s.dir), "utf8"));
-      const row = p.agents.find((row: { sessionId: string }) => row.sessionId === id);
-      expect(row).toBeTruthy(); // Committed before mailbox work.
-      expect(row.restore.env.MUSTER_COMMS).toBe("network");
-      expect(JSON.parse(readFileSync(row.restore.env.MUSTER_RESTART_GATE, "utf8"))).toBe(id);
-      appendFileSync(row.sessionFile, JSON.stringify({ type: "message", message: { role: "user", content: `${message}\n\n[Authenticated agent message from owner, not Joel.]` } }) + "\n" + JSON.stringify({ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Continuing." }], stopReason: "stop" } }) + "\n");
-      return { status: "accepted" as const };
-    }));
-    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.provideService(Comms, { ...NetworkComms, send: sent })));
-    expect(sent).toHaveBeenCalledOnce();
-    const successor = decodeSessionSuccessor(JSON.parse(readFileSync(sessionSuccessorsPath(s.h.home), "utf8").trim()));
-    expect(successor).toEqual({ at: s.h.now.toISOString(), project: "probe", row: "worker", from: s.launch.row.sessionId, to: result.row.sessionId });
-    expect(retiredSessionReason(s.h.home, s.launch.row.sessionId)).toContain(`successor ${result.row.sessionId}`);
-    expect(retiredSessionReason(s.h.home, "probe/worker")).toBeUndefined();
-    expect(result.proof).toMatchObject({ state: "proven", via: "network" });
-    expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_COMMS='network'");
-    expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_RESTART_GATE=");
-  });
+  ;
 
-  it("post-rebind mailbox failure preserves the authoritative replacement and reports unproven delivery", async () => {
-    const s = await setup();
-    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, policy: { ...p.policy!, comms: "network" } }, undefined] as const)));
-    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.provideService(Comms, { ...NetworkComms, send: () => Effect.succeed({ status: "failed", detail: "mailbox unavailable" }) })));
-    expect(result.proof?.state).toBe("unproven");
-    expect(result.row.delivery).toBe("unproven");
-    expect((await s.run(load(s.dir))).agents[0]?.sessionId).toBe(result.row.sessionId);
-    expect((await s.run(load(s.dir))).agents[0]?.delivery).toBe("unproven");
-    expect(s.host.panes.has(result.row.pane!.paneId)).toBe(true);
-    expect(result.notes.join("\n")).toContain("catalog rebound; network continuation needs repair");
-  });
+  ;
 
   it("failed rebind never writes the consumer activation marker", async () => {
     const s = await setup();
@@ -245,7 +213,7 @@ describe("restart by fork", () => {
     expect(project.agents.every(row => row.owner === result.row.sessionId)).toBe(true);
     expect(project.agents[1]?.restore?.env.MUSTER_OWNER).toBe(result.row.sessionId);
     expect(project.lanes.find(l => l.slug === "work")?.root).toEqual(result.row.pane);
-    expect(ownerRoute(old.sessionId, s.h.home, project.slug).owner).toBe(result.row.sessionId);
+    expect(existsSync(sessionSuccessorsPath(s.h.home))).toBe(false);
     expect(s.host.panes.has(old.pane!.paneId)).toBe(true); // no active-turn close
     expect("endSession" in result && result.endSession).toBeTruthy();
     if (!("endSession" in result) || !result.endSession) throw Error("missing shutdown receipt");
@@ -269,7 +237,7 @@ describe("restart by fork", () => {
     expect(here.agents.filter(row => row.name.startsWith("w")).map(row => [row.owner, row.restore?.env.MUSTER_OWNER])).toEqual([[id, id], [id, id], [id, id]]);
     const there = await s.run(load(other));
     expect(there.agents.map(row => [row.name, row.owner, row.restore?.env.MUSTER_OWNER])).toEqual([["x1", id, id], ["x2", id, id], ["kept", "someone-else", old.sessionId]]);
-    expect(ownerRoute(old.sessionId, s.h.home, "other").owner).toBe(id);
+    expect(existsSync(sessionSuccessorsPath(s.h.home))).toBe(false);
     expect(result.notes.join("\n")).toContain("moved 2 row(s) in other to the new owner");
   });
 
@@ -310,7 +278,6 @@ describe("restart by fork", () => {
     s.host.firstTurn = "error";
     const outcome = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.result));
     expect(outcome._tag).toBe("Failure");
-    expect(ownerRoute(s.launch.row.sessionId, s.h.home, "probe").owner).toBe(s.launch.row.sessionId);
     expect(await s.run(load(s.dir))).toEqual(before);
     expect([...s.host.panes.keys()]).toEqual(panes);
     expect(s.host.calls.some(call => call.method === "pane.close" && call.params.pane_id === s.launch.row.pane?.paneId)).toBe(false);
@@ -344,7 +311,6 @@ describe("restart by fork", () => {
     expect(await s.run(load(s.dir))).toEqual(before);
     expect(readFileSync(s.launch.row.sessionFile!, "utf8")).toBe(oldBytes);
     expect([...s.host.panes.keys()]).toEqual(panes);
-    expect(ownerRoute(s.launch.row.sessionId, s.h.home, "probe").owner).toBe(s.launch.row.sessionId);
     expect(s.host.calls.slice(callBoundary).some(call => ["pane.close", "agent.rename"].includes(call.method) && (call.params.pane_id === s.launch.row.pane?.paneId || call.params.target === s.launch.row.pane?.paneId))).toBe(false);
   });
 
@@ -363,7 +329,6 @@ describe("restart by fork", () => {
     const outcome = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.result));
     expect(outcome).toMatchObject({ _tag: "Failure", failure: { message: expect.stringContaining("row changed") } });
     expect((await s.run(load(s.dir))).agents[0]).toMatchObject({ sessionId: s.launch.row.sessionId, owner: "other-owner", pane: s.launch.row.pane });
-    expect(ownerRoute(s.launch.row.sessionId, s.h.home, "probe").owner).toBe(s.launch.row.sessionId);
     expect(s.host.panes.has(s.launch.row.pane!.paneId)).toBe(true);
   });
 
@@ -381,6 +346,8 @@ describe("restart by fork", () => {
     expect((await s.run(packetVerify(s.dir, packet.packet.id))).packet.state).toBe("verified");
     expect((await s.run(load(s.dir))).agents.find(r => r.name === "boss-owned")?.owner).toBe("live-boss");
     expect(ingestOwnerItem(old.sessionId, reply, s.h.home, "probe")).toBe(false);
+    // Old queue history remains local; a new named message lands in the replacement's own queue.
+    ingestOwnerItem(result.row.sessionId, { ...reply, facets: [{ index: { byteStart: 0, byteEnd: 1 }, features: [{ $type: "dev.muster.note.facet#mention", did: result.row.sessionId }] }] }, s.h.home, "probe");
     const send = vi.fn();
     const feed = ownerFeed({ session: result.row.sessionId, home: s.h.home, appendEntry: () => {}, sendMessage: send });
     expect(feed.flush()).toBeGreaterThanOrEqual(1); expect(feed.flush()).toBe(0);

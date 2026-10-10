@@ -118,7 +118,7 @@ export const nudgeSwitchboards = (project: string, record: { id: string; kind: s
     const live = yield* intercom.sessions();
     for (const target of targets) {
       if (target === env.sessionId || (live && !live.includes(target))) continue;
-      yield* (intercom.relay ?? intercom.send)(target, text).pipe(Effect.catchCause(() => Effect.void));
+      yield* intercom.send(target, text).pipe(Effect.catchCause(() => Effect.void));
     }
     return [] as string[];
   }).pipe(Effect.catchCause(() => Effect.succeed([] as string[])));
@@ -146,12 +146,12 @@ export const focusDesk = (slug: string, reference?: string) => Effect.gen(functi
 export const deskPhone = (input: { action: "send" | "poll" | "sync"; card?: unknown; page?: string | undefined }) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const [{ readDeskPhoneConfig }, { deskPhoneSnapshot, sendDeskPhone, syncDeskPhone }, { openNetworkMailbox, readNetworkIdentities }, { DeskInboxError }] = yield* Effect.promise(() => Promise.all([
-    import("./desk-phone-store.ts"), import("./desk-phone.ts"), import("./comms-network.ts"), import("./desk-inbox.ts"),
+    import("./desk-phone-store.ts"), import("./desk-phone.ts"), import("./phone-mailbox.ts"), /* slice B */ import("./desk-inbox.ts"),
   ]));
   const identities = yield* readDeskPhoneConfig(env.home);
   const own = yield* Effect.try({ try: () => readNetworkIdentities(env.home).switchboard?.did, catch: () => new DeskInboxError("desk_phone Switchboard identity cache is unavailable") });
   if (own !== identities.switchboard) return yield* Effect.fail(new DeskInboxError("desk_phone configured DID differs from the Switchboard network identity"));
-  const mailbox = yield* openNetworkMailbox({ home: env.home, agent: "switchboard", configPath: process.env.MUSTER_NETWORK_CONFIG });
+  const mailbox = yield* openNetworkMailbox({ home: env.home, agent: "switchboard", configPath: undefined });
   const lease = yield* mailbox.lease.resolve(identities.switchboard);
   if (lease.did !== identities.switchboard || lease.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || lease.harness.sessionId !== env.sessionId || Date.parse(lease.expiresAt) <= env.now().getTime()) return yield* Effect.fail(new DeskInboxError("desk_phone requires this session's existing Switchboard network consumer and live lease; no second lease will be acquired"));
   const context = { home: env.home, identities, mailbox };
@@ -198,7 +198,7 @@ export const deskAnswer = (params: DeskAnswerInput) =>
     const nudged: string[] = [];
     for (const desk of desks) {
       const message = `☎️ Joel answered ${itemRef({ project: params.project, id: item.id })} "${item.title}": ${params.answer.trim()}`;
-      const result = yield* (intercom.relay ?? intercom.send)({ kind: "alias", project: params.project, row: desk.name }, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
+      const result = yield* intercom.send({ kind: "alias", project: params.project, row: desk.name }, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
       const status = result.status === "delivered" && live && !live.includes(desk.sessionId) ? "queued, no live session" : result.status === "delivered" ? "sent" : result.status;
       nudged.push(`${desk.name} (${desk.sessionId}): ${status}`);
     }

@@ -4,7 +4,6 @@ import { decodeOwnerCursor } from "./domain.ts";
 import type { OwnerItem, OwnerKind } from "./domain.ts";
 import { ownerFeedMachine } from "./machines.ts";
 import { readOwnerSources, ownerSourceReader, mentions } from "./owner-queue.ts";
-import { relayEvent } from "./relay-events.ts";
 import { ownerTimelineData, ownerTimelineDataAsync, projectFlowLine } from "./owner-view.ts";
 import type { OwnerTimelineData } from "./owner-view.ts";
 
@@ -115,7 +114,6 @@ export function ownerFeed(deps: { session: string; home: string; project?: strin
       const deskOwnsFlow = (globalThis as { [FEED_CLAIM]?: string })[FEED_CLAIM] === "pi-muster";
       const flow = deskOwnsFlow ? undefined : projectFlowLine(deps.project, deps.home);
       if (!items.length && !flow) return undefined;
-      relayEvent({ ts: new Date().toISOString(), session: deps.session, project: "", kind: "owner_digest", itemCount: items.length }, deps.home);
       const note = message(items, deps.session, true, deps.home, deps.project, via, mentioned);
       return { message: { ...note, details: { ...note.details, ...(flow ? { flow } : {}) }, content: [flow, items.length ? note.content : undefined].filter(Boolean).join("\n") } };
     },

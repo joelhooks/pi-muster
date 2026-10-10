@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { queuePath, readDesk } from "./desk.ts";
 import { deskPost, projectOpen, agentLaunchForeground as agentLaunch } from "./ops.ts";
-import { NetworkComms } from "./comms.ts";
+import { RatkingMissing as NetworkComms } from "./comms-ratking.ts";
 import { Herdr, Comms } from "./runtime.ts";
 import { load } from "./store.ts";
 import { focusDesk, deskAnswer, loadSystem, nudgeSwitchboards, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
@@ -89,7 +89,7 @@ describe("whole fleet rows", () => {
 describe("switchboard queue delivery", () => {
   it("nudges running switchboards on post and resolve, and unregisters on stop", async () => {
     const { h, dir } = await setup();
-    const stop = registerSwitchboardSession(h.home, "switchboard-session");
+    const stop = registerSwitchboardSession(h.home, "switchboard-session", "switchboard-session");
     h.live = ["switchboard-session"];
     const posted = await runWith(h, deskPost(dir, { kind: "decision", title: "Ship?" }));
     expect(h.sent.at(-1)).toMatchObject({ to: "switchboard-session", message: expect.stringContaining("decision") });
@@ -119,7 +119,7 @@ describe("switchboard queue delivery", () => {
 
   it("doesn't turn an intercom failure into a failed write", async () => {
     const { h, dir } = await setup();
-    registerSwitchboardSession(h.home, "switchboard-session");
+    registerSwitchboardSession(h.home, "switchboard-session", "switchboard-session");
     const broken = Layer.succeed(Comms)({ ...NetworkComms, sessions: () => Effect.succeed(undefined), send: () => Effect.die("disconnected") });
     const posted = await runWith(h, deskPost(dir, { kind: "decision", title: "Still writes" }).pipe(Effect.provide(broken)));
     await runWith(h, deskAnswer({ project: "probe", id: posted.record.id, answer: "yes" }).pipe(Effect.provide(broken)));
@@ -174,7 +174,7 @@ describe("live extension opt-in", () => {
         }),
       },
     };
-    registerSwitchboard(pi as never, { env: { HOME: h.home }, layer: () => h.layer, run: async (_ctx, _signal, program, render) => render(await runWith(h, program)) });
+    registerSwitchboard(pi as never, { env: { HOME: h.home, RATKING_NAME: "inbox-session" }, layer: () => h.layer, run: async (_ctx, _signal, program, render) => render(await runWith(h, program)) });
     await handlers.get("session_start")!(null, ctx);
     expect(widget).toBeUndefined();
     try {

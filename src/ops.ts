@@ -56,17 +56,17 @@ import type { PaneInfo, Proof } from "./herdr.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
-import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
+
 import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
-import { recordSessionSuccessor, remoteCommsEnvironment } from "./comms.ts";
-import { ownerAliases, ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
+import { remoteCommsEnvironment } from "./comms.ts";
+import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
-import { deliverOwnerItem, forwardOwner, ingestOwnerItem, ownerRoute, readOwnerQueue } from "./owner-queue.ts";
+import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { launchDefaults } from "./fleet-steer.ts";
@@ -77,7 +77,8 @@ import { resolveSkills, skillIndex } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
-import { relayEvent, watchFallback } from "./relay-events.ts";
+import { watchFallback } from "./desk-local.ts";
+import { pushRemoteBinding } from "./remote.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
@@ -148,11 +149,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (params.action !== "restore" && existing && !["planned", "failed"].includes(existing.state) && !(existing.state === "interrupted" && !existing.sessionFile)) return yield* input(`row ${name} is ${existing.state}; restore it or choose another name`);
   if (parent && !parent.sessionFile) return yield* input("fork needs a parent session file");
   const custodyNotes: string[] = [];
-  if (project.policy?.comms === "network") {
-    const helper = yield* Effect.promise(() => import("./comms-network.ts"));
-    const peers = project.agents.filter(row => row.state !== "closed" && row.name !== name).map(row => networkRowIdentity(project, row));
-    custodyNotes.push(yield* helper.prepareRemoteNetworkAgent({ home: env.home, agent: role === "desk" ? `${project.slug}/${name}` : name, machineName: nameOfMachine, machine, peers }).pipe(Effect.mapError(error => new InputError({ message: error.message }))));
-  }
+
   const source = lane.repo ?? project.dir;
   const remoteSource = mapPath(source, machine);
   custodyNotes.push(...lockNotes);
@@ -267,9 +264,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const message = params.action === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, promptDir);
     cloneNotes.push(scratchNote);
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(params.action === "fork" ? parentSessionFile : params.action === "restore" ? sessionFile : existing?.cwd === cwd ? existing.sessionFile : null) : 1;
-    const networkBrief = project.policy?.comms === "network" && project.agents.some(agent => agent.sessionId === env.sessionId);
-    const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...(networkBrief ? {} : message) });
-    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), ...(project.policy?.comms === "network" ? networkPeerEnvironment(project, [...project.agents.filter(agent => agent.name !== row.name), row]) : {}), MUSTER_REMOTE_ROW: JSON.stringify(row) };
+    const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...message });
+    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...machine.env, MUSTER_MACHINE: nameOfMachine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), MUSTER_REMOTE_ROW: JSON.stringify(row) };
     // Read the remote environment, never transplant the owner's machine-specific PATH.
     const remotePath = agentEnvironment.PATH ?? (yield* must("printenv", ["PATH"], { cwd, timeoutMs: 10_000 })).trim();
     agentEnvironment.PATH = [join(machine.musterExtension, "bin"), remotePath].filter(Boolean).join(":");
@@ -299,12 +295,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(logDir, `#!/bin/sh\nset -e\n${shellPrelude(cwd, agentEnvironment)}${piReceiptSuffix(piReceiptId)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
-      if (networkBrief && message.expected) {
-        const comms = yield* Comms;
-        const sent = yield* comms.send(row.sessionId, message.expected);
-        if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms brief send refused for ${row.name}: ${sent.detail ?? sent.status}`);
-        cloneNotes.push(`network brief: ${sent.status} (mailbox receipt; first-turn proof checked separately)`);
-      }
+
       const wait = yield* waitForSession(binding.paneId, null);
       if (wait.state !== "ready") {
         const logTail = yield* must("tail", ["-n", "12", launchLog], { cwd, timeoutMs: 10_000 }).pipe(Effect.orElseSucceed(() => ""));
@@ -337,11 +328,9 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       const restoreArgv = buildArgv({ kind: "restore", sessionId: actual, sessionFile: wait.sessionFile, parentSessionFile: null, profile: liveRestore.profile, musterExtension: machine.musterExtension });
       const restore = { cwd, argv: [...wrap, "pi", ...restoreArgv], env: agentEnvironment };
       row = yield* patchRow(dir, name, row.state, [{ type: "STARTED" }], { sessionId: actual, sessionFile: wait.sessionFile, restore, ...(params.action === "restore" && existing?.owner === existing?.sessionId ? { owner: actual } : {}) });
-      if (params.action === "restore") yield* recordRebind(project.slug, name, requestedId, row.sessionId);
       yield* paneRename(binding.paneId, label);
       const prompt = message.expected;
-      let proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined, networkBrief) : null;
-      if (networkBrief && proof?.state === "proven") proof = { ...proof, via: "network" };
+      const proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined) : null;
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
@@ -629,10 +618,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     const removed = yield* sshProc(row.machine, machine, runner, env.home).run("rmdir", ["--", scratch], { cwd: "/", timeoutMs: 10_000 });
     notes.push(removed.code === 0 ? `empty owned scratch removed: ${scratch}` : `scratch kept (nonempty or unavailable): ${scratch}; no destructive retry`);
   }
-  if (project.policy?.comms === "network") {
-    const helper = yield* Effect.promise(() => import("./comms-network.ts"));
-    notes.push(yield* helper.retireRemoteNetworkKey({ home: env.home, agent: networkRowIdentity(project, row), machineName: row.machine, machine }));
-  }
+
   const closed = yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
     yield* requireOwner(latest, env.sessionId, params.takeover, project.slug);
@@ -808,7 +794,6 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
     const next: AgentRow = { ...latest, ...session, pane: adoptionBinding(latest, pane), state, restore, updatedAt: iso(env) };
     return [withRow(project, next), next] as const;
   }));
-  yield* recordRebind(slug, row.name, row.sessionId, adopted.sessionId);
   return adopted;
 });
 
@@ -908,7 +893,6 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
       if (act && mine && (pane.pane_id !== row.pane.paneId || (file && file !== current.sessionFile && !["launching", "failed"].includes(current.state)))) {
         const previous = current.sessionId;
         current = yield* patchRow(dir, row.name, current.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id }, ...(file ? { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId } : {}) });
-        yield* recordRebind(project.slug, row.name, previous, current.sessionId);
       }
     }
     const mtime = current.sessionFile ? mtimes.get(`${row.machine}:${current.sessionFile}`) ?? null : null;
@@ -978,19 +962,7 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
 // ---------- small pure helpers ----------
 
 const iso = (env: { now: () => Date }) => env.now().toISOString();
-const recordRebind = (project: string, row: string, from: string, to: string) => Effect.gen(function* () {
-  if (from === to) return;
-  const env = yield* MusterEnv;
-  yield* Effect.try({
-    try: () => recordSessionSuccessor(env.home, { at: iso(env), project, row, from, to }),
-    catch: error => new GuardFailed({ guard: "session-successor", message: `catalog rebound; successor history needs repair: ${String(error)}` }),
-  });
-});
 
-const recordOwnerForward = (from: string, to: string, project: string, env: { home: string; now: () => Date }) => Effect.try({
-  try: () => forwardOwner({ from, to, project, home: env.home, at: iso(env) }),
-  catch: error => new StoreError({ path: env.home, message: `owner handover failed: ${String(error)}` }),
-});
 
 const input = (message: string) => new InputError({ message });
 
@@ -1016,7 +988,7 @@ export function findPacket(project: Project, id: string): Effect.Effect<Packet, 
 
 /** The launching owner's Rat King name. Recorded on the row, so a rowless owner stays addressable by name. */
 const launchOwnerName = (home: string, dir: string, owner: string): { ownerName?: string } => {
-  const name = ownerName(owner, { catalogs: registeredCatalogs(home, dir), recorded: ownerSelfName(process.env), aliases: ownerAliases(home), self: { session: owner, name: process.env.RATKING_NAME } });
+  const name = ownerName(owner, { catalogs: registeredCatalogs(home, dir), recorded: ownerSelfName(process.env), self: { session: owner, name: process.env.RATKING_NAME } });
   return name ? { ownerName: name } : {};
 };
 
@@ -1031,11 +1003,13 @@ export const backfillOwnerNames = (dir: string) => Effect.gen(function* () {
   if (!name) return 0;
   const stale = (row: AgentRow) => row.state !== "closed" && row.owner === env.sessionId && row.ownerName !== name;
   if (!(yield* load(dir)).agents.some(stale)) return 0;
-  return yield* mutate(dir, current => {
+  const changed = yield* mutate(dir, current => {
     const rows = current.agents.filter(stale);
-    if (!rows.length) return Effect.succeed([current, 0] as const);
-    return Effect.succeed([{ ...current, agents: current.agents.map(row => stale(row) ? { ...row, ownerName: name, updatedAt: iso(env) } : row) }, rows.length] as const);
+    return Effect.succeed([{ ...current, agents: current.agents.map(row => stale(row) ? { ...row, ownerName: name, updatedAt: iso(env) } : row) }, rows.map(row => row.name)] as const);
   });
+  const project = yield* load(dir);
+  for (const row of project.agents.filter(row => changed.includes(row.name) && row.machine !== "local")) yield* pushRemoteBinding(project, row);
+  return changed.length;
 });
 /** Saved restore commands from before pi-ratking lack the row's name. */
 const withRatkingName = (project: Project, row: AgentRow, env: Readonly<Record<string, string>>): Record<string, string> => ({ ...env, RATKING_NAME: `${project.slug}/${row.name}` });
@@ -1757,7 +1731,7 @@ const closeOwnedPane = (binding: PaneBinding | null, dir: string, reason: string
       paneId: located.pane_id, terminalId: binding.terminalId, reason,
     }));
     if (retired !== undefined) {
-      for (const itemId of retired) relayEvent({ ts: iso(env), session: env.sessionId, kind: "watch_retired", project: dir, itemId }, env.home);
+
     }
     yield* paneClose(located.pane_id);
     const watches = retired === undefined
@@ -2225,29 +2199,23 @@ const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(func
     if (moved._tag === "Failure") { notes.push(`owner handover in ${entry.slug} needs repair: ${moved.failure.message}; run project_status takeover: true there`); continue; }
     if (moved.success === 0) continue;
     touched.push(entry.dir);
-    const forward = yield* recordOwnerForward(from, to, entry.slug, env).pipe(Effect.result);
-    notes.push(forward._tag === "Success" ? `moved ${moved.success} row(s) in ${entry.slug} to the new owner` : `moved ${moved.success} row(s) in ${entry.slug}; scoped owner forward needs repair: ${forward.failure.message}`);
+    notes.push(`moved ${moved.success} row(s) in ${entry.slug} to the new owner`);
   }
   notes.push(...yield* pushRemoteBindings(touched));
   return notes;
 });
 
-/** A remote reader knows authors only by the session bindings Flagg pushed it. After a restart, push the
- * successor's binding to every live remote row of a network catalog, or its replies are refused as unknown. */
+/** Push orchestration bindings after an owner restart so remote workers resolve the current owner name. */
 const pushRemoteBindings = (dirs: readonly string[]) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const notes: string[] = [];
-  const network = yield* Effect.promise(() => import("./comms-network.ts"));
-  const { explicitPolicyComms } = yield* Effect.promise(() => import("./comms.ts"));
   for (const dir of dirs) {
-    if (explicitPolicyComms(dir) !== "network") continue;
     const current = yield* load(dir).pipe(Effect.result);
     if (current._tag === "Failure") continue;
-    const rows = network.liveRows(current.success).filter(row => row.machine !== "local");
-    if (!rows.length) continue;
-    const pushed = yield* network.provisionLiveRows({ home: env.home, project: current.success, rows });
-    const failed = pushed.filter(note => note.includes("NOT provisioned"));
-    notes.push(failed.length ? `session bindings in ${current.success.slug}: ${failed.join("; ")}` : `session bindings pushed to ${rows.length} remote row(s) in ${current.success.slug}`);
+    for (const row of current.success.agents.filter(row => row.machine !== "local" && row.state !== "closed")) {
+      const pushed = yield* pushRemoteBinding(current.success, row).pipe(Effect.result);
+      if (pushed._tag === "Failure") notes.push(`binding ${row.name}: ${pushed.failure.message}`);
+    }
   }
   return notes;
 });
@@ -2292,8 +2260,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   const profile = extensionsFor(launchProject, row);
   // provisional → proven → rebound → activated. Failed provisional forks never
   // acquire the identity lease. Network work is submitted only after activation.
-  const network = project.policy?.comms === "network";
-  const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}), ...(network ? { MUSTER_COMMS: "network", ...networkPeerEnvironment(project, [...project.agents.filter(agent => agent.name !== row.name), row]) } : {}) };
+  const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}) };
   const bin = join(machine?.musterExtension ?? env.musterRoot, "bin");
   if (machine || environment.PATH !== undefined) environment.PATH = [bin, environment.PATH ?? (yield* must("printenv", ["PATH"], { cwd: old.cwd })).trim()].join(":");
   const launchDir = remote ? (yield* git(old.cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")).trim() : join(env.home, ".pi/agent");
@@ -2374,10 +2341,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       phase = "rebound";
       // Rows this session owns in other registered catalogs move too, before any mail can name the old owner.
       notes.push(...yield* moveOwnedRows(dir, old.sessionId, id));
-      yield* recordRebind(project.slug, old.name, old.sessionId, row.sessionId);
-      // Install scoped owner forwarding before telling the replacement to read
-      // its inbox, and never before the authoritative catalog write.
-      yield* recordOwnerForward(old.sessionId, id, project.slug, env).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`catalog rebound; scoped owner forward needs repair: ${error.message}`); })));
+
       // Activation is host-local, including remote hosts without the owner's catalog.
       // Never roll back a committed catalog or claim the old agent is untouched here.
       const activate = yield* must("node", ["-e", "require('node:fs').writeFileSync(process.argv[1], JSON.stringify(process.argv[2]), {flag:'wx',mode:0o600})", gate, id], { cwd: old.cwd }).pipe(Effect.result);
@@ -2387,24 +2351,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
       }
       // Under pi-ratking both Pis answer to one name and the old one holds its lease until it quits: a
       // continuation sent now would reach the old Pi. The argv continuation above is the proven brief.
-      const continuationComms = yield* Comms;
-      const ratking = continuationComms.mode ? (yield* continuationComms.mode().pipe(Effect.orElseSucceed(() => "network" as const))) === "ratking" : false;
-      if (network && ratking && activate._tag === "Success") notes.push("ratking: no mailbox continuation; the replacement's reader takes the name when the old Pi quits");
-      if (network && !ratking && activate._tag === "Success") {
-        const continuation = `Your restart handover for ${old.name} onto ${sha} is committed. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox, then continue on network.`;
-        const delivery = yield* Effect.gen(function* () {
-          const boundary = yield* inheritedStartEntries(wait.sessionFile);
-          const comms = yield* Comms;
-          const sent = yield* comms.send(id, continuation);
-          if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms restart brief refused: ${sent.detail ?? sent.status}`);
-          return yield* proveStartedPrompt(wait.sessionFile, continuation, boundary, continuation, true, true);
-        }).pipe(Effect.result);
-        if (delivery._tag === "Success") { proof = delivery.success; if (proof.state !== "proven") notes.push(`catalog rebound; network continuation needs repair: ${proof.detail}`); }
-        else {
-          const detail = `catalog rebound; network continuation needs repair: ${delivery.failure.message}`;
-          notes.push(detail); proof = { state: "unproven", submission: "uncertain", detail };
-        }
-      }
+      if (activate._tag === "Success") notes.push("ratking: no mailbox continuation; the replacement's reader takes the name when the old Pi quits");
       if (proof.state !== "proven") {
         row = { ...row, delivery: "unproven" };
         yield* mutate(dir, current => Effect.gen(function* () {
@@ -2602,10 +2549,7 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
       ...(failed ? { events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: body }] } : {}) };
     // The caller is local even when the worker is remote or network-backed.
     // Record an outcome only once the waking result is durable in its queue.
-    const notice = yield* deliverOwnerItem({ owner: job.owner, home: env.home, session: env.sessionId, project: current.slug,
-      item: { author: `muster-launch-${id}`, lane: row.lane, kind, title: `Launch ${row.name} ${failed ? "failed" : "finished"}`, body, refs: [job.log] },
-      send: () => Effect.succeed({ status: "failed", detail: "result persisted for the owner's queue reader" }), message: body });
-    if (!notice.queued) return yield* input(`launch result could not be queued; log: ${job.log}`);
+    yield* Effect.try({ try: () => appendOwnerItem(job.owner, { author: `muster-launch-${id}`, project: current.slug, lane: row.lane, kind, title: `Launch ${row.name} ${failed ? "failed" : "finished"}`, body, refs: [job.log] }, env.home), catch: () => new InputError({ message: `launch result could not be queued; log: ${job.log}` }) });
     yield* writeLaunchJob(env.home, { ...latestJob, sessionId: next.sessionId, state: yield* stepLaunchJob(id, latestJob.state, { type: failed ? "FAIL" : "SUCCEED" }), outcome: kind });
     return [withRow(current, next), next] as const;
   }));
@@ -2796,12 +2740,6 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     const launchProfile = extensionsFor(project, row);
     const message = kind === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, join(env.home, ".pi/agent"));
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(kind === "fork" ? row.parentSessionFile : kind === "restore" ? row.sessionFile : existing?.cwd === row.cwd ? existing.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home) : null) : 1;
-    const network = project.policy?.comms === "network";
-    const networkBrief = network && project.agents.some(agent => agent.sessionId === env.sessionId);
-    if (network) {
-      const helper = yield* Effect.promise(() => import("./comms-network.ts"));
-      yield* helper.provisionNetworkAgent({ home: env.home, agent: networkRowIdentity(project, row) }).pipe(Effect.mapError(error => new InputError({ message: error.message })));
-    }
     const argv = buildArgv({
       kind,
       sessionId: row.sessionId,
@@ -2809,9 +2747,9 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       parentSessionFile: row.parentSessionFile,
       profile: launchProfile,
       musterExtension: project.musterExtension,
-      ...(networkBrief ? {} : message),
+      ...message,
     });
-    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...(network ? { MUSTER_COMMS: "network", ...networkPeerEnvironment(project, [...project.agents.filter(agent => agent.name !== row.name), row]) } : {}) };
+    const agentEnvironment: Record<string, string> = agentEnv(project, row);
     const musterBin = join(env.musterRoot, "bin");
     // A profile PATH is typed literally. Otherwise only the prepend is typed: a ~1 KB
     // owner PATH overflows the pane's input line and leaves the quote open.
@@ -2823,10 +2761,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     yield* mutate(dir, (current) => Effect.gen(function* () {
       const previous = current.agents.find(agent => agent.name === row.name);
       if (jobId && previous?.state === "closed") return yield* input("launch row was closed while preparing the job");
-      if (previous && !(params.action === "restore" && previous.owner === previous.sessionId)) {
-        const note = yield* recordOwnerForward(previous.owner, row.owner, current.slug, env);
-        if (note) skillNotes.push(note);
-      }
+
       return [withRow(current, row), row] as const;
     }));
 
@@ -2853,18 +2788,11 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(join(env.home, ".pi/agent"), `#!/bin/sh\nset -e\n${shellPrelude(row.cwd, agentEnvironment, pathPrepend)}${piReceiptSuffix(piReceiptId)}\nexec ${["pi", ...argv].map(shellQuote).join(" ")}`);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
-      if (networkBrief && message.expected) {
-        const comms = yield* Comms;
-        const sent = yield* comms.send(row.sessionId, message.expected);
-        if (!["accepted", "queued", "delivered", "acked"].includes(sent.status)) return yield* input(`NetworkComms brief send refused for ${row.name}: ${sent.detail ?? sent.status}`);
-        skillNotes.push(`network brief: ${sent.status} (mailbox receipt; first-turn proof checked separately)`);
-      }
+
       const wait = yield* waitForSession(binding.paneId, null, () => findSessionFile(row.cwd, row.sessionId, env.home));
       const sessionFile = wait.state === "ready" ? wait.sessionFile : null;
       if (wait.state === "ready" && wait.slow) skillNotes.push(slowStartNote(wait));
-      if (wait.state === "pending") skillNotes.push(networkBrief
-        ? `slow start: Pi still starting after 120 s in ${binding.paneId}; network brief sent, first turn pending. Inspect the session before any explicit re-prompt.`
-        : `slow start: Pi still starting after 120 s in ${binding.paneId}; delivery: none (pending). The start argv already carries any work message; inspect the session before any explicit re-prompt.`);
+      if (wait.state === "pending") skillNotes.push(`slow start: Pi still starting after 120 s in ${binding.paneId}; delivery: none (pending). The start argv already carries any work message; inspect the session before any explicit re-prompt.`);
       if (wait.state === "missing") {
         const tail = wait.tail;
         const issue = modelOutputIssue(tail);
@@ -2911,15 +2839,10 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       ...(params.action === "restore" && existing?.owner === existing?.sessionId ? { owner: actualId ?? row.sessionId } : {}),
       restore,
     });
-    if (params.action === "restore") yield* recordRebind(project.slug, row.name, row.sessionId, running.sessionId);
-
     const text = message.expected;
-    let proof: Proof | null = text && networkBrief && launched.pending
-      ? { state: "unproven", submission: "submitted", detail: "network brief sent; first turn pending" }
-      : null;
+    let proof: Proof | null = null;
     if (text && !launched.pending) {
-      proof = yield* proveStartedPrompt(launched.sessionFile!, text, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined, networkBrief);
-      if (networkBrief && proof.state === "proven") proof = { ...proof, via: "network" };
+      proof = yield* proveStartedPrompt(launched.sessionFile!, text, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined);
       if (proof.state === "unproven") skillNotes.push(`delivery: unproven: ${proof.detail}. Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: proof.repairPrompt ?? text } })}`);
       running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(running.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
     }
@@ -2946,16 +2869,7 @@ export interface AgentCloseInput {
 const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined, project: string, callTakeover = true) =>
   Effect.gen(function* () {
     if (row.owner === sessionId || takeover) return;
-    // Closed rows retain their historical owner. A project-scoped forward gives
-    // its replacement authority without rewriting the catalog or live-pane rules.
-    if (row.state === "closed") {
-      const env = yield* MusterEnv;
-      const owner = yield* Effect.try({
-        try: () => ownerRoute(row.owner, env.home, project).owner,
-        catch: error => new GuardFailed({ guard: "owner", message: `cannot resolve ${row.name}'s owner: ${String(error)}` }),
-      });
-      if (owner === sessionId) return;
-    }
+
     return yield* new GuardFailed({
       guard: "owner",
       message: `${row.name} belongs to owner session ${row.owner}. Only its owner acts on its pane. To adopt it, run project_status takeover: true (moves every open row of ${project} to this session)${callTakeover ? ", or pass takeover: true to this call" : ""}.`,
@@ -3166,7 +3080,7 @@ export const packetReport = (params: PacketReportInput) =>
       }),
     );
     const message = `🐑 packet ${id.slice(0, 12)} from ${row.name} (${row.lane}): ${(params.summary.trim().split("\n")[0] ?? "").slice(0, 200).replace(/[.\s]+$/, "")}. Report: ${report}`;
-    relayEvent({ ts: iso(env), session: env.sessionId, kind: "packet_report", project: project.slug, packetId: id }, env.home);
+
     const notice = yield* deliverOwnerItem({ owner: saved.owner, home: env.home, session: env.sessionId, project: project.slug,
       item: { author: env.sessionId, lane: row.lane, kind: "action", title: `Packet ${id.slice(0, 12)} from ${row.name}: ${params.summary.trim().split("\n")[0] ?? ""}`, refs: [report], body: message },
       comms: intercom, send: intercom.send, message });
@@ -3695,10 +3609,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const handoverNotes: string[] = [];
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.gen(function* () {
-          for (const row of current.agents) if (row.state !== "closed") {
-            const note = yield* recordOwnerForward(row.owner, env.sessionId, current.slug, env);
-            if (note) handoverNotes.push(note);
-          }
+
           const next = { ...current, agents: current.agents.map((row) =>
             row.state === "closed" ? row : ownerSynced({ ...withoutOwnerName(row), ...launchOwnerName(env.home, dir, env.sessionId), owner: env.sessionId, updatedAt: iso(env) })) };
           return [next, next] as const;
@@ -3709,13 +3620,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const missingSpace = project.spaceId && !spaces.some(space => space.workspace_id === project.spaceId)
       ? `project ${project.slug}: workspace ${project.spaceId} is missing; space not rebuilt` : null;
     const recoveryNotes: string[] = [...handoverNotes, ...(missingSpace ? [missingSpace] : [])];
-    if (act && project.policy?.comms === "network") {
-      // Addressing a row needs its identity: the owner mints any of its live rows that lack one.
-      const { liveRows, provisionLiveRows, readNetworkIdentities } = yield* Effect.promise(() => import("./comms-network.ts"));
-      const known = (() => { try { return readNetworkIdentities(env.home); } catch { return undefined; } })();
-      const missing = known ? liveRows(project).filter(row => row.owner === env.sessionId && !known[networkRowIdentity(project, row)]) : [];
-      if (missing.length) recoveryNotes.push(...(yield* provisionLiveRows({ home: env.home, project, rows: missing })).map(note => `comms: ${note}`));
-    }
+
     const panes = yield* paneList();
     const byId = new Map(panes.map((pane) => [pane.pane_id, pane]));
     const byTerminal = new Map(panes.map((pane) => [pane.terminal_id, pane]));
@@ -3858,7 +3763,6 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
                 sessionId,
                 restore,
               });
-              yield* recordRebind(project.slug, row.name, row.sessionId, current.sessionId);
               action = "adopted (live pi session matches)";
             } else {
               action = "adoptable (live pi session matches; act: false)";
@@ -3884,7 +3788,6 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           sessionFile: herdrFile,
           sessionId: sessionIdFromFile(herdrFile) ?? current.sessionId,
         }).pipe(Effect.catch(() => Effect.succeed(current)));
-        yield* recordRebind(project.slug, row.name, previous, current.sessionId);
       }
       const file = current.sessionFile;
       const mtime = file ? sessionMtimeMs(file) : null;
@@ -4211,14 +4114,7 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     notes.push(yield* publishTokens(project));
     notes.push(`brain: ${yield* writeBrain(project)}`);
     notes.push(`roster: ${path ?? "built-in defaults"}`);
-    if (before.policy?.comms !== "network" && project.policy?.comms === "network") {
-      // Live rows join without a restart once their identity exists: mint here, push remote keys.
-      const { liveRows, provisionLiveRows } = yield* Effect.promise(() => import("./comms-network.ts"));
-      const live = liveRows(project);
-      notes.push(live.length
-        ? `comms: network. Provisioned live rows; on current pi-muster each joins its mailbox within about a minute, older ones need a restart: ${(yield* provisionLiveRows({ home: (yield* MusterEnv).home, project, rows: live })).join("; ")}.`
-        : "comms: network. No live rows to provision.");
-    }
+
     notes.push(...unknownCommsNote(project.policy));
     return { project, policy: effectivePolicy(roster, project.policy, project.slug), notes };
   });

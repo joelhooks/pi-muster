@@ -4,12 +4,7 @@ import { Context, Effect } from "effect";
 import type { HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
 
 import { ProcError } from "./errors.ts";
-import type { InputValue as AckInput, OutputValue as AckOutput } from "./vendor/rat-king-lexicon/mailbox.ack.ts";
-import type { InputValue as SendInput, OutputValue as SendOutput } from "./vendor/rat-king-lexicon/mailbox.send.ts";
-import type { ParamsValue as ListInput, OutputValue as ListOutput } from "./vendor/rat-king-lexicon/mailbox.list.ts";
-import type { DeliveryStateKnown as KnownDeliveryState } from "./vendor/rat-king-lexicon/defs.ts";
-import type { MainValue as Lease } from "./vendor/rat-king-lexicon/runtime.lease.ts";
-type LeaseFence = Pick<Lease, "did" | "leaseId" | "generation">;
+
 
 /** Bellwether's Herdr socket client. Tests provide a stub with the same shape. */
 export class Herdr extends Context.Service<Herdr, HerdrClient>()("muster/Herdr") {}
@@ -85,11 +80,6 @@ export class MusterEnv extends Context.Service<MusterEnv, EnvShape>()("muster/En
 
 export type OutboxStatus = "sent" | "queued" | "rejected" | "blocked" | "failed" | "unavailable";
 
-export interface IntercomTransport {
-  readonly send: (to: string, message: string) => Effect.Effect<{ readonly status: OutboxStatus; readonly detail?: string; readonly id?: string }>;
-  /** Live intercom session ids, or undefined when pi-intercom is absent or disconnected. */
-  readonly sessions: () => Effect.Effect<readonly string[] | undefined>;
-}
 
 export type CommsAddress =
   | { readonly kind: "alias"; readonly project: string; readonly row: string }
@@ -101,19 +91,7 @@ export interface CommsLease {
   readonly session: string;
   readonly expiresAt?: string;
 }
-export type DeliveryStatus = KnownDeliveryState;
-/** Private authority, not a public record or mailbox endpoint. */
-export interface LeaseAuthorityShape {
-  readonly acquire: (request: Pick<Lease, "did" | "harness" | "expiresAt">) => Effect.Effect<Lease, CommsError>;
-  readonly resolve: (did: Lease["did"]) => Effect.Effect<Lease, CommsError>;
-  readonly release: (fence: LeaseFence) => Effect.Effect<void, CommsError>;
-}
-/** Typed XRPC seam only; no transport, auth or crypto implementation yet. */
-export interface NetworkMailboxShape {
-  readonly send: (input: SendInput) => Effect.Effect<SendOutput, CommsError>;
-  readonly ack: (input: AckInput) => Effect.Effect<AckOutput, CommsError>;
-  readonly list: (input: ListInput) => Effect.Effect<ListOutput, CommsError>;
-}
+export type DeliveryStatus = "accepted" | "queued" | "delivered" | "acked" | "expired" | "failed";
 export interface CommsDelivery {
   readonly status: DeliveryStatus; readonly detail?: string;
   readonly id?: string; readonly senderDid?: string; readonly recipientDid?: string; readonly seq?: number;
@@ -127,12 +105,7 @@ export class Unsupported extends CommsError {
 }
 export interface CommsShape {
   readonly mode?: () => Effect.Effect<"intercom" | "network" | "ratking", CommsError>;
-  /** Under ratking: true while this session's legacy mailbox identity still exists, so its consumer drains it. */
-  readonly legacyDrain?: () => Effect.Effect<boolean, CommsError>;
-  /** Explicit intercom path, including reported network-failure fallback. */
-  readonly relay?: CommsShape["send"];
   readonly postOwner?: (to: string, item: import("./domain.ts").OwnerItem) => Effect.Effect<CommsDelivery>;
-  readonly consume?: (receive: (message: import("./domain.ts").NetworkPayload) => Effect.Effect<void, CommsError>) => Effect.Effect<void, CommsError>;
   readonly send: (to: CommsTarget, message: string) => Effect.Effect<CommsDelivery>;
   readonly ask: (to: CommsTarget, message: string, options: { readonly timeoutMs: number }) => Effect.Effect<CommsDelivery, CommsError>;
   readonly reply: (id: string, message: string) => Effect.Effect<CommsDelivery, CommsError>;

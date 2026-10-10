@@ -22,10 +22,22 @@ Retros run only after an incident (a bad landing, outage or lost work), friction
 pi install git:github.com/joelhooks/pi-muster
 ```
 
-Muster expects [Herdr](https://herdr.dev), pi-ratking (`@rat-king/pi-ratking`) and pi-until in the same Pi install. Muster traffic rides Rat King by name; pi-intercom is not needed. An unset `policy.comms`, or a value this Muster does not know, means ratking; without pi-ratking loaded, Muster sends fail loudly instead of falling back. Two paths default to the author's rig and can be pointed elsewhere:
+Muster expects [Herdr](https://herdr.dev), pi-ratking (`@rat-king/pi-ratking`) and pi-until in the same Pi install. Muster traffic rides Rat King by name; pi-intercom is not needed. Muster always uses pi-ratking. Existing `policy.comms` values, including `intercom` and `network`, still decode but cannot select a transport. `project_status` reports ignored values and keeps the file unchanged. Without pi-ratking loaded, sends fail immediately with `pi-ratking not loaded`; there is no fallback. Two paths default to the author's rig and can be pointed elsewhere:
 
 - `MUSTER_WORKER_WORKTREE`: the script that allocates, harvests, and removes worker clones.
 - `MUSTER_DESK_EXTENSION`: the Pi extension a desk agent loads to read its queue.
+
+## Communications
+
+Muster emits `ratking/send` and receives `ratking/message`. Rows answer to `<project>/<row>`; rowless owners use the `ownerName` recorded on their rows. Owner posts and agent messages retain the deployed `{type: "owner" | "message", recipient, …}` JSON payload inside `kind: "data"`, so old and new Muster sessions can exchange mail during rollout. A session id inside that payload is local queue metadata, not a delivery fence.
+
+pi-ratking owns names, DIDs, keys, leases, cursors and the reader. Muster neither provisions identities nor starts a mailbox consumer. `comms_doctor` reports pi-ratking's live status when available, otherwise its canonical claims, directory and cursor files. It flags a wrong name, wrong session or dead claimant and suggests a restart. Remote rows are probed on their own machine. The doctor never mints or pushes keys.
+
+An owner pass backfills `ownerName` and pushes updated orchestration bindings to running remote rows. Workers read that binding before their launch-time `MUSTER_OWNER_NAME`. A restart rebinds the catalog and emits `ratking/retire` from the old Pi; the successor takes the same name. There is no successor ledger, scoped owner forward or stale-session quarantine. Local queue history stays intact.
+
+Detached launch helpers run on the owner's machine without a Pi event bus. They append their result to that owner's local queue and never send. Initial work travels through argv/file pointers and requires first-turn journal proof.
+
+The phone record path remains a Slice B exception until pi-ratking's record API ships. `phone-mailbox.ts` and its transitive vendor files exist only for that path; no legacy reader is started by Muster.
 
 ## Long-lived sessions
 

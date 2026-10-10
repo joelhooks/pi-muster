@@ -2,10 +2,10 @@ import { closeSync, constants, fstatSync, mkdirSync, openSync, readdirSync, read
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { commsAddress } from "./comms.ts";
-import { networkReceiptPath } from "./comms-fallback.ts";
-import { resolveDeskRoute } from "./desk-route.ts";
+
 import { decodeDeskRouteReceipt, decodeNetworkPayload, decodeProject, type NetworkPayload, type OwnerItem, type Project } from "./domain.ts";
 import { readRegistry } from "./registry.ts";
+import { readRemoteBinding } from "./remote.ts";
 import { projectPath } from "./store.ts";
 import { CommsError, Unsupported, type CommsDelivery, type CommsShape, type CommsTarget } from "./runtime.ts";
 
@@ -50,31 +50,12 @@ export function ratkingLoaded(tools: readonly LoadedTool[], toolName = "ratking"
   return tools.some(tool => tool.name === toolName || fromRatking(tool));
 }
 
-/** pi-intercom is loaded: some `intercom` tool that pi-ratking did not register. */
-export function intercomLoaded(tools: readonly LoadedTool[]): boolean {
-  return tools.some(tool => tool.name === "intercom" && !fromRatking(tool));
-}
+
 
 /** pi-ratking's config file, the same lookup pi-ratking makes. */
 export const ratkingConfigPath = (home: string, env: Readonly<Record<string, string | undefined>> = process.env) => env.RATKING_CONFIG || join(home, ".config/rat-king/pi.json");
 
-/**
- * DIDs pi-ratking reads as reserved names (the Switchboard, an owner). Muster's legacy reader must never consume one.
- * A refused name is not pi-ratking's to read, so it is left out. A missing or unreadable file reserves nothing.
- */
-export function reservedRatkingDids(home: string, env: Readonly<Record<string, string | undefined>> = process.env): Set<string> {
-  const dids = new Set<string>();
-  try {
-    const config = JSON.parse(readFileSync(ratkingConfigPath(home, env), "utf8")) as { reserved?: unknown; refuse?: unknown };
-    const refused = new Set(Array.isArray(config.refuse) ? config.refuse.filter(name => typeof name === "string") : []);
-    if (typeof config.reserved !== "object" || config.reserved === null) return dids;
-    for (const [name, entry] of Object.entries(config.reserved)) {
-      const did = (entry as { did?: unknown } | null)?.did;
-      if (!refused.has(name) && typeof did === "string") dids.add(did);
-    }
-  } catch { /* no config: nothing reserved */ }
-  return dids;
-}
+
 
 /**
  * The owner session's Rat King name. This very process answers to its own RATKING_NAME. A live row in any
@@ -136,20 +117,19 @@ export function registeredCatalogs(home: string, dir?: string): Project[] {
   return catalogs;
 }
 
-/** The legacy session → identity caches, read only for the reserved rowless names. */
-export function ownerAliases(home: string): Record<string, string> {
-  const aliases: Record<string, string> = {};
-  for (const file of ["network-peers.json", "network-desk-peers.json"]) {
-    try {
-      const table = JSON.parse(readFileSync(join(home, ".local/state/muster", file), "utf8")) as unknown;
-      if (typeof table !== "object" || table === null) continue;
-      for (const [session, name] of Object.entries(table)) if (typeof name === "string" && OWNER_ALIASES.includes(name)) aliases[session] = name;
-    } catch { /* absent */ }
-  }
-  return aliases;
-}
+
 
 export interface RatkingTarget { readonly name: string; readonly session: string }
+
+/** desk_send validates orchestration roles, not leases or network identities. */
+export function resolveDeskRoute(home: string, dir: string, to: string) {
+  const address = commsAddress(to);
+  if (address.kind !== "alias") throw new CommsError("desk_send requires a project/row alias");
+  const project = registeredCatalogs(home, dir).find(project => project.slug === address.project);
+  const row = project?.agents.find(row => row.name === address.row && row.state !== "closed");
+  if (!project || !row || row.role === "worker" || (row.role !== "desk" && project.lanes.find(lane => lane.slug === row.lane)?.kind !== "role")) throw new CommsError("desk_send target must be a live desk or role row");
+  return { project, row };
+}
 
 /** A Muster target as a Rat King name, plus the session the payload names. A DID is pi-ratking's business. */
 export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: readonly Project[]; readonly env: Readonly<Record<string, string | undefined>>; readonly aliases?: Readonly<Record<string, string>>; readonly self?: OwnerSelf; readonly switchboards?: Readonly<Record<string, string>> }): RatkingTarget {
@@ -163,7 +143,9 @@ export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: rea
   }
   // A reserved rowless name (`switchboard`) is its own address.
   if (OWNER_ALIASES.includes(address.id)) return { name: address.id, session: address.id };
-  const name = ownerName(address.id, { catalogs: options.catalogs, recorded: address.id === options.env.MUSTER_OWNER ? options.env.MUSTER_OWNER_NAME : undefined, ...(options.aliases ? { aliases: options.aliases } : {}), ...(options.self ? { self: options.self } : {}), ...(options.switchboards ? { switchboards: options.switchboards } : {}) });
+  const binding = readRemoteBinding(options.env);
+  const recorded = binding?.owner === address.id ? binding.ownerName : address.id === options.env.MUSTER_OWNER ? options.env.MUSTER_OWNER_NAME : undefined;
+  const name = ownerName(address.id, { catalogs: options.catalogs, recorded, ...(options.aliases ? { aliases: options.aliases } : {}), ...(options.self ? { self: options.self } : {}), ...(options.switchboards ? { switchboards: options.switchboards } : {}) });
   if (!name) throw new CommsError(`no Rat King name for session ${address.id}: not a live row, no recorded owner name, no alias; set RATKING_NAME on that Pi and relaunch its rows`);
   return { name, session: address.id };
 }
@@ -278,7 +260,7 @@ export function ratkingReceipt(options: { readonly home: string; readonly id: st
   return Effect.try({
     try: () => {
       const record = decodeDeskRouteReceipt({ id: options.id, at: options.at, to: options.to, sender: options.sender, path: "ratking", network: options.delivery });
-      const receipt = networkReceiptPath(options.home);
+      const receipt = join(options.home, ".local/state/muster/ratking-receipts.jsonl");
       mkdirSync(dirname(receipt), { recursive: true, mode: 0o700 });
       const fd = openSync(receipt, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW, 0o600);
       try {

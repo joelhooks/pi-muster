@@ -29,10 +29,11 @@ import {
 } from "./ops.ts";
 import muster from "../extensions/pi-muster.ts";
 import { ownerFeed } from "./owner-feed.ts";
+import { fakeRatking } from "./ratking-fake.ts";
 import { readOwnerQueue, writeReader, ownerPath, appendOwnerItem, deliverOwnerItem, mentions } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { Herdr, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
-import { watchEntries } from "./relay-events.ts";
+import { watchEntries } from "./desk-local.ts";
 import { ProcError } from "./errors.ts";
 import { parsePorcelainZ } from "./packet.ts";
 import { load, mutate, projectPath } from "./store.ts";
@@ -405,10 +406,7 @@ describe("pane close watch retirement", () => {
     expect(receipt).toContain("watches retired: watch-a, watch-b");
     expect(receipt).not.toContain("watch fallback");
     expect(h.herdr.panes.has(target.paneId)).toBe(false);
-    const events = readFileSync(join(h.home, ".local/state/muster/relay-events.jsonl"), "utf8")
-      .trim().split("\n").map(line => JSON.parse(line)).filter(event => event.kind === "watch_retired");
-    expect(events).toEqual(["watch-a", "watch-b"].map(itemId => ({ ts: h.now.toISOString(),
-      session: h.sessionId, kind: "watch_retired", project: dir, itemId })));
+    expect(existsSync(join(h.home, ".local/state/muster/relay-events.jsonl"))).toBe(false);
   });
 
   it.each(["agent", "lane"] as const)("keeps candidate fallback without a listener for %s close", async kind => {
@@ -481,8 +479,8 @@ describe("packet owner queue delivery", () => {
     if (mode === "queue-failure") mkdirSync(ownerPath("owner-session", h.home));
     if (mode === "event-failure") mkdirSync(join(h.home, ".local/state/muster/relay-events.jsonl"));
     const result = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "owner-session", cwd: clone, commit, summary: "queues result", checks: [] }));
-    expect(result.notice.path).toBe(mode === "fresh" ? "queue" : "intercom");
-    expect(h.sent).toHaveLength(mode === "fresh" ? 0 : 1);
+    expect(result.notice.path).toBe("ratking");
+    expect(h.sent).toHaveLength(1);
     if (mode !== "queue-failure") expect(readOwnerQueue("owner-session", h.home).items[0]?.item).toMatchObject({ kind: "action", refs: [result.packet.report], facets: [{ features: [{ did: "owner-session" }] }] });
   });
 });
@@ -937,29 +935,31 @@ describe("field-use regressions", () => {
     vi.stubEnv("HOME", h.home);
     vi.stubEnv("MUSTER_ROLE", "worker"); vi.stubEnv("MUSTER_OWNER", "owner-session");
     vi.stubEnv("MUSTER_PROJECT", dir); vi.stubEnv("MUSTER_AGENT", "probe_w");
-    // The legacy intercom queue path, with pi-intercom loaded.
-    vi.stubEnv("MUSTER_COMMS", "intercom");
+    vi.stubEnv("RATKING_NAME", "probe/probe_w");
+    await runWith(h, mutate(dir, current => Effect.succeed([{ ...current, agents: current.agents.map(row => ({ ...row, ownerName: "new-owner" })) }, undefined] as const)));
+    const fake = fakeRatking(h.home, () => "probe/probe_w", []);
     const tools = new Map<string, { execute: (...args: unknown[]) => Promise<unknown> }>();
     const host = { registerTool: (t: { name: string; execute: (...args: unknown[]) => Promise<unknown> }) => tools.set(t.name, t),
-      on: () => {}, registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {}, getAllTools: () => [{ name: "intercom", sourceInfo: { source: "npm:pi-intercom" } }],
-      getFlag: () => undefined, registerMessageRenderer: () => {}, events: { emit: () => {}, on: () => () => {} } };
+      on: () => {}, registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {}, getAllTools: () => [{ name: "intercom", sourceInfo: { source: "npm:@rat-king/pi-ratking" } }],
+      getFlag: () => undefined, registerMessageRenderer: () => {}, events: fake.events };
     await muster(host as never);
     writeReader("new-owner", h.home);
     writeReader("owner-session", h.home); // A is still alive; routing must choose B, not merely a live reader.
     const ctx = { cwd: dir, sessionManager: { getSessionId: () => "probe", getBranch: () => [] } };
     const result = await tools.get("owner_note")!.execute("note", { kind: "question", title: "new note" }, undefined, undefined, ctx);
-    expect(result).toMatchObject({ details: { owner: "new-owner", resolution: "catalog row", queued: true, woke: true, path: "queue" } });
+    expect(result).toMatchObject({ details: { owner: "new-owner", resolution: "catalog row", queued: true, woke: true, path: "ratking" } });
     expect(readOwnerQueue("new-owner", h.home).items).toHaveLength(1);
     expect(mentions(readOwnerQueue("new-owner", h.home).items[0]!.item, "new-owner")).toBe(true);
     const feed = ownerFeed({ session: "new-owner", home: h.home, appendEntry: () => {}, sendMessage: () => {} });
-    expect(feed.inbox().via[old.uri]).toBe("owner-session");
-    expect(feed.flush()).toBe(2); expect(feed.flush()).toBe(0);
+    expect(feed.inbox().via[old.uri]).toBeUndefined();
+    expect(feed.flush()).toBe(1); expect(feed.flush()).toBe(0);
     feed.dispose();
     const sent: string[] = [];
     const delivery = await Effect.runPromise(deliverOwnerItem({ owner: "owner-session", agent: "probe_w", home: h.home, session: "probe", project: dir,
       item: { author: "probe", kind: "blocked", title: "blocked" }, send: to => { sent.push(to); return Effect.succeed({ status: "delivered" as const }); } }));
     expect(delivery.owner).toBe("new-owner");
-    expect(sent).toEqual([]); // Fresh B reader; its feed owns the wake.
+    expect(sent).toEqual([]); // Legacy send callback is never a transport.
+    expect(delivery.delivery.detail).toBe("pi-ratking not loaded");
   });
 
   it("reports to the adopted catalog owner rather than the launch owner", async () => {

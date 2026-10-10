@@ -153,7 +153,7 @@ describe("thinking_set", () => {
 const JOINED = "Collectionfence4/4behavior/propertytests";
 const PLAIN = "Collection fence: all four behavior and property tests passed.";
 const HINT = "Rewrite in plain sentences with spaces between words; put code, paths and ids in backticks.";
-const notice = { id: "uri", uri: "uri", queued: true, woke: false, path: "queue" as const, delivery: { status: "delivered" as const }, owner: "boss", resolution: "explicit recipient", lost: false };
+const notice = { id: "uri", uri: "uri", queued: true, woke: false, path: "ratking" as const, delivery: { status: "delivered" as const }, owner: "boss", resolution: "explicit recipient", pendingPull: false, lost: false };
 const cleanReport = { commit: "HEAD", summary: PLAIN, body: PLAIN, checks: [{ name: "Unit tests", outcome: "pass", detail: PLAIN }] };
 const refusalCases: Array<[string, Record<string, unknown>]> = [
   ["packet_report", { ...cleanReport, summary: JOINED }],
@@ -245,19 +245,7 @@ describe("readable message boundaries", () => {
   });
 });
 
-describe("retired intercom destinations", () => {
-  it.each(["send", "ask", "reply", "handover"])("blocks %s to an exact retired id, not a row alias", async action => {
-    const reason = "session old-session retired by restart; successor new-session; send to probe/desk or the new id";
-    vi.spyOn(comms, "retiredSessionReason").mockImplementation((_home, to) => to === "old-session" ? reason : undefined);
-    const fake = fakePi();
-    muster(fake.pi as never);
-    const call = (to: string) => Promise.all(fake.hooks.get("tool_call")!.map(hook => hook({ toolName: "intercom", input: { action, to, message: "Hello." } })));
-    expect(await call("old-session")).toContainEqual({ block: true, reason });
-    expect((await call("probe/desk")).every(value => value === undefined)).toBe(true);
-    expect((await call("new-session")).every(value => value === undefined)).toBe(true);
-    expect(fake.emitted).toEqual([]);
-  });
-});
+;
 
 describe("tool failure text", () => {
   it("names a schema error's code, reason and status instead of an empty message", () => {

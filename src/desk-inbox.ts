@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect";
-import { openNetworkMailbox, readNetworkIdentities, sendWithConsumerFence } from "./comms-network.ts";
+import { openNetworkMailbox, readNetworkIdentities, sendWithConsumerFence } from "./phone-mailbox.ts"; // slice B
 import { decodeDeskItem, decodeDeskOpenedMessage, decodeDeskInboxIdentities, type DeskInboxIdentities } from "./domain.ts";
 import { FEEDBACK_SCHEMA, rulingText, rulings, type Feedback, type FeedbackValue, type ReportCard } from "./desk-report.ts";
 import type { DeskAnswerInput } from "./switchboard-ops.ts";
