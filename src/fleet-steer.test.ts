@@ -10,7 +10,7 @@ const opus = "claude-bridge/claude-opus-5-5";
 const fresh = { at: "2026-09-29T05:00:00Z", validUntil: "2026-09-29T07:00:00Z", workerDefault: "opus" };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function launch(raw: string | undefined, options: { model?: string; pin?: string; role?: "worker" | "desk"; roster?: string } = {}) {
+async function launch(raw: string | undefined, options: { model?: string; thinking?: "low" | "high"; workType?: string; pin?: string; role?: "worker" | "desk"; roster?: string } = {}) {
   vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
   vi.stubEnv("MUSTER_PROJECT", "");
   const h = harness();
@@ -24,7 +24,7 @@ async function launch(raw: string | undefined, options: { model?: string; pin?: 
   await runWith(h, projectOpen({ dir, slug: "probe", outcome: "steer launches", reviewTrigger: "weekly", nextAction: "launch", criticalPath: [], space: "w1", ephemeral: true, cadenceMinutes: 15, musterExtension: "/muster", deskExtension: null }));
   await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "test steer" }));
   if (options.pin) await runWith(h, projectUpdate(dir, { policy: { roles: { worker: { model: options.pin } } } }));
-  return runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", role: options.role ?? "worker", lane: "probe", label: "🔨 worker", cwd: dir, ...(options.model ? { model: options.model } : {}) }));
+  return runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", role: options.role ?? "worker", lane: "probe", label: "🔨 worker", cwd: dir, ...(options.model ? { model: options.model } : {}), ...(options.thinking ? { thinking: options.thinking } : {}), ...(options.workType ? { workType: options.workType } : {}) }));
 }
 
 describe("fleet steer launch integration", () => {
@@ -90,5 +90,42 @@ describe("fleet steer contract", () => {
     for (const role of ["desk", "hawk", "boss", "judge"] as const) {
       expect((await Effect.runPromise(launchDefaults({ home: "/missing", now: 0, action: "launch", role }))).notes).toEqual([]);
     }
+  });
+});
+
+describe("fleet steer work-type routes", () => {
+  const sonnet = "claude-bridge/claude-sonnet-5-5";
+  const haiku = "claude-bridge/claude-haiku-5-5";
+  const routed = JSON.stringify({ ...fresh, workerDefault: "sol", routes: {
+    bugfix: { model: sonnet, thinking: "medium", review: true },
+    scan: { model: haiku, thinking: "low" },
+    ui: { model: "sol" },
+    broken: { model: "not a model" },
+  } });
+  it("takes model, thinking and review from the work type's route", async () => {
+    const bugfix = await launch(routed, { workType: "bugfix" });
+    expect(bugfix.row.profile).toMatchObject({ model: sonnet, thinking: "medium" });
+    expect(bugfix.notes.join("\n")).toContain("route bugfix (owner reviews before packet_land)");
+    expect(bugfix.notes.join("\n")).toContain("review: route bugfix wants the owner to review the packet before packet_land");
+    const scan = await launch(routed, { workType: "scan" });
+    expect(scan.row.profile).toMatchObject({ model: haiku, thinking: "low" });
+    expect(scan.notes.join("\n")).not.toContain("review:");
+  });
+  it("falls back to workerDefault for an unknown or undecodable route, and keeps workerDefault when routes are absent", async () => {
+    for (const workType of ["feature", "broken"]) {
+      const result = await launch(routed, { workType, roster: "opus" });
+      expect(result.row.profile.model).toBe(sol);
+      expect(result.notes.join("\n")).toMatch(new RegExp(`(no route for work type ${workType}|route ${workType} undecodable), workerDefault`));
+    }
+    expect((await launch(JSON.stringify({ ...fresh, workerDefault: "sol" }), { workType: "bugfix", roster: "opus" })).row.profile.model).toBe(sol);
+  });
+  it("lets an explicit model or thinking win over the route", async () => {
+    expect((await launch(routed, { workType: "bugfix", model: "opus" })).row.profile.model).toBe(opus);
+    expect((await launch(routed, { workType: "bugfix", thinking: "high" })).row.profile).toMatchObject({ model: sonnet, thinking: "high" });
+  });
+  it("ignores routes from a stale steer and refuses a malformed work type", async () => {
+    const stale = JSON.stringify({ ...JSON.parse(routed), validUntil: "2026-09-29T06:00:00Z" });
+    expect((await launch(stale, { workType: "bugfix" })).row.profile.model).toBe(sol);
+    await expect(launch(routed, { workType: "Bug Fix" })).rejects.toThrow("workType must match");
   });
 });

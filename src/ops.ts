@@ -158,10 +158,11 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (!label) return yield* input("a remote agent needs a label");
   const retroChoice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
   const model = params.model ?? retroChoice?.model ?? parent?.profile.model;
-  const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug });
+  const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug, workType: params.workType });
   const profile = profileFor(role, { ...(parent?.profile ?? existing?.profile), label,
     ...(retroChoice?.model ? { thinking: undefined } : {}),
     ...(params.action === "launch" && role === "worker" ? { model: workerChoice.defaults.model } : model !== undefined ? { model } : {}),
+    ...(params.workType !== undefined ? { thinking: workerChoice.defaults.thinking } : {}),
     ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
     ...(params.skills !== undefined ? { skills: params.skills } : {}),
     ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
@@ -1814,6 +1815,7 @@ export interface AgentLaunchInput {
   readonly from?: string | undefined;
   readonly at?: string | undefined;
   readonly model?: string | undefined;
+  readonly workType?: string | undefined;
   readonly thinking?: Thinking | undefined;
   readonly appendSystemPrompt?: readonly string[] | undefined;
   readonly skills?: readonly string[] | undefined;
@@ -2461,7 +2463,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     for (const path of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", path);
     const choice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
     const model = params.model ?? choice?.model ?? parent?.profile.model ?? (params.action === "launch" && role === "worker" ? undefined : existing?.profile.model);
-    const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug });
+    const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug, workType: params.workType });
     const defaults = workerChoice.defaults;
     modelNotes.push(...workerChoice.notes);
     const resolved = yield* decodeWith(() => resolveModel(model ?? defaults.model, roster, project.slug, role), null);
@@ -2679,7 +2681,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       const retroChoice = retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
       skillNotes.push(...(retroChoice?.notes ?? []));
       const model = params.model ?? retroChoice?.model ?? parent?.profile.model;
-      const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug });
+      const workerChoice = yield* launchDefaults({ home: env.home, now: env.now().getTime(), action: params.action, roster, policy: project.policy, role, model, slug: project.slug, workType: params.workType });
       skillNotes.push(...workerChoice.notes);
       const requestedProfile: LaunchProfile = profileFor(role, {
         ...inherited,

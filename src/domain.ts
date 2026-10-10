@@ -258,7 +258,7 @@ export const AgentLaunchRequest = Schema.Struct({
   label: Schema.optional(Schema.String), cwd: Schema.optional(Schema.String), clone: Schema.optional(Schema.Boolean),
   hydrate: Schema.optional(Schema.Boolean),
   from: Schema.optional(Schema.String), side: Schema.optional(Schema.Boolean), at: Schema.optional(Schema.String),
-  model: Schema.optional(Schema.String), thinking: Schema.optional(Thinking),
+  model: Schema.optional(Schema.String), thinking: Schema.optional(Thinking), workType: Schema.optional(Schema.String),
   appendSystemPrompt: Schema.optional(Schema.Array(Schema.String)), skills: Schema.optional(Schema.Array(Schema.String)),
   noSkills: Schema.optional(Schema.Boolean), extensions: Schema.optional(Schema.Array(Schema.String)),
   env: Schema.optional(Schema.Record(Schema.String, Schema.String)), compactAt: Schema.optional(Schema.NullOr(Schema.Number)),
@@ -668,24 +668,43 @@ export const decodeRoster = Schema.decodeUnknownSync(Roster);
 
 /** Writer contract for the launch-time fleet steer; unrelated writer fields are ignored. */
 const SteerIso = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/));
+const SteerModel = Schema.String.check(Schema.isPattern(/^(?:sol|opus|[^/\s:]+\/[^/\s:]+)$/));
 export const FleetSteer = Schema.Struct({
   at: SteerIso,
   validUntil: SteerIso,
-  workerDefault: Schema.String.check(Schema.isPattern(/^(?:sol|opus|[^/\s:]+\/[^/\s:]+)$/)),
+  workerDefault: SteerModel,
   claude: Schema.optionalKey(Schema.Struct({ pace: Schema.Number })),
   codex: Schema.optionalKey(Schema.Struct({ pace: Schema.Number })),
+  // Each route decodes on its own when used, so one bad route never loses workerDefault.
+  routes: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   source: Schema.optionalKey(Schema.String),
 });
 export type FleetSteer = typeof FleetSteer.Type;
 export const decodeFleetSteer = Schema.decodeUnknownSync(FleetSteer);
 
-export function steerChoice(steer: FleetSteer | undefined, now: number): { model?: string; note: string } {
+/** A work type's route in the steer: its model, an optional thinking level, and whether the owner reviews before landing. */
+const SteerRoute = Schema.Struct({ model: SteerModel, thinking: Schema.optionalKey(Schema.String), review: Schema.optionalKey(Schema.Boolean) });
+const decodeSteerRoute = Schema.decodeUnknownSync(SteerRoute);
+
+export const WORK_TYPE = /^[a-z][a-z0-9-]{0,31}$/;
+
+export type SteerChoice = { model?: string; thinking?: Thinking; review?: boolean; route?: string; note: string };
+
+/** The fresh steer's choice for a worker: the work type's route, else workerDefault. A stale steer chooses nothing. */
+export function steerChoice(steer: FleetSteer | undefined, now: number, workType?: string): SteerChoice {
   if (!steer) return { note: "fleet steer unavailable; roster default" };
   const at = Date.parse(steer.at);
   const until = Date.parse(steer.validUntil);
   if (!Number.isFinite(at) || !Number.isFinite(until) || !Number.isFinite(now) || now >= until || now - at >= 3 * 60 * 60_000)
     return { note: `fleet steer stale (at ${steer.at}, valid until ${steer.validUntil}); roster default` };
-  return { model: steer.workerDefault, note: `fleet steer at ${steer.at} (valid until ${steer.validUntil})` };
+  const fresh = `fleet steer at ${steer.at} (valid until ${steer.validUntil})`;
+  if (workType === undefined) return { model: steer.workerDefault, note: fresh };
+  const raw = steer.routes?.[workType];
+  if (raw === undefined) return { model: steer.workerDefault, note: `${fresh}; no route for work type ${workType}, workerDefault` };
+  let route: typeof SteerRoute.Type;
+  try { route = decodeSteerRoute(raw); } catch { return { model: steer.workerDefault, note: `${fresh}; route ${workType} undecodable, workerDefault` }; }
+  return { model: route.model, ...(isThinking(route.thinking) ? { thinking: route.thinking } : {}), ...(route.review ? { review: true } : {}), route: workType,
+    note: `${fresh}; route ${workType}${route.review ? " (owner reviews before packet_land)" : ""}` };
 }
 
 /** Only the settings field used by skill discovery; other Pi settings stay Pi's. */
@@ -714,14 +733,16 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
  * launch choice; picking an alternate brings its settings (a smaller window's
  * compact-at, say) with it.
  */
-export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string, steer?: FleetSteer, now?: number): RoleDefaults {
+export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string, steer?: FleetSteer, now?: number, workType?: string): RoleDefaults {
   const { alternates = [], ...fleet } = knownLevel(roster?.roles?.[role] ?? {});
   const project = knownLevel(policy?.roles?.[role] ?? {});
-  // Role exceptions are opt-in: only an explicit launch choice can use one, never a policy or fleet default.
-  const resolved = resolveModel(model ?? project.model ?? (role === "worker" && now !== undefined ? steerChoice(steer, now).model : undefined) ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug, model === undefined ? undefined : role);
+  const steered = role === "worker" && now !== undefined && model === undefined && project.model === undefined ? steerChoice(steer, now, workType) : undefined;
+  // Role exceptions are opt-in: an explicit launch choice or a steer route Joel ruled, never a policy or fleet default.
+  const resolved = resolveModel(model ?? project.model ?? steered?.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug, model !== undefined || steered?.route !== undefined ? role : undefined);
+  const routeThinking = steered?.route !== undefined && project.thinking === undefined ? steered.thinking : undefined;
   const chosen = resolved.model;
   const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => { try { return resolveModel(candidate.model, roster, slug, role).model === chosen; } catch { return false; } }) ?? { useFor: [] };
-  return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen, ...(resolved.thinking ? { thinking: resolved.thinking } : {}),
+  return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen, ...(routeThinking ? { thinking: routeThinking } : {}), ...(resolved.thinking ? { thinking: resolved.thinking } : {}),
     skills: [...new Set([...(fleet.skills ?? []), ...("skills" in alternate ? alternate.skills ?? [] : []), ...(project.skills ?? [])])],
   };
 }

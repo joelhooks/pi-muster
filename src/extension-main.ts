@@ -520,6 +520,7 @@ export default function muster(host: ExtensionAPI) {
       from: Type.Optional(Type.String({ description: "fork or side-desk adopt: the parent row" })),
       side: Type.Optional(Type.Boolean({ description: "fork: split a design-only side desk from its desk parent in the same tab. adopt: re-point an existing running desk to its side parent and lane after checking the live pane tab; never touches the pane." })),
       at: Type.Optional(Type.String({ description: "fork: context label or entry id in the parent session; omitted forks the full session" })),
+      workType: Type.Optional(Type.String({ description: "Worker launch: the kind of work (bugfix, refactor, investigation, scan, gather, ui, feature). Picks model and thinking from the fresh fleet steer's route for it; an explicit model or thinking still wins" })),
       model: Type.Optional(Type.String({ description: "an alias (opus, sol) or provider/model" })),
       thinking: Type.Optional(StringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const)),
       appendSystemPrompt: Type.Optional(Type.Array(Type.String())),
