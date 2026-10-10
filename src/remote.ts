@@ -27,7 +27,7 @@ import {join,resolve} from 'node:path';
 ${NAME_SHIM}
 const sidecarRoots = cwd => (${resolveSidecarRoots.toString()})(cwd,execFileSync,join,resolve);`;
 
-export const remotePullReceipt = (comms?: string): string[] => comms === "network" ? [] : ["remote notes reach the owner only when it runs owner_inbox or project_status; for push, set policy comms network only after the owner and its desk run pi-muster 6ec5d32 or later (older owners publish no consumer fence, so launch brief sends fail with LeaseMismatch)"];
+export const remotePullReceipt = (comms?: string): string[] => comms === "network" || comms === "ratking" ? [] : ["remote notes reach the owner only when it runs owner_inbox or project_status; for push, set policy comms ratking (or leave it unset) once the owner and its rows load pi-ratking"];
 
 /** Remote workers retain the exact queue record; publish last so interrupted writes stay invisible. */
 export function writeRemoteOwnerItem(owner: string, item: OwnerItem, session: string) {

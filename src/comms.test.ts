@@ -82,12 +82,14 @@ describe("private network seams", () => {
 
 describe("Comms port", () => {
   it("selects env before policy before default, rejecting invalid env instead of falling back", () => {
-    expect(selectComms(undefined)).toBe("intercom");
+    expect(selectComms(undefined)).toBe("ratking");
     expect(selectComms(undefined, { comms: "network" })).toBe("network");
     expect(selectComms("intercom", { comms: "network" })).toBe("intercom");
     expect(selectComms("network", { comms: "intercom" })).toBe("network");
     expect(() => selectComms("bogus", { comms: "intercom" })).toThrow(/MUSTER_COMMS/);
-    expect(Schema.decodeUnknownSync(Policy)({})).toEqual({ comms: "intercom" });
+    // An unset comms decodes unset and stays unset on write; it reads as ratking.
+    expect(Schema.decodeUnknownSync(Policy)({})).toEqual({});
+    expect(mergePolicy(undefined, decodePolicy({ nudgeAfterMin: 20 }))).not.toHaveProperty("comms");
     expect(mergePolicy({ comms: "network" }, decodePolicy({ nudgeAfterMin: 20 })).comms).toBe("network");
     expect(mergePolicy({ comms: "network" }, decodePolicy({ comms: "intercom" })).comms).toBe("intercom");
   });
@@ -143,10 +145,10 @@ describe("Comms port", () => {
     // The Switchboard runs from a cwd that holds another project's catalog with no comms policy.
     const h = harness(); const dir = h.home + "/project"; mkdirSync(dir, { recursive: true });
     await runWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n", ephemeral: true, createSpace: true }));
-    // A real catalog has no comms key, but decoding defaults it to intercom; strip it the way older catalogs persist.
+    // Older catalogs persist no comms key; it decodes unset.
     const opened = JSON.parse(readFileSync(projectPath(dir), "utf8"));
     writeFileSync(projectPath(dir), JSON.stringify({ ...opened, policy: { roles: {} } }));
-    expect((await Effect.runPromise(load(dir))).policy?.comms).toBe("intercom");
+    expect((await Effect.runPromise(load(dir))).policy?.comms).toBeUndefined();
     const options = { events: bus().events, createId: () => "1", home: h.home, projectDir: dir, adapterEnv: () => "network" as const, followProjectPolicy: true };
     // Reaching the network adapter (which then wants its private config) proves network was selected.
     await expect(Effect.runPromise(createComms(options).mode!())).rejects.toThrow("NetworkComms missing or invalid config");
@@ -159,6 +161,8 @@ describe("Comms port", () => {
     await runWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n", ephemeral: true, createSpace: true }));
     await runWith(h, laneOpen(dir, { slug: "desk", label: "desk", goal: "g", repo: dir }));
     await runWith(h, agentLaunch(dir, { action: "launch", name: "desk", role: "desk", lane: "desk", label: "desk", cwd: dir }));
+    const launched = await runWith(h, load(dir));
+    writeFileSync(projectPath(dir), JSON.stringify({ ...launched, policy: { comms: "intercom" } }));
     const events = bus(); const comms = createComms({ events: events.events, createId: () => "1", home: h.home, projectDir: dir, adapterEnv: () => undefined });
     try {
       const before = await Effect.runPromise(comms.resolve("probe/desk"));

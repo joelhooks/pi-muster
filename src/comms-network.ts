@@ -533,7 +533,7 @@ export const commsDoctor = (options: {
     facts: facts._tag === "Success" ? facts.success : undefined, probeError: facts._tag === "Failure" ? facts.failure.message : undefined });
 });
 
-function report(input: { row: string; machine: string; identity: string; facts: JoinFacts | undefined; probeError?: string; policy: "intercom" | "network" | undefined; hint: string | undefined; remote: boolean; cachedHere?: boolean; fixes: string[] }): CommsDoctorReport {
+function report(input: { row: string; machine: string; identity: string; facts: JoinFacts | undefined; probeError?: string; policy: "intercom" | "network" | "ratking" | undefined; hint: string | undefined; remote: boolean; cachedHere?: boolean; fixes: string[] }): CommsDoctorReport {
   const { facts } = input;
   const where = input.machine === "local" ? "Flagg" : input.machine;
   const checks: DoctorCheck[] = [];

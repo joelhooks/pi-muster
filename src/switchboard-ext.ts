@@ -183,7 +183,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     // An agent Muster launched (desk, hawk, boss, worker, judge) owns one project; it may browse
     // the fleet locally but never registers for every tenant's pages.
     if (deps.env.MUSTER_ROLE) ctx.ui.notify(`☎️ ${deps.env.MUSTER_ROLE} sessions browse the Switchboard but are not paged; only a non-project session registers`, "info");
-    else unregister = registerSwitchboardSession(home, ctx.sessionManager.getSessionId());
+    else unregister = registerSwitchboardSession(home, ctx.sessionManager.getSessionId(), deps.env.RATKING_NAME);
     const ui = ctx.ui;
     let signal: string | undefined;
     setSignal = text => {
@@ -340,7 +340,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     name: "desk_answer",
     label: "Switchboard answer",
     description:
-      "Answer one open item for Joel: writes a resolving line into that project's own desk queue and nudges the project's Muster desk over intercom when there is one. Use Joel's words; do not decide for him.",
+      "Answer one open item for Joel: writes a resolving line into that project's own desk queue and nudges the project's Muster desk over Rat King when there is one. Use Joel's words; do not decide for him.",
     parameters: Type.Object({
       project: Type.String(),
       id: Type.String({ description: "Item id, the part after # in [project#id]" }),

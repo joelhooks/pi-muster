@@ -184,6 +184,7 @@ export type Mode = typeof Mode.Type;
 
 export const Thinking = Schema.Literals(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 export type Thinking = typeof Thinking.Type;
+export const isThinking = (value: unknown): value is Thinking => (Thinking.literals as readonly unknown[]).includes(value);
 
 export const AgentState = Schema.Literals([
   "planned",
@@ -494,7 +495,8 @@ const Minutes = Schema.Number.check(Schema.isGreaterThan(0));
 /** One role's launch defaults, partially overridden. Unset keys keep the built-in default. */
 export const RolePolicy = Schema.Struct({
   model: Schema.optionalKey(Schema.String),
-  thinking: Schema.optionalKey(Thinking),
+  /** Any string decodes and is kept, so a level a newer Muster adds never fails the file; launches use only known levels. */
+  thinking: Schema.optionalKey(Schema.String),
   compactAt: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt()))),
   noSkills: Schema.optionalKey(Schema.Boolean),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -510,7 +512,12 @@ export const Policy = Schema.Struct({
   wipLimit: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)))),
   flowStallMin: Schema.optionalKey(Minutes),
   landWaitMin: Schema.optionalKey(Minutes),
-  comms: Schema.Literals(["intercom", "network", "ratking"]).pipe(Schema.withDecodingDefaultKey(Effect.succeed("intercom" as const))),
+  /**
+   * Read it through `policyComms`. Unset means ratking. Any string decodes and is written back unchanged: a value a
+   * newer Muster adds never fails the file, and an unset key is never filled in, because a Muster older than d3d8d03
+   * rejects the whole file over a value it does not know.
+   */
+  comms: Schema.optionalKey(Schema.String),
   /** Quiet minutes before the owner pass sends `esc` and a note. */
   nudgeAfterMin: Schema.optionalKey(Minutes),
   /** Quiet minutes before `/new` plus a re-prompt; null never restarts on its own. */
@@ -525,8 +532,20 @@ export const Policy = Schema.Struct({
     }),
   ),
 });
-/** Policy patches omit comms; persisted policies decode it to intercom. */
-export type Policy = Partial<Pick<typeof Policy.Type, "comms">> & Omit<typeof Policy.Type, "comms">;
+export type Policy = typeof Policy.Type;
+
+export const COMMS_MODES = ["intercom", "network", "ratking"] as const;
+export type CommsMode = typeof COMMS_MODES[number];
+const isCommsMode = (value: unknown): value is CommsMode => (COMMS_MODES as readonly unknown[]).includes(value);
+/** The comms mode in force: unset is ratking, and so is a value this Muster does not know. */
+export const policyComms = (policy: { readonly comms?: string | undefined } | undefined): CommsMode => isCommsMode(policy?.comms) ? policy.comms : "ratking";
+/** A recorded comms value this Muster does not know, for the note that says it runs as ratking. */
+export const unknownComms = (policy: { readonly comms?: string | undefined } | undefined): string | undefined =>
+  policy?.comms !== undefined && !isCommsMode(policy.comms) ? policy.comms : undefined;
+export const unknownCommsNote = (policy: { readonly comms?: string | undefined } | undefined): string[] => {
+  const value = unknownComms(policy);
+  return value === undefined ? [] : [`comms: ${JSON.stringify(value)} is unknown to this Muster; it runs as ratking. The file keeps the value.`];
+};
 
 const ProjectFields = Schema.Struct({
   version: Schema.Literal(1),
@@ -710,8 +729,8 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
  * compact-at, say) with it.
  */
 export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string, steer?: FleetSteer, now?: number): RoleDefaults {
-  const { alternates = [], ...fleet } = roster?.roles?.[role] ?? {};
-  const project = policy?.roles?.[role] ?? {};
+  const { alternates = [], ...fleet } = knownLevel(roster?.roles?.[role] ?? {});
+  const project = knownLevel(policy?.roles?.[role] ?? {});
   // Role exceptions are opt-in: only an explicit launch choice can use one, never a policy or fleet default.
   const resolved = resolveModel(model ?? project.model ?? (role === "worker" && now !== undefined ? steerChoice(steer, now).model : undefined) ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug, model === undefined ? undefined : role);
   const chosen = resolved.model;
@@ -721,13 +740,20 @@ export function roleDefaults(roster: Roster | undefined, policy: Policy | undefi
   };
 }
 
+/** A thinking level this Muster does not know falls back to the next layer's. */
+function knownLevel<T extends { readonly thinking?: string }>(value: T): Omit<T, "thinking"> & { thinking?: Thinking } {
+  const { thinking, ...rest } = value;
+  return isThinking(thinking) ? { ...rest, thinking } : rest;
+}
+
 /** Shallow per-role merge: a later patch overrides only the keys it names. */
-export function mergePolicy(base: Policy | undefined, patch: Policy): typeof Policy.Type {
+export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
   const roles: Record<string, RolePolicy> = { ...(base?.roles ?? {}) };
   for (const [role, value] of Object.entries(patch.roles ?? {})) roles[role] = { ...(roles[role] ?? {}), ...value };
   return {
     ...(base ?? {}),
-    comms: patch.comms ?? base?.comms ?? "intercom",
+    // Never fill in an unset comms: an older Muster rejects a file over a value it does not know.
+    ...(patch.comms !== undefined ? { comms: patch.comms } : {}),
     ...(patch.deployLevel !== undefined ? { deployLevel: patch.deployLevel } : {}),
     ...(patch.wipLimit !== undefined ? { wipLimit: patch.wipLimit } : {}),
     ...(patch.flowStallMin !== undefined ? { flowStallMin: patch.flowStallMin } : {}),
@@ -747,10 +773,11 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policy?.comms ?? "intercom", aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
-export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(["intercom", "network", "ratking"])) }));
+/** A policy patch from project_update: it may only set a comms mode this Muster knows. */
+export const decodePolicy = Schema.decodeUnknownSync(Schema.Struct({ ...Policy.fields, comms: Schema.optionalKey(Schema.Literals(COMMS_MODES)) }));
 export const decodeProject = Schema.decodeUnknownSync(Project);
 export const decodeDeskItem = Schema.decodeUnknownSync(DeskItem);
 const DeskInboxDid = Schema.String.check(Schema.isPattern(/^did:[a-z0-9]+:[^\s]+$/u));

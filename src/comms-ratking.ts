@@ -1,4 +1,4 @@
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { commsAddress } from "./comms.ts";
@@ -41,21 +41,53 @@ export const rowRatkingName = (project: Pick<Project, "slug">, row: { readonly n
 /** Rowless owners with reserved Rat King names. */
 export const OWNER_ALIASES: readonly string[] = ["switchboard", "servo", "titan"];
 
-/** pi-ratking registers its tool as `ratking` while pi-intercom holds `intercom`; renamed, its source still names the package. */
-export function ratkingLoaded(tools: readonly { readonly name: string; readonly sourceInfo?: { readonly path?: string; readonly source?: string } }[], toolName = "ratking"): boolean {
-  return tools.some(tool => tool.name === toolName || /pi-ratking/.test(`${tool.sourceInfo?.path ?? ""} ${tool.sourceInfo?.source ?? ""}`));
+type LoadedTool = { readonly name: string; readonly sourceInfo?: { readonly path?: string; readonly source?: string } };
+const fromRatking = (tool: LoadedTool) => /pi-ratking/.test(`${tool.sourceInfo?.path ?? ""} ${tool.sourceInfo?.source ?? ""}`);
+
+/** pi-ratking registers its tool as `ratking`, or as `intercom` once pi-intercom is gone; either way its source names the package. */
+export function ratkingLoaded(tools: readonly LoadedTool[], toolName = "ratking"): boolean {
+  return tools.some(tool => tool.name === toolName || fromRatking(tool));
+}
+
+/** pi-intercom is loaded: some `intercom` tool that pi-ratking did not register. */
+export function intercomLoaded(tools: readonly LoadedTool[]): boolean {
+  return tools.some(tool => tool.name === "intercom" && !fromRatking(tool));
+}
+
+/** pi-ratking's config file, the same lookup pi-ratking makes. */
+export const ratkingConfigPath = (home: string, env: Readonly<Record<string, string | undefined>> = process.env) => env.RATKING_CONFIG || join(home, ".config/rat-king/pi.json");
+
+/**
+ * DIDs pi-ratking reads as reserved names (the Switchboard, an owner). Muster's legacy reader must never consume one.
+ * A refused name is not pi-ratking's to read, so it is left out. A missing or unreadable file reserves nothing.
+ */
+export function reservedRatkingDids(home: string, env: Readonly<Record<string, string | undefined>> = process.env): Set<string> {
+  const dids = new Set<string>();
+  try {
+    const config = JSON.parse(readFileSync(ratkingConfigPath(home, env), "utf8")) as { reserved?: unknown; refuse?: unknown };
+    const refused = new Set(Array.isArray(config.refuse) ? config.refuse.filter(name => typeof name === "string") : []);
+    if (typeof config.reserved !== "object" || config.reserved === null) return dids;
+    for (const [name, entry] of Object.entries(config.reserved)) {
+      const did = (entry as { did?: unknown } | null)?.did;
+      if (!refused.has(name) && typeof did === "string") dids.add(did);
+    }
+  } catch { /* no config: nothing reserved */ }
+  return dids;
 }
 
 /**
- * The owner session's Rat King name. A live row in any catalog is `<project>/<row>`; a rowless owner
- * is the name recorded at launch, from its own RATKING_NAME or MUSTER_AGENT; last, the alias table.
+ * The owner session's Rat King name. This very process answers to its own RATKING_NAME. A live row in any
+ * catalog is `<project>/<row>`; a rowless owner is the name recorded at launch, from its own RATKING_NAME or
+ * MUSTER_AGENT, then a subscribed Switchboard's recorded name, then any row's recorded ownerName; last, the alias table.
  */
-export function ownerName(owner: string, sources: { readonly catalogs: readonly Project[]; readonly recorded?: string | undefined; readonly aliases?: Readonly<Record<string, string>> }): string | undefined {
+export function ownerName(owner: string, sources: { readonly catalogs: readonly Project[]; readonly recorded?: string | undefined; readonly aliases?: Readonly<Record<string, string>>; readonly self?: OwnerSelf; readonly switchboards?: Readonly<Record<string, string>> }): string | undefined {
+  if (sources.self?.name && owner === sources.self.session) return sources.self.name;
   for (const project of sources.catalogs) {
     const row = project.agents.find(row => row.sessionId === owner && row.state !== "closed");
     if (row) return rowRatkingName(project, row);
   }
   if (sources.recorded) return sources.recorded;
+  if (sources.switchboards?.[owner]) return sources.switchboards[owner];
   for (const project of sources.catalogs) {
     const row = project.agents.find(row => row.owner === owner && row.ownerName);
     if (row?.ownerName) return row.ownerName;
@@ -63,6 +95,24 @@ export function ownerName(owner: string, sources: { readonly catalogs: readonly 
   const alias = sources.aliases?.[owner];
   return alias !== undefined && OWNER_ALIASES.includes(alias) ? alias : undefined;
 }
+
+/** Subscribed Switchboards, one file per session id. A file holds that Switchboard's Rat King name, or nothing. */
+export const switchboardSessionsDir = (home: string) => join(home, ".local", "state", "muster", "switchboards");
+
+/** Session id → the Rat King name each subscribed Switchboard recorded. Unnamed subscriptions are left out. */
+export function subscribedSwitchboards(home: string): Record<string, string> {
+  const names: Record<string, string> = {};
+  const dir = switchboardSessionsDir(home);
+  let files: string[] = [];
+  try { files = readdirSync(dir); } catch { return names; }
+  for (const file of files) {
+    try { const name = readFileSync(join(dir, file), "utf8").trim(); if (name) names[decodeURIComponent(file)] = name; } catch { /* removed meanwhile */ }
+  }
+  return names;
+}
+
+/** This process: its session and the RATKING_NAME it was started with. */
+export type OwnerSelf = { readonly session: string; readonly name?: string | undefined };
 
 /** The name this process answers to, recorded on rows it launches. */
 export function ownerSelfName(env: Readonly<Record<string, string | undefined>>): string | undefined {
@@ -101,7 +151,7 @@ export function ownerAliases(home: string): Record<string, string> {
 export interface RatkingTarget { readonly name: string; readonly session: string }
 
 /** A Muster target as a Rat King name, plus the session the payload names. A DID is pi-ratking's business. */
-export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: readonly Project[]; readonly env: Readonly<Record<string, string | undefined>>; readonly aliases?: Readonly<Record<string, string>> }): RatkingTarget {
+export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: readonly Project[]; readonly env: Readonly<Record<string, string | undefined>>; readonly aliases?: Readonly<Record<string, string>>; readonly self?: OwnerSelf; readonly switchboards?: Readonly<Record<string, string>> }): RatkingTarget {
   const address = commsAddress(to);
   if (address.kind === "did") throw new Unsupported("Muster sends to Rat King names, not DIDs");
   if (address.kind === "alias") {
@@ -110,7 +160,9 @@ export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: rea
     if (!project || !row) throw new CommsError(`no open row ${address.project}/${address.row}`);
     return { name: rowRatkingName(project, row), session: row.sessionId };
   }
-  const name = ownerName(address.id, { catalogs: options.catalogs, recorded: address.id === options.env.MUSTER_OWNER ? options.env.MUSTER_OWNER_NAME : undefined, ...(options.aliases ? { aliases: options.aliases } : {}) });
+  // A reserved rowless name (`switchboard`) is its own address.
+  if (OWNER_ALIASES.includes(address.id)) return { name: address.id, session: address.id };
+  const name = ownerName(address.id, { catalogs: options.catalogs, recorded: address.id === options.env.MUSTER_OWNER ? options.env.MUSTER_OWNER_NAME : undefined, ...(options.aliases ? { aliases: options.aliases } : {}), ...(options.self ? { self: options.self } : {}), ...(options.switchboards ? { switchboards: options.switchboards } : {}) });
   if (!name) throw new CommsError(`no Rat King name for session ${address.id}: not a live row, no recorded owner name, no alias; set RATKING_NAME on that Pi and relaunch its rows`);
   return { name, session: address.id };
 }
@@ -187,6 +239,20 @@ export function RatkingComms(options: {
     sessions: () => Effect.succeed(undefined),
   };
 }
+
+const NOT_LOADED = "NOT DELIVERED: pi-ratking not loaded in this Pi (ratking; no fallback). Load @rat-king/pi-ratking and restart this Pi.";
+
+/** Ratking selected but pi-ratking absent: every send fails at once and says why. Never the intercom adapter. */
+export const RatkingMissing: CommsShape = {
+  mode: () => Effect.succeed("ratking"),
+  send: () => Effect.succeed({ status: "failed", detail: NOT_LOADED }),
+  postOwner: () => Effect.succeed({ status: "failed", detail: NOT_LOADED }),
+  reply: () => Effect.succeed({ status: "failed", detail: NOT_LOADED }),
+  ask: () => Effect.fail(new CommsError(NOT_LOADED)),
+  wake: () => Effect.succeed({ woke: false, reason: "pi-ratking not loaded" }),
+  resolve: () => Effect.fail(new CommsError(NOT_LOADED)),
+  sessions: () => Effect.succeed(undefined),
+};
 
 /** One inbound ratking message. Muster acts only on its own verified payloads; pi-ratking already shows the rest. */
 export function ratkingInbound(message: unknown, handle: { readonly owner: (item: OwnerItem, id: string) => void; readonly message: (payload: Extract<NetworkPayload, { type: "message" }>) => void }): "owner" | "message" | "ignored" {
