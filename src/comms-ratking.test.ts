@@ -96,8 +96,8 @@ describe("transport", () => {
     const comms = RatkingComms({ events: delivered.events, createId, sender: () => "worker-session", target: () => ({ name: "pilot/desk", session: "desk-session" }) });
     expect(await Effect.runPromise(comms.send("desk-session", "hello"))).toMatchObject({ status: "delivered", id: "m1", seq: 7 });
     expect(delivered.requests[0]).toMatchObject({ to: "pilot/desk" });
-    // A cross-project send stays message: a recipient on pre-cutover Muster has no data hook.
-    expect(delivered.requests[0]).toMatchObject({ kind: "message" });
+    // One copy only: pi-ratking keeps data off the model; Muster's hook delivers the follow-up.
+    expect(delivered.requests[0]).toMatchObject({ kind: "data" });
     expect(JSON.parse(String(delivered.requests[0]!.body))).toEqual({ type: "message", recipient: "desk-session", author: "worker-session", body: "hello" });
 
     const refused = fakeRatking(() => ({ status: "not-delivered", code: "UnknownName", reason: "no such name" }));

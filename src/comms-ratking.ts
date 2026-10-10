@@ -24,10 +24,11 @@ export const RATKING_MESSAGE = "ratking/message";
  */
 export const RATKING_KIND = "data";
 /**
- * `send` crosses projects (desk_send, row messages), and a recipient on Muster older than d3d8d03 has no
- * hook for data: it would see nothing. A message kind shows the payload raw at worst, never drops it.
+ * `send` crosses projects (desk_send, row messages, Switchboard nudges). It was "message" while desks on
+ * Muster older than d3d8d03 (no data hook) could receive it; after the 2026-10-10 waves every live desk runs
+ * the hook, and "message" made each send arrive twice (pi-ratking's raw copy plus Muster's follow-up).
  */
-export const RATKING_SEND_KIND = "message";
+export const RATKING_SEND_KIND = "data";
 const SEND_TIMEOUT_MS = 30_000;
 
 interface EventBus {

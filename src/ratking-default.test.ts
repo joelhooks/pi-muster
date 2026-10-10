@@ -170,11 +170,11 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
     expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/worker", kind: "data" });
     const desk = await owner.get("desk_send")!.execute("id", { to: "pilot/desk", text: "hello desk" }, undefined, undefined, ctx(h.sessionId));
     expect(text(desk)).toContain("delivery: ratking · delivered");
-    expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/desk", kind: "message" });
+    expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/desk", kind: "data" });
     // The Switchboard rides its own Rat King name; `switchboard` stays the legacy desk_phone consumer's DID.
     registerSwitchboardSession(h.home, "switchboard-session", "ernestine");
     await owner.get("desk_post")!.execute("id", { kind: "decision", title: "pick one" }, undefined, undefined, ctx(h.sessionId));
-    expect(fake.requests.at(-1)).toMatchObject({ to: "ernestine", kind: "message" });
+    expect(fake.requests.at(-1)).toMatchObject({ to: "ernestine", kind: "data" });
     expect(String(fake.requests.at(-1)!.body)).toContain("Desk queue changed: [pilot#");
     expect(outbox).toEqual([]);
   });
