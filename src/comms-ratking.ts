@@ -16,7 +16,8 @@ import { CommsError, Unsupported, type CommsDelivery, type CommsShape, type Comm
 export const RATKING_SEND = "ratking/send";
 export const RATKING_SEND_RESULT = "ratking/send:result";
 export const RATKING_MESSAGE = "ratking/message";
-export const RATKING_KIND = "muster";
+/** pi-ratking decodes `kind` as "message" or "ask" and silently drops any other request, so a send would time out. */
+export const RATKING_KIND = "message";
 const SEND_TIMEOUT_MS = 30_000;
 
 interface EventBus {

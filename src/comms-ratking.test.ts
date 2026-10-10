@@ -95,7 +95,9 @@ describe("transport", () => {
     const delivered = fakeRatking(() => ({ status: "delivered", id: "m1", seq: 7, to: "pilot/desk" }));
     const comms = RatkingComms({ events: delivered.events, createId, sender: () => "worker-session", target: () => ({ name: "pilot/desk", session: "desk-session" }) });
     expect(await Effect.runPromise(comms.send("desk-session", "hello"))).toMatchObject({ status: "delivered", id: "m1", seq: 7 });
-    expect(delivered.requests[0]).toMatchObject({ to: "pilot/desk", kind: "muster" });
+    expect(delivered.requests[0]).toMatchObject({ to: "pilot/desk" });
+    // pi-ratking's SendRequest schema: kind is "message" or "ask"; anything else is dropped without a result.
+    expect(["message", "ask", undefined]).toContain((delivered.requests[0] as { kind?: string }).kind);
     expect(JSON.parse(String(delivered.requests[0]!.body))).toEqual({ type: "message", recipient: "desk-session", author: "worker-session", body: "hello" });
 
     const refused = fakeRatking(() => ({ status: "not-delivered", code: "UnknownName", reason: "no such name" }));
