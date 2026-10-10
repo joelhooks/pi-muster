@@ -126,7 +126,9 @@ export class Unsupported extends CommsError {
   override readonly name = "Unsupported";
 }
 export interface CommsShape {
-  readonly mode?: () => Effect.Effect<"intercom" | "network", CommsError>;
+  readonly mode?: () => Effect.Effect<"intercom" | "network" | "ratking", CommsError>;
+  /** Under ratking: true while this session's legacy mailbox identity still exists, so its consumer drains it. */
+  readonly legacyDrain?: () => Effect.Effect<boolean, CommsError>;
   /** Explicit intercom path, including reported network-failure fallback. */
   readonly relay?: CommsShape["send"];
   readonly postOwner?: (to: string, item: import("./domain.ts").OwnerItem) => Effect.Effect<CommsDelivery>;

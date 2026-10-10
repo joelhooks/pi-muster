@@ -239,7 +239,9 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
   /** This process runs on a remote machine: it never mints, and it joins only on a key Flagg pushed here. */
   remote?: boolean; run?: import("./comms-network.ts").PrivateCommand;
   /** The session this one was forked from (a restart fork's parent): mail addressed to it is this session's. */
-  forkParent?: () => string | undefined }) {
+  forkParent?: () => string | undefined;
+  /** pi-ratking's transport when it is loaded in this Pi. It then carries every send; the network module only drains. */
+  ratking?: () => CommsShape | undefined }) {
   let transport: ReturnType<typeof createIntercom> | undefined;
   // A join, once seen, holds for this process. A miss is rechecked after 20 s: the key check spawns the secrets CLI.
   const joins = new Map<string, { joined: boolean; at: number }>();
@@ -390,6 +392,20 @@ export function createComms(options: { deskRecord?: import("./comms-network.ts")
     return IntercomComms(transport, lookup);
   });
   const current = (to: CommsTarget) => Effect.try({ try: () => assertCurrentSession(options.home, to), catch: error => error instanceof CommsError ? error : new CommsError(String(error)) });
+  const ratking = options.ratking?.();
+  if (ratking) {
+    // The legacy consumer drains an existing legacy identity only; it never mints one or reads the ratking name.
+    const legacyDrain = () => joinedFact;
+    const shaped: CommsShape = {
+      ...ratking,
+      legacyDrain,
+      send: (to, message) => current(to).pipe(Effect.flatMap(() => ratking.send(to, message)), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: `NOT DELIVERED: ${error.message} (ratking; no fallback)` }))),
+      postOwner: (to, item) => current(to).pipe(Effect.flatMap(() => ratking.postOwner ? ratking.postOwner(to, item) : Effect.succeed<CommsDelivery>({ status: "failed", detail: "ratking owner transport unavailable" })), Effect.catch(error => Effect.succeed<CommsDelivery>({ status: "failed", detail: `NOT DELIVERED: ${error.message} (ratking; no fallback)` }))),
+      consume: receive => joinedFact.pipe(Effect.flatMap(joined => joined ? adapter.pipe(Effect.flatMap(service => service.consume ? service.consume(receive) : Effect.void)) : Effect.void)),
+    };
+    return { ...shaped, dispose: () => { transport?.dispose(); transport = undefined; },
+      rejoin: () => { for (const [key, seen] of joins) if (!seen.joined) joins.delete(key); } };
+  }
   const service: CommsShape = {
     relay: (to, message) => current(to).pipe(Effect.flatMap(() => Effect.suspend(() => {
       transport ??= createIntercom(options.events, options.createId);

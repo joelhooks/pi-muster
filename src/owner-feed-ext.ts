@@ -63,7 +63,9 @@ async function ownDuplicate(session: string, env: Readonly<Record<string, string
 /** Registration is inert. Session lifecycle owns its file watch and fallback poll. */
 export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>, network?: {
   pull?: (ctx: ExtensionContext) => Promise<readonly string[]>;
-  mode?: (ctx: ExtensionContext) => Promise<"intercom" | "network">;
+  mode?: (ctx: ExtensionContext) => Promise<"intercom" | "network" | "ratking">;
+  /** Under pi-ratking: whether this session's legacy mailbox identity exists and still needs draining. */
+  legacyDrain?: (ctx: ExtensionContext) => Promise<boolean>;
   consume: (ctx: ExtensionContext, signal: AbortSignal, receive: (payload: NetworkPayload) => Effect.Effect<void, CommsError>) => Promise<void>;
   /** Forget remembered join misses, so the next selection reads the identity, key and policy again. */
   rejoin?: () => void;
@@ -141,9 +143,12 @@ export function registerOwnerFeed(pi: ExtensionAPI, env: Readonly<Record<string,
     };
     const refreshNetwork = () => {
       if (!network || !actor || !restartFeedActivated(id, env)) return;
-      void Promise.all([network.mode?.(ctx) ?? Promise.resolve("network"), checkDuplicate()]).then(([mode, duplicated]) => {
+      void Promise.all([network.mode?.(ctx) ?? Promise.resolve("network"), checkDuplicate()]).then(async ([mode, duplicated]) => {
         if (networkActor !== actor || duplicated) return;
-        if (mode === "intercom") { actor.send({ type: "INTERCOM" }); consumer?.abort(); consumer = undefined; return; }
+        // pi-ratking reads this session's name. The legacy consumer only drains an existing legacy identity, never the new name.
+        const drain = mode !== "ratking" || await (network.legacyDrain?.(ctx) ?? Promise.resolve(false));
+        if (networkActor !== actor) return;
+        if (mode === "intercom" || !drain) { actor.send({ type: "INTERCOM" }); consumer?.abort(); consumer = undefined; return; }
         // A failed consumer is retried, not left dead: a predecessor's lease expires, an outage passes.
         if (actor.getSnapshot().value === "failed" && retryAt !== undefined && Date.now() >= retryAt) actor.send({ type: "INTERCOM" });
         if (actor.getSnapshot().value !== "off") return;

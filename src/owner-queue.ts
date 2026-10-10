@@ -371,6 +371,18 @@ export const deliverOwnerItem = <R>(params: { owner: string; agent?: string; hom
   }, catch: error => new StoreError({ path: ownerPath(owner, params.home), message: String(error) }) });
   const note = params.item.mention === params.owner ? { ...params.item, mention: owner } : params.item;
   const mode = params.comms?.mode ? yield* params.comms.mode().pipe(Effect.catch(() => Effect.succeed("network" as const))) : "intercom";
+  if (mode === "ratking") {
+    // pi-ratking carries the post by name; the owner's reader ingests it. Not delivered is loud, with no fallback.
+    const item = yield* Effect.try({ try: () => appendOwnerItem(owner, { ...note, project }, params.home, false), catch: () => new StoreError({ path: "owner ratking record", message: "owner ratking record refused" }) });
+    const delivery = params.comms?.postOwner ? yield* params.comms.postOwner(owner, item) : { status: "failed" as const, detail: "ratking owner transport unavailable" };
+    const { ratkingReceipt } = yield* Effect.promise(() => import("./comms-ratking.ts"));
+    const result = yield* ratkingReceipt({ home: params.home, id: item.uri, at: new Date().toISOString(), to: owner, sender: params.session, delivery }).pipe(
+      Effect.mapError(error => new StoreError({ path: "ratking route receipt", message: error.message })));
+    const queued = !result.lost;
+    const woke = delivery.status === "delivered" && mentions(item, owner);
+    relayEvent({ ts: new Date().toISOString(), session: params.session, project: params.project, kind: "owner_note", noteKind: params.item.kind, woke, path: "ratking", itemId: item.uri }, params.home);
+    return { id: item.uri, uri: item.uri, queued, woke, path: "ratking" as const, delivery, owner, resolution, pendingPull: false, lost: result.lost };
+  }
   if (mode === "network") {
     // Local readers must not see a post until authenticated mailbox ingestion.
     const item = yield* Effect.try({ try: () => appendOwnerItem(owner, { ...note, project }, params.home, false), catch: () => new StoreError({ path: "owner network record", message: "owner network record refused" }) });

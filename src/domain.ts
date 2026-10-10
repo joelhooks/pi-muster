@@ -110,7 +110,7 @@ const RouteDelivery = Schema.Struct({ status: Schema.String, detail: Schema.opti
 });
 export const DeskRouteReceipt = Schema.Struct({
   id: Schema.String, at: Schema.String, to: Schema.String, sender: SessionId,
-  path: Schema.Literals(["network", "intercom-fallback", "herdr-prompt"]),
+  path: Schema.Literals(["network", "intercom-fallback", "herdr-prompt", "ratking"]),
   network: RouteDelivery,
   fallback: Schema.optionalKey(RouteDelivery),
 });
@@ -317,6 +317,8 @@ export const AgentRow = Schema.Struct({
   parentSessionFile: Schema.NullOr(Path),
   pane: Schema.NullOr(PaneBinding),
   owner: Schema.String,
+  /** The owner's Rat King name, recorded at launch: rowless owners have no catalog row to resolve it from. */
+  ownerName: Schema.optionalKey(Schema.String),
   brief: Schema.NullOr(Path),
   state: AgentState,
   delivery: Delivery,
