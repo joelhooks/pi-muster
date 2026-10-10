@@ -731,6 +731,7 @@ export const pullRemoteOwnerInbox = (currentDir?: string) => Effect.gen(function
   if (currentDir) dirs.add(currentDir);
   const notes: string[] = [];
   for (const dir of dirs) {
+    yield* backfillOwnerNames(dir).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`owner name: ${error.message.replace(/[\r\n]+/g, " ")}`); })));
     const result = yield* ingestRemotePackets(dir, env.sessionId, 5000).pipe(Effect.catch(error => Effect.succeed({ notes: [`remote inbox: ${error.message.replace(/[\r\n]+/g, " ")}`], failedMachines: new Set<string>() })));
     notes.push(...result.notes.map(note => note.replace(/[\r\n]+/g, " ")));
   }
@@ -1014,9 +1015,27 @@ export function findPacket(project: Project, id: string): Effect.Effect<Packet, 
 
 /** The launching owner's Rat King name. Recorded on the row, so a rowless owner stays addressable by name. */
 const launchOwnerName = (home: string, dir: string, owner: string): { ownerName?: string } => {
-  const name = ownerName(owner, { catalogs: registeredCatalogs(home, dir), recorded: ownerSelfName(process.env), aliases: ownerAliases(home) });
+  const name = ownerName(owner, { catalogs: registeredCatalogs(home, dir), recorded: ownerSelfName(process.env), aliases: ownerAliases(home), self: { session: owner, name: process.env.RATKING_NAME } });
   return name ? { ownerName: name } : {};
 };
+
+/**
+ * Rows launched before ownerName existed, or by a rowless owner with no alias, name no owner, so a worker's post to
+ * it has no Rat King name. The owner records its own RATKING_NAME on every live row it owns that lacks it or names
+ * another. An ordinary row patch, so it rides the usual binding push; no RATKING_NAME, no change.
+ */
+export const backfillOwnerNames = (dir: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const name = process.env.RATKING_NAME;
+  if (!name) return 0;
+  const stale = (row: AgentRow) => row.state !== "closed" && row.owner === env.sessionId && row.ownerName !== name;
+  if (!(yield* load(dir)).agents.some(stale)) return 0;
+  return yield* mutate(dir, current => {
+    const rows = current.agents.filter(stale);
+    if (!rows.length) return Effect.succeed([current, 0] as const);
+    return Effect.succeed([{ ...current, agents: current.agents.map(row => stale(row) ? { ...row, ownerName: name, updatedAt: iso(env) } : row) }, rows.length] as const);
+  });
+});
 /** Saved restore commands from before pi-ratking lack the row's name. */
 const withRatkingName = (project: Project, row: AgentRow, env: Readonly<Record<string, string>>): Record<string, string> => ({ ...env, RATKING_NAME: `${project.slug}/${row.name}` });
 const withoutOwnerName = ({ ownerName: _, ...row }: AgentRow): AgentRow => row;
@@ -3615,10 +3634,10 @@ export const deskPost = (dir: string, params: DeskPostInput) =>
       return yield* input(`no desk item ${record.resolves} to resolve`);
     }
     appendDesk(path, record);
-    yield* nudgeSwitchboards(project.slug, record);
+    const nudge = yield* nudgeSwitchboards(project.slug, record);
     const open = openDeskItems(readDesk(path));
     const tokens = yield* publishTokens(project);
-    return { record, open: open.length, path, notes: [tokens] };
+    return { record, open: open.length, path, notes: [tokens, ...nudge] };
   });
 
 // ---------- project_status ----------
@@ -3684,6 +3703,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           return [next, next] as const;
         }))
       : yield* load(dir);
+    if (act) yield* backfillOwnerNames(dir);
     const spaces = yield* workspaceList();
     const missingSpace = project.spaceId && !spaces.some(space => space.workspace_id === project.spaceId)
       ? `project ${project.slug}: workspace ${project.spaceId} is missing; space not rebuilt` : null;

@@ -9,6 +9,7 @@ import { InputError, NotFound } from "./errors.ts";
 import { agentGet, call, paneGet, paneList, paneSendText, workspaceList } from "./herdr.ts";
 import { PROCESS_STATES } from "./machines.ts";
 import { readRegistry } from "./registry.ts";
+import { subscribedSwitchboards, switchboardSessionsDir } from "./comms-ratking.ts";
 import { Comms, MusterEnv } from "./runtime.ts";
 import { load } from "./store.ts";
 import { KIND_GLYPH, answerPost, deadDesk, fleetGroups, fleetStats, formatAge, inbox, itemRef, latestPost, openCount, queueDir, queueEvents, readQueues, recentPosts } from "./switchboard.ts";
@@ -77,20 +78,20 @@ export function inboxText(groups: readonly InboxGroup[], unregistered: readonly 
 }
 
 /** Session ids are filenames, not a second queue or a transcript store. */
-export const switchboardSessionsDir = (home: string) => join(home, ".local", "state", "muster", "switchboards");
+export { switchboardSessionsDir };
 
-export function registerSwitchboardSession(home: string, sessionId: string): () => void {
+export function registerSwitchboardSession(home: string, sessionId: string, ratkingName?: string): () => void {
   const dir = switchboardSessionsDir(home);
   mkdirSync(dir, { recursive: true });
   const path = join(dir, encodeURIComponent(sessionId));
-  writeFileSync(path, "");
+  writeFileSync(path, ratkingName?.trim() ?? "");
   return () => { try { unlinkSync(path); } catch { /* Already removed. */ } };
 }
 
-/** Queue writes remain authoritative; a disconnected or stale session never fails the write. */
+/** Queue writes remain authoritative; a disconnected or stale session never fails the write. Returns notes for the receipt. */
 export const nudgeSwitchboards = (project: string, record: { id: string; kind: string; resolves?: string | undefined }) =>
   Effect.gen(function* () {
-    if (!record.resolves && !["blocked", "approval", "decision"].includes(record.kind)) return;
+    if (!record.resolves && !["blocked", "approval", "decision"].includes(record.kind)) return [] as string[];
     const env = yield* MusterEnv;
     const intercom = yield* Comms;
     const dir = switchboardSessionsDir(env.home);
@@ -99,16 +100,28 @@ export const nudgeSwitchboards = (project: string, record: { id: string; kind: s
     const text = `☎️ Desk queue changed: [${project}#${record.resolves ?? record.id}] ${record.resolves ? "resolved" : record.kind}. Read desk_inbox for the current fleet; don't answer without Joel.`;
     const mode = intercom.mode ? yield* intercom.mode().pipe(Effect.orElseSucceed(() => "intercom" as const)) : "intercom";
     if (mode === "ratking") {
-      // One send to the reserved name: whoever holds the Switchboard's lease reads it. Never to this Switchboard itself.
-      if (targets.size > 0 && !targets.has(env.sessionId) && process.env.MUSTER_SWITCHBOARD !== "1") yield* intercom.send("switchboard", text);
-      return;
+      // Each subscribed Switchboard by the Rat King name it recorded. Never the literal `switchboard`: that DID is
+      // the legacy desk_phone consumer's. Never this Switchboard itself.
+      if (process.env.MUSTER_SWITCHBOARD === "1") return [];
+      const others = [...targets].filter(target => target !== env.sessionId);
+      const recorded = subscribedSwitchboards(env.home);
+      // One send per name, addressed by the subscribing session, which resolves to the name it recorded.
+      const byName = new Map(others.flatMap(target => recorded[target] && recorded[target] !== process.env.RATKING_NAME ? [[recorded[target], target] as const] : []));
+      const notes: string[] = [];
+      if (others.length && !byName.size) notes.push("switchboard nudge skipped: no subscribed Switchboard recorded a Rat King name; it reads the queue on its next turn");
+      for (const [name, session] of byName) {
+        const result = yield* intercom.send(session, text).pipe(Effect.catchCause(() => Effect.succeed({ status: "failed" as const, detail: "send failed" })));
+        if (result.status !== "delivered" && result.status !== "accepted") notes.push(`switchboard nudge to ${name}: ${result.status}${result.detail ? ` (${result.detail})` : ""}`);
+      }
+      return notes;
     }
     const live = yield* intercom.sessions();
     for (const target of targets) {
       if (target === env.sessionId || (live && !live.includes(target))) continue;
       yield* (intercom.relay ?? intercom.send)(target, text).pipe(Effect.catchCause(() => Effect.void));
     }
-  }).pipe(Effect.catchCause(() => Effect.void));
+    return [] as string[];
+  }).pipe(Effect.catchCause(() => Effect.succeed([] as string[])));
 
 /** Focus only a terminal-verified desk binding. Never submit the reference. */
 export const focusDesk = (slug: string, reference?: string) => Effect.gen(function* () {

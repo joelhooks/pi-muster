@@ -2,17 +2,19 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEventBus, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
+import { Comms } from "./runtime.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createComms, explicitPolicyComms, selectComms } from "./comms.ts";
 import { NetworkComms } from "./comms.ts";
-import { RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, intercomLoaded, ratkingLoaded, registeredCatalogs, reservedRatkingDids } from "./comms-ratking.ts";
+import { RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, intercomLoaded, ratkingLoaded, ratkingTarget, registeredCatalogs, reservedRatkingDids, subscribedSwitchboards } from "./comms-ratking.ts";
 import { decodeProject, roleDefaults } from "./domain.ts";
 import muster from "./extension-main.ts";
 import { OUTBOX_REQUEST_EVENT } from "./intercom.ts";
 import { ingestOwnerItem } from "./owner-queue.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate, pullRemoteOwnerInbox } from "./ops.ts";
-import { load, mutate, projectPath } from "./store.ts";
+import { dataDir, load, mutate, projectPath } from "./store.ts";
+import { deskPost } from "./ops.ts";
 import { registerSwitchboardSession } from "./switchboard-ops.ts";
 import { harness, runWith } from "./test-support.ts";
 
@@ -169,15 +171,45 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
     const desk = await owner.get("desk_send")!.execute("id", { to: "pilot/desk", text: "hello desk" }, undefined, undefined, ctx(h.sessionId));
     expect(text(desk)).toContain("delivery: ratking · delivered");
     expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/desk", kind: "message" });
-    registerSwitchboardSession(h.home, "switchboard-session");
+    // The Switchboard rides its own Rat King name; `switchboard` stays the legacy desk_phone consumer's DID.
+    registerSwitchboardSession(h.home, "switchboard-session", "ernestine");
     await owner.get("desk_post")!.execute("id", { kind: "decision", title: "pick one" }, undefined, undefined, ctx(h.sessionId));
-    expect(fake.requests.at(-1)).toMatchObject({ to: "switchboard", kind: "message" });
+    expect(fake.requests.at(-1)).toMatchObject({ to: "ernestine", kind: "message" });
     expect(String(fake.requests.at(-1)!.body)).toContain("Desk queue changed: [pilot#");
     expect(outbox).toEqual([]);
   });
 });
 
 describe("legacy drain and reserved names", { timeout: 30_000 }, () => {
+  it("with pi-ratking loaded and switchboard refused, desk_phone records still reach deskRecord through the legacy consumer", async () => {
+    const home = mkdtempSync(join(tmpdir(), "ratking-phone-"));
+    process.env.RATKING_CONFIG = join(home, "pi.json");
+    writeFileSync(process.env.RATKING_CONFIG, JSON.stringify({ reserved: { switchboard: { did: "did:web:switchboard.example.invalid" } }, refuse: ["switchboard"] }));
+    const record = { ownDid: "did:web:switchboard.example.invalid", envelope: {}, opened: { $type: "sh.mschf.ratking.desk.answer" } };
+    vi.doMock("./comms-network.ts", () => ({
+      localJoinFacts: async () => ({ agent: "switchboard", config: null, identity: true, did: "did:web:switchboard.example.invalid", key: null, session: null, fence: "absent", joined: true, reason: null }),
+      readNetworkConfig: () => ({}), seedNetworkPeers: () => {}, readNetworkPeers: () => ({}), readNetworkIdentities: () => ({}),
+      // The legacy consumer hands a desk.answer record to the deskRecord handler Muster gave it.
+      createNetworkComms: (options: { deskRecord?: (input: unknown) => Effect.Effect<string> }) => ({ ...NetworkComms,
+        consume: (receive: (payload: unknown) => Effect.Effect<void>) => Effect.flatMap(options.deskRecord!(record), body => receive({ type: "message", author: "desk_phone (local dispatch)", body })) }),
+    }));
+    try {
+      const deskRecord = vi.fn(() => Effect.succeed("desk_phone answer recorded"));
+      const received: unknown[] = [];
+      // The Switchboard joins the legacy network from a network catalog; Muster's own traffic rides ratking.
+      const catalog = join(home, "switchboard"); mkdirSync(dataDir(catalog), { recursive: true });
+      writeFileSync(projectPath(catalog), JSON.stringify({ policy: { comms: "network" } }));
+      const service = createComms({ events: createEventBus(), createId: () => "id", home, projectDir: catalog, adapterEnv: () => "ratking", deskRecord: deskRecord as never,
+        networkSender: () => ({ agent: "switchboard", session: "switchboard-session" }), intercom: () => false,
+        ratking: () => RatkingComms({ events: createEventBus(), createId: () => "id", sender: () => "me", target: () => ({ name: "ernestine", session: "me" }) }) });
+      expect(await Effect.runPromise(service.mode!())).toBe("ratking");
+      expect(await Effect.runPromise(service.legacyDrain!())).toBe(true);
+      await Effect.runPromise(service.consume!(payload => Effect.sync(() => { received.push(payload); })));
+      expect(deskRecord).toHaveBeenCalledWith(record);
+      expect(received).toEqual([expect.objectContaining({ body: "desk_phone answer recorded" })]);
+    } finally { vi.doUnmock("./comms-network.ts"); }
+  });
+
   const sender = () => ({ agent: "pilot/desk", session: "desk-session" });
   const mockNetwork = (did: string, consume: () => Effect.Effect<void>) => vi.doMock("./comms-network.ts", () => ({
     localJoinFacts: async () => ({ agent: "pilot/desk", config: null, identity: true, did, key: null, session: null, fence: "absent", joined: true, reason: null }),
@@ -213,5 +245,54 @@ describe("legacy drain and reserved names", { timeout: 30_000 }, () => {
     mkdirSync(join(home, ".config/rat-king"), { recursive: true });
     writeFileSync(join(home, ".config/rat-king/pi.json"), JSON.stringify({ reserved: { "pilot-desk": { did: "did:web:pilot.desk.example.invalid" } } }));
     expect(await drained("did:web:pilot.desk.example.invalid")).toBe(false);
+  });
+});
+
+describe("Switchboard nudge", { timeout: 30_000 }, () => {
+  it("goes to the subscribed Switchboard's recorded Rat King name, and is skipped with a note when none is recorded", async () => {
+    const { h, dir } = await opened();
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, sidebar: "off" as const }, undefined] as const)));
+    const fake = fakeRatking();
+    const ratking = () => RatkingComms({ events: fake.events, createId: () => "id", sender: () => "me", target: to => ratkingTarget(to, { catalogs: [], env: {}, switchboards: subscribedSwitchboards(h.home) }) });
+    const comms = createComms({ events: fake.events, createId: () => "id", home: h.home, projectDir: dir, adapterEnv: () => undefined, followProjectPolicy: true, ratking, intercom: () => false });
+    const post = (title: string) => Effect.runPromise(deskPost(dir, { kind: "decision", title }).pipe(Effect.provide(Layer.succeed(Comms)(comms)), Effect.provide(h.layer)));
+    const unregister = registerSwitchboardSession(h.home, "switchboard-session");
+    const skipped = await post("no name yet");
+    expect(fake.requests).toEqual([]);
+    expect(skipped.notes.join("\n")).toContain("switchboard nudge skipped: no subscribed Switchboard recorded a Rat King name");
+    unregister();
+    registerSwitchboardSession(h.home, "switchboard-session", "ernestine");
+    await post("named");
+    expect(fake.requests.map(request => request.to)).toEqual(["ernestine"]);
+  });
+});
+
+describe("rowless owners", { timeout: 30_000 }, () => {
+  it("an owner pass records the owner's RATKING_NAME on its rows, and a worker's owner post resolves to it", async () => {
+    const { h, dir } = await opened();
+    await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "work", repo: dir }));
+    await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", cwd: dir, noSkills: true }));
+    await runWith(h, agentLaunch(dir, { action: "launch", name: "other", role: "worker", lane: "work", label: "other", cwd: dir, noSkills: true }));
+    // Launched before d3d8d03: no ownerName; another row names a stale owner; a third belongs to someone else.
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(({ ownerName: _, ...row }) =>
+      row.name === "other" ? { ...row, ownerName: "old-owner" } : row.name === "worker" ? row : { ...row, owner: "someone-else" }) }, undefined] as const)));
+    const workerTarget = () => ratkingTarget(h.sessionId, { catalogs: registeredCatalogs(h.home, dir), env: { MUSTER_OWNER: h.sessionId } });
+    expect(workerTarget()).toEqual({ name: "old-owner", session: h.sessionId });
+    process.env.RATKING_NAME = "pennywise-owner";
+    await runWith(h, projectStatus(dir));
+    const rows = (await runWith(h, load(dir))).agents;
+    expect(rows.filter(row => row.owner === h.sessionId).map(row => [row.name, row.ownerName])).toEqual([["worker", "pennywise-owner"], ["other", "pennywise-owner"]]);
+    expect(rows.filter(row => row.owner !== h.sessionId).every(row => row.ownerName === undefined)).toBe(true);
+    expect(workerTarget()).toEqual({ name: "pennywise-owner", session: h.sessionId });
+    // owner_inbox's pull backfills too.
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(({ ownerName: _, ...row }) => row) }, undefined] as const)));
+    expect(workerTarget).toThrow("no Rat King name");
+    await runWith(h, pullRemoteOwnerInbox(dir));
+    expect(workerTarget()).toEqual({ name: "pennywise-owner", session: h.sessionId });
+  });
+
+  it("the owner itself answers to its own RATKING_NAME first", () => {
+    expect(ratkingTarget("titan-session", { catalogs: [], env: {}, self: { session: "titan-session", name: "titan" } })).toEqual({ name: "titan", session: "titan-session" });
+    expect(() => ratkingTarget("titan-session", { catalogs: [], env: {}, self: { session: "other", name: "titan" } })).toThrow("no Rat King name");
   });
 });

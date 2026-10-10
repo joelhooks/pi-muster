@@ -16,7 +16,7 @@ import { MAX_CADENCE_MINUTES, decodeAgentRow, decodeNetworkPeers, decodeNetworkD
 import { sendDesk } from "./desk-route.ts";
 import { createComms, catalogCommsSender, catalogNetworkPeers, forkParentSession, retiredCatalogSession, retiredSessionReason, successorRowSender } from "./comms.ts";
 import { lostDeliveryText } from "./comms-fallback.ts";
-import { RATKING_MESSAGE, RatkingComms, intercomLoaded, ownerAliases, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking } from "./comms-ratking.ts";
+import { RATKING_MESSAGE, RatkingComms, intercomLoaded, ownerAliases, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking, subscribedSwitchboards } from "./comms-ratking.ts";
 import {
   pullRemoteOwnerInbox,
   agentClose,
@@ -165,7 +165,7 @@ export default function muster(host: ExtensionAPI) {
   // pi-ratking's transport whenever it is loaded; createComms decides at call time whether ratking is selected.
   const ratkingFor = (dir: string, ctx: ExtensionContext) => ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
     sender: () => ctx.sessionManager.getSessionId(),
-    target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, aliases: ownerAliases(homedir()) }) }) : undefined;
+    target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, aliases: ownerAliases(homedir()), self: { session: ctx.sessionManager.getSessionId(), name: env.RATKING_NAME }, switchboards: subscribedSwitchboards(homedir()) }) }) : undefined;
   const rejoinComms = () => { for (const service of comms.values()) service.rejoin(); };
   const kickSelf = (ctx: ExtensionContext) => {
     rejoinComms();
