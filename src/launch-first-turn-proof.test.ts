@@ -10,6 +10,22 @@ import { harness, runWith } from "./test-support.ts";
 const user = (text: string) => JSON.stringify({ type: "message", message: { role: "user", content: text } }) + "\n";
 const assistant = (extra = {}) => JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "toolUse", content: [], ...extra } }) + "\n";
 
+// Nicodemus's desk, 2026-10-10: an active goal fired continuations into the restart fork, then the bridge's
+// refresh notice arrived before the restart prompt, and the proof refused a healthy restart.
+describe("restart proof tolerates pre-prompt wakes", () => {
+  const goal = JSON.stringify({ type: "custom_message", customType: "pi-codex-goal", content: "<pi_goal_continuation>" }) + "\n";
+  const refresh = user("[claude-bridge] A delayed message above (timer, watch or intercom) arrived before the bridge had your current instructions.");
+  const busy = JSON.stringify({ type: "message", message: { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "checking goal" }] } }) + "\n";
+  it("proves a restart whose prompt follows a goal turn and a bridge refresh", () => {
+    expect(firstTurnDetail(goal + busy + refresh + user("Continue as desk") + assistant({ stopReason: "stop" }), "Continue as desk", false, false, true).state).toBe("proven");
+  });
+  it("still refuses an unknown user message, and stays strict outside restart", () => {
+    expect(firstTurnDetail(user("something else") + user("Continue as desk") + assistant(), "Continue as desk", false, false, true).state).toBe("unproven");
+    expect(firstTurnDetail(refresh + user("Continue as desk") + assistant(), "Continue as desk").state).toBe("unproven");
+    expect(firstTurnDetail(busy + user("Continue as desk") + assistant(), "Continue as desk").state).toBe("unproven");
+  });
+});
+
 function setup() {
   const h = harness();
   h.sleep = ms => { h.now = new Date(h.now.getTime() + ms); };

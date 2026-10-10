@@ -409,6 +409,7 @@ export const decodeAgentRow = Schema.decodeUnknownSync(AgentRow);
 /** Read-only projection of Pi's append-only session journal, not a catalog field. */
 export const decodeFirstTurnEntry = Schema.decodeUnknownSync(Schema.Struct({
   type: Schema.String,
+  customType: Schema.optionalKey(Schema.String),
   message: Schema.optionalKey(Schema.Struct({
     role: Schema.String,
     content: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.Struct({ type: Schema.String, text: Schema.optionalKey(Schema.String) }))])),

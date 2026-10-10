@@ -131,20 +131,31 @@ const sessionSlice = (path: string, offset: number, skipEntries = 0, timeoutMs =
   return yield* Effect.try({ try: () => decodeSessionSlice(JSON.parse(result.stdout)), catch: () => new HerdrFailure({ operation: "first-turn", code: "unreadable_slice", message: "unreadable slice: invalid session slice" }) });
 });
 
+const BRIDGE_REFRESH = "[claude-bridge] A delayed message above";
+const isBridgeRefresh = (content: unknown) => {
+  const text = typeof content === "string" ? content : Array.isArray(content) ? content.map(block => (block as { text?: string }).text ?? "").join(" ") : "";
+  return text.trimStart().startsWith(BRIDGE_REFRESH);
+};
+
 /** Only the newly appended user and its first assistant can prove this submission. */
 export function firstTurnDetail(journal: string, prompt: string, exactPrompt = false, network = false, restart = false): { state: "waiting" | "proven" | "unproven"; detail: string; failureKind?: FirstTurnFailure } {
   const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
   // The network consumer appends exactly one attribution line after the brief body.
   const unattributed = (text: string) => network ? text.replace(/\n\n\[Authenticated agent message from [^\]\n]+, not Joel\.\]\s*$/u, "") : text;
   let matched = false;
+  let goalWake = false;
   for (const line of journal.split("\n").slice(0, -1)) {
     if (!line.trim()) continue;
     let entry;
     try { entry = decodeFirstTurnEntry(JSON.parse(line)); }
     catch { return { state: "unproven", failureKind: "unreadable_slice", detail: "unreadable slice: invalid first-turn session entry" }; }
+    if (entry.type === "custom_message" && entry.customType === "pi-codex-goal") goalWake = true;
     const message = entry.message;
     if (entry.type !== "message" || !message) continue;
     if (message.role === "user") {
+      // A restart fork wakes other extensions first: a goal continuation turn, then the Claude bridge's
+      // refresh notice. Before the prompt they are not substitutes for it; anything else still is.
+      if (restart && !matched && isBridgeRefresh(message.content)) continue;
       if (matched) return { state: "unproven", failureKind: "substituted_message", detail: "unverified user message after intended prompt: no verified bridge provenance; first assistant refused" };
       const text = typeof message.content === "string" ? message.content : (message.content ?? []).filter(block => block.type === "text").map(block => block.text ?? "").join(" ");
       if (/^\[paste #\d+(?: (?:\+\d+ lines|\d+ chars))?\]$/.test(text.trim())) return { state: "unproven", failureKind: "substituted_message", detail: "user entry is only a paste marker" };
@@ -155,6 +166,8 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
       // Restart proof ignores only that content-free placeholder, never a reply,
       // a tool call, thinking, or an error. Ordinary launch proof stays strict.
       if (restart && !matched && Array.isArray(message.content) && message.content.length === 0 && (message.stopReason === undefined || message.stopReason === "stop") && message.errorMessage === undefined) continue;
+      // An active goal wakes the fork before the prompt; that turn's replies are the goal's, not a substitute.
+      if (restart && !matched && goalWake && message.stopReason !== "error" && message.errorMessage === undefined) continue;
       if (!matched) return { state: "unproven", failureKind: "wrong_boundary", detail: "wrong boundary: assistant precedes intended prompt" };
       if (message.stopReason === "error" || message.errorMessage !== undefined) return { state: "unproven", failureKind: "assistant_error", detail: `first assistant error: ${message.errorMessage || message.stopReason}`.replace(/\s+/g, " ").slice(0, 1000) };
       return { state: "proven", detail: "matching user entry and clean first assistant" };
