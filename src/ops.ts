@@ -61,6 +61,7 @@ import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { recordSessionSuccessor, remoteCommsEnvironment } from "./comms.ts";
+import { ownerAliases, ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
@@ -250,7 +251,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     }
     const now = iso(env);
     let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
-      profile: remoteProfile, owner: params.action === "restore" && existing ? existing.owner : env.sessionId, sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
+      profile: remoteProfile, owner: params.action === "restore" && existing ? existing.owner : env.sessionId,
+      ...(params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId)), sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
       brief: syncedBrief?.brief ?? existing?.brief ?? null,
       state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
       restore: null, ...(existing?.events ? { events: existing.events } : {}), createdAt: existing?.createdAt ?? now, updatedAt: now };
@@ -596,7 +598,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
   const restore = yield* onRemote(row.machine, machine, Effect.gen(function* () {
     const selected = yield* sessionRestore(extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row), row.sessionFile, project, row.role, roster, {}, true);
     notes.push(...selected.notes);
-    const restore = { cwd: row.cwd, argv: [...machine.wrap.map(arg => arg.replaceAll("{name}", row.name)), "pi", ...buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile: row.sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: machine.musterExtension })], env: row.restore?.env ?? agentEnv(project, row) };
+    const restore = { cwd: row.cwd, argv: [...machine.wrap.map(arg => arg.replaceAll("{name}", row.name)), "pi", ...buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile: row.sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: machine.musterExtension })], env: withRatkingName(project, row, row.restore?.env ?? agentEnv(project, row)) };
     if (row.state !== "closed") {
       yield* stepAgent(row.name, row.state, { type: "CLOSE" });
       const holder = project.agents.find(other => other.machine === row.machine && other.name !== row.name && other.state !== "closed" && row.pane && sharesPane(row.pane, other.pane));
@@ -1009,6 +1011,15 @@ export function findPacket(project: Project, id: string): Effect.Effect<Packet, 
       : new InputError({ message: `packet id ${id} is ambiguous: ${matches.map((packet) => packet.id.slice(0, 12)).join(", ")}` }),
   );
 }
+
+/** The launching owner's Rat King name. Recorded on the row, so a rowless owner stays addressable by name. */
+const launchOwnerName = (home: string, dir: string, owner: string): { ownerName?: string } => {
+  const name = ownerName(owner, { catalogs: registeredCatalogs(home, dir), recorded: ownerSelfName(process.env), aliases: ownerAliases(home) });
+  return name ? { ownerName: name } : {};
+};
+/** Saved restore commands from before pi-ratking lack the row's name. */
+const withRatkingName = (project: Project, row: AgentRow, env: Readonly<Record<string, string>>): Record<string, string> => ({ ...env, RATKING_NAME: `${project.slug}/${row.name}` });
+const withoutOwnerName = ({ ownerName: _, ...row }: AgentRow): AgentRow => row;
 
 /** A saved restore command must hand the row back to its current owner, not a past one. */
 const ownerSynced = (row: AgentRow): AgentRow =>
@@ -2352,7 +2363,12 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
         const detail = `catalog rebound; consumer activation needs repair: ${activate.failure.message}; write the session id as JSON to ${gate}`;
         notes.push(detail); proof = { state: "unproven", submission: "uncertain", detail };
       }
-      if (network && activate._tag === "Success") {
+      // Under pi-ratking both Pis answer to one name and the old one holds its lease until it quits: a
+      // continuation sent now would reach the old Pi. The argv continuation above is the proven brief.
+      const continuationComms = yield* Comms;
+      const ratking = continuationComms.mode ? (yield* continuationComms.mode().pipe(Effect.orElseSucceed(() => "network" as const))) === "ratking" : false;
+      if (network && ratking && activate._tag === "Success") notes.push("ratking: no mailbox continuation; the replacement's reader takes the name when the old Pi quits");
+      if (network && !ratking && activate._tag === "Success") {
         const continuation = `Your restart handover for ${old.name} onto ${sha} is committed. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox, then continue on network.`;
         const delivery = yield* Effect.gen(function* () {
           const boundary = yield* inheritedStartEntries(wait.sessionFile);
@@ -2734,6 +2750,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         parentSessionFile,
         pane: existing?.pane ?? null,
         owner: env.sessionId,
+        ...launchOwnerName(env.home, dir, env.sessionId),
         brief: params.brief ?? existing?.brief ?? null,
         state: yield* stepAgent(name, existing?.state ?? "planned", { type: "LAUNCH" }),
         delivery: "none",
@@ -3661,7 +3678,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
             if (note) handoverNotes.push(note);
           }
           const next = { ...current, agents: current.agents.map((row) =>
-            row.state === "closed" ? row : ownerSynced({ ...row, owner: env.sessionId, updatedAt: iso(env) })) };
+            row.state === "closed" ? row : ownerSynced({ ...withoutOwnerName(row), ...launchOwnerName(env.home, dir, env.sessionId), owner: env.sessionId, updatedAt: iso(env) })) };
           return [next, next] as const;
         }))
       : yield* load(dir);

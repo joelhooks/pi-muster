@@ -16,6 +16,7 @@ import { MAX_CADENCE_MINUTES, decodeAgentRow, decodeNetworkPeers, decodeNetworkD
 import { sendDesk } from "./desk-route.ts";
 import { createComms, catalogCommsSender, catalogNetworkPeers, forkParentSession, retiredCatalogSession, retiredSessionReason, successorRowSender } from "./comms.ts";
 import { lostDeliveryText } from "./comms-fallback.ts";
+import { RATKING_MESSAGE, RatkingComms, ownerAliases, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking } from "./comms-ratking.ts";
 import {
   pullRemoteOwnerInbox,
   agentClose,
@@ -39,7 +40,7 @@ import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "./
 import { registerDeskFeed } from "./desk-feed-ext.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "./owner-view.ts";
-import { capBody, deliverOwnerItem, findOwnerPost, kickComms } from "./owner-queue.ts";
+import { capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem, kickComms } from "./owner-queue.ts";
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
@@ -158,6 +159,12 @@ export default function muster(host: ExtensionAPI) {
   const role = env.MUSTER_ROLE;
   const worker = role === "worker";
   const comms = new Map<string, ReturnType<typeof createComms>>();
+  // pi-ratking registers at load; Muster asks at call time and never starts a reader on the ratking name.
+  const ratkingHere = () => { try { return ratkingLoaded(pi.getAllTools(), env.RATKING_TOOL); } catch { return false; } };
+  // Opt-in: a Pi rides ratking only when launched with MUSTER_COMMS=ratking and pi-ratking is loaded. The fleet stays mixed.
+  const ratkingFor = (dir: string, ctx: ExtensionContext) => env.MUSTER_COMMS === "ratking" && ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
+    sender: () => ctx.sessionManager.getSessionId(),
+    target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, aliases: ownerAliases(homedir()) }) }) : undefined;
   const rejoinComms = () => { for (const service of comms.values()) service.rejoin(); };
   const kickSelf = (ctx: ExtensionContext) => {
     rejoinComms();
@@ -204,6 +211,7 @@ export default function muster(host: ExtensionAPI) {
             },
             networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
             forkParent: () => forkParentSession(ctx.sessionManager.getHeader()),
+            ratking: () => ratkingFor(dir, ctx),
           });
           comms.set(key, service);
         }
@@ -234,13 +242,32 @@ export default function muster(host: ExtensionAPI) {
     if (error) return { block: true, reason: error.content[0]!.text };
   });
 
+  // Inbound Muster payloads over pi-ratking: owner posts land in this session's queue, messages follow up.
+  let offRatking: (() => void) | undefined;
+  pi.on("session_start", (_event, ctx) => {
+    offRatking?.(); offRatking = undefined;
+    if (!ratkingHere()) return;
+    const off = pi.events.on(RATKING_MESSAGE, message => {
+      try {
+        ratkingInbound(message, {
+          owner: item => { ingestOwnerItem(ctx.sessionManager.getSessionId(), item, homedir()); },
+          // Preserve the brief prefix for first-turn proof; attribution is not operator authority.
+          message: payload => pi.sendUserMessage(`${payload.body}\n\n[Authenticated agent message from ${payload.author}, not Joel.]`, { deliverAs: "followUp" }),
+        });
+      } catch { /* pi-ratking already showed the message to the model */ }
+    });
+    offRatking = typeof off === "function" ? off : undefined;
+  });
+
   pi.on("session_shutdown", () => {
+    offRatking?.(); offRatking = undefined;
     for (const service of comms.values()) service.dispose();
     comms.clear();
   });
 
   const pull = remoteInboxPull(env, (ctx: ExtensionContext) => Effect.runPromise(pullRemoteOwnerInbox(env.MUSTER_PROJECT).pipe(Effect.provide(layer(ctx)))));
-  const stopOwnerFeed = registerOwnerFeed(pi, env, { ...(pull ? { pull } : {}), rejoin: () => rejoinComms(), mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
+  const stopOwnerFeed = registerOwnerFeed(pi, env, { ...(pull ? { pull } : {}), rejoin: () => rejoinComms(), mode: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.mode ? service.mode() : Effect.succeed("intercom" as const)).pipe(Effect.provide(layer(ctx)))),
+    legacyDrain: ctx => Effect.runPromise(Effect.flatMap(Comms, service => service.legacyDrain ? service.legacyDrain() : Effect.succeed(false)).pipe(Effect.provide(layer(ctx)))), consume: (ctx, signal, receive) => Effect.runPromise(Effect.flatMap(Comms, service => service.consume ? service.consume(receive) : Effect.void).pipe(Effect.provide(layer(ctx))), { signal }) });
 
   if ((worker || role === "boss") && env.MUSTER_OWNER) {
     pi.registerTool({
@@ -369,6 +396,10 @@ export default function muster(host: ExtensionAPI) {
     async execute(_id, params, signal, _onUpdate, ctx) {
       const error = unreadable([params.text]); if (error) return error;
       const dir = resolve(env.MUSTER_PROJECT ?? ctx.cwd);
+      const ratking = ratkingFor(dir, ctx);
+      if (ratking) return run(ctx, signal, sendDeskRatking({ home: homedir(), dir, to: params.to, text: params.text,
+        sender: ctx.sessionManager.getSessionId(), id: randomUUID(), at: new Date().toISOString(), comms: ratking,
+      }), result => `delivery: ratking · ${result.network.status}${result.network.detail ? ` (${result.network.detail})` : ""}${result.network.id ? ` · ratking id: ${result.network.id}` : ""}\nreceipt: ${result.receipt} · id: ${result.id}`, result => result.lost);
       const service = createComms({ events: pi.events, createId: randomUUID, home: homedir(), projectDir: dir,
         adapterEnv: () => "network", networkConfig: () => env.MUSTER_NETWORK_CONFIG,
         networkSender: () => sessionCommsSender(dir, ctx.sessionManager.getSessionId(), env),
@@ -711,7 +742,7 @@ export default function muster(host: ExtensionAPI) {
       policy: Type.Optional(
         Type.Object({
           deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Set fallback deploy permission on the 0 locked to 3 jfdi scale." })),
-          comms: Type.Optional(StringEnum(["intercom", "network"] as const)),
+          comms: Type.Optional(StringEnum(["intercom", "network", "ratking"] as const)),
           wipLimit: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
           flowStallMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
           landWaitMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
