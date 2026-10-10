@@ -104,6 +104,8 @@ export class Unsupported extends CommsError {
   override readonly name = "Unsupported";
 }
 export interface CommsShape {
+  readonly sendRecord?: (to: string, record: { readonly $type: string }, options?: { readonly encrypt?: boolean }) => Effect.Effect<CommsDelivery>;
+  readonly status?: () => Effect.Effect<ReturnType<typeof import("./domain.ts").decodeRatkingStatus> | undefined>;
   readonly mode?: () => Effect.Effect<"intercom" | "network" | "ratking", CommsError>;
   readonly postOwner?: (to: string, item: import("./domain.ts").OwnerItem) => Effect.Effect<CommsDelivery>;
   readonly send: (to: CommsTarget, message: string) => Effect.Effect<CommsDelivery>;

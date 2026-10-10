@@ -38,6 +38,8 @@ export function createComms(options: { ratking?: () => CommsShape | undefined })
   const current = () => options.ratking?.() ?? RatkingMissing;
   const service: CommsShape = {
     mode: () => Effect.succeed("ratking"),
+    status: () => Effect.suspend(() => current().status?.() ?? Effect.succeed(undefined)),
+    sendRecord: (to, record, opts) => Effect.suspend(() => (current().sendRecord ?? RatkingMissing.sendRecord!)(to, record, opts)),
     send: (to, message) => Effect.suspend(() => current().send(to, message)),
     postOwner: (to, item) => Effect.suspend(() => (current().postOwner ?? RatkingMissing.postOwner!)(to, item)),
     ask: (to, message, opts) => Effect.suspend(() => current().ask(to, message, opts)),

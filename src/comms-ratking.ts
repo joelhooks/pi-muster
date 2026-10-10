@@ -30,6 +30,7 @@ export const RATKING_KIND = "data";
  */
 export const RATKING_SEND_KIND = "data";
 const SEND_TIMEOUT_MS = 30_000;
+import { ratkingStatus } from "./ratking-status.ts";
 
 interface EventBus {
   emit(event: string, payload: unknown): void;
@@ -150,7 +151,8 @@ export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: rea
   return { name, session: address.id };
 }
 
-type SendRequest = { readonly to: string; readonly body: string; readonly kind?: string } | { readonly replyTo: string; readonly body: string; readonly kind?: string };
+type SendRequest = ({ readonly to: string } | { readonly replyTo: string }) &
+  ({ readonly body: string; readonly kind?: string; readonly record?: never } | { readonly record: { readonly $type: string }; readonly body?: never }) & { readonly encrypt?: boolean };
 
 /** One request, one result by requestId. Not delivered is a failed delivery with pi-ratking's code; there is no fallback. */
 export function ratkingSend(events: EventBus, createId: () => string, request: SendRequest, timeoutMs = SEND_TIMEOUT_MS): Effect.Effect<CommsDelivery> {
@@ -202,6 +204,8 @@ export function RatkingComms(options: {
   const failed = (error: CommsError): CommsDelivery => ({ status: "failed", detail: `NOT DELIVERED: ${error.message} (ratking; no fallback)` });
   return {
     mode: () => Effect.succeed("ratking"),
+    status: () => ratkingStatus(options.events, `muster-status-${options.createId()}`),
+    sendRecord: (to, record, opts) => send({ to, record, encrypt: opts?.encrypt ?? true }),
     send: (to, message) => target(to).pipe(
       Effect.flatMap(({ name, session }) => {
         const author = options.sender();
@@ -228,6 +232,8 @@ const NOT_LOADED = "NOT DELIVERED: pi-ratking not loaded in this Pi (ratking; no
 /** Ratking selected but pi-ratking absent: every send fails at once and says why. Never the intercom adapter. */
 export const RatkingMissing: CommsShape = {
   mode: () => Effect.succeed("ratking"),
+  sendRecord: () => Effect.succeed({ status: "failed", detail: NOT_LOADED }),
+  status: () => Effect.succeed(undefined),
   send: () => Effect.succeed({ status: "failed", detail: NOT_LOADED }),
   postOwner: () => Effect.succeed({ status: "failed", detail: NOT_LOADED }),
   reply: () => Effect.succeed({ status: "failed", detail: NOT_LOADED }),

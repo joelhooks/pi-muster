@@ -43,11 +43,14 @@ import { capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem } from "./own
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
-import { deskPhone } from "./switchboard-ops.ts";
+import { deskPhone, deskPhoneRecord } from "./switchboard-ops.ts";
 import { CommsError } from "./runtime.ts";
 import { findSkills, skillIndex } from "./skills.ts";
 import { createVersionSkew, loadedVersion, withVersionSkew } from "./version-skew.ts";
 import { squashed } from "./readable.ts";
+import { deliveryId, recentDeliveries } from "./recent-deliveries.ts";
+// Memory only; shared across session starts and both inbound event paths in this Pi process.
+const handledDeliveries = recentDeliveries(500);
 
 const MUSTER_ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
 /** Read once, as this module graph evaluates: the stale-tools warning names the code that is running. */
@@ -208,23 +211,46 @@ export default function muster(host: ExtensionAPI) {
 
   // Inbound Muster payloads over pi-ratking: owner posts land in this session's queue, messages follow up.
   let offRatking: (() => void) | undefined;
+  let offRecord: (() => void) | undefined;
   pi.on("session_start", (_event, ctx) => {
     offRatking?.(); offRatking = undefined;
+    offRecord?.(); offRecord = undefined;
     if (!ratkingHere()) return;
     const off = pi.events.on(RATKING_MESSAGE, message => {
+      const id = deliveryId(message);
+      if (!id || handledDeliveries.has(id)) return;
       try {
         ratkingInbound(message, {
-          owner: item => { ingestOwnerItem(ctx.sessionManager.getSessionId(), item, homedir()); },
+          owner: item => {
+            if (!handledDeliveries.claim(id)) return;
+            // ingestOwnerItem also rejects an existing URI, even under a different delivery id/CID.
+            ingestOwnerItem(ctx.sessionManager.getSessionId(), item, homedir());
+          },
           // Preserve the brief prefix for first-turn proof; attribution is not operator authority.
-          message: payload => pi.sendUserMessage(`${payload.body}\n\n[Authenticated agent message from ${payload.author}, not Joel.]`, { deliverAs: "followUp" }),
+          message: payload => {
+            if (!handledDeliveries.claim(id)) return;
+            pi.sendUserMessage(`${payload.body}\n\n[Authenticated agent message from ${payload.author}, not Joel.]`, { deliverAs: "followUp" });
+          },
         });
-      } catch { /* pi-ratking already showed the message to the model */ }
+      } catch { handledDeliveries.forget(id); /* a failed local write is not a handled delivery */ }
     });
     offRatking = typeof off === "function" ? off : undefined;
+    const recordOff = pi.events.on("ratking/record", event => {
+      if (typeof event !== "object" || event === null || !("record" in event) ||
+        typeof event.record !== "object" || event.record === null || !("$type" in event.record) ||
+        event.record.$type !== "sh.mschf.ratking.desk.answer") return;
+      const id = deliveryId(event);
+      if (!id || !handledDeliveries.claim(id)) return;
+      void Effect.runPromise(deskPhoneRecord(event).pipe(Effect.provide(layer(ctx))))
+        .then(notice => ctx.ui.notify(notice, notice.includes("answer failed") ? "warning" : "info"))
+        .catch(() => ctx.ui.notify("desk_phone answer failed: identity, record or queue unavailable; inspect pending state and run sync.", "warning"));
+    });
+    offRecord = typeof recordOff === "function" ? recordOff : undefined;
   });
 
   pi.on("session_shutdown", () => {
     offRatking?.(); offRatking = undefined;
+    offRecord?.(); offRecord = undefined;
     for (const service of comms.values()) service.dispose();
     comms.clear();
   });
@@ -379,7 +405,7 @@ export default function muster(host: ExtensionAPI) {
   registerSwitchboard(pi, { env, layer, run });
   pi.registerTool({
     name: "desk_phone", label: "Desk phone",
-    description: "Route one open rats-nest desk card to Joel's allowlisted phone (send); inspect durable pending state (poll); retry recorded rulings and close resolved threads (sync). Slice B compatibility path uses an existing phone mailbox fence; Muster starts no consumer. Supply one desk-report card with marked suggestions; never decide for Joel.",
+    description: "Route one open rats-nest desk card to Joel's allowlisted phone (send); inspect durable pending state (poll); retry recorded rulings and close resolved threads (sync). Uses pi-ratking's encrypted record send and existing reader; Muster starts no consumer. Supply one desk-report card with marked suggestions; never decide for Joel.",
     parameters: Type.Object({ action: StringEnum(["send", "poll", "sync"] as const), card: Type.Optional(Type.Unknown({ description: "One muster-desk-report.items.v1 card, including id, why, choices with suggest, and report context. Required for send." })), page: Type.Optional(Type.String()) }),
     execute: (_id, params, signal, _onUpdate, ctx) => run(ctx, signal, deskPhone(params), result => JSON.stringify(result)),
   });

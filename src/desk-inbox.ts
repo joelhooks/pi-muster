@@ -1,29 +1,27 @@
 import { Effect, Schema } from "effect";
-import { openNetworkMailbox, readNetworkIdentities, sendWithConsumerFence } from "./phone-mailbox.ts"; // slice B
-import { decodeDeskItem, decodeDeskOpenedMessage, decodeDeskInboxIdentities, type DeskInboxIdentities } from "./domain.ts";
+import { decodeDeskItem, decodeRatkingRecord, decodeDeskRecordItem, decodeDeskRecordAnswer, decodeDeskRecordUpdate, decodeDeskInboxIdentities, type DeskInboxIdentities, type DeskRecordItem, type DeskRecordUpdate } from "./domain.ts";
+import { RatkingMissing } from "./comms-ratking.ts";
+import type { CommsShape } from "./runtime.ts";
 import { FEEDBACK_SCHEMA, rulingText, rulings, type Feedback, type FeedbackValue, type ReportCard } from "./desk-report.ts";
 import type { DeskAnswerInput } from "./switchboard-ops.ts";
-import * as Item from "./vendor/rat-king-lexicon/desk.item.ts";
-import * as Answer from "./vendor/rat-king-lexicon/desk.answer.ts";
-import * as Update from "./vendor/rat-king-lexicon/desk.update.ts";
 
 export type { DeskInboxIdentities } from "./domain.ts";
-export type DeskInboxMailbox = Pick<Effect.Success<ReturnType<typeof openNetworkMailbox>>, "send" | "open">;
+export type DeskInboxTransport = Pick<CommsShape, "sendRecord">;
 export class DeskInboxError extends Error {
   readonly _tag = "DeskInboxError";
 }
 const refuse = (reason: string): never => { throw new DeskInboxError(reason); };
 const boundary = <A>(f: () => A) => Effect.try({ try: f, catch: error => error instanceof DeskInboxError ? error : new DeskInboxError("Invalid desk record") });
-const decodeItem = Schema.decodeUnknownSync(Item.Main);
-const decodeAnswer = Schema.decodeUnknownSync(Answer.Main);
-const decodeUpdate = Schema.decodeUnknownSync(Update.Main);
+const decodeItem = decodeDeskRecordItem;
+const decodeAnswer = decodeDeskRecordAnswer;
+const decodeUpdate = decodeDeskRecordUpdate;
 const identitiesFrom = (value: unknown): DeskInboxIdentities => {
   try { return { ...decodeDeskInboxIdentities(value) }; }
   catch { return refuse("Desk inbox identities are required and must be did: strings"); }
 };
 
 /** The only then/outcome translation lives at this edge. No report object is spread into a record. */
-export function deskInboxItem(options: { project: string; queueItem: unknown; card: ReportCard; supersedes?: string }): Item.MainValue {
+export function deskInboxItem(options: { project: string; queueItem: unknown; card: ReportCard; supersedes?: string }): DeskRecordItem {
   const queue = decodeDeskItem(options.queueItem);
   const { card } = options;
   if (card.id !== queue.id || card.extra_ids?.length) refuse("One card must cover exactly one desk item");
@@ -41,7 +39,7 @@ export function deskInboxItem(options: { project: string; queueItem: unknown; ca
   return record;
 }
 
-function validateAxes(item: Item.MainValue): void {
+function validateAxes(item: DeskRecordItem): void {
   const keys = item.choices.map(choice => choice.key);
   if (item.rows) keys.push(item.rows.key);
   if (keys.includes("t") || new Set(keys).size !== keys.length) refuse("Ambiguous desk axes");
@@ -68,32 +66,25 @@ export function deskInboxCard(value: unknown): ReportCard {
 }
 
 export interface PendingDeskItem {
-  readonly item: Item.MainValue;
+  readonly item: DeskRecordItem;
   /** Persist the send result's tid. Keep only unresolved items in this list. */
   readonly messageTid: string;
   readonly page: string;
 }
 
-/** Open verifies HPKE/AAD/signature using the mailbox's DID resolver before any feedback is produced.
- * The caller owns pending state, deduplication, queue writes, notification, and deliver/ack.
- * Refusals never write a resolving line or ack a message.
- */
+/** pi-ratking owns cryptography and ack. This edge checks the configured signed phone DID,
+ * the pending reference and feedback axes before producing any resolving input. */
 export function consumeDeskAnswer(options: {
   identities: DeskInboxIdentities;
-  mailbox: Pick<DeskInboxMailbox, "open">;
-  envelope: Parameters<DeskInboxMailbox["open"]>[0];
+  event: unknown;
   pending: readonly PendingDeskItem[];
 }) {
   return Effect.gen(function* () {
     const identities = yield* boundary(() => identitiesFrom(options.identities));
-    yield* boundary(() => {
-      if (options.envelope.aad.recipientDid !== identities.switchboard) refuse("Switchboard identity mismatch");
-    });
-    const opened = yield* options.mailbox.open(options.envelope);
     return yield* boundary(() => {
-      const message = decodeDeskOpenedMessage(opened);
-      if (message.senderDid !== identities.phone) refuse("Desk answer sender is not allowlisted");
-      const answer = decodeAnswer(JSON.parse(message.body));
+      const message = decodeRatkingRecord(options.event);
+      if (message.did !== identities.phone) refuse("Desk answer sender is not allowlisted");
+      const answer = decodeAnswer(message.record);
       const pending = options.pending.find(entry => entry.item.project === answer.project && entry.item.itemId === answer.itemId);
       if (!pending) return refuse("Unknown or resolved desk item");
       if (answer.inReplyTo !== pending.messageTid) refuse("Desk answer references a different message");
@@ -118,39 +109,24 @@ export function consumeDeskAnswer(options: {
       const result = rulings({ schema: "muster-desk-report.items.v1", slug: pending.page, snapshot: "", seed: "", groups: [], items: [card] }, feedback);
       const ruling = result.rulings[0];
       if (!ruling) return refuse("No desk ruling");
-      return { feedback, deskAnswer: { project: answer.project, id: answer.itemId, answer: rulingText(ruling) } satisfies DeskAnswerInput, answerTid: message.tid };
+      return { feedback, deskAnswer: { project: answer.project, id: answer.itemId, answer: rulingText(ruling) } satisfies DeskAnswerInput, answerTid: message.id };
     });
   });
 }
 
-export function deskInboxUpdate(options: { project: string; itemId: string; state: Update.MainValue["state"]; text?: string }): Update.MainValue {
+export function deskInboxUpdate(options: { project: string; itemId: string; state: DeskRecordUpdate["state"]; text?: string }): DeskRecordUpdate {
   return decodeUpdate({ $type: "sh.mschf.ratking.desk.update", project: options.project, itemId: options.itemId,
     state: options.state, ...(options.text !== undefined ? { text: options.text } : {}) });
 }
 
-/** Call once with the Switchboard's already-open mailbox, or load its existing network.json identity.
- * No poller, timer, cursor, lease acquisition, or tool registration belongs to this library.
- */
-export function openDeskInbox(options: { home: string; configPath?: string; identities: DeskInboxIdentities }) {
-  return Effect.gen(function* () {
-    const identities = yield* boundary(() => identitiesFrom(options.identities));
-    const mailbox = yield* openNetworkMailbox({ ...options, agent: "switchboard" });
-    yield* boundary(() => {
-      if (readNetworkIdentities(options.home).switchboard?.did !== identities.switchboard) refuse("Switchboard identity mismatch");
-    });
-    return deskInbox({ home: options.home, mailbox, identities });
-  });
-}
-
-export function deskInbox(options: { home: string; mailbox: DeskInboxMailbox; identities: DeskInboxIdentities }) {
+/** Sends only named, encrypted records. No mailbox, cursor, consumer or lease belongs here. */
+export function deskInbox(options: { home: string; comms: DeskInboxTransport; identities: DeskInboxIdentities }) {
   const identities = identitiesFrom(options.identities);
-  const send = (record: Item.MainValue | Update.MainValue) => sendWithConsumerFence({
-    home: options.home, did: identities.switchboard,
-    send: opts => options.mailbox.send(identities.phone, JSON.stringify(record), opts),
-  });
+  const send = (record: DeskRecordItem | DeskRecordUpdate) =>
+    (options.comms.sendRecord ?? RatkingMissing.sendRecord!)("joel-phone", record, { encrypt: true });
   return {
     sendItem: (input: Parameters<typeof deskInboxItem>[0]) => boundary(() => deskInboxItem(input)).pipe(Effect.flatMap(send)),
     sendUpdate: (input: Parameters<typeof deskInboxUpdate>[0]) => boundary(() => deskInboxUpdate(input)).pipe(Effect.flatMap(send)),
-    consumeAnswer: (input: Omit<Parameters<typeof consumeDeskAnswer>[0], "mailbox" | "identities">) => consumeDeskAnswer({ ...input, mailbox: options.mailbox, identities }),
+    consumeAnswer: (input: Omit<Parameters<typeof consumeDeskAnswer>[0], "identities">) => consumeDeskAnswer({ ...input, identities }),
   };
 }

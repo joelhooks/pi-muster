@@ -142,24 +142,35 @@ export const focusDesk = (slug: string, reference?: string) => Effect.gen(functi
   return { live: true, typed };
 });
 
-/** Borrow the current Switchboard consumer's lease; this tool never acquires or polls a mailbox. */
-export const deskPhone = (input: { action: "send" | "poll" | "sync"; card?: unknown; page?: string | undefined }) => Effect.gen(function* () {
+const phoneContext = Effect.gen(function* () {
   const env = yield* MusterEnv;
-  const [{ readDeskPhoneConfig }, { deskPhoneSnapshot, sendDeskPhone, syncDeskPhone }, { openNetworkMailbox, readNetworkIdentities }, { DeskInboxError }] = yield* Effect.promise(() => Promise.all([
-    import("./desk-phone-store.ts"), import("./desk-phone.ts"), import("./phone-mailbox.ts"), /* slice B */ import("./desk-inbox.ts"),
+  const comms = yield* Comms;
+  const [{ readDeskPhoneConfig }, { DeskInboxError }] = yield* Effect.promise(() => Promise.all([
+    import("./desk-phone-store.ts"), import("./desk-inbox.ts"),
   ]));
   const identities = yield* readDeskPhoneConfig(env.home);
-  const own = yield* Effect.try({ try: () => readNetworkIdentities(env.home).switchboard?.did, catch: () => new DeskInboxError("desk_phone Switchboard identity cache is unavailable") });
-  if (own !== identities.switchboard) return yield* Effect.fail(new DeskInboxError("desk_phone configured DID differs from the Switchboard network identity"));
-  const mailbox = yield* openNetworkMailbox({ home: env.home, agent: "switchboard", configPath: undefined });
-  const lease = yield* mailbox.lease.resolve(identities.switchboard);
-  if (lease.did !== identities.switchboard || lease.harness.$type !== "sh.mschf.ratking.runtime.lease#pi" || lease.harness.sessionId !== env.sessionId || Date.parse(lease.expiresAt) <= env.now().getTime()) return yield* Effect.fail(new DeskInboxError("desk_phone requires this session's existing Switchboard network consumer and live lease; no second lease will be acquired"));
-  const context = { home: env.home, identities, mailbox };
+  const status = comms.status ? yield* comms.status() : undefined;
+  if (!status?.did) return yield* Effect.fail(new DeskInboxError("desk_phone: pi-ratking not loaded or has no identity/status; no fallback"));
+  if (status.did !== identities.switchboard) return yield* Effect.fail(new DeskInboxError("desk_phone configured DID differs from this Pi's pi-ratking identity"));
+  return { home: env.home, identities, comms, ownDid: status.did };
+});
+
+/** pi-ratking alone sends records and owns the reader. No lease or mailbox is opened here. */
+export const deskPhone = (input: { action: "send" | "poll" | "sync"; card?: unknown; page?: string | undefined }) => Effect.gen(function* () {
+  const { deskPhoneSnapshot, sendDeskPhone, syncDeskPhone } = yield* Effect.promise(() => import("./desk-phone.ts"));
+  const context = yield* phoneContext;
   switch (input.action) {
     case "send": return yield* sendDeskPhone({ ...context, card: input.card, page: input.page ?? "phone-rats-nest" });
     case "sync": return yield* syncDeskPhone(context);
-    case "poll": return yield* deskPhoneSnapshot(env.home, identities);
+    case "poll": return yield* deskPhoneSnapshot(context.home, context.identities);
   }
+});
+
+/** Consume only a record from pi-ratking, never raw agent text. */
+export const deskPhoneRecord = (event: unknown) => Effect.gen(function* () {
+  const context = yield* phoneContext;
+  const { dispatchDeskPhone } = yield* Effect.promise(() => import("./desk-phone.ts"));
+  return yield* dispatchDeskPhone({ ...context, event });
 });
 
 export interface DeskAnswerInput {

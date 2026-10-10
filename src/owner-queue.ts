@@ -114,7 +114,7 @@ export function appendOwnerItem(owner: string, input: OwnerNoteInput, home = hom
 export function ingestOwnerItem(owner: string, value: OwnerItem, home = homedir(), project?: string): boolean {
   const item = decodeOwnerItem(value);
   if (project !== undefined && item.project !== undefined && item.project !== project) throw new Error("owner item project mismatch");
-  if (readOwnerQueue(owner, home).items.some(record => record.item.cid === item.cid)) return false;
+  if (readOwnerQueue(owner, home).items.some(record => record.item.uri === item.uri || record.item.cid === item.cid)) return false;
   const path = ownerPath(owner, home); mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   appendFileSync(path, `${JSON.stringify(item)}\n`, { mode: 0o600 }); return true;
 }
