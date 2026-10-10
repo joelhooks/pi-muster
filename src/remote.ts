@@ -91,6 +91,17 @@ export const mapPath = (path: string, machine: MachineConfig): string => {
   const prefix = Object.keys(machine.paths).sort((a, b) => b.length - a.length).find(p => path === p || path.startsWith(`${p}/`));
   return prefix ? `${machine.paths[prefix]}${path.slice(prefix.length)}` : path;
 };
+/**
+ * The owner-side source of a row-private brief copy (`<transferDir>/files/<sha256>/<mapped path>`), or null.
+ * Close removes owned copies, so a restore re-copies the brief from its source instead of reading a gone copy.
+ */
+export const transferredBriefSource = (brief: string, transferDir: string, machine: MachineConfig): string | null => {
+  const match = brief.startsWith(`${transferDir}/files/`) ? /^[0-9a-f]{64}(\/.+)$/.exec(brief.slice(transferDir.length + "/files/".length)) : null;
+  if (!match) return null;
+  const mapped = match[1]!;
+  const entry = Object.entries(machine.paths).sort((a, b) => b[1].length - a[1].length).find(([, remote]) => mapped === remote || mapped.startsWith(`${remote}/`));
+  return entry ? `${entry[0]}${mapped.slice(entry[1].length)}` : mapped;
+};
 /** The remote package owns its bundled skills and extensions, regardless of the owner's install directory. */
 export const mapWorkerPath = (path: string, machine: MachineConfig) => mapPath(path, { ...machine, paths: { ...machine.paths, [fileURLToPath(new URL("..", import.meta.url)).replace(/\/$/, "")]: machine.musterExtension } });
 

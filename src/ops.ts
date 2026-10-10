@@ -57,7 +57,7 @@ import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 import { networkPeerEnvironment, networkRowIdentity } from "./desk-route.ts";
-import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
+import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
 import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { recordSessionSuccessor, remoteCommsEnvironment } from "./comms.ts";
@@ -193,7 +193,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (!isAbsolute(remoteHome)) return yield* input(`machine ${nameOfMachine}: remote HOME is not absolute`);
   const scratch = join(remoteHome, ".cache", project.slug, name);
   const transferDir = join(remoteHome, ".cache/muster-transfers", project.slug, name);
-  const syncedBrief = params.brief ? yield* syncRemoteBrief(nameOfMachine, machine, params.brief, transferDir) : null;
+  const briefSource = params.brief ?? (params.action === "restore" && existing?.brief ? transferredBriefSource(existing.brief, transferDir, machine) : null);
+  const syncedBrief = briefSource ? yield* syncRemoteBrief(nameOfMachine, machine, briefSource, transferDir) : null;
   if (syncedBrief) resolved.notes.push(syncedBrief.note);
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
   let modelFailure: GuardFailed | null = null;

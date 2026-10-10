@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect, Layer } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
-import { remotePullReceipt, sidecarRoots, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief } from "./remote.ts";
+import { remotePullReceipt, sidecarRoots, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
 import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
@@ -360,6 +360,27 @@ describe("remote owner operations", () => {
     await s.run(projectStatus(s.dir, { act: true }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: "other-owner" })));
     expect((await s.run(load(s.dir))).agents[0]).toMatchObject({ state: "interrupted", pane: null, owner: row.owner });
     expect(s.remote.calls.slice(boundary).some(call => ["pane.close", "agent.prompt", "pane.send_input"].includes(call.method))).toBe(false);
+  });
+  // Bravestarr, 2026-10-10: close removed the row's brief copy, so restore failed with ENOENT on it.
+  it("restore of a closed remote row re-copies its brief from the owner-side source", async () => {
+    const s = setup(); await s.open();
+    const brief = join(s.dir, "w2-brief.md"); writeFileSync(brief, "fold the second wave\n");
+    const launched = await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "w2-fold", role: "worker", lane: "work", label: "fold worker", clone: true, noSkills: true, brief }));
+    const copy = launched.row.brief!;
+    expect(copy).not.toBe(brief); expect(readFileSync(copy, "utf8")).toBe("fold the second wave\n");
+    writeFileSync(join(launched.row.cwd, "wip.txt"), "unharvested\n"); // close keeps a clone with work in it
+    await s.run(agentClose(s.dir, { name: "w2-fold" }));
+    expect(existsSync(launched.row.cwd)).toBe(true);
+    expect(existsSync(copy)).toBe(false);
+    const restored = await s.run(agentLaunch(s.dir, { action: "restore", name: "w2-fold" }));
+    expect(restored.row.state).toBe("running");
+    expect(readFileSync(restored.row.brief!, "utf8")).toBe("fold the second wave\n");
+  });
+  it("maps a transferred brief copy back to its owner-side source", () => {
+    const machine = config({ paths: { "/Users/joel": "/home/joel" } });
+    const transfer = "/home/joel/.cache/muster-transfers/drovr/w2-fold", hash = "a".repeat(64);
+    expect(transferredBriefSource(`${transfer}/files/${hash}/home/joel/.agent/b.md`, transfer, machine)).toBe("/Users/joel/.agent/b.md");
+    expect(transferredBriefSource("/home/joel/other/b.md", transfer, machine)).toBeNull();
   });
   it("restore recovers a running remote row whose bound pane is gone", async () => {
     const s = setup(); await s.open(); const { row } = await s.launch();
