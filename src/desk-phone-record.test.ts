@@ -32,15 +32,16 @@ it("the extension handles phone records once, never injects them as model text, 
   const lifecycle = async (event: string) => { for (const handler of hooks.get(event) ?? []) await handler({}, ctx); };
   try {
     await lifecycle("session_start"); await lifecycle("session_start");
-    fake.events.emit("ratking/record", { ...phoneEvent, did: "did:web:impostor.example.invalid", from: "joel-phone" });
+    fake.events.emit("ratking/record", { ...phoneEvent, id: "wrong-signer-record", did: "did:web:impostor.example.invalid", from: "joel-phone" });
     await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
     expect(readDesk(queuePath("rats-nest", h.home)).some(row => row.resolves)).toBe(false);
     notify.mockClear();
-    fake.events.emit("ratking/record", { ...phoneEvent, verified: false });
+    fake.events.emit("ratking/record", { ...phoneEvent, id: "unverified-record", verified: false });
     await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
     expect(readDesk(queuePath("rats-nest", h.home)).some(row => row.resolves)).toBe(false);
     notify.mockClear();
     fake.events.emit("ratking/record", phoneEvent);
+    fake.events.emit("ratking/record", phoneEvent); // Concurrent replay must not enqueue another handler.
     await vi.waitFor(() => expect(JSON.parse(readFileSync(deskPhoneStatePath(h.home), "utf8")).entries[phoneItem.itemId].state).toBe("closed"));
     await vi.waitFor(() => expect(notify).toHaveBeenCalledOnce());
     expect(readDesk(queuePath("rats-nest", h.home)).filter(row => row.resolves)).toHaveLength(1);
