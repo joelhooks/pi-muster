@@ -16,8 +16,18 @@ import { CommsError, Unsupported, type CommsDelivery, type CommsShape, type Comm
 export const RATKING_SEND = "ratking/send";
 export const RATKING_SEND_RESULT = "ratking/send:result";
 export const RATKING_MESSAGE = "ratking/message";
-/** pi-ratking decodes `kind` as "message" or "ask" and silently drops any other request, so a send would time out. */
-export const RATKING_KIND = "message";
+/**
+ * Muster's JSON payloads ride as pi-ratking kind "data" (rat-king cfade48): they reach `ratking/message`
+ * listeners only, never the model, and Muster's inbound hook turns them into queue items or follow-ups.
+ * pi-ratking decodes kind as "message", "ask" or "data"; an older pi-ratking refuses "data".
+ * Owner traffic stays inside a ratking project, whose rows and owner run the ratking Muster, so it is data.
+ */
+export const RATKING_KIND = "data";
+/**
+ * `send` crosses projects (desk_send, row messages), and a recipient on Muster older than d3d8d03 has no
+ * hook for data: it would see nothing. A message kind shows the payload raw at worst, never drops it.
+ */
+export const RATKING_SEND_KIND = "message";
 const SEND_TIMEOUT_MS = 30_000;
 
 interface EventBus {
@@ -105,7 +115,7 @@ export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: rea
   return { name, session: address.id };
 }
 
-type SendRequest = { readonly to: string; readonly body: string; readonly kind?: string } | { readonly replyTo: string; readonly body: string };
+type SendRequest = { readonly to: string; readonly body: string; readonly kind?: string } | { readonly replyTo: string; readonly body: string; readonly kind?: string };
 
 /** One request, one result by requestId. Not delivered is a failed delivery with pi-ratking's code; there is no fallback. */
 export function ratkingSend(events: EventBus, createId: () => string, request: SendRequest, timeoutMs = SEND_TIMEOUT_MS): Effect.Effect<CommsDelivery> {
@@ -161,13 +171,13 @@ export function RatkingComms(options: {
       Effect.flatMap(({ name, session }) => {
         const author = options.sender();
         if (!author) return Effect.succeed<CommsDelivery>({ status: "failed", detail: "NOT DELIVERED: sender session missing (ratking)" });
-        return send({ to: name, kind: RATKING_KIND, body: JSON.stringify({ type: "message", recipient: session, author, body: message }) });
+        return send({ to: name, kind: RATKING_SEND_KIND, body: JSON.stringify({ type: "message", recipient: session, author, body: message }) });
       }),
       Effect.catch(error => Effect.succeed(failed(error)))),
     postOwner: (to, item) => {
       const body = (recipient: string) => JSON.stringify({ type: "owner", recipient, item });
       const replyTo = item.reply ? repliesByUri.get(item.reply.parent.uri) : undefined;
-      if (replyTo) return send({ replyTo, body: body(typeof to === "string" ? to : item.author) });
+      if (replyTo) return send({ replyTo, kind: RATKING_KIND, body: body(typeof to === "string" ? to : item.author) });
       return target(to).pipe(Effect.flatMap(({ name, session }) => send({ to: name, kind: RATKING_KIND, body: body(session) })), Effect.catch(error => Effect.succeed(failed(error))));
     },
     reply: (id, message) => send({ replyTo: id, body: message }),

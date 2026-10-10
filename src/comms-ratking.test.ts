@@ -96,8 +96,8 @@ describe("transport", () => {
     const comms = RatkingComms({ events: delivered.events, createId, sender: () => "worker-session", target: () => ({ name: "pilot/desk", session: "desk-session" }) });
     expect(await Effect.runPromise(comms.send("desk-session", "hello"))).toMatchObject({ status: "delivered", id: "m1", seq: 7 });
     expect(delivered.requests[0]).toMatchObject({ to: "pilot/desk" });
-    // pi-ratking's SendRequest schema: kind is "message" or "ask"; anything else is dropped without a result.
-    expect(["message", "ask", undefined]).toContain((delivered.requests[0] as { kind?: string }).kind);
+    // A cross-project send stays message: a recipient on pre-cutover Muster has no data hook.
+    expect(delivered.requests[0]).toMatchObject({ kind: "message" });
     expect(JSON.parse(String(delivered.requests[0]!.body))).toEqual({ type: "message", recipient: "desk-session", author: "worker-session", body: "hello" });
 
     const refused = fakeRatking(() => ({ status: "not-delivered", code: "UnknownName", reason: "no such name" }));
@@ -117,7 +117,7 @@ describe("transport", () => {
     const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => { throw new Error("a reply needs no name"); } });
     const reply = appendOwnerItem("worker-session", { author: "owner-session", kind: "fyi", title: "left", replyTo: parent.uri }, home, false);
     expect(await Effect.runPromise(comms.postOwner!("worker-session", reply))).toMatchObject({ status: "delivered" });
-    expect(fake.requests[0]).toMatchObject({ replyTo: "rk-1" });
+    expect(fake.requests[0]).toMatchObject({ replyTo: "rk-1", kind: "data" });
     expect(fake.requests[0]).not.toHaveProperty("to");
   });
 
@@ -128,6 +128,7 @@ describe("transport", () => {
     const send = vi.fn(() => Effect.succeed({ status: "delivered" as const }));
     const ok = await Effect.runPromise(deliverOwnerItem({ owner: "titan-session", home, session: "worker-session", project: "pilot", item: { author: "worker-session", kind: "done", title: "shipped" }, comms, send }));
     expect(ok).toMatchObject({ path: "ratking", lost: false, delivery: { status: "delivered" } });
+    expect(fake.requests[0]).toMatchObject({ kind: "data" }); // owner traffic never reaches the model raw
     const body = JSON.parse(String(fake.requests[0]!.body));
     expect(body).toMatchObject({ type: "owner", recipient: "titan-session", item: { author: "worker-session" } });
     const lost = await Effect.runPromise(deliverOwnerItem({ owner: "ghost-session", home, session: "worker-session", project: "pilot", item: { author: "worker-session", kind: "done", title: "shipped" }, comms, send }));
@@ -158,7 +159,7 @@ describe("inbound", () => {
     for (const hook of hooks.get("session_start") ?? []) await hook({}, ctx);
     try {
       const item = appendOwnerItem("owner-session", { author: "worker-session", kind: "done", title: "landed over ratking" }, home, false);
-      events.emit(RATKING_MESSAGE, { id: "m1", from: "pilot/worker", did: "did:web:x", verified: true, body: JSON.stringify({ type: "owner", recipient: "owner-session", item }), kind: "muster" });
+      events.emit(RATKING_MESSAGE, { id: "m1", from: "pilot/worker", did: "did:web:x", verified: true, body: JSON.stringify({ type: "owner", recipient: "owner-session", item }), kind: "data" });
       events.emit(RATKING_MESSAGE, { id: "m2", from: "pilot/worker", did: "did:web:x", verified: false, body: JSON.stringify({ type: "owner", recipient: "owner-session", item: { ...item, uri: `${item.uri}x` } }) });
       events.emit(RATKING_MESSAGE, { id: "m3", from: "joel", did: "did:web:y", verified: true, body: "plain words" });
       events.emit(RATKING_MESSAGE, { id: "m4", from: "pilot/desk", did: "did:web:z", verified: true, body: JSON.stringify({ type: "message", recipient: "owner-session", author: "desk-session", body: "Do the brief." }) });
