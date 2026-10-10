@@ -739,7 +739,8 @@ export function roleDefaults(roster: Roster | undefined, policy: Policy | undefi
   const steered = role === "worker" && now !== undefined && model === undefined && project.model === undefined ? steerChoice(steer, now, workType) : undefined;
   // Role exceptions are opt-in: an explicit launch choice or a steer route Joel ruled, never a policy or fleet default.
   const resolved = resolveModel(model ?? project.model ?? steered?.model ?? fleet.model ?? ROLE_DEFAULTS[role].model, roster, slug, model !== undefined || steered?.route !== undefined ? role : undefined);
-  const routeThinking = steered?.route !== undefined && project.thinking === undefined ? steered.thinking : undefined;
+  // A route's model and thinking travel together. A project's thinking pin without a model pin tunes the default model, not a route's.
+  const routeThinking = steered?.route !== undefined ? steered.thinking : undefined;
   const chosen = resolved.model;
   const { useFor: _use, avoidFor: _avoid, source: _source, ...alternate } = alternates.find((candidate) => { try { return resolveModel(candidate.model, roster, slug, role).model === chosen; } catch { return false; } }) ?? { useFor: [] };
   return { ...ROLE_DEFAULTS[role], ...fleet, ...alternate, ...project, model: chosen, ...(routeThinking ? { thinking: routeThinking } : {}), ...(resolved.thinking ? { thinking: resolved.thinking } : {}),

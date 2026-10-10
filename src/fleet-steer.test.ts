@@ -123,6 +123,20 @@ describe("fleet steer work-type routes", () => {
     expect((await launch(routed, { workType: "bugfix", model: "opus" })).row.profile.model).toBe(opus);
     expect((await launch(routed, { workType: "bugfix", thinking: "high" })).row.profile).toMatchObject({ model: sonnet, thinking: "high" });
   });
+  it("uses the route's thinking over a project thinking pin that names no model", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    const path = join(h.home, ".local/state/muster/fleet-steer.json");
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, routed);
+    vi.stubEnv("MUSTER_PROJECT", "");
+    await runWith(h, projectOpen({ dir, slug: "probe", outcome: "steer launches", reviewTrigger: "weekly", nextAction: "launch", criticalPath: [], space: "w1", ephemeral: true, cadenceMinutes: 15, musterExtension: "/muster", deskExtension: null }));
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "test steer" }));
+    await runWith(h, projectUpdate(dir, { policy: { roles: { worker: { thinking: "medium" } } } }));
+    const result = await runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", role: "worker", lane: "probe", label: "🔨 worker", cwd: dir, workType: "scan" }));
+    expect(result.row.profile).toMatchObject({ model: haiku, thinking: "low" });
+  });
   it("ignores routes from a stale steer and refuses a malformed work type", async () => {
     const stale = JSON.stringify({ ...JSON.parse(routed), validUntil: "2026-09-29T06:00:00Z" });
     expect((await launch(stale, { workType: "bugfix" })).row.profile.model).toBe(sol);
