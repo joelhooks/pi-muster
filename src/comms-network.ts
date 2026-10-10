@@ -994,7 +994,10 @@ export function consumeNetworkMailbox(options: {
       if (error instanceof MailboxClientError && error.error === "AuthRequired") return new CommsError("NetworkComms authentication failed; consumer stopped");
       if (error instanceof MailboxClientError && ["LeaseTakenOver", "StaleGeneration", "LeaseHeld"].includes(error.error ?? ""))
         return new CommsError(`NetworkComms consumer lost its identity lease: ${error.error}; consumer stopped; this notice is desk-visible.`);
-      return error instanceof CommsError && !(error instanceof MailboxClientError) ? error : failure();
+      // A mailbox error code and HTTP status are protocol vocabulary, not private output: name them so a stuck
+      // reader can be diagnosed (front-desk, 2026-10-09: "private output withheld" every 60 s, cause unknown).
+      if (error instanceof MailboxClientError) return new CommsError(`NetworkComms consumer failed: mailbox ${error.error ?? "client error"}${error.status === undefined ? "" : ` (HTTP ${error.status})`}; private output withheld`);
+      return error instanceof CommsError ? error : failure();
     }), Effect.ensuring(retire()), Effect.ensuring(Effect.sync(() => { if (lifecycle.getSnapshot().status !== "done") lifecycle.send({ type: "STOP" }); lifecycle.stop(); })));
   });
 }

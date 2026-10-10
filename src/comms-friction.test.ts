@@ -131,6 +131,21 @@ describe("comms friction: predecessors and rowless senders", () => {
       ? readdirSync(join(h.home, ".local/state/muster/network-quarantine"), { recursive: true }).filter(name => String(name).endsWith(".json")) : []).toEqual([]);
   });
 
+  it("names the mailbox error code and status when delivery fails, never a bare generic failure", async () => {
+    const { h } = await fixture();
+    const desk = reference(networkProvisionName("alpha/desk")); const worker = reference("worker");
+    seedNetworkIdentities(h.home, { "alpha/desk": desk, worker });
+    const base = await oneMessage(h.home, desk.did, "alpha-session", worker.did, { type: "message", recipient: "alpha-session", author: "worker-session", body: "Report." });
+    const { MailboxClientError } = await import("./vendor/rat-king-mailbox-client/error.ts");
+    const mailbox = { ...base, deliver: () => Effect.fail(new MailboxClientError({ error: "InvalidState", reason: "already delivered", status: 409 })) };
+    const result = await Effect.runPromise(Effect.result(consumeNetworkMailbox({ home: h.home, agent: "alpha/desk", session: "alpha-session", mailbox: mailbox as never,
+      senderAgent: () => Effect.succeed("worker"), receive: () => Effect.void })));
+    expect(result._tag).toBe("Failure");
+    const message = result._tag === "Failure" ? (result.failure as Error).message : "";
+    expect(message).toContain("mailbox InvalidState (HTTP 409)");
+    expect(message).not.toContain("already delivered");
+  });
+
   it("reads a restart fork's parent from its journal header", () => {
     const h = harness();
     const parent = join(h.home, "restart-new.jsonl");
