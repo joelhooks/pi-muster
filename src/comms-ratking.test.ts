@@ -132,7 +132,9 @@ describe("transport", () => {
     const body = JSON.parse(String(fake.requests[0]!.body));
     expect(body).toMatchObject({ type: "owner", recipient: "titan-session", item: { author: "worker-session" } });
     const lost = await Effect.runPromise(deliverOwnerItem({ owner: "ghost-session", home, session: "worker-session", project: "pilot", item: { author: "worker-session", kind: "done", title: "shipped" }, comms, send }));
-    expect(lost).toMatchObject({ path: "ratking", lost: true, delivery: { status: "failed" } });
+    // A failed send is parked in the owner's local queue, never thrown away.
+    expect(lost).toMatchObject({ path: "ratking", lost: false, stored: "local-queue", failureCode: "UnknownName", delivery: { status: "failed" } });
+    expect(readOwnerQueue("ghost-session", home).items.map(record => record.item.uri)).toEqual([lost.uri]);
     expect(send).not.toHaveBeenCalled();
     const receipts = readFileSync(networkReceiptPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(receipts.map(receipt => receipt.path)).toEqual(["ratking", "ratking"]);

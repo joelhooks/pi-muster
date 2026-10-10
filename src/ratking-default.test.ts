@@ -153,8 +153,8 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
 
     // Without pi-ratking the same note fails at once, never over intercom.
     const lost = await piWith([]).get("owner_note")!.execute("id", { kind: "fyi", title: "lost" }, undefined, undefined, ctx(worker.sessionId));
-    expect(lost).toMatchObject({ isError: true });
-    expect(text(lost)).toContain("pi-ratking not loaded");
+    expect(lost).not.toHaveProperty("isError");
+    expect(text(lost)).toContain("queued: Rat King send failed (pi-ratking not loaded in this Pi); saved for the owner's next pass");
 
     // The owner: owner_reply, desk_send and the Switchboard nudge from desk_post.
     for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_LANE", "MUSTER_OWNER", "MUSTER_OWNER_NAME"]) delete process.env[key];
