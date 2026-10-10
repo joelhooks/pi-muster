@@ -100,6 +100,9 @@ export function sessionCommsSender(dir: string, session: string, env: NodeJS.Pro
 }
 
 
+/** A failed send that was stored for the owner's next pass is a quiet success, not a reason to pause. */
+export const queuedNotice = (result: { stored?: string | undefined; failureCode?: string | undefined }) => result.stored ? `queued: Rat King send failed (${result.failureCode ?? "unknown"}); saved for the owner's next pass` : undefined;
+
 export const remoteMachineProcess = (env: NodeJS.ProcessEnv) => env.MUSTER_MACHINE !== undefined && env.MUSTER_MACHINE !== "local";
 
 /** A routed send that reached no one is an error result, led by plain words, never a quiet receipt. */
@@ -273,7 +276,7 @@ export default function muster(host: ExtensionAPI) {
         if (error) return error;
         const session = ctx.sessionManager.getSessionId();
         if (params.replyTo) findOwnerPost(session, params.replyTo);
-        return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${result.pendingPull ? "🐦 Queued for the Flagg owner to pull; not delivered." : ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
+        return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${queuedNotice(result) ?? (result.pendingPull ? "🐦 Queued for the Flagg owner to pull; not delivered." : ownerReceipt({ kind: params.kind, title: params.title, ...result }))}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
       },
     });
   }
@@ -292,7 +295,7 @@ export default function muster(host: ExtensionAPI) {
       const session = ctx.sessionManager.getSessionId();
       const parent = findOwnerPost(session, params.uri);
       const body = capBody(params.text);
-      return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
+      return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${queuedNotice(result) ?? ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
     },
   });
 
@@ -346,7 +349,7 @@ export default function muster(host: ExtensionAPI) {
           signal,
           packetReport({ dir: project, agent, owner, cwd: ctx.cwd, ...params }),
           (result) =>
-            `Packet ${result.packet.id.slice(0, 12)} reported (${result.packet.state}). Report: ${result.packet.report}. Owner notified: ${result.delivery.status}${result.delivery.detail ? ` (${result.delivery.detail})` : ""}.${result.notice.lost ? " The packet is recorded; do not report it again. Tell your owner another way." : ""}`,
+            `Packet ${result.packet.id.slice(0, 12)} reported (${result.packet.state}). Report: ${result.packet.report}. Owner notified: ${queuedNotice(result.notice) ?? `${result.delivery.status}${result.delivery.detail ? ` (${result.delivery.detail})` : ""}`}.${result.notice.lost ? " The packet is recorded; do not report it again. Tell your owner another way." : ""}`,
           (result) => result.notice.lost,
         );
       },

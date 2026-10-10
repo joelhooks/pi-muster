@@ -636,4 +636,58 @@ describe("remote owner operations", () => {
     expect(s.remote.panes.has(launched.row.pane!.paneId)).toBe(false); expect(existsSync(launched.row.cwd)).toBe(false);
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("'remove'"))).toBe(true);
   });
+
+  describe("owner note outbox", () => {
+    const leaseMismatch = { status: "failed" as const, detail: "NOT DELIVERED: LeaseMismatch: Rejected LeaseMismatch (409) (ratking; no fallback)" };
+    const failing = (delivery: { status: "failed"; detail: string } = leaseMismatch) => ({ postOwner: () => Effect.succeed(delivery) }) as unknown as import("./runtime.ts").CommsShape;
+    const post = (s: ReturnType<typeof setup>, launched: Awaited<ReturnType<ReturnType<typeof setup>["launch"]>>, comms: import("./runtime.ts").CommsShape | undefined, kind: "question" | "progress" = "question") =>
+      s.run(deliverOwnerItem({ owner: launched.row.owner, agent: launched.row.name, home: join(s.h.root, "remote-home"), session: launched.row.sessionId, project: "probe", item: { author: launched.row.sessionId, lane: launched.row.lane, kind, title: "Need owner eyes", body: "Full note" }, comms, send: () => Effect.succeed(leaseMismatch) }));
+    const remoteEnv = (launched: Awaited<ReturnType<ReturnType<typeof setup>["launch"]>>) => { vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_AGENT", launched.row.name); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe"); };
+
+    it("a remote worker's failed send is saved as a sidecar the owner pass ingests once, with a wake and a board note", async () => {
+      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
+      const posted = await post(s, launched, failing());
+      expect(posted.lost).toBe(false); expect(posted.stored).toBe("sidecar"); expect(posted.failureCode).toBe("LeaseMismatch");
+      const notes = join(sidecarRoots(launched.row.cwd)[0]!, "notes");
+      expect(readdirSync(notes)).toEqual([`${posted.uri.split("/").at(-1)}.json`]);
+      expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(0);
+      const first = await s.run(ingestRemotePackets(s.dir));
+      expect(first.notes.join("\n")).toContain(`owner note from ${launched.row.name} arrived by sidecar (Rat King send had failed: LeaseMismatch)`);
+      expect(readOwnerQueue(launched.row.owner, s.h.home).items.map(r => r.item.uri)).toEqual([posted.uri]);
+      const second = await s.run(ingestRemotePackets(s.dir));
+      expect(second.notes).toEqual([]); expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(1);
+      const wake = vi.fn(); const feed = ownerFeed({ session: launched.row.owner, home: s.h.home, appendEntry: vi.fn(), sendMessage: wake });
+      expect(feed.flush()).toBe(1); expect(wake).toHaveBeenCalledTimes(1); feed.dispose();
+    });
+    it("does not duplicate when the Rat King send was delivered after all", async () => {
+      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
+      const posted = await post(s, launched, failing());
+      const { ingestOwnerItem } = await import("./owner-queue.ts");
+      const item = JSON.parse(readFileSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes", `${posted.uri.split("/").at(-1)}.json`), "utf8")).item;
+      expect(ingestOwnerItem(launched.row.owner, item, s.h.home)).toBe(true);
+      const result = await s.run(ingestRemotePackets(s.dir));
+      expect(result.notes).toEqual([]);
+      expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(1);
+      const wake = vi.fn(); const feed = ownerFeed({ session: launched.row.owner, home: s.h.home, appendEntry: vi.fn(), sendMessage: wake });
+      expect(feed.flush()).toBe(1); expect(wake).toHaveBeenCalledTimes(1); feed.dispose();
+    });
+    it("a local worker's failed send persists into the local owner queue", async () => {
+      const s = setup(); await s.open(); const launched = await s.launch();
+      const posted = await post(s, launched, failing());
+      expect(posted.lost).toBe(false); expect(posted.stored).toBe("local-queue");
+      expect(readOwnerQueue(launched.row.owner, join(s.h.root, "remote-home")).items.map(r => r.item.uri)).toEqual([posted.uri]);
+    });
+    it("a failure that cannot be stored stays lost", async () => {
+      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
+      vi.stubEnv("MUSTER_REMOTE_ROW", "");
+      const posted = await post(s, launched, failing());
+      expect(posted.lost).toBe(true); expect(posted.stored).toBeUndefined();
+    });
+    it("a delivered send writes no sidecar", async () => {
+      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
+      const posted = await post(s, launched, fakeRatking(s.h.home, () => "probe/remote-w", []).service);
+      expect(posted.lost).toBe(false); expect(posted.stored).toBeUndefined();
+      expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
+    });
+  });
 });
