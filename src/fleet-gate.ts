@@ -38,16 +38,23 @@ export interface FleetGateOptions {
   readonly tree?: string;
   /** Branch the gate measures against (fleet-compute --branch); default HEAD itself. */
   readonly base?: string;
+  /** Current main for the gate sandbox's origin/main (fleet-compute --main); sent only when given. */
+  readonly main?: string;
+  /** fleet-compute --attest required: force the kit-signed attestation for this gate. fleet-compute alone decides
+   * whether the run can be kit-signed (explicit pennywise kit run of an attesting repo) and refuses before queueing. */
+  readonly attest?: "required";
   readonly host: "auto" | "flagg" | "pennywise";
   readonly home: string;
 }
 
-export function parseHeavyGate(args: readonly string[]): Pick<FleetGateOptions, "command" | "wait" | "tree" | "host" | "base"> {
+export function parseHeavyGate(args: readonly string[]): Pick<FleetGateOptions, "command" | "wait" | "tree" | "host" | "base" | "main" | "attest"> {
   const split = args.indexOf("--");
   if (split < 0 || !args[split + 1]) throw input("gate requires -- <command> [args...]");
   let wait = 0;
   let tree: string | undefined;
   let base: string | undefined;
+  let main: string | undefined;
+  let attest: "required" | undefined;
   let host: FleetGateOptions["host"] = "auto";
   const seen = new Set<string>();
   for (let i = 0; i < split; i += 2) {
@@ -57,10 +64,12 @@ export function parseHeavyGate(args: readonly string[]): Pick<FleetGateOptions, 
     if (key === "--wait" && Number.isFinite(Number(value)) && Number(value) >= 0) wait = Number(value);
     else if (key === "--tree" && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value)) tree = value;
     else if (key === "--base" && /^[A-Za-z0-9_][A-Za-z0-9._\/-]*$/.test(value) && !value.includes("..")) base = value;
+    else if (key === "--main" && /^[A-Za-z0-9_][A-Za-z0-9._\/-]*$/.test(value) && !value.includes("..")) main = value;
+    else if (key === "--attest" && value === "required") attest = value;
     else if (key === "--host" && (value === "auto" || value === "flagg" || value === "pennywise")) host = value;
     else throw input(`invalid gate option: ${key} ${value}`);
   }
-  return { command: args.slice(split + 1), wait, host, ...(tree ? { tree } : {}), ...(base ? { base } : {}) };
+  return { command: args.slice(split + 1), wait, host, ...(tree ? { tree } : {}), ...(base ? { base } : {}), ...(main ? { main } : {}), ...(attest ? { attest } : {}) };
 }
 
 /** Fleet repo key, made kebab-case (e.g. `codetv.dev` → `codetv-dev`): the origin's repo name; without an origin,
@@ -105,8 +114,9 @@ export const runFleetGate = (options: FleetGateOptions) => Effect.gen(function* 
   const head = (yield* git(source, "rev-parse", "HEAD")).trim();
   const tree = (yield* git(source, "rev-parse", "--verify", "--end-of-options", `${options.tree ?? head}^{tree}`)).trim();
   // fleet-compute resolves --branch in this checkout; refuse early, before queueing, if it can't.
-  if (options.base && (yield* proc.run("git", ["rev-parse", "--verify", "--quiet", "--end-of-options", `${options.base}^{commit}`], { cwd: source })).code !== 0)
-    return yield* input(`--base ${options.base} does not resolve to a commit in ${source}; fetch it (e.g. origin/<branch>); no gate was run`);
+  for (const [flag, ref] of [["--base", options.base], ["--main", options.main]] as const)
+    if (ref && (yield* proc.run("git", ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], { cwd: source })).code !== 0)
+      return yield* input(`${flag} ${ref} does not resolve to a commit in ${source}; fetch it (e.g. origin/<branch>); no gate was run`);
   // Flagg and local runs execute this checkout, so --tree must describe it. Only pinned pennywise ships the tree itself.
   if (options.tree && (!runner || options.host !== "pennywise")) {
     const drift = yield* checkoutDrift(source, tree);
@@ -120,7 +130,7 @@ export const runFleetGate = (options: FleetGateOptions) => Effect.gen(function* 
   const result = yield* proc.run(runner.command, [
     ...runner.prefix, "gate", "--project", repo, "--repo", repo,
     "--source", source, "--tree", tree, "--head", head, "--branch", options.base ?? head,
-    "--host", options.host, "--wait", String(options.wait), "--receipt", receiptPath,
+    "--host", options.host, "--wait", String(options.wait), "--receipt", receiptPath, ...(options.main ? ["--main", options.main] : []), ...(options.attest ? ["--attest", options.attest] : []),
     "--", ...options.command,
   ], { cwd: source, timeoutMs: (options.wait + 45 * 60 + 60) * 1000 });
   const receipt = !existsSync(receiptPath) ? null : yield* Effect.try({

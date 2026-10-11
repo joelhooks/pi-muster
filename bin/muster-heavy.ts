@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { finishJob, heavyReport, heavySnapshot, heavyStatus, registerJob, refreshJob, jobsPath, type HeavyOptions } from "../src/heavy-lock.ts";
 
-const usage = "usage: muster-heavy [legacy flags] -- <command> [args...] | status [--json] | report [--since 24h] [--json] | gate [--wait seconds] [--tree sha] [--host auto|flagg|pennywise] [--base <branch>] -- <command>";
+const usage = "usage: muster-heavy [legacy flags] -- <command> [args...] | status [--json] | report [--since 24h] [--json] | gate [--wait seconds] [--tree sha] [--host auto|flagg|pennywise] [--base <branch>] [--main <ref>] [--attest required] -- <command>";
 const legacyValueFlags = new Set(["--wait", "--grant", "--slots", "--min-free-gb", "--load-limit", "--window", "--priority", "--ttl", "--revoke"]);
 const legacyFlags = new Set(["--exclusive", "--reap", "--list"]);
 function ignoredLine(args: readonly string[], options: HeavyOptions) {
