@@ -116,6 +116,21 @@ const sessionRestore = (profile: LaunchProfile, file: string | null, project: Pr
   return { ...selected, live, notes: [...notes, selected.note] };
 });
 
+/** Muster's own per-attempt scratch note (writeLaunchFile's m-<uuid>.prompt.txt in the launch dir), not a caller prompt. */
+export const isScratchNote = (path: string, promptDir: string) => dirname(path) === promptDir && /^m-[0-9a-f-]{36}\.prompt\.txt$/.test(basename(path));
+
+/** A brief written in the same tool batch can land a moment after the launch reads it; wait briefly before refusing. */
+export const readableBrief = (brief: string) => Effect.gen(function* () {
+  const check = () => { const fd = openSync(brief, "r"); try { if (!fstatSync(fd).isFile()) throw new Error("brief is not a file"); } finally { closeSync(fd); } };
+  for (let attempt = 0; ; attempt++) {
+    const failure = yield* Effect.try({ try: check, catch: error => error }).pipe(Effect.match({ onFailure: error => error, onSuccess: () => null }));
+    if (failure === null) return;
+    const missing = typeof failure === "object" && failure !== null && "code" in failure && failure.code === "ENOENT";
+    if (!missing || attempt >= 10) return yield* new InputError({ message: `brief is not readable: ${String(failure)}` });
+    yield* Effect.sleep("300 millis");
+  }
+});
+
 const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
   const pane = yield* paneGet(paneId);
   if (!pane) return yield* input(`launch pane ${paneId} is gone`);
@@ -261,7 +276,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     yield* must("mkdir", ["-p", scratch], { cwd, timeoutMs: 10_000 });
     const scratchNote = `Your scratch path is ${scratch}. This row owns it. Clean your disposable scratch before close; report anything that must survive. Close removes the directory only if empty. If dcg refuses cleanup, stop and report the path and size; do not try a second destructive command.${syncedBrief ? `\n${syncedBrief.note}` : ""}`;
     const contextFile = yield* writeLaunchFile(promptDir, scratchNote, "prompt.txt");
-    row = { ...row, profile: { ...row.profile, appendSystemPrompt: [...row.profile.appendSystemPrompt, contextFile] } };
+    // A retried or restored row inherits the last attempt's scratch note; replace it, never stack another.
+    row = { ...row, profile: { ...row.profile, appendSystemPrompt: [...row.profile.appendSystemPrompt.filter(path => !isScratchNote(path, promptDir)), contextFile] } };
     const launchProfile = extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row);
     const message = params.action === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, promptDir);
     cloneNotes.push(scratchNote);
@@ -2466,7 +2482,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     if (brief && (machine === "local" || params.brief)) {
       yield* requireAbsolute("brief", brief);
       yield* guardDurable(project, "brief", brief);
-      yield* Effect.try({ try: () => { const fd = openSync(brief, "r"); try { if (!fstatSync(fd).isFile()) throw new Error("brief is not a file"); } finally { closeSync(fd); } }, catch: error => new InputError({ message: `brief is not readable: ${String(error)}` }) });
+      yield* readableBrief(brief);
     }
     for (const path of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", path);
     const choice = params.action === "restore" ? null : retroJudgeModel(roster, { kind: lane.kind, role, model: params.model });
