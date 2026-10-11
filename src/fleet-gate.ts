@@ -124,6 +124,8 @@ export const runFleetGate = (options: FleetGateOptions) => Effect.gen(function* 
   if (receipt && receipt.exit !== null && receipt.exit !== result.code) return yield* input(`fleet gate receipt exit ${receipt.exit} differs from runner exit ${result.code}`);
   // The checkout can move while a gate queues; fleet-compute records the drift it started on.
   if (receipt?.host === "flagg" && receipt.exactTree === false) return yield* input(`fleet gate ran on flagg in a checkout that differed from tree ${tree} (${receipt.dirtyCount ?? "?"} path(s)); not proven. Receipt ${receiptPath}`);
+  // fleet-compute's "flagg" slot runs on whichever machine called it; a named host must be where the gate ran.
+  if (receipt?.machine && options.host !== "auto" && receipt.machine !== options.host) return yield* input(`fleet gate asked for --host ${options.host} but ran on ${receipt.machine}; not proven. Run it from ${options.host}, or use --host auto. Receipt ${receiptPath}`);
   // Admission timeout has no external receipt; never invent host/run/duration proof for it.
   const note = receipt
     ? `muster-heavy gate: host ${receipt.machine ?? receipt.host}; run ${receipt.runId}; exit ${receipt.exit ?? "lost"}; duration ${receipt.durationMs}ms; receipt ${receiptPath}`

@@ -152,6 +152,13 @@ describe("fleet gate routing", () => {
     expect(result).toMatchObject({ kind: "fleet", code: 0, note: expect.stringContaining("muster-heavy gate: host pennywise; run fake-run") });
   });
 
+  it("refuses a named host the gate did not run on", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
+    const { options } = fixture();
+    const failure = await Effect.runPromise(Effect.flip(runFleetGate({ ...options, host: "flagg" }).pipe(Effect.provideService(Proc, fakeRunner(0, true, { host: "flagg", machine: "pennywise", exactTree: true }).proc))));
+    expect(String(failure.message)).toContain("asked for --host flagg but ran on pennywise; not proven");
+  });
+
   it.each([0, 1, 75])("propagates exit %s", async exit => {
     vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
     const { options } = fixture();
