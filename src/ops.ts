@@ -19,6 +19,7 @@ import {
   sessionIdFromFile,
   shellPrelude,
   shellQuote,
+  slimProblem,
 } from "./argv.ts";
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
@@ -2650,6 +2651,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}) };
       const selected = yield* sessionRestore(profileFor(existing.role, { ...overridden, slim: overridden.slim }), sessionFile, project, existing.role, roster, params);
       const restoredProfile = selected.profile;
+      const slimRefusal = slimProblem(restoredProfile);
+      if (slimRefusal) return yield* input(slimRefusal);
       skillNotes.push(...selected.notes);
       restoreTokens = selected.live.contextTokens;
       const restoredSkills = yield* Effect.try({
@@ -2712,6 +2715,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
       }, workerChoice.defaults);
+      const slimRefusal = slimProblem(requestedProfile);
+      if (slimRefusal) return yield* input(slimRefusal);
       const resolved = requestedProfile.skills.length > 0
         ? yield* Effect.try({
           try: () => resolveSkills({ skills: requestedProfile.skills, index: requestedProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),

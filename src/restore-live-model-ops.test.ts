@@ -107,9 +107,15 @@ it("a local restore applies and saves profile overrides, so a row can move onto 
   const { h, dir } = await setup();
   const prompt = join(dir, "ea.md");
   await runWith(h, agentClose(dir, { name: "worker" }));
-  const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "worker", slim: true, noSkills: true, extensions: ["/ext/bridge.ts", "/ext/ratking.ts"], appendSystemPrompt: [prompt] }));
+  const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "worker", slim: true, noSkills: true, extensions: ["/ext/bridge.ts", "/ext/ratking.ts", "/h/.pi/agent/extensions/herdr-agent-state.ts"], appendSystemPrompt: [prompt] }));
   expect(restored.argv).toEqual(expect.arrayContaining(["-ne", "-nc", "-ns", "-e", "/ext/bridge.ts", "/ext/ratking.ts", "--append-system-prompt"]));
   expect(restored.argv).not.toContain("--skill");
+  expect(restored.argv).not.toContain("--compact-at");
   const saved = (await runWith(h, load(dir))).agents.find(row => row.name === "worker")!.profile;
-  expect(saved).toMatchObject({ slim: true, noSkills: true, skills: [], extensions: ["/ext/bridge.ts", "/ext/ratking.ts"], appendSystemPrompt: [prompt] });
+  expect(saved).toMatchObject({ slim: true, noSkills: true, skills: [], extensions: ["/ext/bridge.ts", "/ext/ratking.ts", "/h/.pi/agent/extensions/herdr-agent-state.ts"], appendSystemPrompt: [prompt] });
+});
+it("refuses a slim restore without herdr's integration, before starting Pi", async () => {
+  const { h, dir } = await setup();
+  await runWith(h, agentClose(dir, { name: "worker" }));
+  expect((await failWith(h, agentLaunch(dir, { action: "restore", name: "worker", slim: true, extensions: ["/ext/bridge.ts"] }))).message).toContain("herdr-agent-state.ts");
 });

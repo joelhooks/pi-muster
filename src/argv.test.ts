@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { FORBIDDEN_FLAGS, buildArgv, mintSessionId, profileFor, sessionDirFor, sessionIdFromFile, shellPrelude } from "./argv.ts";
+import { FORBIDDEN_FLAGS, buildArgv, mintSessionId, profileFor, sessionDirFor, sessionIdFromFile, shellPrelude, slimProblem } from "./argv.ts";
 import { roleDefaults } from "./domain.ts";
 
 const profile = profileFor("worker", {
@@ -72,12 +72,17 @@ describe("slim profile", () => {
     expect(argv).toEqual(expect.arrayContaining(["-ne", "-nc", "-ns", "-e", "/pi-ratking"]));
     expect(argv).not.toContain("/muster");
     expect(argv.filter(arg => FORBIDDEN_FLAGS.includes(arg))).toEqual([]);
+    // --compact-at is the Muster extension's flag; a slim Pi rejects it at startup.
+    expect(argv).not.toContain("--compact-at");
+    expect(slimProblem(profile)).toContain("herdr-agent-state.ts");
+    expect(slimProblem({ ...profile, extensions: ["/pi-ratking", "/h/.pi/agent/extensions/herdr-agent-state.ts"] })).toBeNull();
     // Restore keeps the stored profile, so the row stays slim.
     expect(buildArgv({ kind: "restore", sessionId: "ea", sessionFile: "/s/ea.jsonl", parentSessionFile: null, profile, musterExtension: "/muster" })).toContain("-ne");
   });
   it("leaves ordinary profiles untouched", () => {
     const argv = buildArgv({ kind: "launch", sessionId: "d", sessionFile: null, parentSessionFile: null, profile: profileFor("desk", { label: "d" }), musterExtension: "/muster" });
     expect(argv).not.toContain("-ne"); expect(argv).not.toContain("-nc"); expect(argv).toContain("/muster");
+    expect(argv).toContain("--compact-at");
   });
 });
 

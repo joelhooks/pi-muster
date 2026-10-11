@@ -57,7 +57,8 @@ export function buildArgv(input: ArgvInput): string[] {
   const extensions = input.musterExtension && !profile.slim ? [input.musterExtension, ...profile.extensions] : profile.extensions;
   for (const extension of new Set(extensions)) argv.push(...value("-e", extension));
   // Always explicit: without the flag the role default comes back, so "off" must say off.
-  argv.push("--compact-at", profile.compactAt === null ? "off" : String(profile.compactAt));
+  // Muster's extension registers --compact-at; a slim Pi does not load it and would reject the flag.
+  if (!profile.slim) argv.push("--compact-at", profile.compactAt === null ? "off" : String(profile.compactAt));
   argv.push("--approve");
   const forbidden = argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg));
   if (forbidden.length > 0) throw new Error(`argv contains tool-registry flags: ${forbidden.join(", ")}`);
@@ -80,6 +81,14 @@ export interface ProfileInput {
   readonly extensions?: readonly string[] | undefined;
   readonly env?: Readonly<Record<string, string>> | undefined;
   readonly compactAt?: number | null | undefined;
+}
+
+/** Herdr's own Pi integration reports the session Muster proves launches and adoption by; -ne skips its discovery. */
+export const HERDR_INTEGRATION = "herdr-agent-state.ts";
+export function slimProblem(profile: Pick<LaunchProfile, "slim" | "extensions">): string | null {
+  return profile.slim && !profile.extensions.some(path => path.endsWith(`/${HERDR_INTEGRATION}`))
+    ? `slim needs herdr's integration in extensions (e.g. ~/.pi/agent/extensions/${HERDR_INTEGRATION}, absolute) so Herdr can report the session; without it launch proof and adopt fail`
+    : null;
 }
 
 export function profileFor(role: Role, input: ProfileInput, d: RoleDefaults = ROLE_DEFAULTS[role]): LaunchProfile {
