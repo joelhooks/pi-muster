@@ -77,6 +77,15 @@ describe("machine boundary", () => {
     expect(run.mock.calls[0]?.[1]).toContain("BatchMode=yes");
     expect(String(run.mock.calls[0]?.[1].at(-1))).toContain("'\\''");
   });
+  // Bravestarr, 2026-10-11: a remote restart's binding push ran ssh inside onRemote's ssh: `cd /Users/joel` on pennywise.
+  it("wrapping an ssh-wrapped runner again makes one ssh, not ssh inside ssh", async () => {
+    const run = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed({ code: 0, stdout: "", stderr: "" }));
+    const outer = sshProc("remote", config(), { run }, "/local-home");
+    await Effect.runPromise(sshProc("remote", config(), outer, "/local-home").run("node", ["-e", "1"], { cwd: "/", timeoutMs: 1000 }));
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]?.[0]).toBe("ssh");
+    expect(String(run.mock.calls[0]?.[1].at(-1))).toMatch(/^cd '\/' && exec env .*'node'/);
+  });
   it("runs in place, not over ssh, when this Pi is already on that machine", async () => {
     vi.stubEnv("MUSTER_MACHINE", "remote");
     const run = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed({ code: 0, stdout: "ok", stderr: "" }));

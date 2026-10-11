@@ -188,11 +188,15 @@ export const defaultCloneMachine = Effect.gen(function* () {
   return names[0];
 });
 
-/** SSH has one quoted shell argument; remote user data never becomes local argv. */
-export function sshProc(name: string, machine: MachineConfig, runner: ProcShape, localCwd: string): ProcShape {
+/** The local runner under an ssh-wrapped one, so wrapping again never nests ssh inside ssh. */
+const localRunner = new WeakMap<ProcShape, ProcShape>();
+
+/** SSH has one quoted shell argument; remote user data never becomes local argv. Inside `onRemote` the ambient Proc is
+ * already an sshProc; a nested call (a remote restart's binding push) wraps the local runner beneath it instead. */
+export function sshProc(name: string, machine: MachineConfig, outer: ProcShape, localCwd: string): ProcShape {
+  const runner = localRunner.get(outer) ?? outer;
   // A Pi already on that machine (a remote owner such as a pennywise lane boss) runs in place: a host cannot ssh to itself.
-  if (process.env.MUSTER_MACHINE === name) return { run: (command, args, options) => runner.run(command, args, { ...options, env: { ...machine.env, ...options.env } }) };
-  return { run: (command, args, options) => {
+  const proc: ProcShape = process.env.MUSTER_MACHINE === name ? { run: (command, args, options) => runner.run(command, args, { ...options, env: { ...machine.env, ...options.env } }) } : { run: (command, args, options) => {
     const env = { ...machine.env, ...options.env };
     const script = `cd ${shellQuote(options.cwd)} && exec env ${Object.entries(env).map(([k,v]) => `${k}=${shellQuote(v)}`).join(" ")} ${[command, ...args].map(shellQuote).join(" ")}`;
     return runner.run("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "--", machine.ssh, script], { cwd: localCwd, timeoutMs: Math.min(options.timeoutMs ?? 30_000, 300_000), ...(options.input === undefined ? {} : { input: options.input }) }).pipe(
@@ -200,6 +204,8 @@ export function sshProc(name: string, machine: MachineConfig, runner: ProcShape,
       Effect.flatMap(result => result.code === 255 ? Effect.fail(new ProcError({ command: `ssh ${name}`, code: result.code, stderr: result.stderr, message: `machine ${name}: SSH failed: ${result.stderr.slice(-500)}` })) : Effect.succeed(result)),
     );
   } };
+  localRunner.set(proc, runner);
+  return proc;
 }
 
 /** SSH owns the forward's lifecycle. Reuse a live control master; without one, the hashed local socket is a leftover
