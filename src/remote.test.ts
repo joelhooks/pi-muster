@@ -77,6 +77,14 @@ describe("machine boundary", () => {
     expect(run.mock.calls[0]?.[1]).toContain("BatchMode=yes");
     expect(String(run.mock.calls[0]?.[1].at(-1))).toContain("'\\''");
   });
+  it("runs in place, not over ssh, when this Pi is already on that machine", async () => {
+    vi.stubEnv("MUSTER_MACHINE", "remote");
+    const run = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed({ code: 0, stdout: "ok", stderr: "" }));
+    await Effect.runPromise(sshProc("remote", config(), { run }, "/").run("node", ["-e", "1"], { cwd: "/repo", timeoutMs: 1000, env: { X: "1" } }));
+    expect(run.mock.calls[0]?.[0]).toBe("node");
+    expect(run.mock.calls[0]?.[2]).toMatchObject({ cwd: "/repo", env: expect.objectContaining({ X: "1" }) });
+    vi.unstubAllEnvs();
+  });
   it("creates a socket forward only when its master is absent", async () => {
     const s = setup();
     const capture: string[][] = [];
@@ -482,6 +490,7 @@ describe("remote owner operations", () => {
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "sibling", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs(); // the owner runs on another machine
     const verified = await s.run(packetVerify(s.dir, commit));
     expect(verified.checks).toContainEqual({ name: "on lane branch", outcome: "pass", detail: `on sibling branch worker/remote-next (row branch ${launched.row.clone!.branch})` });
     expect(verified.note).toContain("updated clone.branch to worker/remote-next");

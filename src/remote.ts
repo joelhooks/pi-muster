@@ -156,6 +156,8 @@ export const defaultCloneMachine = Effect.gen(function* () {
 
 /** SSH has one quoted shell argument; remote user data never becomes local argv. */
 export function sshProc(name: string, machine: MachineConfig, runner: ProcShape, localCwd: string): ProcShape {
+  // A Pi already on that machine (a remote owner such as a pennywise lane boss) runs in place: a host cannot ssh to itself.
+  if (process.env.MUSTER_MACHINE === name) return { run: (command, args, options) => runner.run(command, args, { ...options, env: { ...machine.env, ...options.env } }) };
   return { run: (command, args, options) => {
     const env = { ...machine.env, ...options.env };
     const script = `cd ${shellQuote(options.cwd)} && exec env ${Object.entries(env).map(([k,v]) => `${k}=${shellQuote(v)}`).join(" ")} ${[command, ...args].map(shellQuote).join(" ")}`;
