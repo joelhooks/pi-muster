@@ -1895,8 +1895,9 @@ const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?:
         return yield* input(`cannot resolve source local branch in ${source}: ${branch.stderr.trim()}`);
       }
     }
-    // --hydrate runs one locked offline install under the heavy lock, so it may queue.
-    const out = yield* must(workerWorktree, ["create", source, slug, ...(requestedBase !== null ? ["--base", requestedBase] : []), ...(hydrate ? ["--hydrate"] : [])], { cwd: source, timeoutMs: hydrate ? 1_800_000 : 300_000 });
+    // --hydrate runs one locked offline install, recorded by muster-heavy but never queued (dark-wizard b43ffd3). It no
+    // longer falls back online: a store missing locked packages fails with the script's hint in this error.
+    const out = yield* must(workerWorktree, ["create", source, slug, ...(requestedBase !== null ? ["--base", requestedBase] : []), ...(hydrate ? ["--hydrate"] : [])], { cwd: source, timeoutMs: hydrate ? 900_000 : 300_000 });
     const path = /^worktree:\s+(.+)$/m.exec(out)?.[1]?.trim();
     const branch = /^branch:\s+(.+)$/m.exec(out)?.[1]?.trim();
     if (!path || !branch) return yield* input(`worker-worktree.sh create printed no worktree/branch:\n${out}`);
