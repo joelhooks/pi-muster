@@ -1575,7 +1575,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     if (wantOpen && !project.spaceId) return yield* input("the project has no space; run project_open with space or createSpace first");
 
     const refusal = wantOpen ? wipRefusal(project, slug, existing?.kind ?? params.kind ?? "work", env.now().getTime()) : null;
-    if (params.override !== undefined && !params.override.trim()) return yield* input("override must contain Joel's words");
+    if (params.override !== undefined && !params.override.trim()) return yield* input("override must say why");
     if (refusal && ((existing?.kind ?? params.kind) === "retro" || !params.override?.trim())) return yield* input(refusal);
     const base: Lane = existing ?? {
       slug,

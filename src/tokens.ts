@@ -103,7 +103,7 @@ export function backlog(project: Project): Lane[] {
     .sort((a, b) => (a.rank ?? Infinity) - (b.rank ?? Infinity) || Date.parse(a.createdAt) - Date.parse(b.createdAt));
 }
 export function openSlots(project: Project): number | null {
-  const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
+  const limit = project.policy?.wipLimit ?? null;
   return limit === null ? null : Math.max(0, limit - inFlight(project).length);
 }
 export function wipRefusal(project: Project, slug: string, kind: Lane["kind"], now: number): string | null {
@@ -112,13 +112,13 @@ export function wipRefusal(project: Project, slug: string, kind: Lane["kind"], n
     return running ? `retro: ${running.slug} is ${running.state}; finish it before opening another retro lane.` : null;
   }
   const lanes = inFlight(project);
-  const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
+  const limit = project.policy?.wipLimit ?? null;
   if (kind !== "work" || limit === null || lanes.some(lane => lane.slug === slug) || lanes.length < limit) return null;
-  return `WIP ${lanes.length}/${limit}: ${lanes.map(lane => `${lane.slug} (${lane.delivery ?? "none"}, ${formatAge(Math.max(0, now - Date.parse(lane.createdAt)))})`).join(", ")}. Park it in the backlog with lane_open open: false; rank it with rank, or supply override with Joel's words.`;
+  return `WIP ${lanes.length}/${limit}: ${lanes.map(lane => `${lane.slug} (${lane.delivery ?? "none"}, ${formatAge(Math.max(0, now - Date.parse(lane.createdAt)))})`).join(", ")}. Park it in the backlog with lane_open open: false; rank it with rank, or lift the project's wipLimit with project_update.`;
 }
 export function flowLine(project: Project, now: number = Date.now()): string {
   const lanes = inFlight(project);
-  const limit = project.policy?.wipLimit === undefined ? 3 : project.policy.wipLimit;
+  const limit = project.policy?.wipLimit ?? null;
   const history = project.lanes.filter(lane => lane.kind === "work").flatMap(lane => lane.deliveryHistory ??
     (lane.deliveryAt ? [{ stage: lane.delivery ?? "none", at: lane.deliveryAt, evidence: lane.deliveryEvidence ?? "" }] : []));
   // Count lanes, not repeated proof entries. First proof ends that lane's cycle.

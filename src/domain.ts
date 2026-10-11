@@ -749,7 +749,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit === undefined ? 3 : policy.wipLimit, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 /** Legacy comms hints decode tolerantly; mergePolicy never writes them. */

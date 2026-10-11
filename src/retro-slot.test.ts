@@ -4,7 +4,7 @@ import { stepLane } from "./machines.ts";
 import { decodeProject } from "./domain.ts";
 import { backlog, flowLine, inFlight, openSlots } from "./tokens.ts";
 import { describe, expect, it } from "vitest";
-import { laneClose, laneOpen, projectOpen } from "./ops.ts";
+import { laneClose, laneOpen, projectOpen, projectUpdate } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 
@@ -12,6 +12,7 @@ async function setup() {
   const h = harness();
   const dir = makeRepo(join(h.root, "repo"));
   await runWith(h, projectOpen({ dir, slug: "retro-slot", outcome: "ship", reviewTrigger: "weekly", nextAction: "ship", space: "w1", ephemeral: true, deskExtension: null }));
+  await runWith(h, projectUpdate(dir, { policy: { wipLimit: 3 } }));
   return { h, dir };
 }
 

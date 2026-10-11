@@ -491,7 +491,7 @@ export default function muster(host: ExtensionAPI) {
       open: Type.Optional(Type.Boolean()),
       deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Lower the project's deploy level on the 0 locked to 3 jfdi scale." })),
       deployRule: Type.Optional(StringEnum(["customer-facing", "money", "outbound-sends", "irreversible", "shared-infra", "slow-rollback"] as const, { description: "Name the rubric rule lowering permission on the 0 locked to 3 jfdi scale." })),
-      override: Type.Optional(Type.String({ description: "Joel's words authorizing WIP above the limit; saved on the lane" })),
+      override: Type.Optional(Type.String({ description: "Why this lane may exceed a project's wipLimit (off by default); saved on the lane" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;

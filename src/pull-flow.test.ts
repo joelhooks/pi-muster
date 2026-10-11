@@ -106,9 +106,11 @@ describe("pull flow", () => {
   });
   it("shows free slots and the ranked backlog, breaking ties by creation time", async () => {
     const { project } = await setup();
-    const p = decodeProject({ ...project, lanes: [lane("unranked"), lane("later", { rank: 1, createdAt: "2026-10-02T00:00:00.000Z" }), lane("first", { rank: 1 }), lane("role", { kind: "role", rank: 0 }), lane("active", { state: "open" })] });
+    const p = decodeProject({ ...project, policy: { wipLimit: 3 }, lanes: [lane("unranked"), lane("later", { rank: 1, createdAt: "2026-10-02T00:00:00.000Z" }), lane("first", { rank: 1 }), lane("role", { kind: "role", rank: 0 }), lane("active", { state: "open" })] });
     expect(flowLine(p)).toContain("2 open · next: first");
     expect(flowLine(decodeProject({ ...p, lanes: [] }))).toContain("3 open · backlog empty");
     expect(flowLine(decodeProject({ ...p, policy: { wipLimit: null } }))).not.toContain("open · next:");
+    const { policy: _policy, ...uncapped } = p;
+    expect(flowLine(decodeProject(uncapped))).toContain("WIP 1/off"); // uncapped by default (Joel, 2026-10-10)
   });
 });

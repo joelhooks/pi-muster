@@ -12,7 +12,7 @@ For docs-only work or a probe with nothing to deploy, record why delivery is wai
 
 ## Keep the next lane ready
 
-After proving or closing a lane, pull the top ranked lane when it advances the outcome and a WIP slot is open. The WIP limit is a ceiling, not a target. The desk keeps proposed lanes briefed and ranked so the next useful slice is ready. Joel can change the order. See [Keep work flowing](../SKILL.md#keep-work-flowing) for the pull policy and its cycle-time and throughput measures.
+After proving or closing a lane, pull the top ranked lane when it advances the outcome and the fleet steer has room. The desk keeps proposed lanes briefed and ranked so the next useful slice is ready. Joel can change the order. See [Keep work flowing](../SKILL.md#keep-work-flowing) for the pull policy and its cycle-time and throughput measures.
 
 ## Brief template
 
