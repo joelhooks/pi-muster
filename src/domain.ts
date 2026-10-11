@@ -227,7 +227,7 @@ export const AgentLaunchRequest = Schema.Struct({
   label: Schema.optional(Schema.String), cwd: Schema.optional(Schema.String), clone: Schema.optional(Schema.Boolean),
   hydrate: Schema.optional(Schema.Boolean),
   from: Schema.optional(Schema.String), side: Schema.optional(Schema.Boolean), at: Schema.optional(Schema.String),
-  model: Schema.optional(Schema.String), thinking: Schema.optional(Thinking), workType: Schema.optional(Schema.String),
+  model: Schema.optional(Schema.String), thinking: Schema.optional(Thinking), workType: Schema.optional(Schema.String), critical: Schema.optional(Schema.Boolean),
   appendSystemPrompt: Schema.optional(Schema.Array(Schema.String)), skills: Schema.optional(Schema.Array(Schema.String)),
   noSkills: Schema.optional(Schema.Boolean), extensions: Schema.optional(Schema.Array(Schema.String)),
   env: Schema.optional(Schema.Record(Schema.String, Schema.String)), compactAt: Schema.optional(Schema.NullOr(Schema.Number)),
@@ -642,8 +642,8 @@ export const FleetSteer = Schema.Struct({
   at: SteerIso,
   validUntil: SteerIso,
   workerDefault: SteerModel,
-  claude: Schema.optionalKey(Schema.Struct({ pace: Schema.Number })),
-  codex: Schema.optionalKey(Schema.Struct({ pace: Schema.Number })),
+  claude: Schema.optionalKey(Schema.Struct({ pace: Schema.Number, dryDays: Schema.optionalKey(Schema.Number) })),
+  codex: Schema.optionalKey(Schema.Struct({ pace: Schema.Number, dryDays: Schema.optionalKey(Schema.Number) })),
   // Each route decodes on its own when used, so one bad route never loses workerDefault.
   routes: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   source: Schema.optionalKey(Schema.String),
@@ -659,12 +659,30 @@ export const WORK_TYPE = /^[a-z][a-z0-9-]{0,31}$/;
 
 export type SteerChoice = { model?: string; thinking?: Thinking; review?: boolean; route?: string; note: string };
 
+const steerFresh = (steer: FleetSteer, now: number) => {
+  const at = Date.parse(steer.at);
+  const until = Date.parse(steer.validUntil);
+  return Number.isFinite(at) && Number.isFinite(until) && Number.isFinite(now) && now < until && now - at < 3 * 60 * 60_000;
+};
+
+/** At or above this pace a fresh steer holds non-critical worker launches on that pool (Joel, 2026-10-10: the steer is the throttle, not a WIP count). */
+export const PACE_HOLD = 1.2;
+export const steerPool = (model: string): "claude" | "codex" | undefined =>
+  model === "opus" || /^(?:anthropic|claude-bridge)\//.test(model) ? "claude" : model === "sol" || /^openai-codex\//.test(model) ? "codex" : undefined;
+
+/** One-line refusal for a worker launch on a pool running hot, or null. A missing or stale steer fails open; critical work and Haiku pass. */
+export function steerHold(steer: FleetSteer | undefined, now: number, model: string, workType?: string, critical = false): string | null {
+  if (!steer || !steerFresh(steer, now) || critical || workType === "critical" || /haiku/i.test(model)) return null;
+  const pool = steerPool(model);
+  const reading = pool ? steer[pool] : undefined;
+  if (!pool || !reading || !(reading.pace >= PACE_HOLD)) return null;
+  return `pool ${pool} at ${reading.pace.toFixed(2)}× pace${reading.dryDays !== undefined ? `, dry in ${reading.dryDays.toFixed(1)} d` : ""} (fleet steer at ${steer.at}): worker launch on ${model} held. Pass critical: true for critical-path work (keeps the routed model), use a Haiku scan or gather, or wait for the steer to cool`;
+}
+
 /** The fresh steer's choice for a worker: the work type's route, else workerDefault. A stale steer chooses nothing. */
 export function steerChoice(steer: FleetSteer | undefined, now: number, workType?: string): SteerChoice {
   if (!steer) return { note: "fleet steer unavailable; roster default" };
-  const at = Date.parse(steer.at);
-  const until = Date.parse(steer.validUntil);
-  if (!Number.isFinite(at) || !Number.isFinite(until) || !Number.isFinite(now) || now >= until || now - at >= 3 * 60 * 60_000)
+  if (!steerFresh(steer, now))
     return { note: `fleet steer stale (at ${steer.at}, valid until ${steer.validUntil}); roster default` };
   const fresh = `fleet steer at ${steer.at} (valid until ${steer.validUntil})`;
   if (workType === undefined) return { model: steer.workerDefault, note: fresh };

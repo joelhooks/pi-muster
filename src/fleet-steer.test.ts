@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { harness, makeRepo, runWith } from "./test-support.ts";
 import { agentLaunchForeground, laneOpen, projectOpen, projectUpdate } from "./ops.ts";
 
@@ -10,7 +10,7 @@ const opus = "claude-bridge/claude-opus-5-5";
 const fresh = { at: "2026-09-29T05:00:00Z", validUntil: "2026-09-29T07:00:00Z", workerDefault: "opus" };
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-async function launch(raw: string | undefined, options: { model?: string; thinking?: "low" | "high"; workType?: string; pin?: string; role?: "worker" | "desk"; roster?: string } = {}) {
+async function launch(raw: string | undefined, options: { model?: string; thinking?: "low" | "high"; workType?: string; critical?: boolean; pin?: string; role?: "worker" | "desk"; roster?: string } = {}) {
   vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
   vi.stubEnv("MUSTER_PROJECT", "");
   const h = harness();
@@ -24,7 +24,7 @@ async function launch(raw: string | undefined, options: { model?: string; thinki
   await runWith(h, projectOpen({ dir, slug: "probe", outcome: "steer launches", reviewTrigger: "weekly", nextAction: "launch", criticalPath: [], space: "w1", ephemeral: true, cadenceMinutes: 15, musterExtension: "/muster", deskExtension: null }));
   await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "test steer" }));
   if (options.pin) await runWith(h, projectUpdate(dir, { policy: { roles: { worker: { model: options.pin } } } }));
-  return runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", role: options.role ?? "worker", lane: "probe", label: "🔨 worker", cwd: dir, ...(options.model ? { model: options.model } : {}), ...(options.thinking ? { thinking: options.thinking } : {}), ...(options.workType ? { workType: options.workType } : {}) }));
+  return runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", role: options.role ?? "worker", lane: "probe", label: "🔨 worker", cwd: dir, ...(options.model ? { model: options.model } : {}), ...(options.thinking ? { thinking: options.thinking } : {}), ...(options.workType ? { workType: options.workType } : {}), ...(options.critical ? { critical: true } : {}) }));
 }
 
 describe("fleet steer launch integration", () => {
@@ -141,5 +141,36 @@ describe("fleet steer work-type routes", () => {
     const stale = JSON.stringify({ ...JSON.parse(routed), validUntil: "2026-09-29T06:00:00Z" });
     expect((await launch(stale, { workType: "bugfix" })).row.profile.model).toBe(sol);
     await expect(launch(routed, { workType: "Bug Fix" })).rejects.toThrow("workType must match");
+  });
+});
+
+describe("fleet steer pace hold", () => {
+  const sonnet = "claude-bridge/claude-sonnet-5-5";
+  const haiku = "claude-bridge/claude-haiku-5-5";
+  const hot = (extra: object = {}) => JSON.stringify({ ...fresh, workerDefault: "sol", claude: { pace: 1.46, dryDays: 3.2 }, codex: { pace: 1.1 },
+    routes: { bugfix: { model: sonnet, thinking: "medium" }, scan: { model: haiku, thinking: "low" }, critical: { model: "opus", thinking: "high" } }, ...extra });
+  const now = Date.parse("2026-09-29T06:00:00Z");
+  beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(now); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it("holds a non-critical worker on a hot pool with one line naming pool, pace and days to dry", async () => {
+    await expect(launch(hot(), { workType: "bugfix" })).rejects.toThrow("pool claude at 1.46× pace, dry in 3.2 d");
+    await expect(launch(hot(), { model: "opus" })).rejects.toThrow("pool claude at 1.46× pace");
+  });
+  it("lets critical: true through on the work type's own route, and names the flag when it holds", async () => {
+    expect((await launch(hot(), { workType: "bugfix", critical: true })).row.profile).toMatchObject({ model: sonnet, thinking: "medium" });
+    await expect(launch(hot(), { workType: "bugfix" })).rejects.toThrow("Pass critical: true for critical-path work");
+  });
+  it("lets critical work, Haiku and a cool pool through", async () => {
+    expect((await launch(hot(), { workType: "critical" })).row.profile.model).toBe(opus);
+    expect((await launch(hot(), { workType: "scan" })).row.profile.model).toBe(haiku);
+    expect((await launch(hot())).row.profile.model).toBe(sol);
+  });
+  it("fails open when the steer is stale or missing", async () => {
+    expect((await launch(hot({ validUntil: "2026-09-29T05:30:00Z" }), { model: "opus" })).row.profile.model).toBe(opus);
+    expect((await launch(undefined, { model: "opus" })).row.profile.model).toBe(opus);
+  });
+  it("never holds a non-worker launch", async () => {
+    expect((await launch(hot(), { role: "desk", model: "opus" })).row.profile.model).toBe(opus);
   });
 });

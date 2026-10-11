@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { decodeFleetSteer, roleDefaults, steerChoice, WORK_TYPE } from "./domain.ts";
+import { decodeFleetSteer, roleDefaults, steerChoice, steerHold, WORK_TYPE } from "./domain.ts";
 import type { FleetSteer, Policy, Role, Roster } from "./domain.ts";
 import { InputError } from "./errors.ts";
 
@@ -15,7 +15,7 @@ export const readFleetSteer = (home: string) => Effect.try({
     : "fleet steer undecodable; roster default" }),
 }).pipe(Effect.catch(error => Effect.succeed({ steer: undefined as FleetSteer | undefined, note: error.message as string | undefined })));
 
-export const launchDefaults = (args: { home: string; now: number; action: string; roster?: Roster; policy?: Policy; role: Role; model?: string; slug?: string; workType?: string | undefined }) => Effect.gen(function* () {
+export const launchDefaults = (args: { home: string; now: number; action: string; roster?: Roster; policy?: Policy; role: Role; model?: string; slug?: string; workType?: string | undefined; critical?: boolean | undefined }) => Effect.gen(function* () {
   const applies = args.action === "launch" && args.role === "worker";
   if (args.workType !== undefined && !WORK_TYPE.test(args.workType)) return yield* new InputError({ message: `workType must match ${WORK_TYPE.source}` });
   if (args.workType !== undefined && !applies) return yield* new InputError({ message: "workType applies only to a worker launch" });
@@ -26,6 +26,9 @@ export const launchDefaults = (args: { home: string; now: number; action: string
     try: () => roleDefaults(args.roster, args.policy, args.role, args.model, args.slug, read?.steer, args.now, args.workType),
     catch: error => new InputError({ message: String(error instanceof Error ? error.message : error) }),
   });
+  // Every worker launch answers to the pace hold, pinned model or not.
+  const hold = applies ? steerHold((read ?? (yield* readFleetSteer(args.home))).steer, args.now, defaults.model, args.workType, args.critical === true) : null;
+  if (hold) return yield* new InputError({ message: hold });
   const reason = args.model !== undefined ? "explicit model" : args.policy?.roles?.worker?.model !== undefined ? "project policy" : choice?.model ? choice.note : args.roster?.roles.worker?.model !== undefined ? "roster default" : "ROLE_DEFAULTS";
   return { defaults, review: choice?.review === true, notes: applies ? [
     ...(!pinned && !choice?.model ? [read?.note ?? choice!.note] : []),
