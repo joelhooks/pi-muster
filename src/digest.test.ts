@@ -82,6 +82,15 @@ describe("project digest", () => {
     expect(readFileSync(path, "utf8")).toBe(before);
     expect(readFileSync(session, "utf8")).toBe("unchanged\n");
   });
+  // Ernestine, 2026-10-11: agents misreported quota capacity; cliproxy publishes the source of truth on each host.
+  it("points at the published fleet capacity file when the host has one", async () => {
+    const { dir } = fixture();
+    const home = join(dir, "home");
+    expect((await projectDigest(dir, { ...options(), env: { HOME: home } })).notes.join(" ")).not.toContain("capacity");
+    mkdirSync(join(home, ".local/state/muster"), { recursive: true });
+    writeFileSync(join(home, ".local/state/muster/fleet-capacity.md"), "# capacity\n");
+    expect((await projectDigest(dir, { ...options(), env: { HOME: home } })).notes).toContain("capacity: read and cite ~/.local/state/muster/fleet-capacity.md (pace, dry time, refills, routes); never estimate");
+  });
   it("isolates a command failure from all other parts", async () => {
     const base = runner();
     const result = await projectDigest(fixture().dir, options(async (command, args, opts) => { if (args[0] === "run") throw new Error("CI unavailable"); return base(command, args, opts); }));

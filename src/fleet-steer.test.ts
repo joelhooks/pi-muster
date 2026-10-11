@@ -166,6 +166,7 @@ describe("fleet steer pace hold", () => {
   it("lets critical: true through on the work type's own route, and names the flag when it holds", async () => {
     expect((await launch(hot(), { workType: "bugfix", critical: true })).row.profile).toMatchObject({ model: sonnet, thinking: "medium" });
     await expect(launch(hot(), { workType: "bugfix" })).rejects.toThrow("Pass critical: true for critical-path work");
+    await expect(launch(hot(), { workType: "bugfix" })).rejects.toThrow("read and cite ~/.local/state/muster/fleet-capacity.md; never estimate");
   });
   it("lets critical work, Haiku and a cool pool through", async () => {
     expect((await launch(hot(), { workType: "critical" })).row.profile.model).toBe(opus);

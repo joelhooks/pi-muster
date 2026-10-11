@@ -7,7 +7,7 @@ import { basename, delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Cause, Effect, Exit, Schema } from "effect";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { decodeProject, silenceLimits } from "./domain.ts";
+import { decodeProject, FLEET_CAPACITY_FILE, silenceLimits } from "./domain.ts";
 import { projectPath } from "./store.ts";
 import { staleReading } from "./fleet.ts";
 
@@ -193,6 +193,9 @@ export async function projectDigest(dir: string, options: DigestOptions = {}): P
     }),
   ]);
   const parts = { ...gh, gates, agents, packets };
+  const home = env.HOME;
+  if (home && await access(join(home, FLEET_CAPACITY_FILE.slice(2))).then(() => true, () => false))
+    notes.push(`capacity: read and cite ${FLEET_CAPACITY_FILE} (pace, dry time, refills, routes); never estimate`);
   const clock = now.toTimeString().slice(0, 5);
   return { line: digestLine(`${project?.slug ?? basename(dir)} ${clock}`, parts, options.width ?? 160), parts, notes: notes.sort() };
 }

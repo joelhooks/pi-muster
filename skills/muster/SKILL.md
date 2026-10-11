@@ -37,7 +37,7 @@ Bosses, the hawk, judges and arbiters are opt-in for a named risk. Record the ri
 
 ## Keep work flowing
 
-WIP is uncapped by default; the fleet quota steer and pennywise headroom throttle launches, and Joel never rules on slots. Finish one slice before expanding the program. Keep a ranked backlog of proposed work with briefs so the next useful slice is ready. A role lane that lands commits is a work lane in disguise.
+WIP is uncapped by default; the fleet quota steer and pennywise headroom throttle launches, and Joel never rules on slots. For capacity (pace, dry time, refills, routes), read and cite `~/.local/state/muster/fleet-capacity.md`; never estimate. Finish one slice before expanding the program. Keep a ranked backlog of proposed work with briefs so the next useful slice is ready. A role lane that lands commits is a work lane in disguise.
 
 Use median cycle time over the last ten proven lanes and throughput over the last seven days to judge flow. Lanes are continuous work, not sprints.
 

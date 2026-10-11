@@ -671,6 +671,8 @@ const steerFresh = (steer: FleetSteer, now: number) => {
 
 /** At or above this pace a fresh steer holds non-critical worker launches on that pool (Joel, 2026-10-10: the steer is the throttle, not a WIP count). */
 export const PACE_HOLD = 1.2;
+/** cliproxy publishes the fleet's capacity here on each host; agents cite it instead of estimating (Ernestine, 2026-10-11). */
+export const FLEET_CAPACITY_FILE = "~/.local/state/muster/fleet-capacity.md";
 export const steerPool = (model: string): "claude" | "codex" | undefined =>
   model === "opus" || /^(?:anthropic|claude-bridge)\//.test(model) ? "claude" : model === "sol" || /^(?:openai-codex|cliproxy-codex)\//.test(model) ? "codex" : undefined;
 
@@ -680,7 +682,7 @@ export function steerHold(steer: FleetSteer | undefined, now: number, model: str
   const pool = steerPool(model);
   const reading = pool ? steer[pool] : undefined;
   if (!pool || !reading || !(reading.pace >= PACE_HOLD)) return null;
-  return `pool ${pool} at ${reading.pace.toFixed(2)}× pace${typeof reading.dryDays === "number" && Number.isFinite(reading.dryDays) ? `, dry in ${reading.dryDays.toFixed(1)} d` : ""} (fleet steer at ${steer.at}): worker launch on ${model} held. Pass critical: true for critical-path work (keeps the routed model), use a Haiku scan or gather, or wait for the steer to cool`;
+  return `pool ${pool} at ${reading.pace.toFixed(2)}× pace${typeof reading.dryDays === "number" && Number.isFinite(reading.dryDays) ? `, dry in ${reading.dryDays.toFixed(1)} d` : ""} (fleet steer at ${steer.at}): worker launch on ${model} held. Pass critical: true for critical-path work (keeps the routed model), use a Haiku scan or gather, or wait for the steer to cool. For capacity detail, read and cite ${FLEET_CAPACITY_FILE}; never estimate`;
 }
 
 /** The fresh steer's choice for a worker: the work type's route, else workerDefault. A stale steer chooses nothing. */
