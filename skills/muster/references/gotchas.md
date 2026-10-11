@@ -67,6 +67,8 @@ A manually resumed desk does not need another restore. Run `project_status act: 
 
 If the same journal was resumed twice, fork the unbound copy with `/fork` to keep its context under a new session id, or launch a named fork from the bound row. Do not repeatedly restore or adopt the duplicate; that does not create a new identity. The duplicate's own feed asks it to fork. pi-ratking owns the row name's single reader; Muster starts none. Use `comms_doctor` to check the expected name against its session claim.
 
+To change a running row's launch profile (model, `slim`, extensions, appended prompt), quit its Pi first, then `agent_launch action: "restore"` with the overrides: restore refuses a running row, and `restart` forks the stored profile unchanged. The new profile is saved on the row.
+
 Restore is not an ownership handover. To take the catalog's open rows explicitly, use `project_status takeover: true`. A session can restart itself even when another session owns its row. Other actors must own the row before restarting it.
 
 - Takeover forwarding is project-scoped; restart every desk after this update before lifting the takeover ban, and leave legacy posts without a project in their original session's inbox.
