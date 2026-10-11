@@ -145,6 +145,22 @@ describe("fleet gate routing", () => {
     expect(args[args.indexOf("--host") + 1]).toBe("flagg");
   });
 
+  it("measures against --base when given, HEAD otherwise, and refuses a base the checkout can't resolve", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
+    const { options, git } = fixture();
+    git("branch", "storage-wave-3");
+    const head = git("rev-parse", "HEAD");
+    const based = fakeRunner();
+    await run({ ...options, base: "storage-wave-3" }, based.proc);
+    expect(based.calls[0]!.args[based.calls[0]!.args.indexOf("--branch") + 1]).toBe("storage-wave-3");
+    const plain = fakeRunner();
+    await run(options, plain.proc);
+    expect(plain.calls[0]!.args[plain.calls[0]!.args.indexOf("--branch") + 1]).toBe(head);
+    const missing = fakeRunner();
+    await expect(run({ ...options, base: "origin/nope" }, missing.proc)).rejects.toThrow("--base origin/nope does not resolve");
+    expect(missing.calls).toEqual([]);
+  });
+
   it("names the worker machine in the summary while checks keep host", async () => {
     vi.stubEnv("MUSTER_FLEET_COMPUTE", "");
     const { options } = fixture();
@@ -229,7 +245,8 @@ console.log('streamed output'); process.exit(${exit});\n`);
 
   it("keeps legacy heavy argv parsing separate", () => {
     expect(parseHeavyGate(["--wait", "3", "--tree", sha, "--host", "pennywise", "--", "echo", "--tree"])).toEqual({ wait: 3, tree: sha, host: "pennywise", command: ["echo", "--tree"] });
-    for (const args of [["--exclusive", "--", "true"], ["--wait", "-1", "--", "true"], ["--wait", "1", "--wait", "2", "--", "true"], ["--tree", "HEAD", "--", "true"], ["--host", "elsewhere", "--", "true"], ["--"]]) expect(() => parseHeavyGate(args)).toThrow();
+    expect(parseHeavyGate(["--base", "origin/storage-wave-3", "--", "true"])).toMatchObject({ base: "origin/storage-wave-3" });
+    for (const args of [["--base", "-x", "--", "true"], ["--base", "a..b", "--", "true"], ["--exclusive", "--", "true"], ["--wait", "-1", "--", "true"], ["--wait", "1", "--wait", "2", "--", "true"], ["--tree", "HEAD", "--", "true"], ["--host", "elsewhere", "--", "true"], ["--"]]) expect(() => parseHeavyGate(args)).toThrow();
     expect(gateRepoName("/clone/lane", "ssh://git@example.invalid/owner/drovr.git")).toBe("drovr");
     // codetv.dev failed decodeSlug and blocked its gates and hydrate (Theora, 2026-10-07).
     expect(gateRepoName("/clone/lane", "git@github.com:owner/codetv.dev.git")).toBe("codetv-dev");
