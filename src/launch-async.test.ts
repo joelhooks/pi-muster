@@ -204,5 +204,7 @@ describe("asynchronous launch admission", () => {
     const renderer = readFileSync(new URL("./extension-main.ts", import.meta.url), "utf8");
     expect(renderer).toContain("return launchResultText(result);");
     expect(launchResultText(result)).toContain("delivery: proven");
+    // Nicodemus, 2026-10-11: an owner kept sending to a relaunched row's old name; the receipt names the mailbox.
+    expect(launchResultText(result)).toContain(`Rat King name: async/${result.row.name} (send to this name`);
   });
 });
