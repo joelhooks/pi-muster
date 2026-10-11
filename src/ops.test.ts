@@ -734,6 +734,19 @@ describe("pane binding safety", () => {
     return { h, dir, row: launched.row };
   }
 
+  // Tin-Tin, 2026-10-11: close retires the row's Rat King name, so a restored row came back under a refused name.
+  it("takes the Rat King name back when a closed row is restored", async () => {
+    const { h, dir } = await rootWorker();
+    const shim = join(h.home, ".config/muster/fleet-mailbox.sh");
+    mkdirSync(join(shim, ".."), { recursive: true });
+    writeFileSync(shim, `printf '%s\\n' "$*" >> "${h.root}/mailbox-args"; exit 0\n`);
+    const slug = (await runWith(h, load(dir))).slug;
+    await runWith(h, agentClose(dir, { name: "first" }));
+    const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "first", slot: "root" }));
+    expect(readFileSync(join(h.root, "mailbox-args"), "utf8").trim().split("\n")).toEqual([`retire --name ${slug}/first`, `unretire --name ${slug}/first`]);
+    expect(restored.notes).toContain(`Rat King name ${slug}/first unretired: it takes mail again`);
+  });
+
   it.each(["pane", "terminal"])("keeps a shared %s binding until the last row closes", async (identity) => {
     const { h, dir, row } = await rootWorker();
     const binding = row.pane!;

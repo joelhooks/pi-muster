@@ -2690,6 +2690,10 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         catch: error => input(`restore skills: ${String(error)}`),
       });
       skillNotes.push(...restoredSkills.notes);
+      if (existing.state === "closed") {
+        const note = yield* retireRatkingName(project, existing, "unretire");
+        if (note) skillNotes.push(note);
+      }
       row = { ...existing, profile: { ...restoredProfile, skills: restoredSkills.paths, appendSystemPrompt: withHiddenSkills(restoredProfile.appendSystemPrompt, restoredSkills.hidden) }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
     } else {
       const relaunchable = existing?.state === "planned" || existing?.state === "failed" || (existing?.state === "interrupted" && !existing.sessionFile);
@@ -2935,17 +2939,19 @@ const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | unde
  * 2026-10-11). Only after close: a live reader re-acquiring its lease clears the mark, as does a later restore under
  * the same name. Never fails the close; a missing shim or refusal is a note.
  */
-const retireRatkingName = (project: Project, row: AgentRow) => Effect.gen(function* () {
+/** Close retires a row's Rat King name; restoring the closed row takes the same name back (Tin-Tin, 2026-10-11). */
+const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "unretire" = "retire") => Effect.gen(function* () {
   const env = yield* MusterEnv;
   if (project.policy?.comms && project.policy.comms !== "ratking") return null;
   const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
+  const done = verb === "retire" ? "retired: sends to it now fail Retired" : "unretired: it takes mail again";
   const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
-  if (!existsSync(shim)) return `Rat King name ${name} not retired: no ${shim}`;
+  if (!existsSync(shim)) return `Rat King name ${name} not ${verb}d: no ${shim}`;
   const proc = yield* Proc;
-  const result = yield* proc.run("sh", [shim, "retire", "--name", name], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
-  if (result._tag === "Failure") return `Rat King name ${name} not retired: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
-  if (result.success.code !== 0) return `Rat King name ${name} not retired (exit ${result.success.code}: ${stderrClass(result.success.stderr)})`;
-  return `Rat King name ${name} retired: sends to it now fail Retired`;
+  const result = yield* proc.run("sh", [shim, verb, "--name", name], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
+  if (result._tag === "Failure") return `Rat King name ${name} not ${verb}d: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
+  if (result.success.code !== 0) return `Rat King name ${name} not ${verb}d (exit ${result.success.code}: ${stderrClass(result.success.stderr)})`;
+  return `Rat King name ${name} ${done}`;
 });
 
 export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir, params).pipe(
