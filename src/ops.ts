@@ -165,7 +165,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     ...(params.workType !== undefined ? { thinking: workerChoice.defaults.thinking } : {}),
     ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
     ...(params.skills !== undefined ? { skills: params.skills } : {}),
-    ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
+    ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}), ...(params.slim !== undefined ? { slim: params.slim } : {}),
     ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
     ...(params.env !== undefined ? { env: params.env } : {}),
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
@@ -1822,6 +1822,7 @@ export interface AgentLaunchInput {
   readonly appendSystemPrompt?: readonly string[] | undefined;
   readonly skills?: readonly string[] | undefined;
   readonly noSkills?: boolean | undefined;
+  readonly slim?: boolean | undefined;
   readonly extensions?: readonly string[] | undefined;
   readonly env?: Readonly<Record<string, string>> | undefined;
   readonly compactAt?: number | null | undefined;
@@ -2692,7 +2693,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
         ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
         ...(params.skills !== undefined ? { skills: params.skills } : {}),
-        ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
+        ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}), ...(params.slim !== undefined ? { slim: params.slim } : {}),
         ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
         ...(params.env !== undefined ? { env: params.env } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),

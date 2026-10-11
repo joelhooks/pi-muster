@@ -64,6 +64,23 @@ describe("buildArgv", () => {
   });
 });
 
+describe("slim profile", () => {
+  it("loads only the named extensions: no discovery, no context files, no Muster extension or skill, no tool flags", () => {
+    const profile = profileFor("hawk", { label: "🗂️ EA", model: "claude-bridge/claude-haiku-5-5", thinking: "low", slim: true, noSkills: true, extensions: ["/pi-ratking"] });
+    expect(profile).toMatchObject({ slim: true, skills: [], extensions: ["/pi-ratking"] });
+    const argv = buildArgv({ kind: "launch", sessionId: "ea", sessionFile: null, parentSessionFile: null, profile, musterExtension: "/muster" });
+    expect(argv).toEqual(expect.arrayContaining(["-ne", "-nc", "-ns", "-e", "/pi-ratking"]));
+    expect(argv).not.toContain("/muster");
+    expect(argv.filter(arg => FORBIDDEN_FLAGS.includes(arg))).toEqual([]);
+    // Restore keeps the stored profile, so the row stays slim.
+    expect(buildArgv({ kind: "restore", sessionId: "ea", sessionFile: "/s/ea.jsonl", parentSessionFile: null, profile, musterExtension: "/muster" })).toContain("-ne");
+  });
+  it("leaves ordinary profiles untouched", () => {
+    const argv = buildArgv({ kind: "launch", sessionId: "d", sessionFile: null, parentSessionFile: null, profile: profileFor("desk", { label: "d" }), musterExtension: "/muster" });
+    expect(argv).not.toContain("-ne"); expect(argv).not.toContain("-nc"); expect(argv).toContain("/muster");
+  });
+});
+
 describe("helpers", () => {
   it("says off for a null compact-at and takes project role defaults", () => {
     const off = profileFor("judge", { label: "j", compactAt: null });

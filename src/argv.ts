@@ -49,9 +49,12 @@ export function buildArgv(input: ArgvInput): string[] {
   argv.push(...value("--name", profile.label));
   argv.push(...value("--model", profile.thinking ? `${profile.model}:${profile.thinking}` : profile.model));
   for (const prompt of profile.appendSystemPrompt) argv.push(...value("--append-system-prompt", prompt));
+  // Slim: no extension discovery and no context files. Explicit -e paths still load; never a tool-registry flag.
+  if (profile.slim) argv.push("-ne", "-nc");
   if (profile.noSkills) argv.push("-ns");
   for (const skill of profile.skills) argv.push(...value("--skill", skill));
-  const extensions = input.musterExtension ? [input.musterExtension, ...profile.extensions] : profile.extensions;
+  // A slim role carries no Muster tools: it reaches its owner only through the extensions it names.
+  const extensions = input.musterExtension && !profile.slim ? [input.musterExtension, ...profile.extensions] : profile.extensions;
   for (const extension of new Set(extensions)) argv.push(...value("-e", extension));
   // Always explicit: without the flag the role default comes back, so "off" must say off.
   argv.push("--compact-at", profile.compactAt === null ? "off" : String(profile.compactAt));
@@ -72,6 +75,7 @@ export interface ProfileInput {
   readonly thinking?: LaunchProfile["thinking"] | undefined;
   readonly appendSystemPrompt?: readonly string[] | undefined;
   readonly noSkills?: boolean | undefined;
+  readonly slim?: boolean | undefined;
   readonly skills?: readonly string[] | undefined;
   readonly extensions?: readonly string[] | undefined;
   readonly env?: Readonly<Record<string, string>> | undefined;
@@ -82,7 +86,7 @@ export function profileFor(role: Role, input: ProfileInput, d: RoleDefaults = RO
   const noSkills = input.noSkills ?? d.noSkills;
   const requested = [...(d.skills ?? []), ...(input.skills ?? [])];
   const musterSkill = fileURLToPath(new URL("../skills/muster", import.meta.url));
-  const roleSkills = !noSkills && role !== "worker"
+  const roleSkills = !noSkills && !input.slim && role !== "worker"
     ? [musterSkill, ...requested.filter(skill => skill !== "muster" && skill !== musterSkill && skill !== `${musterSkill}/SKILL.md`)]
     : requested;
   return {
@@ -91,6 +95,7 @@ export function profileFor(role: Role, input: ProfileInput, d: RoleDefaults = RO
     thinking: input.thinking === undefined ? d.thinking : input.thinking,
     appendSystemPrompt: [...(input.appendSystemPrompt ?? [])],
     noSkills,
+    ...(input.slim ? { slim: true } : {}),
     skills: [...new Set(roleSkills)],
     extensions: [...(input.extensions ?? [])],
     env: { ...(input.env ?? {}) },

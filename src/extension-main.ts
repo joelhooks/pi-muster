@@ -556,6 +556,7 @@ export default function muster(host: ExtensionAPI) {
       appendSystemPrompt: Type.Optional(Type.Array(Type.String())),
       skills: Type.Optional(Type.Array(Type.String())),
       noSkills: Type.Optional(Type.Boolean()),
+      slim: Type.Optional(Type.Boolean({ description: "Narrow standing role: no extension discovery, no AGENTS.md/CLAUDE.md, no Muster tools or skill; only extensions you list load (e.g. pi-ratking)" })),
       extensions: Type.Optional(Type.Array(Type.String())),
       env: Type.Optional(Type.Record(Type.String(), Type.String())),
       compactAt: Type.Optional(Type.Union([Type.Number(), Type.Null()])),

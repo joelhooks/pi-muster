@@ -174,6 +174,8 @@ export const LaunchProfile = Schema.Struct({
   thinking: Schema.NullOr(Thinking),
   appendSystemPrompt: Schema.Array(Path),
   noSkills: Schema.Boolean,
+  /** No extension discovery and no AGENTS.md/CLAUDE.md: only the explicit extensions load. For narrow standing roles. */
+  slim: Schema.optional(Schema.Boolean),
   skills: Schema.Array(Path),
   extensions: Schema.Array(Path),
   env: Schema.Record(Schema.String, Schema.String),
@@ -229,7 +231,7 @@ export const AgentLaunchRequest = Schema.Struct({
   from: Schema.optional(Schema.String), side: Schema.optional(Schema.Boolean), at: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String), thinking: Schema.optional(Thinking), workType: Schema.optional(Schema.String), critical: Schema.optional(Schema.Boolean),
   appendSystemPrompt: Schema.optional(Schema.Array(Schema.String)), skills: Schema.optional(Schema.Array(Schema.String)),
-  noSkills: Schema.optional(Schema.Boolean), extensions: Schema.optional(Schema.Array(Schema.String)),
+  noSkills: Schema.optional(Schema.Boolean), slim: Schema.optional(Schema.Boolean), extensions: Schema.optional(Schema.Array(Schema.String)),
   env: Schema.optional(Schema.Record(Schema.String, Schema.String)), compactAt: Schema.optional(Schema.NullOr(Schema.Number)),
   brief: Schema.optional(Schema.String), prompt: Schema.optional(Schema.String), pane: Schema.optional(Schema.String),
   slot: Schema.optional(Schema.Literals(["root", "split"])),
