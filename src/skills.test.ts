@@ -33,7 +33,13 @@ describe("skill discovery", () => {
     expect(matches).toHaveLength(5);
     expect(matches[0]?.name).toBe("testing");
     expect(matches.some((s) => s.name === "builder")).toBe(true);
-    expect(skills.some((s) => s.name === "hidden")).toBe(false);
+    expect(matches.some((s) => s.name === "hidden")).toBe(false);
+    expect(findSkills({ skills, query: "hidden" })).toEqual([]);
+    // A launch may still name a model-hidden skill, here through a symlinked skill directory (para-operator, 2026-10-11).
+    const real = join(f.cwd, "elsewhere", "operator"); f.skill(join(f.cwd, "elsewhere"), "operator", "Hidden operator", true);
+    symlinkSync(real, join(f.agentDir, "skills", "operator"));
+    const linked = skillIndex(f);
+    expect(resolveSkills({ skills: ["hidden", "operator"], index: linked })).toEqual({ paths: [realpathSync(join(f.agentDir, "skills", "hidden", "SKILL.md")), realpathSync(join(real, "SKILL.md"))], notes: [] });
     expect(findSkills({ skills, query: "zebra" })).toEqual([]);
     expect(findSkills({ skills, query: "testing", limit: 99 })).toHaveLength(10);
     expect(findSkills({ skills, query: "fixtures", limit: 1 })[0]?.name).toBe("builder");

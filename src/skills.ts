@@ -26,9 +26,10 @@ export function skillIndex({ cwd, agentDir = process.env.PI_CODING_AGENT_DIR ?? 
     cwd, agentDir: dir, includeDefaults: true,
     skillPaths: [...settingsPaths(dir), ...settingsPaths(join(cwd, ".pi"))],
   });
+  // Every skill stays indexed: findSkills hides disable-model-invocation ones from search, but a launch may still name
+  // one explicitly (para-operator, 2026-10-11).
   const seen = new Set<string>();
   return skills.filter((skill) => {
-    if (skill.disableModelInvocation) return false;
     const path = realpathSync(skill.filePath);
     if (seen.has(path)) return false;
     seen.add(path);
