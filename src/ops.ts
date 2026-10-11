@@ -3328,8 +3328,12 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
     const branch = row.clone.branch;
     if (row.machine !== "local") {
       const machine = yield* machineConfig(row.machine);
-      yield* must("git", ["fetch", "-q", cloneUrl(machine, row.cwd), `${branch}:${branch}`], { cwd: source, timeoutMs: 120_000, env: { GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2" } }).pipe(Effect.mapError(error => new ProcError({ ...error, message: `machine ${row.machine}: harvest failed: ${error.message}` })));
-    } else if (existsSync(row.cwd)) yield* git(source, "fetch", "-q", row.cwd, `${branch}:${branch}`);
+      yield* must("git", ["fetch", cloneUrl(machine, row.cwd), `+${branch}:${branch}`], { cwd: source, timeoutMs: 120_000, env: { GIT_SSH_COMMAND: "ssh -o BatchMode=yes -o ConnectTimeout=8 -o ServerAliveInterval=5 -o ServerAliveCountMax=2" } }).pipe(Effect.mapError(error => new ProcError({ ...error, message: `machine ${row.machine}: harvest fetch of ${branch} from clone ${row.cwd} failed: ${error.message}` })));
+    } else if (existsSync(row.cwd)) {
+      // Forced: the source's copy of a worker branch is Muster's own, and a rebased clone branch is not a fast-forward of
+      // it. Unforced and quiet, git rejected that with exit 1 and an empty stderr (rat-king c1c0627, 2026-10-11).
+      yield* must("git", ["fetch", row.cwd, `+${branch}:${branch}`], { cwd: source, timeoutMs: 120_000 }).pipe(Effect.mapError(error => new ProcError({ ...error, message: `harvest fetch of ${branch} from clone ${row.cwd} failed: ${error.message}` })));
+    }
     const onBranch = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, branch], { cwd: source })).code === 0;
     if (!onBranch) return yield* new GuardFailed({ guard: "harvest", message: `${packet.id.slice(0, 12)} is not on ${branch} in ${source}` });
     const merged = (yield* proc.run("git", ["merge-base", "--is-ancestor", packet.id, "HEAD"], { cwd: source })).code === 0;

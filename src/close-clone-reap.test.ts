@@ -291,3 +291,20 @@ it("keeps the clone and says why when a process never leaves it", async () => {
   expect(closed.cloneError).toContain("clone kept: a process still runs inside it (a pane shell Muster did not open, or a session still exiting)");
   expect(existsSync(f.row.cwd)).toBe(true);
 });
+
+// Nicodemus, 2026-10-11: the source already held a stale copy of the worker branch; the quiet fetch was rejected as a
+// non-fast-forward with exit 1 and an empty stderr, three times.
+it("lands over a stale, diverged copy of the worker branch in the source", async () => {
+  const f = await fixture();
+  const branch = f.row.clone!.branch;
+  const tree = sh(f.dir, "rev-parse", "HEAD^{tree}").trim();
+  const stale = sh(f.dir, "commit-tree", tree, "-m", "stale worker copy").trim();
+  sh(f.dir, "branch", "-f", branch, stale);
+  const head = f.commit(f.row.cwd, "work.txt", "rebased work");
+  await runWith(f.h, packetReport({ dir: f.dir, agent: f.row.name, owner: f.h.sessionId, cwd: f.row.cwd, commit: head, summary: "land over stale", checks: [] }));
+  await runWith(f.h, packetVerify(f.dir, head));
+  const landed = await runWith(f.h, packetLand(f.dir, { id: head, outcome: "committed" }));
+  expect(sh(f.dir, "rev-parse", branch).trim()).toBe(head);
+  expect(sh(f.dir, "merge-base", "--is-ancestor", head, "HEAD")).toBe("");
+  expect(JSON.stringify(landed)).toContain(head.slice(0, 7));
+});
