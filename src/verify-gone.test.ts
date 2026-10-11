@@ -72,7 +72,7 @@ describe("missing clone verification", () => {
     s.h.proc = { run: (command, args, options) => {
       if (command !== "ssh") return base.run(command, args, options);
       const script = args.at(-1)!; sshScripts.push(script);
-      return liveProc.run("sh", ["-c", script], { cwd: s.h.home, timeoutMs: options.timeoutMs });
+      return liveProc.run("sh", ["-c", script], { cwd: s.h.home, timeoutMs: options.timeoutMs, input: options.input });
     } };
     s.gone();
     if (landing === "absent") {

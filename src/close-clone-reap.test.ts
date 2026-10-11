@@ -240,7 +240,7 @@ it("records SSH removal failures and retries an already-closed remote row throug
         const script = args.at(-1)!;
         ssh.push(script);
         if (refuse && script.includes("'remove'")) return Effect.succeed({ code: 1, stdout: "", stderr: "remote remove refused" });
-        return liveProc.run("sh", ["-c", script], { cwd: f.h.home, timeoutMs: options.timeoutMs });
+        return liveProc.run("sh", ["-c", script], { cwd: f.h.home, timeoutMs: options.timeoutMs, input: options.input });
       } }),
     );
   }));

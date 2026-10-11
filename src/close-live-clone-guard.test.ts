@@ -142,7 +142,7 @@ describe("close live clone guard", () => {
     const proc: ProcShape = { run: (command, args, options) => {
       if (command !== "ssh") return h.proc.run(command, args, options);
       commands.push(args.at(-1)!);
-      return liveProc.run("sh", ["-c", args.at(-1)!], { cwd: h.home, timeoutMs: options.timeoutMs });
+      return liveProc.run("sh", ["-c", args.at(-1)!], { cwd: h.home, timeoutMs: options.timeoutMs, input: options.input });
     } };
     const close = () => runWith(h, agentClose(dir, { name: row.name }).pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc)));
     const result = await close();

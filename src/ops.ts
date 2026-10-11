@@ -79,7 +79,7 @@ import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
 import { watchFallback } from "./desk-local.ts";
-import { pushRemoteBinding } from "./remote.ts";
+import { pushRemoteBinding, syncRemoteBindings } from "./remote.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
@@ -3663,6 +3663,13 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         }))
       : yield* load(dir);
     if (act) yield* backfillOwnerNames(dir);
+    if (act) {
+      const owned = (yield* load(dir)).agents.filter(row => row.machine !== "local" && row.state !== "closed" && row.owner === env.sessionId && !ingestion.failedMachines.has(row.machine));
+      if (owned.length) {
+        const synced = yield* syncRemoteBindings(project, owned);
+        handoverNotes.push(...synced.notes, ...(synced.written ? [`re-sent ${synced.written} stale remote binding(s)`] : []));
+      }
+    }
     const spaces = yield* workspaceList();
     const missingSpace = project.spaceId && !spaces.some(space => space.workspace_id === project.spaceId)
       ? `project ${project.slug}: workspace ${project.spaceId} is missing; space not rebuilt` : null;

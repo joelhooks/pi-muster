@@ -52,6 +52,10 @@ export function readRemoteBinding(env: Readonly<Record<string, string | undefine
     return row.name === name && row.machine === env.MUSTER_MACHINE && row.sessionId === launch.sessionId ? row : undefined;
   } catch { return undefined; }
 }
+/** The first stderr line up to any quote or bracket, which is where a parser would echo the row it carried. */
+export const stderrClass = (stderr: string) =>
+  (stderr.split(/\r?\n/).map(line => line.trim()).find(line => line !== "") ?? "no stderr")
+    .replace(/["'`{[].*$/, "…").slice(0, 120);
 export const pushRemoteBinding = (project: Project, row: AgentRow) => Effect.gen(function* () {
   const machine = yield* machineConfig(row.machine);
   const runner = yield* Proc;
@@ -64,7 +68,37 @@ const path=join(root,row.name+'.json'),temp=path+'.'+process.pid+'.tmp';
 fs.writeFileSync(temp,JSON.stringify(row),{mode:0o600}); fs.renameSync(temp,path);
 process.stdout.write('binding pushed');`;
   const result = yield* sshProc(row.machine, machine, runner, env.home).run("node", ["--input-type=module", "-e", script], { cwd: "/", timeoutMs: 30_000, input: JSON.stringify(decodeAgentRow(row)) });
-  if (result.code !== 0) return yield* new InputError({ message: `binding ${project.slug}/${row.name}: push failed (private output withheld)` });
+  if (result.code !== 0) return yield* new InputError({ message: `binding ${project.slug}/${row.name}: push failed (exit ${result.code}: ${stderrClass(result.stderr)})` });
+});
+
+/**
+ * An owner pass re-sends every live remote row's binding, one process per machine, writing only what changed. A push
+ * that failed during a restart (the caller had no route) heals on the new owner's next pass instead of leaving workers
+ * naming a retired session.
+ */
+export const syncRemoteBindings = (project: Project, rows: readonly AgentRow[]) => Effect.gen(function* () {
+  const runner = yield* Proc;
+  const env = yield* MusterEnv;
+  const notes: string[] = [];
+  let written = 0;
+  const script = `${sidecarRootsScript}
+import fs from 'node:fs';
+let written=0;
+for (const row of JSON.parse(fs.readFileSync(0,'utf8'))) {
+  const root=join(sidecarRoots(row.cwd)[0],'bindings'); const path=join(root,row.name+'.json'); const next=JSON.stringify(row);
+  try { if (fs.readFileSync(path,'utf8')===next) continue; } catch {}
+  fs.mkdirSync(root,{recursive:true,mode:0o700}); const temp=path+'.'+process.pid+'.tmp';
+  fs.writeFileSync(temp,next,{mode:0o600}); fs.renameSync(temp,path); written++;
+}
+process.stdout.write(String(written));`;
+  for (const name of [...new Set(rows.map(row => row.machine))]) {
+    const result = yield* machineConfig(name).pipe(
+      Effect.flatMap(machine => sshProc(name, machine, runner, env.home).run("node", ["--input-type=module", "-e", script], { cwd: "/", timeoutMs: 30_000, input: JSON.stringify(rows.filter(row => row.machine === name).map(row => decodeAgentRow(row))) })),
+      Effect.result);
+    if (result._tag === "Failure" || result.success.code !== 0) { notes.push(`bindings ${project.slug} on ${name}: sync failed (private output withheld)`); continue; }
+    written += Number(result.success.stdout.trim()) || 0;
+  }
+  return { written, notes };
 });
 
 /** Serializes capacity reservations across registered projects on this owner machine. */

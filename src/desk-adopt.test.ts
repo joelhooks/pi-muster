@@ -32,7 +32,7 @@ async function setup(remote = false) {
   const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: h.workerWorktree, env: {}, wrap: [] } });
   const run = <A, E>(effect: Parameters<typeof runWith<A, E>>[1]) => runWith(h, remote ? effect.pipe(
     Effect.provideService(MusterEnv, { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: noEmitPaneClose, machines, remoteHerdr: () => Effect.succeed(h.herdr.client()) }),
-    Effect.provideService(Proc, { run: (command, args, options) => command === "ssh" ? liveProc.run("sh", ["-c", args.at(-1)!], { cwd: h.home, timeoutMs: options.timeoutMs }) : h.proc.run(command, args, options) }),
+    Effect.provideService(Proc, { run: (command, args, options) => command === "ssh" ? liveProc.run("sh", ["-c", args.at(-1)!], { cwd: h.home, timeoutMs: options.timeoutMs, input: options.input }) : h.proc.run(command, args, options) }),
   ) : effect);
   h.herdr.calls.length = 0;
   const untouched = () => expect(h.herdr.calls.filter(call => ["agent.start", "agent.prompt", "pane.send_keys", "pane.send_input", "pane.close"].includes(call.method))).toEqual([]);

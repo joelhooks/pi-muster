@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect, Layer } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
-import { remotePullReceipt, sidecarRoots, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource } from "./remote.ts";
+import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
 import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
@@ -338,6 +338,23 @@ describe("remote owner operations", () => {
     expect(restored.row.machine).toBe("remote"); expect(restored.argv).toContain("--session");
     expect(s.calls.filter(call => call.command === "ssh").every(call => (call.timeoutMs ?? Infinity) <= 300000)).toBe(true);
   }, 30_000);
+  it("names a failed binding push's stderr class without its row text", () => {
+    expect(stderrClass("\nSyntaxError: Unexpected token 'x', \"{\"env\":{\"K\":\"secret\"}\" is not valid JSON\n    at JSON.parse")).toBe("SyntaxError: Unexpected token …");
+    expect(stderrClass("joel@pennywise: Permission denied (publickey).")).toBe("joel@pennywise: Permission denied (publickey).");
+    expect(stderrClass("ENOENT {\"path\":\"/x\"}")).toBe("ENOENT …");
+    expect(stderrClass("")).toBe("no stderr");
+  });
+  // Bravestarr, 2026-10-11: a restart's binding push failed, so pennywise workers kept naming the retired owner session.
+  it("an owner pass re-sends a stale remote binding once, then writes nothing", async () => {
+    const s = setup(); await s.open(); const { row } = await s.launch();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(a => a.name === row.name ? { ...a, owner: "new-owner" } : a) }, undefined] as const)));
+    const asNew = Effect.provideService(MusterEnv, { ...s.env, sessionId: "new-owner" });
+    const first = await s.run(projectStatus(s.dir, { act: true }).pipe(asNew));
+    expect(JSON.stringify(first)).toContain("re-sent 1 stale remote binding");
+    expect(JSON.parse(readFileSync(remoteBindingPath(row.cwd, row.name), "utf8")).owner).toBe("new-owner");
+    const second = await s.run(projectStatus(s.dir, { act: true }).pipe(asNew));
+    expect(JSON.stringify(second)).not.toContain("stale remote binding");
+  });
   it("non-owner status interrupts a gone remote pane without touching live panes", async () => {
     const s = setup(); await s.open(); const { row } = await s.launch();
     s.remote.panes.delete(row.pane!.paneId);

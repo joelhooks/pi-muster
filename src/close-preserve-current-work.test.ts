@@ -55,7 +55,7 @@ async function fixture(remote: boolean) {
         const rescueFetch = script.includes("fetch") && script.includes("--no-tags");
         if (failFetch && rescueFetch) return Effect.succeed({ code: 1, stdout: "", stderr: "injected rescue fetch failure" });
         if (wrongReadback && rescue && script.includes("rev-parse")) return Effect.succeed({ code: 0, stdout: `${"0".repeat(40)}\n`, stderr: "" });
-        const result = command === "ssh" ? liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: options.timeoutMs }) : h.proc.run(command, args, options);
+        const result = command === "ssh" ? liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: options.timeoutMs, input: options.input }) : h.proc.run(command, args, options);
         return result.pipe(Effect.tap(output => Effect.sync(() => {
           if (corruptRescue && transcriptCopy && output.code === 0) {
             corruptRescue = false;

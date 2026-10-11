@@ -43,7 +43,7 @@ async function setup(options: { error?: string; paneTail?: string; readyAfterWai
     const script = args.at(-1)!;
     if (script.includes("muster-prerequisites")) return Effect.succeed({ code: 0, stdout: "", stderr: "" });
     if (options.logUnreadable && script.includes("'tail'")) return Effect.succeed({ code: 1, stdout: "", stderr: "unreadable" });
-    return liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: opts.timeoutMs });
+    return liveProc.run("sh", ["-c", script], { cwd: h.home, timeoutMs: opts.timeoutMs, input: opts.input });
   } };
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", emitPaneClose: noEmitPaneClose, startupLoad: () => ({ load: 0, cpus: 1 }),
