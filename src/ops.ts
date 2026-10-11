@@ -2891,7 +2891,14 @@ export const agentClose = (dir: string, params: AgentCloseInput) =>
       const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;
       return { row: latest, restore: latest.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
     }
-    if (row.machine !== "local") return yield* remoteClose(dir, project, row, params);
+    if (row.machine !== "local") {
+      // Packet and note sidecars live in the clone's git dir, which a harvested clone's removal deletes: ingest first.
+      const ingest = yield* ingestRemotePackets(dir, row.owner);
+      const failed = ingest.failedMachines.has(row.machine) ? [`machine ${row.machine} unreachable`] : ingest.notes.filter(note => note.includes(`ingest skipped for ${row.name}:`));
+      if (failed.length) return yield* new InputError({ message: `agent_close refused: ${row.name}'s remote sidecars were not ingested (${failed.join("; ")}); nothing was closed. Fix the cause and close again` });
+      const current = yield* load(dir);
+      return yield* remoteClose(dir, current, yield* findRow(current, params.name), params);
+    }
     const notes: string[] = [];
     const sessionFile = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
     const selected = yield* sessionRestore(extensionsFor(project, row), sessionFile, project, row.role, (yield* loadRoster).roster);
