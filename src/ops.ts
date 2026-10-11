@@ -663,11 +663,15 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
     if (failedMachines.has(row.machine)) { skipped("machine unavailable earlier in this pass"); continue; }
     const fetched = yield* Effect.gen(function* () {
       const machine = yield* machineConfig(row.machine);
-      // One bounded call per row reads both kinds; transport failure skips all remaining machine rows.
-      const output = yield* remoteNode(row.machine, machine, `${sidecarRootsScript}\nimport {existsSync,readdirSync,readFileSync} from 'node:fs'; const roots=sidecarRoots(process.argv[1]); const values=[]; for(const root of roots) for(const kind of ['packet','note']) { const dir=root+'/'+(kind==='packet'?'packets':'notes'); const files=existsSync(dir)?readdirSync(dir).filter(n=>kind==='packet'?/^[a-f0-9]{40,64}$/.test(n):/^[a-f0-9]{24,64}\\.json$/.test(n)):[]; for(const id of files){const p=dir+'/'+id+(kind==='packet'?'/packet.json':'');if(!existsSync(p))continue;try{values.push({kind,id,value:JSON.parse(readFileSync(p,'utf8')),error:null})}catch(error){values.push({kind,id,value:null,error:String(error)})}} } console.log(JSON.stringify(values));`, [row.cwd], timeoutMs);
+      // One bounded call per row reads both kinds; a row whose clone is gone has nothing to read.
+      const output = yield* remoteNode(row.machine, machine, `${sidecarRootsScript}\nimport {existsSync,readdirSync,readFileSync} from 'node:fs'; const roots=existsSync(process.argv[1])?sidecarRoots(process.argv[1]):[]; const values=[]; for(const root of roots) for(const kind of ['packet','note']) { const dir=root+'/'+(kind==='packet'?'packets':'notes'); const files=existsSync(dir)?readdirSync(dir).filter(n=>kind==='packet'?/^[a-f0-9]{40,64}$/.test(n):/^[a-f0-9]{24,64}\\.json$/.test(n)):[]; for(const id of files){const p=dir+'/'+id+(kind==='packet'?'/packet.json':'');if(!existsSync(p))continue;try{values.push({kind,id,value:JSON.parse(readFileSync(p,'utf8')),error:null})}catch(error){values.push({kind,id,value:null,error:String(error)})}} } console.log(JSON.stringify(values));`, [row.cwd], timeoutMs);
       const values = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ kind: Schema.Literals(["packet", "note"]), id: Schema.String, value: Schema.Unknown, error: Schema.NullOr(Schema.String) }))), output);
       return { machine, values };
-    }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(row.machine); skipped(error.message); return null; })));
+    }).pipe(Effect.catch(error => Effect.sync(() => {
+      // Only a transport failure (ssh exit 255 or no exit) marks the machine down; one row's bad clone skips only that row.
+      if (error._tag === "ProcError" && (error.code === null || error.code === 255)) failedMachines.add(row.machine);
+      skipped(error.message); return null;
+    })));
     if (!fetched) continue;
     const { machine, values } = fetched;
     for (const entry of values) {

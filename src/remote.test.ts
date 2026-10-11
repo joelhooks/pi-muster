@@ -592,6 +592,19 @@ describe("remote owner operations", () => {
     await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect((await s.run(load(s.dir))).packets.map(packet => packet.id)).toContain(commit);
   });
+  it("a row whose clone is gone neither poisons the machine nor blocks its own close", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [{ ...launched.row, name: "dead", state: "failed" as const, pane: null, cwd: join(s.h.root, "gone-clone") }, ...p.agents] }, undefined] as const)));
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/remote-project", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "No source changes", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs();
+    const ingest = await s.run(ingestRemotePackets(s.dir));
+    expect(ingest.failedMachines.size).toBe(0);
+    expect((await s.run(load(s.dir))).packets.map(packet => packet.id)).toContain(commit);
+    await s.run(agentClose(s.dir, { name: "dead" }));
+    expect((await s.run(load(s.dir))).agents.find(row => row.name === "dead")?.state).toBe("closed");
+  });
   it("refuses to close a remote row whose machine cannot be read", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const original = s.proc.run;
