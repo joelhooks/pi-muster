@@ -74,7 +74,7 @@ import { launchDefaults } from "./fleet-steer.ts";
 import { retroJudgeModel } from "./retro-cadence.ts";
 import { checkRunnableModel, checkRestoreContext, resolveModel, modelOutputIssue } from "./models.ts";
 import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./session-model.ts";
-import { resolveSkills, skillIndex } from "./skills.ts";
+import { resolveSkills, skillIndex, withHiddenSkills } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
@@ -190,7 +190,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   // Restore resolves too: a row or param may carry an alias (sol, opus) that a remote probe cannot read.
   const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
-  const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
+  const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[], hidden: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
   const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...custodyNotes, ...workerChoice.notes, ...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
@@ -200,7 +200,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   const remoteModel = mappedProvider && modelRest.length ? [mappedProvider, ...modelRest].join("/") : selected.model;
   let remoteProfile: LaunchProfile = { ...profile, model: remoteModel, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
-    appendSystemPrompt: profile.appendSystemPrompt.map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
+    appendSystemPrompt: withHiddenSkills(profile.appendSystemPrompt, discovered.hidden).map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
   resolved.notes.push(...(yield* prerequisites(nameOfMachine, machine, remoteSource, params.hydrate === true, remoteProfile.env)));
   resolved.notes.push(...(yield* readyForRemoteLaunch(nameOfMachine, machine, remoteSource, `${remoteModel}${remoteProfile.thinking ? `:${remoteProfile.thinking}` : ""}`, 300_000, remoteProfile.env)));
   const remoteHome = machine.env.HOME ?? (yield* remoteNode(nameOfMachine, machine, "process.stdout.write(process.env.HOME ?? '')")).trim();
@@ -2690,7 +2690,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         catch: error => input(`restore skills: ${String(error)}`),
       });
       skillNotes.push(...restoredSkills.notes);
-      row = { ...existing, profile: { ...restoredProfile, skills: restoredSkills.paths }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
+      row = { ...existing, profile: { ...restoredProfile, skills: restoredSkills.paths, appendSystemPrompt: withHiddenSkills(restoredProfile.appendSystemPrompt, restoredSkills.hidden) }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
     } else {
       const relaunchable = existing?.state === "planned" || existing?.state === "failed" || (existing?.state === "interrupted" && !existing.sessionFile);
       if (existing && !relaunchable) {
@@ -2752,8 +2752,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
           try: () => resolveSkills({ skills: requestedProfile.skills, index: requestedProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
           catch: (cause) => new InputError({ message: `skill discovery: ${String(cause)}` }),
         })
-        : { paths: [], notes: [] };
-      const profile: LaunchProfile = { ...requestedProfile, skills: resolved.paths };
+        : { paths: [], notes: [], hidden: [] };
+      const profile: LaunchProfile = { ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) };
       skillNotes.push(...resolved.notes);
       const now = iso(env);
       row = {

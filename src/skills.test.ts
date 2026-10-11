@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { findSkills, resolveSkills, skillIndex } from "./skills.ts";
+import { findSkills, resolveSkills, skillIndex, withHiddenSkills } from "./skills.ts";
 import { decodeRoster, roleDefaults } from "./domain.ts";
 import { buildArgv, profileFor } from "./argv.ts";
 
@@ -39,7 +39,10 @@ describe("skill discovery", () => {
     const real = join(f.cwd, "elsewhere", "operator"); f.skill(join(f.cwd, "elsewhere"), "operator", "Hidden operator", true);
     symlinkSync(real, join(f.agentDir, "skills", "operator"));
     const linked = skillIndex(f);
-    expect(resolveSkills({ skills: ["hidden", "operator"], index: linked })).toEqual({ paths: [realpathSync(join(f.agentDir, "skills", "hidden", "SKILL.md")), realpathSync(join(real, "SKILL.md"))], notes: [] });
+    const hiddenPaths = [realpathSync(join(f.agentDir, "skills", "hidden", "SKILL.md")), realpathSync(join(real, "SKILL.md"))];
+    expect(resolveSkills({ skills: ["hidden", "operator", "testing"], index: linked })).toEqual({ paths: [...hiddenPaths, realpathSync(f.exact)], notes: [], hidden: hiddenPaths });
+    // Pi keeps hidden skills out of the model's list even under --skill, so their SKILL.md joins the appended prompt once.
+    expect(withHiddenSkills(["/brief.md", hiddenPaths[0]!], hiddenPaths)).toEqual(["/brief.md", ...hiddenPaths]);
     expect(findSkills({ skills, query: "zebra" })).toEqual([]);
     expect(findSkills({ skills, query: "testing", limit: 99 })).toHaveLength(10);
     expect(findSkills({ skills, query: "fixtures", limit: 1 })[0]?.name).toBe("builder");

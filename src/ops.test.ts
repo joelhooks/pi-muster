@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { Effect } from "effect";
@@ -2124,6 +2124,23 @@ describe("worker skill launch", () => {
       expect(workPrompt({ ...row, role }, undefined)).not.toContain("skill_find");
     }
     expect(workPrompt(row, "Custom prompt")).toBe("Custom prompt");
+  });
+
+  it("appends a named model-hidden skill's SKILL.md to the system prompt, once", async () => {
+    const h = harness();
+    const dir = makeRepo(join(h.root, "repo"));
+    const skill = join(dir, ".pi", "skills", "operator", "SKILL.md");
+    mkdirSync(join(skill, ".."), { recursive: true });
+    writeFileSync(skill, "---\nname: operator\ndescription: Hidden\ndisable-model-invocation: true\n---\n# Operator");
+    await open(h, dir);
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "probe", goal: "g" }));
+    const result = await runWith(h, agentLaunch(dir, {
+      action: "launch", name: "w", role: "worker", lane: "probe", label: "worker", cwd: dir, skills: ["operator"],
+    }));
+    const real = realpathSync(skill);
+    expect(result.argv.filter((arg, index) => result.argv[index - 1] === "--append-system-prompt")).toEqual([real]);
+    expect(result.argv.filter((arg, index) => result.argv[index - 1] === "--skill")).toContain(real);
+    expect(result.row.profile.appendSystemPrompt).toEqual([real]);
   });
 });
 

@@ -92,16 +92,25 @@ export function findSkills({ skills, query, limit = 5 }: { skills: readonly Skil
 export function resolveSkills({ skills, index }: { skills: readonly string[]; index: readonly Skill[] }) {
   const paths: string[] = [];
   const notes: string[] = [];
+  const hidden: string[] = [];
   const seen = new Set<string>();
   for (const entry of skills) {
-    let path = isAbsolute(entry) ? entry : index.find((skill) => skill.name === entry)?.filePath;
+    const named = isAbsolute(entry) ? undefined : index.find((skill) => skill.name === entry);
+    let path = isAbsolute(entry) ? entry : named?.filePath;
     if (path && existsSync(path) && statSync(path).isDirectory()) path = join(path, "SKILL.md");
     if (!path || !existsSync(path) || !statSync(path).isFile()) {
       notes.push(`skill ${JSON.stringify(entry)} not found; skipped`);
       continue;
     }
     const real = realpathSync(path);
-    if (!seen.has(real)) { seen.add(real); paths.push(real); }
+    if (!seen.has(real)) { seen.add(real); paths.push(real); if (named?.disableModelInvocation) hidden.push(real); }
   }
-  return { paths, notes };
+  return { paths, notes, hidden };
+}
+
+/** Pi leaves disable-model-invocation skills out of the model's list even under --skill, and only a typed /skill:
+ * expands one. A launch that names one means it, so its SKILL.md joins the appended system prompt, which Pi reads
+ * from a file path. */
+export function withHiddenSkills(appendSystemPrompt: readonly string[], hidden: readonly string[]): string[] {
+  return [...new Set([...appendSystemPrompt, ...hidden])];
 }
