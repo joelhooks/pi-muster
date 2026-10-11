@@ -79,7 +79,7 @@ import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
 import { watchFallback } from "./desk-local.ts";
-import { pushRemoteBinding, syncRemoteBindings } from "./remote.ts";
+import { pushRemoteBinding, stderrClass, syncRemoteBindings } from "./remote.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
@@ -2917,7 +2917,31 @@ const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | unde
     });
   });
 
-export const agentClose = (dir: string, params: AgentCloseInput) =>
+/**
+ * After close, retire the row's Rat King name so mail to it fails `Retired` instead of piling up unread (Nicodemus,
+ * 2026-10-11). Only after close: a live reader re-acquiring its lease clears the mark, as does a later restore under
+ * the same name. Never fails the close; a missing shim or refusal is a note.
+ */
+const retireRatkingName = (project: Project, row: AgentRow) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  if (project.policy?.comms && project.policy.comms !== "ratking") return null;
+  const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
+  const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
+  if (!existsSync(shim)) return `Rat King name ${name} not retired: no ${shim}`;
+  const proc = yield* Proc;
+  const result = yield* proc.run("sh", [shim, "retire", "--name", name], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
+  if (result._tag === "Failure") return `Rat King name ${name} not retired: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
+  if (result.success.code !== 0) return `Rat King name ${name} not retired (exit ${result.success.code}: ${stderrClass(result.success.stderr)})`;
+  return `Rat King name ${name} retired: sends to it now fail Retired`;
+});
+
+export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir, params).pipe(
+  Effect.flatMap(result => result.row.state !== "closed" ? Effect.succeed(result) : Effect.gen(function* () {
+    const note = yield* retireRatkingName(yield* load(dir), result.row);
+    return note ? { ...result, notes: [...result.notes, note] } : result;
+  })));
+
+const closeRow = (dir: string, params: AgentCloseInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const project = yield* load(dir);

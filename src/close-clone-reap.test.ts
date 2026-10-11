@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { agentClose, agentLaunchForeground, laneOpen, packetLand, packetReport, packetVerify, projectOpen, projectStatus } from "./ops.ts";
@@ -255,4 +255,18 @@ it("records SSH removal failures and retries an already-closed remote row throug
   expect(second.row.events?.at(-1)?.type).toBe("CLONE_REMOVED");
   expect(existsSync(f.row.cwd)).toBe(false);
   expect(ssh.some(script => script.includes("'--force'"))).toBe(true);
+});
+
+// Nicodemus, 2026-10-11: mail to a closed row's name was accepted and never read. Close retires the name.
+it("retires the closed row's Rat King name through the fleet mailbox shim, and only notes a failure", async () => {
+  const f = await fixture();
+  const shim = join(f.h.home, ".config/muster/fleet-mailbox.sh");
+  mkdirSync(join(shim, ".."), { recursive: true });
+  writeFileSync(shim, `printf '%s ' "$@" > "${f.h.root}/retire-args"; exit 0\n`);
+  const closed = await f.close();
+  expect(readFileSync(join(f.h.root, "retire-args"), "utf8").trim()).toBe(`retire --name reap/${f.row.name}`);
+  expect(closed.notes).toContain(`Rat King name reap/${f.row.name} retired: sends to it now fail Retired`);
+  writeFileSync(shim, "echo 'Error: reserved name' >&2; exit 3\n");
+  const again = await f.close();
+  expect(again.notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 3: Error: reserved name)`);
 });
