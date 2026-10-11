@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
 describe("restart-wave compatibility only", () => {
@@ -8,10 +7,8 @@ describe("restart-wave compatibility only", () => {
     expect(existsSync(new URL("./__fixtures__/ratking-v0/", import.meta.url))).toBe(false);
     expect(readFileSync(new URL("../package.json", import.meta.url), "utf8")).not.toContain("src/vendor/");
   });
-  it("retains only the inert comms-network non-phone restart imports, without phone open/identity exports", async () => {
-    const standIn = await import("./comms-network.ts");
-    expect(standIn.liveRows()).toEqual([]);
-    expect(await Effect.runPromise(standIn.provisionLiveRows())).toEqual([]);
-    expect(standIn).not.toHaveProperty("openNetworkMailbox"); expect(standIn).not.toHaveProperty("readNetworkIdentities");
+  it("drops the comms-network restart stand-in once every Pi loads post-fb2b29b code", () => {
+    expect(existsSync(new URL("./comms-network.ts", import.meta.url))).toBe(false);
+    expect(readFileSync(new URL("../package.json", import.meta.url), "utf8")).not.toContain("comms-network");
   });
 });

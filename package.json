@@ -66,7 +66,6 @@
     "src/comms-probe.ts",
     "src/ratking-status.ts",
     "src/recent-deliveries.ts",
-    "src/comms-network.ts",
     "src/desk-local.ts",
     "src/comms-ratking.ts",
     "src/desk-inbox.ts",
