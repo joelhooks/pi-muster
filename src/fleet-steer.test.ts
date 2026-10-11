@@ -153,6 +153,12 @@ describe("fleet steer pace hold", () => {
   beforeEach(() => { vi.useFakeTimers({ toFake: ["Date"] }); vi.setSystemTime(now); });
   afterEach(() => { vi.useRealTimers(); });
 
+  // Ernestine, 2026-10-11: today's steer had claude.dryDays null plus cache, bankedResets and route why; 8dfc0dd called it undecodable and failed open.
+  it("decodes a steer with null and additive fields and still holds", async () => {
+    const additive = hot({ claude: { pace: 1.46, dryDays: null, cache: { opus: { hitPct: 95.7 } } }, codex: { pace: 1.1, dryDays: 4.7, bankedResets: 3 },
+      routes: { bugfix: { model: sonnet, thinking: "medium", review: true, why: "claude cooler" } }, paceDrop: { claude: false, codex: true } });
+    await expect(launch(additive, { workType: "bugfix" })).rejects.toThrow(/pool claude at 1\.46× pace \(fleet steer/);
+  });
   it("holds a non-critical worker on a hot pool with one line naming pool, pace and days to dry", async () => {
     await expect(launch(hot(), { workType: "bugfix" })).rejects.toThrow("pool claude at 1.46× pace, dry in 3.2 d");
     await expect(launch(hot(), { model: "opus" })).rejects.toThrow("pool claude at 1.46× pace");

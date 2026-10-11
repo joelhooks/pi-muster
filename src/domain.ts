@@ -637,15 +637,17 @@ export const Roster = Schema.Struct({
 export type Roster = typeof Roster.Type;
 export const decodeRoster = Schema.decodeUnknownSync(Roster);
 
-/** Writer contract for the launch-time fleet steer; unrelated writer fields are ignored. */
+/** Writer contract for the launch-time fleet steer. Unknown fields are ignored, and only `pace` is required of a pool:
+ * an additive or null optional field must never make the steer undecodable, which would drop routing and the pace hold. */
 const SteerIso = Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/));
 const SteerModel = Schema.String.check(Schema.isPattern(/^(?:sol|opus|[^/\s:]+\/[^/\s:]+)$/));
+const SteerPool = Schema.Struct({ pace: Schema.Number, dryDays: Schema.optionalKey(Schema.Unknown) });
 export const FleetSteer = Schema.Struct({
   at: SteerIso,
   validUntil: SteerIso,
   workerDefault: SteerModel,
-  claude: Schema.optionalKey(Schema.Struct({ pace: Schema.Number, dryDays: Schema.optionalKey(Schema.Number) })),
-  codex: Schema.optionalKey(Schema.Struct({ pace: Schema.Number, dryDays: Schema.optionalKey(Schema.Number) })),
+  claude: Schema.optionalKey(SteerPool),
+  codex: Schema.optionalKey(SteerPool),
   // Each route decodes on its own when used, so one bad route never loses workerDefault.
   routes: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
   source: Schema.optionalKey(Schema.String),
@@ -678,7 +680,7 @@ export function steerHold(steer: FleetSteer | undefined, now: number, model: str
   const pool = steerPool(model);
   const reading = pool ? steer[pool] : undefined;
   if (!pool || !reading || !(reading.pace >= PACE_HOLD)) return null;
-  return `pool ${pool} at ${reading.pace.toFixed(2)}× pace${reading.dryDays !== undefined ? `, dry in ${reading.dryDays.toFixed(1)} d` : ""} (fleet steer at ${steer.at}): worker launch on ${model} held. Pass critical: true for critical-path work (keeps the routed model), use a Haiku scan or gather, or wait for the steer to cool`;
+  return `pool ${pool} at ${reading.pace.toFixed(2)}× pace${typeof reading.dryDays === "number" && Number.isFinite(reading.dryDays) ? `, dry in ${reading.dryDays.toFixed(1)} d` : ""} (fleet steer at ${steer.at}): worker launch on ${model} held. Pass critical: true for critical-path work (keeps the routed model), use a Haiku scan or gather, or wait for the steer to cool`;
 }
 
 /** The fresh steer's choice for a worker: the work type's route, else workerDefault. A stale steer chooses nothing. */
