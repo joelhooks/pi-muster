@@ -270,3 +270,24 @@ it("retires the closed row's Rat King name through the fleet mailbox shim, and o
   const again = await f.close();
   expect(again.notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 3: Error: reserved name)`);
 });
+
+// Ernestine, 2026-10-11: worker-worktree.sh remove refuses while a process has its cwd in the clone (dark-wizard 22c7f59).
+it("retries removal while a just-closed session is still exiting, and keeps the clone with a plain note if it never does", async () => {
+  const f = await fixture();
+  const real = readFileSync(f.h.workerWorktree, "utf8");
+  const counter = join(f.h.root, "holder-count");
+  const refuse = (times: number) => real.replace(/^(#!.*\n)/, shebang => shebang + `if [ "$1" = remove ]; then n=$(cat "${counter}" 2>/dev/null || echo 0); if [ "$n" -lt ${times} ]; then echo $((n+1)) > "${counter}"; echo "worker-worktree: refusing: process 42 (pi) still runs inside $2; close its session first" >&2; exit 1; fi; fi\n`);
+  writeFileSync(f.h.workerWorktree, refuse(2));
+  expect((await f.close()).cloneError).toBeNull();
+  expect(readFileSync(counter, "utf8").trim()).toBe("2");
+  expect(existsSync(f.row.cwd)).toBe(false);
+});
+
+it("keeps the clone and says why when a process never leaves it", async () => {
+  const f = await fixture();
+  const real = readFileSync(f.h.workerWorktree, "utf8");
+  writeFileSync(f.h.workerWorktree, real.replace(/^(#!.*\n)/, shebang => shebang + `if [ "$1" = remove ]; then echo "worker-worktree: refusing: process 42 (zsh) still runs inside $2; close its session first" >&2; exit 1; fi\n`));
+  const closed = await f.close();
+  expect(closed.cloneError).toContain("clone kept: a process still runs inside it (a pane shell Muster did not open, or a session still exiting)");
+  expect(existsSync(f.row.cwd)).toBe(true);
+});

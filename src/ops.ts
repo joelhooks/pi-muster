@@ -552,6 +552,8 @@ const clonePresent = (row: AgentRow) => cloneOnMachine(row, () => Effect.gen(fun
   return (yield* proc.run("test", ["-d", row.cwd], { cwd: "/", timeoutMs: 10_000 })).code === 0;
 }));
 
+/** Removal attempts, a second apart, while a just-closed session still has its cwd in the clone. */
+const CLONE_HOLDER_TRIES = 6;
 const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = false, sources?: ReapSources) => Effect.gen(function* () {
   if (!row.clone) return { cloneError: null, notes: [] as string[] };
   const project = yield* load(dir);
@@ -581,7 +583,17 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
       return { removed: false, detail: `clone changed during preservation: ${row.cwd}; retry agent_close` };
     }
     yield* must("node", ["-e", transcriptRescueScript(), "verify", ...rescueArgs, JSON.stringify(receipt)], { cwd: source, timeoutMs: 120_000 });
-    const removal = yield* must(script, ["remove", ...(force || assessment.force ? ["--force"] : []), row.cwd], { cwd: source, timeoutMs: 120_000 }).pipe(Effect.result);
+    // worker-worktree.sh refuses while any process has its cwd inside the clone (dark-wizard 22c7f59). A Pi this close
+    // just ended can take seconds to exit (Rat King waits up to 2 s for its lease release), so retry briefly.
+    const remove = () => must(script, ["remove", ...(force || assessment.force ? ["--force"] : []), row.cwd], { cwd: source, timeoutMs: 120_000 }).pipe(Effect.result);
+    let removal = yield* remove();
+    for (let attempt = 1; attempt < CLONE_HOLDER_TRIES && removal._tag === "Failure" && removal.failure.message.includes("still runs inside"); attempt++) {
+      yield* env.sleep(1000);
+      removal = yield* remove();
+    }
+    if (removal._tag === "Failure" && removal.failure.message.includes("still runs inside")) {
+      return { removed: false, detail: `${detail}; clone kept: a process still runs inside it (a pane shell Muster did not open, or a session still exiting); end it, then agent_close again: ${removal.failure.message}` };
+    }
     if (removal._tag === "Failure") return { removed: false, detail: `${detail}; removal failed: ${removal.failure.message}` };
     if (yield* present()) return { removed: false, detail: `${detail}; removal left clone on disk` };
     return { removed: true, detail: `clone removed: ${row.cwd}; ${detail}` };
