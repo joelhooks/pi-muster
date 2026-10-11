@@ -2634,7 +2634,17 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       }
       const sessionFile = existing.sessionFile ?? findSessionFile(existing.cwd, existing.sessionId, env.home);
       if (!sessionFile) return yield* new GuardFailed({ guard: "session", message: `row ${name} has no session file to restore; use launch` });
-      const selected = yield* sessionRestore(profileFor(existing.role, existing.profile), sessionFile, project, existing.role, roster, params);
+      for (const prompt of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", prompt);
+      // Overrides apply and persist on every local restore, as on the remote path. Slim drops stored skills unless new ones are named.
+      const overridden: LaunchProfile = { ...existing.profile,
+        ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: [...params.appendSystemPrompt] } : {}),
+        ...(params.skills !== undefined ? { skills: [...params.skills] } : params.slim ? { skills: [] } : {}),
+        ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
+        ...(params.slim !== undefined ? { slim: params.slim } : {}),
+        ...(params.extensions !== undefined ? { extensions: [...params.extensions] } : {}),
+        ...(params.env !== undefined ? { env: { ...params.env } } : {}),
+        ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}) };
+      const selected = yield* sessionRestore(profileFor(existing.role, { ...overridden, slim: overridden.slim }), sessionFile, project, existing.role, roster, params);
       const restoredProfile = selected.profile;
       skillNotes.push(...selected.notes);
       restoreTokens = selected.live.contextTokens;

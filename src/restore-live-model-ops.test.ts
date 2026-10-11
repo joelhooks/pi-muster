@@ -103,3 +103,13 @@ it("status adoption rebuilds switched restore argv", async () => {
   await runWith(h, projectStatus(dir, { act: true }));
   expect((await runWith(h, load(dir))).agents[0]?.restore?.argv).toContain("claude-bridge/claude-opus-5-5:high");
 });
+it("a local restore applies and saves profile overrides, so a row can move onto slim", async () => {
+  const { h, dir } = await setup();
+  const prompt = join(dir, "ea.md");
+  await runWith(h, agentClose(dir, { name: "worker" }));
+  const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "worker", slim: true, noSkills: true, extensions: ["/ext/bridge.ts", "/ext/ratking.ts"], appendSystemPrompt: [prompt] }));
+  expect(restored.argv).toEqual(expect.arrayContaining(["-ne", "-nc", "-ns", "-e", "/ext/bridge.ts", "/ext/ratking.ts", "--append-system-prompt"]));
+  expect(restored.argv).not.toContain("--skill");
+  const saved = (await runWith(h, load(dir))).agents.find(row => row.name === "worker")!.profile;
+  expect(saved).toMatchObject({ slim: true, noSkills: true, skills: [], extensions: ["/ext/bridge.ts", "/ext/ratking.ts"], appendSystemPrompt: [prompt] });
+});
