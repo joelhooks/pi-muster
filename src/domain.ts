@@ -670,7 +670,7 @@ const steerFresh = (steer: FleetSteer, now: number) => {
 /** At or above this pace a fresh steer holds non-critical worker launches on that pool (Joel, 2026-10-10: the steer is the throttle, not a WIP count). */
 export const PACE_HOLD = 1.2;
 export const steerPool = (model: string): "claude" | "codex" | undefined =>
-  model === "opus" || /^(?:anthropic|claude-bridge)\//.test(model) ? "claude" : model === "sol" || /^openai-codex\//.test(model) ? "codex" : undefined;
+  model === "opus" || /^(?:anthropic|claude-bridge)\//.test(model) ? "claude" : model === "sol" || /^(?:openai-codex|cliproxy-codex)\//.test(model) ? "codex" : undefined;
 
 /** One-line refusal for a worker launch on a pool running hot, or null. A missing or stale steer fails open; critical work and Haiku pass. */
 export function steerHold(steer: FleetSteer | undefined, now: number, model: string, workType?: string, critical = false): string | null {

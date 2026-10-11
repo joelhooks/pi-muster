@@ -170,6 +170,12 @@ describe("fleet steer pace hold", () => {
     expect((await launch(hot({ validUntil: "2026-09-29T05:30:00Z" }), { model: "opus" })).row.profile.model).toBe(opus);
     expect((await launch(undefined, { model: "opus" })).row.profile.model).toBe(opus);
   });
+  it("counts cliproxy-routed Codex models in the codex pool", async () => {
+    const { steerPool } = await import("./domain.ts");
+    expect(steerPool("cliproxy-codex/gpt-6.1-sol")).toBe("codex");
+    expect(steerPool("openai-codex/gpt-6.1-sol")).toBe("codex");
+    expect(steerPool("claude-bridge/claude-haiku-5-5")).toBe("claude");
+  });
   it("never holds a non-worker launch", async () => {
     expect((await launch(hot(), { role: "desk", model: "opus" })).row.profile.model).toBe(opus);
   });
