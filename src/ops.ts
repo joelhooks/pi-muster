@@ -2961,6 +2961,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
 export interface AgentCloseInput {
   readonly name: string;
   readonly force?: boolean | undefined;
+  readonly dropWatches?: boolean | undefined;
   readonly takeover?: boolean | undefined;
 }
 
@@ -3001,6 +3002,25 @@ export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir
     return note ? { ...result, notes: [...result.notes, note] } : result;
   })));
 
+/** States whose Pi may still be running its pi-until watches: a row that reported or landed keeps its Pi until closed. */
+const WATCH_LIVE_STATES: readonly string[] = ["running", "silent", "nudged", "restarted", "reported", "verified", "landed"];
+/** Open pi-until watches in a live row's journal, read on the row's own host; null when the check could not run. */
+const liveRowWatches = (row: AgentRow) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  if (!WATCH_LIVE_STATES.includes(row.state)) return [] as string[];
+  if (row.machine === "local") {
+    const journal = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
+    if (!journal) return null;
+    return openUntilWatches([journal, untilTelemetryPath(env.home)].map(path => { try { return readFileSync(path, "utf8"); } catch { return ""; } })
+      .map((text, index) => index ? untilFinishedLines(text) : text).join("\n"));
+  }
+  if (!row.sessionFile) return null;
+  const machine = yield* machineConfig(row.machine);
+  const runner = yield* Proc;
+  const result = yield* sshProc(row.machine, machine, runner, env.home).run("node", ["-e", UNTIL_LINES_SCRIPT, row.sessionFile], { cwd: "/", timeoutMs: 10_000 });
+  return result.code === 0 ? openUntilWatches(result.stdout) : null;
+}).pipe(Effect.catch(() => Effect.succeed(null)));
+
 const closeRow = (dir: string, params: AgentCloseInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -3008,6 +3028,11 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
     yield* guardSideDesk(project, env.sessionId, "agent_close");
     const row = yield* findRow(project, params.name);
     yield* requireOwner(row, env.sessionId, params.takeover, project.slug);
+    // drovr, 2026-10-12: closing Quartermaster killed its armed release watch with the pane. A live watch is duty.
+    if (row.state !== "closed" && !params.dropWatches) {
+      const watches = yield* liveRowWatches(row);
+      if (watches?.length) return yield* new InputError({ message: `agent_close refused: ${row.name} has ${watches.length} pi-until watch(es) armed: ${watches.join("; ")}. A watch dies with its pane. Let them finish, have the row cancel them, or close with dropWatches: true; nothing was closed` });
+    }
     if (row.state === "closed") {
       const retirement = yield* retireClone(dir, row, params.force === true, params.takeover);
       const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;

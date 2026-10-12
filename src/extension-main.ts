@@ -665,6 +665,7 @@ export default function muster(host: ExtensionAPI) {
       project: ProjectParam,
       name: Type.String(),
       force: Type.Optional(Type.Boolean({ description: "Preserve current HEAD in an immutable source-repo rescue ref before retiring; never discards non-harness dirt" })),
+      dropWatches: Type.Optional(Type.Boolean({ description: "Close even though the live row has pi-until watches armed; they die with its pane" })),
       takeover: Type.Optional(Type.Boolean({ description: "Act on a row another owner session launched" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {

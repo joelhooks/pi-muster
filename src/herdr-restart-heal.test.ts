@@ -1,10 +1,10 @@
-import { renameSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { Effect } from "effect";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRow } from "./domain.ts";
-import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, projectOpen, projectStatus } from "./ops.ts";
+import { agentClose, agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, projectOpen, projectStatus } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { MusterEnv } from "./runtime.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";
@@ -343,4 +343,35 @@ it("refuses to adopt a foreign session over a live row", async () => {
   const s = await setup("running");
   await expect(runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id, session: "01a0ff19-c75d-74c5-85d6-c269a2c1e18e", reason: "x" })))
     .rejects.toThrow("adopt a foreign session only over a row that is not live");
+});
+
+// drovr, 2026-10-12: agent_close on a landed row killed Quartermaster's armed release watch with the pane.
+describe("agent_close and armed pi-until watches", () => {
+  const started = (id: string, label: string) => JSON.stringify({ type: "custom", customType: "pi-until-started", id: `e-${id}`, parentId: null, timestamp: "2026-10-12T16:00:00.000Z",
+    data: { receipt: { id, label, kind: "until", intervalMs: 30_000, expiresAt: "2099-01-01T00:00:00.000Z" }, snapshot: { quickRef: "r1073 window" } } });
+  it("refuses while a watch is armed, names it, and closes nothing", async () => {
+    const s = await setup("landed");
+    appendFileSync(s.row.sessionFile!, started("w1073", "r1073 gated-plan window 16:31") + "\n");
+    await expect(runWith(s.h, agentClose(s.dir, { name: "worker" }))).rejects.toThrow('worker has 1 pi-until watch(es) armed: w1073 "r1073 gated-plan window 16:31"');
+    expect((await s.saved()).state).toBe("landed");
+    s.untouched();
+  });
+  it("closes once the watch has finished in pi-until telemetry", async () => {
+    const s = await setup("landed");
+    appendFileSync(s.row.sessionFile!, started("w1073", "r1073") + "\n");
+    const telemetry = join(s.h.home, ".pi/agent/pi-until/events.jsonl");
+    mkdirSync(dirname(telemetry), { recursive: true });
+    writeFileSync(telemetry, JSON.stringify({ event: "finished", id: "w1073", status: "succeeded" }) + "\n");
+    expect((await runWith(s.h, agentClose(s.dir, { name: "worker" }))).row.state).toBe("closed");
+  });
+  it("closes over an armed watch only with dropWatches", async () => {
+    const s = await setup("landed");
+    appendFileSync(s.row.sessionFile!, started("w1073", "r1073") + "\n");
+    expect((await runWith(s.h, agentClose(s.dir, { name: "worker", dropWatches: true }))).row.state).toBe("closed");
+  });
+  it("does not check a row whose Pi is gone", async () => {
+    const s = await setup("interrupted");
+    appendFileSync(s.row.sessionFile!, started("w1073", "r1073") + "\n");
+    expect((await runWith(s.h, agentClose(s.dir, { name: "worker" }))).row.state).toBe("closed");
+  });
 });
