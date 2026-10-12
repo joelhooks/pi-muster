@@ -1,4 +1,4 @@
-import { appendFileSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -251,12 +251,17 @@ describe("restart by fork", () => {
       entry("pi-until-finished", { id: "gate2", status: "done" }),
       // Days-old watches with no finish receipt (a timeout or cancel) are over too.
       entry("pi-until-started", { receipt: { id: "old3", label: "gate100", kind: "until", intervalMs: 30_000, expiresAt: new Date(s.h.now.getTime() - 60_000).toISOString() } }),
+      // Cancelled with no session entry, possibly in an ancestor session: only pi-until's telemetry records it.
+      entry("pi-until-started", { receipt: { id: "can4", label: "gate205 --main", kind: "until", intervalMs: 300_000 } }),
     ].join("\n") + "\n");
+    const telemetry = join(s.h.home, ".pi/agent/pi-until/events.jsonl");
+    mkdirSync(join(telemetry, ".."), { recursive: true });
+    writeFileSync(telemetry, [JSON.stringify({ event: "started", id: "can4", sessionId: "desk-older" }), JSON.stringify({ event: "finished", id: "can4", status: "cancelled", sessionId: "desk-older" })].join("\n") + "\n");
     const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
     const receipt = result.notes.join("\n");
     expect(receipt).toContain("pi-until watches not carried into the fork");
     expect(receipt).toContain('cad1 "owner pass" (recurring, every 600 s; project_status act)');
-    expect(receipt).not.toContain("gate2"); expect(receipt).not.toContain("old3");
+    expect(receipt).not.toContain("gate2"); expect(receipt).not.toContain("old3"); expect(receipt).not.toContain("can4");
     expect(s.host.initialPrompts.at(-1)).toContain("re-arm the ones still needed: cad1");
   });
 

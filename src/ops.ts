@@ -2187,21 +2187,31 @@ export function claimedLabel(home: string, project: string, agent: string, role:
   return found ? `${found.emoji} ${found.callsign} · ${role ?? agent}` : undefined;
 }
 
-/** Prints only pi-until session entries: a remote journal never crosses ssh whole. */
-const UNTIL_LINES_SCRIPT = "process.stdout.write(require('node:fs').readFileSync(process.argv[1],'utf8').split('\\n').filter(line=>line.includes('\"pi-until-')).join('\\n'))";
+/** pi-until's local telemetry, the one place a cancel is recorded (pi-until writes no session entry for it). */
+const untilTelemetryPath = (home: string, env: Readonly<Record<string, string | undefined>> = process.env) =>
+  env.PI_UNTIL_TELEMETRY_FILE?.trim() || join(home, ".pi/agent/pi-until/events.jsonl");
+const untilFinishedLines = (text: string) => text.split("\n").filter(line => line.includes('"event":"finished"')).join("\n");
+/** Prints only pi-until session entries, then the host's pi-until finish events: a remote journal never crosses ssh whole. */
+const UNTIL_LINES_SCRIPT = "const fs=require('node:fs');const read=p=>{try{return fs.readFileSync(p,'utf8')}catch{return ''}};"
+  + "const t=(process.env.PI_UNTIL_TELEMETRY_FILE||'').trim()||require('node:path').join(require('node:os').homedir(),'.pi/agent/pi-until/events.jsonl');"
+  + "process.stdout.write([...read(process.argv[1]).split('\\n').filter(line=>line.includes('\"pi-until-')),...read(t).split('\\n').filter(line=>line.includes('\"event\":\"finished\"'))].join('\\n'))";
 
 /** pi-until watches a journal started and never finished, one short line each. A cancel writes no
  * receipt, so a listed watch may already be gone: the successor checks before re-arming. */
 export function openUntilWatches(journal: string, now = Date.now()): string[] {
   const open = new Map<string, string>();
+  const finished = new Set<string>();
   // A watch past its deadline has ended, receipt or not (a timeout or a cancel can leave none).
   const expired = (at: unknown) => typeof at === "string" && Number.isFinite(Date.parse(at)) && Date.parse(at) <= now;
   const describe = (id: string, label: unknown, kind: unknown, interval: unknown, quickRef?: unknown) =>
     `${id} "${String(label ?? "").slice(0, 80)}" (${String(kind ?? "until")}${typeof interval === "number" ? `, every ${Math.round(interval / 1000)} s` : ""}${typeof quickRef === "string" && quickRef ? `; ${quickRef.slice(0, 120)}` : ""})`;
   for (const line of journal.split("\n")) {
-    if (!line.includes("\"pi-until-")) continue;
-    let entry: { type?: unknown; customType?: unknown; data?: Record<string, unknown> };
+    if (!line.includes("\"pi-until-") && !line.includes('"event":"finished"')) continue;
+    let entry: { type?: unknown; customType?: unknown; data?: Record<string, unknown>; event?: unknown; id?: unknown };
     try { entry = JSON.parse(line); } catch { continue; }
+    // A telemetry finish (any status, cancels included) ends the watch whichever session ran it: forks inherit
+    // ancestors' start entries, so a watch cancelled days ago in an older session was still listed (2026-10-12).
+    if (entry.event === "finished" && typeof entry.id === "string") { finished.add(entry.id); continue; }
     if (entry.type !== "custom" || typeof entry.data !== "object" || entry.data === null) continue;
     const data = entry.data;
     if (entry.customType === "pi-until-started") {
@@ -2218,6 +2228,7 @@ export function openUntilWatches(journal: string, now = Date.now()): string[] {
       }
     } else if (entry.customType === "pi-until-finished" && typeof data.id === "string") open.delete(data.id);
   }
+  for (const id of finished) open.delete(id);
   return [...open.values()].slice(-12);
 }
 
@@ -2316,7 +2327,8 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   // pi-until persists live watches only when Pi quits or reloads, so a fork cannot carry them. Name them instead.
   const watchLines = remote
     ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, snapshot], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))
-    : yield* Effect.sync(() => { try { return readFileSync(snapshot, "utf8"); } catch { return ""; } });
+    : yield* Effect.sync(() => [snapshot, untilTelemetryPath(env.home)].map(path => { try { return readFileSync(path, "utf8"); } catch { return ""; } })
+      .map((text, index) => index ? untilFinishedLines(text) : text).join("\n"));
   const watches = openUntilWatches(watchLines);
   if (watches.length) notes.push(`pi-until watches not carried into the fork (re-arm in the successor): ${watches.join("; ")}`);
   const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.${watches.length ? ` Your parent session's pi-until watches did not carry across this fork; re-arm the ones still needed: ${watches.join("; ")}.` : ""}`;
