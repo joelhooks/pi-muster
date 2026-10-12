@@ -716,6 +716,9 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
           // The existing owner feed reads this queue and wakes on the post's mention facets.
           return;
         }
+        // A packet the catalog already holds is done, whichever row left it: a clone reused by a later row still
+        // carries the earlier row's sidecars, and checking them against the new row refused close (🧠, 2026-10-12).
+        if (project.packets.some(prior => prior.id === entry.id)) return;
         const sidecar = yield* decodeWith(decodeRemotePacket, entry.value);
         const packet = sidecar.packet;
         if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);

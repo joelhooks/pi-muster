@@ -580,6 +580,22 @@ describe("remote owner operations", () => {
     expect(result.notes.join("\n")).toContain("invalid packet sidecar identity");
     expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
   });
+  // 🧠, 2026-10-12: hooksv141 reused hooksv14's clone; the closed row's sidecars failed identity against the new row and close refused.
+  it("skips a sidecar for a packet already in the catalog, even one an earlier row left in a reused clone", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
+    const packet = { id, kind: "commit", artifact: null, lane: "work", agent: launched.row.name, report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-12T00:00:00.000Z", updatedAt: "2026-10-12T00:00:00.000Z" };
+    const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
+    const sidecar = (agent: string) => writeFileSync(join(root, "packet.json"), JSON.stringify({ project: "probe", machine: "remote", packet: { ...packet, agent }, reportText: "report" }));
+    sidecar(launched.row.name);
+    expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
+    expect((await s.run(load(s.dir))).packets.map(p => p.id)).toEqual([id]);
+    // The same clone now serves a later row: the sidecar names the earlier row, and its packet is already recorded.
+    sidecar("earlier-row");
+    const before = readFileSync(projectPath(s.dir), "utf8");
+    expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
+    expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
+  });
   it("keeps local status available and skips remaining machine rows after a transport failure", async () => {
     const s = setup(); await s.open(); await s.launch(); await s.launch("remote-two");
     const local = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local worker", clone: true, noSkills: true }));
