@@ -85,6 +85,10 @@ export const paneRun = (paneId: string, text: string) =>
 export const paneSendKeys = (paneId: string, keys: readonly string[]) =>
   call({ method: "pane.send_keys", params: { pane_id: paneId, keys } }).pipe(Effect.asVoid);
 
+/** One bracketed-paste submission to the pane's foreground agent, never retried. A busy Pi queues it as a steer. */
+export const agentPromptOnce = (paneId: string, text: string) =>
+  call({ method: "agent.prompt", params: { target: paneId, text } }).pipe(Effect.asVoid);
+
 export const paneSendText = (paneId: string, text: string) =>
   call({ method: "pane.send_text", params: { pane_id: paneId, text } }).pipe(Effect.asVoid);
 

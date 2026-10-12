@@ -11,6 +11,7 @@ import { Cause, Effect, Exit, Layer } from "effect";
 import { Type } from "typebox";
 
 import { registerCompaction } from "./compact.ts";
+import { agentPromptOnce, paneRename } from "./herdr.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
 import { MAX_CADENCE_MINUTES } from "./domain.ts";
 import { createComms, catalogCommsSender } from "./comms.ts";
@@ -118,16 +119,77 @@ export const remoteInboxPull = <C>(env: NodeJS.ProcessEnv, pull: (ctx: C) => Pro
 
 export { commsDoctorText } from "./comms-doctor.ts";
 
+/** The header on an operator turn carried to the replacement; the operator's words follow unchanged. */
+export const CARRIED_HEADER = "Typed into the old pane while it handed over; Muster carried it here verbatim:";
+const userText = (message: unknown) => {
+  const value = message as { role?: unknown; content?: unknown } | undefined;
+  if (value?.role !== "user") return undefined;
+  if (typeof value.content === "string") return value.content;
+  if (!Array.isArray(value.content)) return undefined;
+  return value.content.flatMap(part => part && typeof part === "object" && (part as { type?: unknown }).type === "text" ? [String((part as { text?: unknown }).text)] : []).join("\n");
+};
+
 /**
  * The handover is committed when a restart is armed: the successor holds the row. From then on this Pi must
  * not read the name's mail, or it acks messages into a dying session, so pi-ratking's reader retires now
  * (rat-king 1f2141a), not when the turn ends and the process exits.
+ *
+ * Operator text must not die with the old pane (mega-desk, 2026-10-12): Joel pressed Enter while the restart
+ * tool ran, Pi queued it as a steer, and the old session answered "resend it" and quit. Typed input after the
+ * arm goes straight to the replacement and never reaches this model. Input queued before the arm and delivered
+ * after it is carried at shutdown, before the old pane closes. A failed carry says so in the old pane.
  */
-export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>, release: () => Promise<void> = async () => {}, retire: () => void = () => {}) {
+export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pending: RestartExit, ctx: ExtensionContext) => Promise<void>, release: () => Promise<void> = async () => {}, retire: () => void = () => {},
+  forward: (pending: RestartExit, text: string, ctx: ExtensionContext) => Promise<void> = async () => { throw new Error("no carrier"); },
+  hold: (pending: RestartExit, uncarried: readonly string[], ctx: ExtensionContext) => Promise<void> = async () => {},
+  announce: (pending: RestartExit) => void = () => {}) {
   let ending: RestartExit | undefined;
   let closing: RestartExit | undefined;
-  pi.on("agent_end", (_event, ctx) => {
+  const queued: string[] = []; // interactive input Pi queued during a turn, oldest first
+  const late: string[] = []; // operator turns delivered into this session after the arm
+  const uncarried: string[] = []; // a failed carry keeps this Pi open: Joel's words must stay somewhere he can see
+  const carry = async (pending: RestartExit, text: string, ctx: ExtensionContext) => {
+    const pane = pending.restart.replacementPane.paneId;
+    try {
+      await forward(pending, `${CARRIED_HEADER}\n\n${text}`, ctx);
+      ctx.ui?.notify?.(`Carried to the replacement pane ${pane}.`, "info");
+      return true;
+    } catch (error) {
+      ctx.ui?.notify?.(`NOT CARRIED to ${pane}: ${error instanceof Error ? error.message : String(error)}. Type it again there.`, "error");
+      return false;
+    }
+  };
+  pi.on("input", async (event, ctx) => {
+    if (event.source !== "interactive") return { action: "continue" as const };
+    const pending = ending ?? closing;
+    if (pending && pending.sessionId === ctx.sessionManager.getSessionId()) {
+      if (!event.images?.length && await carry(pending, event.text, ctx)) return { action: "handled" as const };
+      uncarried.push(event.text); // the old model answers it here, and this Pi does not quit
+    }
+    if (event.streamingBehavior) queued.push(event.text);
+    return { action: "continue" as const };
+  });
+  pi.on("message_end", (event, ctx) => {
+    const text = userText(event.message);
+    if (text === undefined || queued.length === 0) return;
+    const at = queued.indexOf(text);
+    if (at < 0) return;
+    queued.splice(at, 1);
+    const pending = ending ?? closing;
+    if (pending && pending.sessionId === ctx.sessionManager.getSessionId()) late.push(text);
+  });
+  pi.on("agent_end", async (_event, ctx) => {
+    queued.length = 0; // Pi delivers every steer and follow-up before the run ends
     if (!ending || ending.sessionId !== ctx.sessionManager.getSessionId()) return;
+    const pending = ending;
+    for (const text of late.splice(0)) if (!await carry(pending, text, ctx)) uncarried.push(text);
+    if (uncarried.length > 0) {
+      // Fail safe: never quit with operator text that reached no other pane.
+      ending = undefined;
+      ctx.ui?.notify?.(`Restart held: ${uncarried.length} operator message(s) did not reach ${pending.restart.replacementPane.paneId}. This Pi stays open; the row already belongs to the replacement.`, "error");
+      try { await hold(pending, uncarried.splice(0), ctx); } catch { /* the pane notice stands */ }
+      return;
+    }
     closing = ending;
     ending = undefined;
     ctx.shutdown();
@@ -144,6 +206,7 @@ export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pendin
     if (ending) return;
     ending = pending;
     try { retire(); } catch { /* the old reader still stops at shutdown */ }
+    try { announce(pending); } catch { /* a label is a courtesy */ }
   };
 }
 
@@ -163,7 +226,13 @@ export default function muster(host: ExtensionAPI) {
 
   const armRestartExit = registerRestartExit(pi, async (pending, ctx) => {
     await Effect.runPromise(finishRestart(pending.dir, pending.restart).pipe(Effect.provide(layer(ctx))));
-  }, () => stopOwnerFeed(), () => { pi.events.emit("ratking/retire", { requestId: `muster-retire-${randomUUID()}` }); });
+  }, () => stopOwnerFeed(), () => { pi.events.emit("ratking/retire", { requestId: `muster-retire-${randomUUID()}` }); },
+  async (pending, text, ctx) => { await Effect.runPromise(agentPromptOnce(pending.restart.replacementPane.paneId, text).pipe(Effect.provide(layer(ctx)))); },
+  async (pending, uncarried, ctx) => {
+    await Effect.runPromise(deskPost(pending.dir, { kind: "blocked", title: `${pending.restart.name}: restart held, operator text not carried`,
+      body: `The old pane ${pending.restart.oldPane.paneId} stayed open because ${uncarried.length} message(s) typed during the handover did not reach ${pending.restart.replacementPane.paneId}:\n\n${uncarried.map(text => `> ${text.replaceAll("\n", "\n> ")}`).join("\n\n")}\n\nAnswer them there or resend them to the new pane, then quit the old Pi.` }).pipe(Effect.provide(layer(ctx))));
+  },
+  pending => { void Effect.runPromise(paneRename(pending.restart.oldPane.paneId, `↪ moved to ${pending.restart.replacementPane.paneId}`).pipe(Effect.provide(Layer.succeed(Herdr)(createHerdrClient())))).catch(() => {}); });
 
   registerCompaction(pi, env);
 

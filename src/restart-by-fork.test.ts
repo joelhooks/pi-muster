@@ -8,7 +8,7 @@ import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { Comms, MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
 import { appendOwnerItem, ingestOwnerItem } from "./owner-queue.ts";
 import { ownerFeed } from "./owner-feed.ts";
-import muster, { registerRestartExit } from "./extension-main.ts";
+import muster, { CARRIED_HEADER, registerRestartExit } from "./extension-main.ts";
 import * as ops from "./ops.ts";
 import { InputError } from "./errors.ts";
 const sessionSuccessorsPath = (home: string) => join(home, ".local/state/muster/session-successors.jsonl");
@@ -457,6 +457,69 @@ describe("restart by fork", () => {
     const shutdown = hooks.get("session_shutdown")!({}, ctx);
     expect(order).toEqual(["release-start"]); expect(close).not.toHaveBeenCalled();
     finish(); await shutdown; expect(order).toEqual(["release-start", "released", "close"]);
+  });
+
+  // mega-desk, 2026-10-12: Joel pressed Enter during the restart; Pi queued it, the old session answered "resend it" and quit.
+  describe("operator text during a handover", () => {
+    const rig = (forward = vi.fn(async (_pending: unknown, _text: string) => {})) => {
+      const hooks = new Map<string, (event: unknown, ctx: unknown) => unknown>(); const order: string[] = [];
+      const close = vi.fn(async () => { order.push("close"); });
+      const carrier = vi.fn(async (pending: unknown, text: string) => { order.push(`carry:${text.split("\n").at(-1)}`); await forward(pending, text); });
+      const hold = vi.fn(async (_pending: unknown, _texts: readonly string[]) => { order.push("hold"); }); const announce = vi.fn();
+      const arm = registerRestartExit({ on: (name: string, callback: (event: unknown, ctx: unknown) => unknown) => { hooks.set(name, callback); } } as never, close, async () => {}, () => {}, carrier as never, hold as never, announce);
+      const binding = { paneId: "old", terminalId: "terminal", tabId: "tab", openedByMuster: true };
+      const notify = vi.fn();
+      const ctx = { sessionManager: { getSessionId: () => "old" }, shutdown: vi.fn(), ui: { notify } };
+      const pending = { sessionId: "old", dir: "/project", restart: { oldPane: binding, replacementPane: { ...binding, paneId: "replacement" }, name: "desk" } };
+      const input = (text: string, extra: object = {}) => hooks.get("input")!({ type: "input", text, source: "interactive", ...extra }, ctx);
+      const delivered = (text: string) => hooks.get("message_end")!({ type: "message_end", message: { role: "user", content: [{ type: "text", text }] } }, ctx);
+      const end = async () => { await hooks.get("agent_end")!({}, ctx); if (ctx.shutdown.mock.calls.length) await hooks.get("session_shutdown")!({}, ctx); };
+      return { arm: () => arm(pending), input, delivered, end, order, carrier, notify, close, hold, announce, shutdown: ctx.shutdown, pending };
+    };
+    it("carries a steer queued before the arm and delivered after it, verbatim, before the old pane closes", async () => {
+      const r = rig();
+      expect(await r.input("open the browse page", { streamingBehavior: "steer" })).toEqual({ action: "continue" });
+      r.arm(); r.delivered("open the browse page"); await r.end();
+      expect(r.order).toEqual(["carry:open the browse page", "close"]);
+      expect(r.carrier.mock.calls[0]![1]).toBe(`${CARRIED_HEADER}\n\nopen the browse page`);
+    });
+    it("sends input typed after the arm straight to the replacement, so the old model never sees it", async () => {
+      const r = rig();
+      r.arm();
+      expect(await r.input("line one\nline two")).toEqual({ action: "handled" });
+      expect(r.carrier.mock.calls[0]![1]).toBe(`${CARRIED_HEADER}\n\nline one\nline two`);
+      expect(r.notify).toHaveBeenCalledWith("Carried to the replacement pane replacement.", "info");
+      await r.end(); expect(r.carrier).toHaveBeenCalledOnce();
+    });
+    it("holds the old Pi open and posts a blocked item when typed text cannot be carried", async () => {
+      const r = rig(vi.fn(async () => { throw new Error("agent_not_found"); }));
+      r.arm();
+      expect(await r.input("hello")).toEqual({ action: "continue" });
+      expect(r.notify).toHaveBeenCalledWith("NOT CARRIED to replacement: agent_not_found. Type it again there.", "error");
+      await r.end();
+      expect(r.shutdown).not.toHaveBeenCalled(); expect(r.close).not.toHaveBeenCalled();
+      expect(r.hold).toHaveBeenCalledWith(r.pending, ["hello"], expect.anything());
+    });
+    it("holds the old Pi open when a queued turn cannot be carried at agent_end", async () => {
+      const r = rig(vi.fn(async () => { throw new Error("gone"); }));
+      await r.input("queued", { streamingBehavior: "followUp" }); r.arm(); r.delivered("queued"); await r.end();
+      expect(r.shutdown).not.toHaveBeenCalled();
+      expect(r.order).toEqual(["carry:queued", "hold"]);
+    });
+    it("labels the old pane as moved the moment the restart is armed", () => {
+      const r = rig(); r.arm(); r.arm();
+      expect(r.announce).toHaveBeenCalledOnce(); expect(r.announce).toHaveBeenCalledWith(r.pending);
+    });
+    it("leaves extension input, turns delivered before the arm and unarmed sessions alone", async () => {
+      const r = rig();
+      expect(await r.input("before", { streamingBehavior: "steer" })).toEqual({ action: "continue" });
+      r.delivered("before");
+      expect(await r.input("not armed")).toEqual({ action: "continue" });
+      r.arm();
+      expect(await r.input("wake", { source: "extension" })).toEqual({ action: "continue" });
+      r.delivered("wake"); await r.end();
+      expect(r.carrier).not.toHaveBeenCalled(); expect(r.order).toEqual(["close"]);
+    });
   });
 
   // A lingering old Pi read the name's mail into the dying session; arming retires pi-ratking's reader at once.

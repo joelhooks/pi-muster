@@ -2423,7 +2423,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
           return [withRow(current, { ...latest, delivery: "unproven" }), undefined] as const;
         })).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`delivery catalog update needs repair: ${error.message}`); })));
       }
-      if (self) notes.push(`Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place.${oldPane.openedByMuster ? "" : ` ${adoptedSelfNote(oldPane)}`}`);
+      if (self) notes.push(`Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place. An operator message that reaches this session from now on is carried verbatim to the replacement pane; do not answer it or ask for it again here.${oldPane.openedByMuster ? "" : ` ${adoptedSelfNote(oldPane)}`}`);
       else {
         // A resumed pane proves identity, not permission to type or close it.
         notes.push(oldPane.openedByMuster
