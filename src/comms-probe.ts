@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { decodeRatkingClaims, decodeRatkingCursor, decodeRatkingDirectory, decodeRatkingProbe, decodeRatkingSettings } from "./domain.ts";
+import { decodeRatkingClaims, decodeRatkingCursor, decodeRatkingDirectory, decodeRatkingLease, decodeRatkingProbe, decodeRatkingSettings } from "./domain.ts";
 
 /** Read-only pi-ratking state probe; safe to import from remote plain Node. */
 export function ratkingStateProbe(home: string, expected: string, configPath = process.env.RATKING_CONFIG || join(home, ".config/rat-king/pi.json")) {
@@ -15,5 +15,10 @@ export function ratkingStateProbe(home: string, expected: string, configPath = p
   try { did = decodeRatkingDirectory(JSON.parse(readFileSync(join(state, "directory.json"), "utf8")))[expected]?.did ?? null; } catch { /* no directory entry */ }
   let afterSeq: number | null = null;
   try { afterSeq = decodeRatkingCursor(JSON.parse(readFileSync(join(state, "cursors", `${expected.replaceAll("/", ".")}.json`), "utf8"))).afterSeq; } catch { /* cursor absence is not reader proof */ }
-  return decodeRatkingProbe({ name: expected, did, session: claim?.session ?? null, pid: claim?.pid ?? null, alive, afterSeq });
+  let lease: { generation: number; writtenAt: string } | null = null;
+  try {
+    const file = join(state, "leases", `${expected.replaceAll("/", ".")}.json`);
+    lease = { generation: decodeRatkingLease(JSON.parse(readFileSync(file, "utf8"))).generation, writtenAt: statSync(file).mtime.toISOString() };
+  } catch { /* no lease file: never held here */ }
+  return decodeRatkingProbe({ name: expected, did, session: claim?.session ?? null, pid: claim?.pid ?? null, alive, afterSeq, lease });
 }

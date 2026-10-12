@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
 import { Effect } from "effect";
@@ -32,6 +32,17 @@ describe("pi-ratking doctor", () => {
     const report = doctorReport("pilot/worker", "worker-session", "local", ratkingStateProbe(h.home, "pilot/worker"));
     expect(report).toMatchObject({ mismatch: false, claim: { session: null, afterSeq: 4 } });
     expect(report.verdict).toMatch(/^unknown:/);
+  });
+  // Bravestarr, 2026-10-12: ship-c (remote, env-given name) showed "claim: none · alive: false" while its reader was consuming.
+  it.each([[60, false, "reader holds the name: lease generation 2, last poll 60s ago"], [600, true, "stale: the reader's last poll was 600s ago"]] as const)(
+    "reads an env-given name's lease file as the reader heartbeat (%ss old)", (age, flagged, verdict) => {
+    const h = harness(); const state = join(h.home, ".local/state/rat-king/pi");
+    json(join(state, "cursors/pilot.worker.json"), { afterSeq: 41 });
+    const lease = join(state, "leases/pilot.worker.json"); json(lease, { did: "did:web:x.invalid", generation: 2, leaseId: "3mxotutt6zkau" });
+    const now = Date.now(); utimesSync(lease, (now - age * 1000) / 1000, (now - age * 1000) / 1000);
+    const report = doctorReport("pilot/worker", "worker-session", "pennywise", ratkingStateProbe(h.home, "pilot/worker"), undefined, now);
+    expect(report).toMatchObject({ mismatch: flagged, leaseGeneration: 2, claim: { session: null, afterSeq: 41, lease: { generation: 2 } } });
+    expect(report.verdict).toContain(verdict);
   });
   it("takes in-process status when available and flags an expected-versus-claimed name mismatch", async () => {
     const events = createEventBus(); const h = harness();

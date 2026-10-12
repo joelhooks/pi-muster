@@ -126,7 +126,10 @@ export const decodeRatkingStatus = Schema.decodeUnknownSync(Schema.Struct({
   leaseGeneration: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
   leaseUntil: Schema.optionalKey(Schema.String),
 }));
-export const decodeRatkingProbe = Schema.decodeUnknownSync(Schema.Struct({ name: Schema.String, did: Schema.NullOr(Schema.String), session: Schema.NullOr(Schema.String), pid: Schema.NullOr(Schema.Number), alive: Schema.Boolean, afterSeq: Schema.NullOr(Schema.Number) }));
+export const decodeRatkingProbe = Schema.decodeUnknownSync(Schema.Struct({ name: Schema.String, did: Schema.NullOr(Schema.String), session: Schema.NullOr(Schema.String), pid: Schema.NullOr(Schema.Number), alive: Schema.Boolean, afterSeq: Schema.NullOr(Schema.Number),
+  // pi-ratking rewrites its lease file after every successful consume poll, so the file's mtime shows the reader loop runs.
+  lease: Schema.optionalKey(Schema.NullOr(Schema.Struct({ generation: Schema.Number, writtenAt: Schema.String }))) }));
+export const decodeRatkingLease = Schema.decodeUnknownSync(Schema.Struct({ generation: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1)) }));
 const Iso = Schema.String;
 const Path = Schema.String;
 

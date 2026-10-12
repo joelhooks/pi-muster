@@ -11,16 +11,26 @@ import { load } from "./store.ts";
 import { CommsError } from "./runtime.ts";
 
 export type RatkingProbe = ReturnType<typeof ratkingStateProbe>;
-export function doctorReport(expected: string, session: string, machine: string, probe: RatkingProbe, live?: ReturnType<typeof decodeRatkingStatus>) {
+/** A reader rewrites its lease file every consume poll; this much silence means its loop has stopped. */
+export const LEASE_STALE_MS = 5 * 60_000;
+export function doctorReport(expected: string, session: string, machine: string, probe: RatkingProbe, live?: ReturnType<typeof decodeRatkingStatus>, now = Date.now()) {
   const claimed = live ? live.name : probe.name;
-  // Env-given names have no claim. Status from this Pi is authoritative over absent/stale claims.
-  const unknown = !live && probe.session === null && probe.afterSeq !== null;
+  // Env-given names have no claim, so a remote probe used to report "alive: false" for healthy readers (ship-c,
+  // 2026-10-12). The lease file's mtime on the row's host is the reader's own heartbeat.
+  const leaseAge = !live && probe.session === null && probe.lease ? Math.max(0, Math.round((now - Date.parse(probe.lease.writtenAt)) / 1000)) : null;
+  const leased = leaseAge !== null && leaseAge * 1000 <= LEASE_STALE_MS;
+  const stale = leaseAge !== null && !leased;
+  const unknown = !live && probe.session === null && probe.afterSeq !== null && leaseAge === null;
   const mismatch = live ? claimed !== expected || ["retired", "off", "send-only"].includes(live.reader)
     : !unknown && (claimed !== expected || probe.session !== session || !probe.alive);
   return { expected, claimed, session, machine, did: live ? live.did : probe.did,
-    reader: live?.reader ?? (probe.alive ? "claimed process alive; reader state unavailable" : unknown ? "unknown: no claim for an env-given name; this pi-ratking reports no status" : "no live claimant"),
-    leaseGeneration: live?.leaseGeneration ?? null, leaseUntil: live?.leaseUntil ?? null, claim: probe,
-    mismatch, verdict: unknown ? "unknown: the name has a cursor but no claim; reader state needs pi-ratking's status event"
+    reader: live?.reader ?? (leased ? `consuming: lease generation ${probe.lease!.generation} rewritten ${leaseAge}s ago (lease file on ${machine}); mail reaches the agent when its turn ends`
+      : stale ? `stopped: lease generation ${probe.lease!.generation} last rewritten ${leaseAge}s ago (lease file on ${machine})`
+      : probe.alive ? "claimed process alive; reader state unavailable" : unknown ? "unknown: no claim for an env-given name; this pi-ratking reports no status" : "no live claimant"),
+    leaseGeneration: live?.leaseGeneration ?? probe.lease?.generation ?? null, leaseUntil: live?.leaseUntil ?? null, claim: probe,
+    mismatch: mismatch && !leased, verdict: leased ? `reader holds the name: lease generation ${probe.lease!.generation}, last poll ${leaseAge}s ago`
+      : stale ? `stale: the reader's last poll was ${leaseAge}s ago; check the row's Pi is alive, then restart it`
+      : unknown ? "unknown: the name has a cursor but no claim; reader state needs pi-ratking's status event"
       : mismatch ? "mismatch: restart the row with its expected RATKING_NAME"
       : live ? `name matches; reader ${live.reader}` : "claim matches; lease is pi-ratking's",
   };
