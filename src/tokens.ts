@@ -139,7 +139,12 @@ export function flowLine(project: Project, now: number = Date.now()): string {
   const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
   const { level } = deployPosture(project);
   const watching = project.lanes.filter(lane => lane.kind === "work" && lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2);
-  const landed = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
+  const landedAll = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
+  // Owl (drovr), 2026-10-12: a lane landed on a long-lived branch waits for that branch to merge, not for a release.
+  const landed = landedAll.filter(lane => releaseBase(lane.base));
+  const onBranch = new Map<string, typeof landedAll>();
+  for (const lane of landedAll) if (!releaseBase(lane.base)) onBranch.set(lane.base!, [...(onBranch.get(lane.base!) ?? []), lane]);
+  const age = (lane: (typeof landedAll)[number]) => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`;
   const slots = openSlots(project);
   const next = backlog(project)[0];
   const retro = project.lanes.find(lane => lane.kind === "retro" && (lane.state === "open" || lane.state === "draining"));
@@ -148,7 +153,8 @@ export function flowLine(project: Project, now: number = Date.now()): string {
     `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"}`,
     ...(slots ? [`${slots} open`, next ? `next: ${next.slug}` : "backlog empty"] : []),
     ...(retro ? [`retro: running ${retro.slug}`] : []),
-    `landed, not live: ${landed.map(lane => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`).join(", ") || "none"}`,
+    `landed, not live: ${landed.map(age).join(", ") || "none"}`,
+    ...[...onBranch].map(([branch, waiting]) => `waiting on ${branch} to merge: ${waiting.map(age).join(", ")}`),
     ...(watching.length ? [`watching: ${watching.map(lane => lane.slug).join(", ")}`] : []),
     ...(lanes.length ? [`oldest in flight ${formatAge(Math.max(0, now - oldest))}`] : []),
     ...(lastProven !== undefined ? [`last proven ${ago(lastProven)}`] : []),
@@ -156,6 +162,9 @@ export function flowLine(project: Project, now: number = Date.now()): string {
     ...(proven.length ? [`${proven.filter(entry => now - entry.at <= 7 * 86_400_000).length}/wk`] : []),
   ].join(" · ").replace(/[\r\n]+/g, " ");
 }
+
+/** A null base is the repo default branch; `main`/`master`, optionally `<remote>/`, also ship with a release. */
+export const releaseBase = (base: string | null | undefined) => !base || /^(?:[\w.-]+\/)?(?:main|master)$/.test(base);
 
 export function deriveTokens(project: Project, desk: readonly DeskItem[], live: LiveCounts = {}): Tokens {
   const work = project.lanes.filter((lane) => lane.kind === "work" && !lane.archived);

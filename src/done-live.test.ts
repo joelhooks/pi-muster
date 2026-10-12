@@ -111,6 +111,16 @@ describe("live delivery and WIP", () => {
     expect(flowLine(p, s.h.now.getTime())).not.toContain("⚠ not flowing");
     expect(board(p, [], 0, s.h.now.getTime())).toContain("WIP 1/3 · 2 open · backlog empty · landed, not live: one");
   });
+  // Owl (drovr), 2026-10-12: five lanes landed on storage-wave-3 read as waiting on a release no one could ship.
+  it("splits lanes landed on a long-lived base branch from lanes waiting on a release", async () => {
+    const s = await setup();
+    await runWith(s.h, projectUpdate(s.dir, { policy: { wipLimit: null } }));
+    for (const slug of ["broadcasts", "switch", "archive", "mirror"]) { await s.lane(slug); await landed(s, slug); }
+    await runWith(s.h, mutate(s.dir, p => Effect.succeed([{ ...p, lanes: p.lanes.map(lane => ({ ...lane,
+      base: lane.slug === "switch" || lane.slug === "archive" ? "storage-wave-3" : lane.slug === "mirror" ? "walgit/main" : lane.base })) }, undefined] as const)));
+    const line = flowLine(await runWith(s.h, load(s.dir)), s.h.now.getTime());
+    expect(line).toContain("landed, not live: broadcasts now, mirror now · waiting on storage-wave-3 to merge: switch now, archive now");
+  });
   it("reads naturally with nothing in flight and a fresh proof", async () => {
     const s = await setup();
     await s.lane("one");
