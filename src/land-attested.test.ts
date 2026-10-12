@@ -50,6 +50,21 @@ describe("owner-attested landing", () => {
     expect((await runWith(s.h, load(s.dir))).agents.find(row => row.name === s.row.name)?.state).toBe("landed");
   });
 
+  // KITT, 2026-10-12: walgit-only code never reaches origin, so packet_land fetched origin and refused.
+  it("proves a landing on the remote the lane base names (walgit/<branch>), not origin", async () => {
+    const s = await fixture(); await runWith(s.h, packetVerify(s.dir, s.id));
+    const walgit = join(s.h.root, "walgit"); sh(s.h.root, "clone", "-q", "--bare", s.origin, walgit);
+    sh(s.dir, "remote", "add", "walgit", walgit);
+    const pushed = join(s.h.root, "pusher"); sh(s.h.root, "clone", "-q", walgit, pushed);
+    sh(pushed, "fetch", "-q", s.row.cwd, s.id); sh(pushed, "checkout", "-qb", "central/landing", s.id); sh(pushed, "push", "-q", "origin", "central/landing");
+    const err = await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
+    expect(err.message).toContain("fetch from origin did not resolve it");
+    await runWith(s.h, laneOpen(s.dir, { slug: "probe", base: "walgit/central/landing" }));
+    const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs: s.id, attested: true });
+    expect(sh(s.dir, "rev-parse", "refs/remotes/walgit/central/landing").trim()).toBe(s.id);
+  });
+
   it("lands a reported packet after dirty-clone verification fails, without changing dirty bytes", async () => {
     const s = await fixture(); const landedAs = squash(s);
     writeFileSync(join(s.row.cwd, "work"), "dirty\n");

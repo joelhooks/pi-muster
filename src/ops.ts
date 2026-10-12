@@ -3462,6 +3462,21 @@ const recordPacketOutcome = (project: Project, packet: Packet, outcome: LandOutc
     return { project: withPacket(delivered, next), packet: next };
   });
 
+/** The remote and branch a landing is proven against. A lane base may name its remote (`walgit/main`) when the
+ * repo lands somewhere other than origin (walgit-only code, KITT 2026-10-12); otherwise origin and the base branch. */
+const landingBase = (source: string, laneBase: string | null | undefined) => Effect.gen(function* () {
+  const proc = yield* Proc;
+  const stripped = laneBase?.replace(/^refs\/remotes\//, "");
+  const named = stripped?.match(/^([^/]+)\/(.+)$/);
+  if (named && named[1] !== "origin" && (yield* proc.run("git", ["remote", "get-url", "--", named[1]!], { cwd: source })).code === 0)
+    return { remote: named[1]!, branch: named[2]!, hasRemote: true };
+  const hasRemote = (yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source })).code === 0;
+  const symbolic = yield* proc.run("git", ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: source });
+  const branch = laneBase?.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "") ??
+    (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
+  return { remote: "origin", branch, hasRemote };
+});
+
 export const packetLand = (dir: string, params: PacketLandInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -3512,25 +3527,22 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
       const source = sourceOf(project, lane, row);
+      const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base);
+      if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
+      if (hasRemote) {
+        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source });
+        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot attest against stale base refs` });
+      }
       const resolve = () => proc.run("git", ["rev-parse", "--verify", "--end-of-options", `${targetRef}^{commit}`], { cwd: source });
       let target = yield* resolve();
-      if (target.code !== 0) {
-        yield* proc.run("git", ["fetch", "-q", "--", "origin", targetRef], { cwd: source });
+      if (target.code !== 0 && hasRemote) {
+        yield* proc.run("git", ["fetch", "-q", "--", remote, targetRef], { cwd: source });
         target = yield* resolve();
       }
-      if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from origin did not resolve it)` });
+      if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from ${remote} did not resolve it)` });
       landedAs = target.stdout.trim();
-      const symbolic = yield* proc.run("git", ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: source });
-      const base = lane?.base?.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "") ??
-        (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
-      if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
-      const hasOrigin = (yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source })).code === 0;
-      if (hasOrigin) {
-        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`], { cwd: source });
-        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch origin/${base} failed; cannot attest against stale base refs` });
-      }
-      const baseRef = hasOrigin ? `refs/remotes/origin/${base}` : `refs/heads/${base}`;
-      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasOrigin ? "origin/" : ""}${base}` });
+      const baseRef = hasRemote ? `refs/remotes/${remote}/${base}` : `refs/heads/${base}`;
+      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasRemote ? `${remote}/` : ""}${base}` });
       evidence = `owner-attested: landed inside ${landedAs}; ${evidence}`;
       note = "recorded an owner-attested landing";
     } else if (outcome === "committed") {
@@ -3553,11 +3565,17 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
         if (!contains) {
           const resolve = () => proc.run("git", ["rev-parse", "--verify", "--end-of-options", `${params.landedAs}^{commit}`], { cwd: source });
           let target = yield* resolve();
-          if (target.code !== 0) {
-            yield* proc.run("git", ["fetch", "-q", "--", "origin", params.landedAs], { cwd: source });
+          const { remote, branch, hasRemote } = yield* landingBase(source, lane?.base);
+          if (target.code !== 0 && hasRemote) {
+            yield* proc.run("git", ["fetch", "-q", "--", remote, params.landedAs], { cwd: source });
             target = yield* resolve();
           }
-          if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from origin did not resolve it)` });
+          if (target.code !== 0 && hasRemote) {
+            // A host may refuse fetch-by-sha; the base branch brings the landing with it.
+            yield* proc.run("git", ["fetch", "-q", "--no-tags", "--", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`], { cwd: source });
+            target = yield* resolve();
+          }
+          if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from ${remote} did not resolve it)` });
           landedAs = target.stdout.trim();
           if ((yield* proc.run("git", ["cat-file", "-e", `${packet.id}^{commit}`], { cwd: source })).code !== 0 && row.clone && existsSync(row.cwd)) {
             yield* git(source, "fetch", "-q", "--", row.cwd, packet.id);
@@ -3590,17 +3608,14 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (outcome === "committed" && !params.attested && project.mode !== "rift-merge") {
       if (!landedAs) return yield* input(`mode ${project.mode} requires landedAs on the lane base branch`);
       const source = sourceOf(project, lane, row);
-      const symbolic = yield* proc.run("git", ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: source });
-      const base = lane?.base?.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "") ??
-        (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
+      const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base);
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`landing requires a base branch, not ${base}`);
-      const hasOrigin = (yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source })).code === 0;
-      if (hasOrigin) {
-        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`], { cwd: source });
-        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch origin/${base} failed; cannot prove ${landedAs} on base origin/${base}` });
+      if (hasRemote) {
+        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source });
+        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot prove ${landedAs} on base ${remote}/${base}` });
       }
-      const baseRef = hasOrigin ? `refs/remotes/origin/${base}` : `refs/heads/${base}`;
-      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasOrigin ? "origin/" : ""}${base}` });
+      const baseRef = hasRemote ? `refs/remotes/${remote}/${base}` : `refs/heads/${base}`;
+      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasRemote ? `${remote}/` : ""}${base}` });
       landedAs = (yield* git(source, "rev-parse", "--verify", "--end-of-options", `${landedAs}^{commit}`)).trim();
     }
     const event: AgentEvent | null = outcome === "rejected" ? { type: "REWORK" } : { type: "LAND" };
