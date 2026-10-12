@@ -46,6 +46,8 @@ function projectRestoreEntries(raw: unknown[]): Entry[] {
   branch.reverse();
   let change: Entry | undefined, thinking: Entry | undefined, assistant: Entry | undefined, previousChange: Entry | undefined, usage: Entry | undefined;
   for (const entry of branch) {
+    // A later compaction makes the last usage stale: keep the compaction marker in its place.
+    if (entry.type === "compaction") { usage = entry; continue; }
     if (entry.type === "model_change" && typeof entry.provider === "string" && typeof entry.modelId === "string") change = entry;
     if (entry.type === "thinking_level_change" && typeof entry.thinkingLevel === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(entry.thinkingLevel)) thinking = entry;
     const message = entry.message;
@@ -114,6 +116,8 @@ export function parseSessionModel(text: string, getModel?: ModelLookup): Session
     if (entry.type === "thinking_level_change") {
       try { thinking = Schema.decodeUnknownSync(Thinking)(entry.thinkingLevel); } catch { /* future thinking level */ }
     }
+    // drovr, 2026-10-12: a 374k boss compacted to fit Sol still read as 374k until its next turn, so restart refused.
+    if (entry.type === "compaction") { contextTokens = null; continue; }
     const message = entry.message;
     if (entry.type !== "message" || !object(message) || message.role !== "assistant") continue;
     if (message.api !== "pi-virtual" && typeof message.provider === "string" && typeof message.model === "string") {

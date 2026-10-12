@@ -60,3 +60,9 @@ it("ignores a partial trailing line", () => {
 it("bounds remote evidence for large journals and retains branch links", () => {
   expect(readers([model("root", null), response("a", "root"), ...Array.from({ length: 20000 }, (_, i) => ({ type: "message", id: `u${i}`, parentId: i ? `u${i - 1}` : "a", message: { role: "user", content: "private transcript".repeat(60) } }))])).toMatchObject({ model: "openai-codex/gpt-6.1-sol", contextTokens: 434000 });
 });
+
+it("a compaction after the last usage makes the context size unknown until the next turn, locally and over SSH", () => {
+  const compaction = { type: "compaction", id: "c", parentId: "a", summary: "private transcript summary", firstKeptEntryId: "a", tokensBefore: 434000 };
+  expect(readers([response("a", null), compaction]).contextTokens).toBeNull();
+  expect(readers([response("a", null), compaction, response("b", "c", { usage: { totalTokens: 41000, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } })]).contextTokens).toBe(41000);
+});
