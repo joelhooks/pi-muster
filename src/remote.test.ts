@@ -712,6 +712,26 @@ describe("remote owner operations", () => {
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect(result.cloneError).toContain(".pi/notes-bridge/edited-review.json"); expect(existsSync(launched.row.cwd)).toBe(true);
   });
+  // KITT, 2026-10-12: a walgit lane base resolved on Flagg, but pennywise's checkout had only origin.
+  it("fetches a named-remote lane base the remote checkout lacks, for clone create and close", async () => {
+    const s = setup(); await s.open();
+    const bare = join(s.h.root, "walgit.git"); sh(s.h.root, "init", "-q", "--bare", bare);
+    sh(s.dir, "remote", "add", "walgit", bare);
+    sh(s.dir, "checkout", "-q", "-b", "central/cache");
+    writeFileSync(join(s.dir, "cache.txt"), "cache\n"); sh(s.dir, "add", "cache.txt"); sh(s.dir, "commit", "-q", "-m", "cache");
+    const tip = sh(s.dir, "rev-parse", "HEAD").trim();
+    sh(s.dir, "push", "-q", "walgit", "central/cache"); sh(s.dir, "fetch", "-q", "walgit"); sh(s.dir, "checkout", "-q", "main");
+    const mirror = join(s.h.root, "remote-source"); sh(s.h.root, "clone", "-q", s.dir, mirror); sh(mirror, "remote", "remove", "origin");
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off", HOME: s.h.home }, wrap: ["/wrapper", "--name", "{name}", "--"], paths: { [s.dir]: mirror } }) });
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, lanes: p.lanes.map(lane => lane.slug === "work" ? { ...lane, base: "walgit/central/cache" } : lane) }, undefined] as const)));
+    const launched = await s.launch();
+    expect(launched.row.clone?.base).toEqual({ ref: "walgit/central/cache", sha: tip });
+    expect(launched.notes.join("\n")).toContain(`base walgit/central/cache fetched from ${bare}; this checkout has no walgit remote`);
+    expect(sh(mirror, "remote").trim()).toBe("");
+    const closed = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(closed.cloneError).toBeNull(); expect(existsSync(launched.row.cwd)).toBe(false);
+  });
+
   it("saves remote logs, closes the bound pane and removes the clone through SSH", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));

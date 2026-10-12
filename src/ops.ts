@@ -168,6 +168,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
 
   const source = lane.repo ?? project.dir;
   const remoteSource = mapPath(source, machine);
+  const baseFetch = params.clone && params.action !== "restore" ? yield* baseRemoteFetch(source, lane.base) : null;
   custodyNotes.push(...lockNotes);
   const roster = (yield* loadRoster).roster;
   const label = params.label ?? claimedLabel(env.home, project.slug, name, role) ?? parent?.profile.label ?? existing?.profile.label;
@@ -238,6 +239,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const cloneNotes: string[] = [...skillNotes];
     if (params.clone && params.action !== "restore") {
       // onRemote supplies the remote Proc, so branch selection reads the remote source.
+      cloneNotes.push(...(yield* ensureBaseRef(remoteSource, baseFetch)));
       const allocated = yield* cloneFor(remoteSource, name, lane, project.mode, machine.workerWorktree, params.hydrate === true);
       cwd = yield* requireAbsolute("remote clone", allocated.path);
       clone = { source, branch: allocated.branch, base: allocated.base };
@@ -540,12 +542,37 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
   return { safe: proof !== null, force: proof !== null, detail: `${proof ? `harvested: ${proof}` : "unreachable"}: ${row.cwd}; HEAD ${head}${dirt}` };
 });
 
-const cloneOnMachine = <A, E, R>(row: AgentRow, operation: (source: string, script: string) => Effect.Effect<A, E, R>) => Effect.gen(function* () {
+/** A lane base `<remote>/<branch>` whose remote the desk's source has; null for any other base. Runs on the desk. */
+export const baseRemoteFetch = (localSource: string, base: string | null | undefined) => Effect.gen(function* () {
+  const match = base ? /^([\w.-]+)\/(.+)$/.exec(base) : null;
+  if (!match) return null;
+  const proc = yield* Proc;
+  const url = yield* proc.run("git", ["remote", "get-url", "--", match[1]!], { cwd: localSource, timeoutMs: 10_000 });
+  return url.code === 0 && url.stdout.trim() ? { remote: match[1]!, branch: match[2]!, url: url.stdout.trim() } : null;
+});
+
+/** KITT, 2026-10-12: a walgit lane base resolved on Flagg, but pennywise's checkout has only origin, so clone create
+ * and close's harvest check failed on it. The row's host fetches just that branch from the desk's URL into the same
+ * remote-tracking ref. It never adds a remote and never pushes; a host that has the remote keeps its own fetch. */
+export const ensureBaseRef = (remoteSource: string, fetch: { remote: string; branch: string; url: string } | null) => Effect.gen(function* () {
+  if (!fetch) return [] as string[];
+  const proc = yield* Proc;
+  if ((yield* proc.run("git", ["remote", "get-url", "--", fetch.remote], { cwd: remoteSource, timeoutMs: 10_000 })).code === 0) return [];
+  const got = yield* proc.run("git", ["fetch", "-q", "--no-write-fetch-head", "--no-tags", "--", fetch.url, `+refs/heads/${fetch.branch}:refs/remotes/${fetch.remote}/${fetch.branch}`], { cwd: remoteSource, timeoutMs: 120_000 });
+  return [got.code === 0
+    ? `base ${fetch.remote}/${fetch.branch} fetched from ${fetch.url}; this checkout has no ${fetch.remote} remote`
+    : `base ${fetch.remote}/${fetch.branch} not fetched from ${fetch.url}: ${got.stderr.trim().slice(-300)}`];
+});
+
+const cloneOnMachine = <A, E, R>(row: AgentRow, operation: (source: string, script: string) => Effect.Effect<A, E, R>, base?: string | null) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   if (row.machine === "local") return yield* operation(row.clone!.source, env.workerWorktree);
   const machine = yield* machineConfig(row.machine);
-  return yield* onRemote(row.machine, machine, operation(mapPath(row.clone!.source, machine), machine.workerWorktree));
+  const fetch = yield* baseRemoteFetch(row.clone!.source, base);
+  const remoteSource = mapPath(row.clone!.source, machine);
+  return yield* onRemote(row.machine, machine, ensureBaseRef(remoteSource, fetch).pipe(Effect.andThen(operation(remoteSource, machine.workerWorktree))));
 });
+const reapBase = (project: Project, row: AgentRow) => project.lanes.find(lane => lane.slug === row.lane)?.base ?? row.clone?.base?.ref ?? null;
 
 const clonePresent = (row: AgentRow) => cloneOnMachine(row, () => Effect.gen(function* () {
   const proc = yield* Proc;
@@ -597,7 +624,7 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
     if (removal._tag === "Failure") return { removed: false, detail: `${detail}; removal failed: ${removal.failure.message}` };
     if (yield* present()) return { removed: false, detail: `${detail}; removal left clone on disk` };
     return { removed: true, detail: `clone removed: ${row.cwd}; ${detail}` };
-  })).pipe(Effect.catch(error => Effect.succeed({ removed: false, detail: `clone kept: ${row.cwd}; ${error.message}` })));
+  }), reapBase(project, row)).pipe(Effect.catch(error => Effect.succeed({ removed: false, detail: `clone kept: ${row.cwd}; ${error.message}` })));
   yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
     yield* requireOwner(latest, env.sessionId, takeover, project.slug);
@@ -3861,7 +3888,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         const prior = latestCloneEvent(row);
         const owned = act && (yield* requireOwner(row, env.sessionId, false, project.slug).pipe(Effect.result))._tag === "Success";
         if (owned && prior?.type === "CLONE_KEPT" && /^(unreachable|dirty|harvested):/.test(prior.detail)) {
-          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source, false, reapSources)).pipe(Effect.orElseSucceed(() => null));
+          const assessment = yield* cloneOnMachine(row, source => cloneReapAssessment(project, row, source, false, reapSources), reapBase(project, row)).pipe(Effect.orElseSucceed(() => null));
           // Unchanged proof plus a script failure must not retry every pass.
           if (assessment?.safe && !prior.detail.startsWith(assessment.detail)) {
             yield* retireClone(dir, row, false, false, reapSources);
