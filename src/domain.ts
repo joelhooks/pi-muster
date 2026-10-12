@@ -682,7 +682,7 @@ export function steerHold(steer: FleetSteer | undefined, now: number, model: str
   const pool = steerPool(model);
   const reading = pool ? steer[pool] : undefined;
   if (!pool || !reading || !(reading.pace >= PACE_HOLD)) return null;
-  return `pool ${pool} at ${reading.pace.toFixed(2)}× pace${typeof reading.dryDays === "number" && Number.isFinite(reading.dryDays) ? `, dry in ${reading.dryDays.toFixed(1)} d` : ""} (fleet steer at ${steer.at}): worker launch on ${model} held. Pass critical: true for critical-path work (keeps the routed model), use a Haiku scan or gather, or wait for the steer to cool. For capacity detail, read and cite ${FLEET_CAPACITY_FILE}; never estimate`;
+  return `pool ${pool} at ${reading.pace.toFixed(2)}× pace${typeof reading.dryDays === "number" && Number.isFinite(reading.dryDays) ? `, dry in ${reading.dryDays.toFixed(1)} d` : ""} (fleet steer at ${steer.at}): worker launch on ${model} held. Pass critical: true for critical-path work (keeps the routed model), use a Haiku scan or gather, or wait for the steer to cool. For capacity detail, read and cite ${FLEET_CAPACITY_FILE}; never estimate. Move a running row to another provider only by agent_launch restart with model, never /model mid-session`;
 }
 
 /** The fresh steer's choice for a worker: the work type's route, else workerDefault. A stale steer chooses nothing. */

@@ -2277,7 +2277,9 @@ const pushRemoteBindings = (dirs: readonly string[]) => Effect.gen(function* () 
 export const restartLockName = (project: string, row: string) =>
   `r-${createHash("sha256").update(`${project}\0${row}`).digest("hex").slice(0, 8)}-${row.slice(0, 21)}`;
 
-const restartByFork = (dir: string, project: Project, old: AgentRow) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
+/** `overrides` switch the model or thinking at the fork. Switching providers mid-session (/model) can leave an orphaned
+ * tool result that Sol rejects; a restart rebuilds the context from the session file (Ernestine SOP, 2026-10-12). */
+const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
   if (!self) yield* requireOwner(old, env.sessionId, false, project.slug, false);
@@ -2294,7 +2296,8 @@ const restartByFork = (dir: string, project: Project, old: AgentRow) => withMach
   const remote = old.machine !== "local";
   const machine = remote ? yield* machineConfig(old.machine) : null;
   const launchProject = machine ? { ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null } : project;
-  const selected = yield* sessionRestore(old.profile, old.sessionFile, project, old.role, (yield* loadRoster).roster, {}, remote);
+  const selected = yield* sessionRestore(old.profile, old.sessionFile, project, old.role, (yield* loadRoster).roster, {
+    ...(overrides.model !== undefined ? { model: overrides.model } : {}), ...(overrides.thinking !== undefined ? { thinking: overrides.thinking } : {}) }, remote);
   const notes = [...selected.notes];
   const modelNote = yield* checkRunnableModel(selected.profile.model, old.cwd, { tokens: selected.live.contextTokens });
   if (modelNote) notes.push(modelNote);
@@ -2628,7 +2631,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (params.action === "restart") {
       const row = yield* findRow(project, name);
-      const restart = restartByFork(dir, project, row);
+      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking });
       return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
     }
     if (params.action === "adopt") {

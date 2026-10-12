@@ -63,6 +63,17 @@ describe("restart by fork", () => {
     expect(s.host.calls.filter(call => ["pane.send_input", "pane.send_keys", "pane.close"].includes(call.method) && call.params.pane_id === moved.pane_id)).toEqual([]);
   });
 
+  // Ernestine SOP, 2026-10-12: a provider switch happens only by restart with model; restart used to ignore model.
+  it("switches the model and thinking at the fork when restart names them, and keeps them on the row", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    appendFileSync(old.sessionFile!, "\n" + JSON.stringify({ type: "model_change", provider: "claude-bridge", modelId: "claude-opus-5-5" }) + "\n");
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, model: "openai-codex/gpt-6.1-sol", thinking: "medium" }));
+    expect(result.argv).toContain("openai-codex/gpt-6.1-sol:medium");
+    expect(result.row.profile).toMatchObject({ model: "openai-codex/gpt-6.1-sol", thinking: "medium" });
+    expect(result.notes.join("\n")).toContain("from explicit model");
+  });
+
   it("restart forks the actual Herdr journal when its path changed", async () => {
     const s = await setup();
     const liveFile = join(dirname(s.launch.row.sessionFile!), `moved_${s.launch.row.sessionId}.jsonl`);
