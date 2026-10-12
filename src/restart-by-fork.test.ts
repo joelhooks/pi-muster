@@ -74,6 +74,21 @@ describe("restart by fork", () => {
     expect(result.notes.join("\n")).toContain("from explicit model");
   });
 
+  it("after a foreign adopt, restart forks the adopted session with the row's environment", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    const foreign = "01a0ff19-c75d-74c5-85d6-c269a2c1e18e";
+    const file = join(dirname(old.sessionFile!), `2026-10-12T00-00-00-000Z_${foreign}.jsonl`);
+    writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: foreign, timestamp: "2026-10-12T00:00:00.000Z", cwd: s.dir }) + "\n");
+    s.host.panes.get(old.pane!.paneId)!.agent_session!.value = file;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, state: "interrupted" as const })) }, undefined] as const)));
+    await s.run(agentLaunch(s.dir, { action: "adopt", name: old.name, pane: old.pane!.paneId, session: foreign, reason: "Joel: desk now" }));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    expect(result.row.parentSessionFile).toBe(file);
+    expect(result.row.sessionId).not.toBe(foreign);
+    expect(readFileSync(result.argv[result.argv.indexOf("--fork") + 1]!, "utf8")).toContain(foreign);
+  });
+
   it("restart forks the actual Herdr journal when its path changed", async () => {
     const s = await setup();
     const liveFile = join(dirname(s.launch.row.sessionFile!), `moved_${s.launch.row.sessionId}.jsonl`);

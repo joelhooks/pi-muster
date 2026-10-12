@@ -790,10 +790,11 @@ const adoptionHolder = (project: Project, row: AgentRow, pane: PaneInfo) => proj
   other.machine === row.machine && other.name !== row.name && other.state !== "closed" && sharesPane(adoptionBinding(row, pane), other.pane));
 
 /** Pi's read-only parser owns the header format; never open/migrate a live transcript. */
-const adoptionSession = (row: AgentRow, pane: PaneInfo) => Effect.gen(function* () {
+/** `foreign`: an explicit session id the pane's live journal header must carry, for adopting an unrelated session. */
+const adoptionSession = (row: AgentRow, pane: PaneInfo, foreign?: string) => Effect.gen(function* () {
   const file = pane.agent_session?.kind === "path" ? pane.agent_session.value : null;
   if (!pane.agent || !(pane.agent === "pi" || pane.agent_session?.agent === "pi") || !file) return null;
-  if (sameSessionFile(row, file)) return { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId };
+  if (!foreign && sameSessionFile(row, file)) return { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId };
   const headerText = row.machine === "local"
     ? yield* Effect.try({ try: () => readFileSync(file, "utf8").split("\n", 1)[0] ?? "", catch: error => input(String(error)) })
     : yield* Effect.gen(function* () {
@@ -803,12 +804,13 @@ const adoptionSession = (row: AgentRow, pane: PaneInfo) => Effect.gen(function* 
         return result.stdout;
       });
   const header = yield* Effect.try({ try: () => parseSessionEntries(headerText).find(entry => entry.type === "session"), catch: error => input(String(error)) });
+  if (foreign) return header?.id === foreign ? { sessionFile: file, sessionId: foreign } : null;
   if (!header || typeof header.parentSession !== "string" || !sameSessionFile(row, header.parentSession)) return null;
   const sessionId = yield* decodeWith(Schema.decodeUnknownSync(SessionId), header.id);
   return { sessionFile: file, sessionId };
 }).pipe(Effect.orElseSucceed(() => null));
 
-const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessionFile: string; sessionId: string }, preserveState = false) => Effect.gen(function* () {
+const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessionFile: string; sessionId: string }, preserveState = false, audit?: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   let slug = "";
   const adopted = yield* mutate(dir, project => Effect.gen(function* () {
@@ -829,7 +831,8 @@ const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessi
     const selected = yield* sessionRestore(latest.profile, session.sessionFile, project, latest.role, (yield* loadRoster).roster, {}, latest.machine !== "local");
     const restore = latest.restore ? { ...latest.restore, argv: latest.restore.argv.map((arg, index, argv) =>
       argv[index - 1] === "--session" ? session.sessionFile : argv[index - 1] === "--session-id" ? session.sessionId : argv[index - 1] === "--model" ? `${selected.profile.model}:${selected.profile.thinking}` : arg) } : null;
-    const next: AgentRow = { ...latest, ...session, pane: adoptionBinding(latest, pane), state, restore, updatedAt: iso(env) };
+    const events = audit ? [...(latest.events ?? []), { type: "ADOPT_FOREIGN", at: iso(env), detail: `${latest.sessionId} -> ${session.sessionId}: ${audit}` }] : latest.events;
+    const next: AgentRow = { ...latest, ...session, pane: adoptionBinding(latest, pane), state, restore, ...(events ? { events } : {}), updatedAt: iso(env) };
     return [withRow(project, next), next] as const;
   }));
   return adopted;
@@ -1866,6 +1869,9 @@ export interface AgentLaunchInput {
   readonly prompt?: string | undefined;
   readonly pane?: string | undefined;
   readonly slot?: "root" | "split" | undefined;
+  /** adopt: an unrelated live session to bind, with a recorded reason. */
+  readonly session?: string | undefined;
+  readonly reason?: string | undefined;
 }
 
 /** Keep warm selection independent of side-desk fork topology. */
@@ -2644,6 +2650,23 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       if (!params.pane) return yield* input("adopt requires name and pane");
       if (row.state === "closed") return yield* input(`cannot adopt a ${row.state} row`);
       const adopt = Effect.gen(function* () {
+        if (params.session !== undefined) {
+          // Joel can hand a row to an unrelated live Pi ("you are the tokenmaxx desk now", 2026-10-12). Explicit, audited, never over a live row.
+          const reason = params.reason?.trim();
+          if (!reason) return yield* input("adopt with session needs a reason; it is recorded on the row");
+          if (row.state === "running" || row.state === "launching") return yield* input(`row ${row.name} is ${row.state}; adopt a foreign session only over a row that is not live`);
+          const other = project.agents.find(agent => agent.name !== row.name && agent.state !== "closed" && agent.sessionId === params.session);
+          if (other) return yield* input(`session ${params.session} is already row ${other.name}'s`);
+          const pane = (yield* readoptionPanes(project, row)).find(pane => pane.pane_id === params.pane);
+          if (!pane) return yield* input("adopt needs a pane in the project's workspace");
+          const holder = adoptionHolder(project, row, pane);
+          if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
+          const foreign = yield* adoptionSession(row, pane, params.session);
+          if (!foreign) return yield* input(`adopt refused: pane ${pane.pane_id} is not a Pi whose live session is ${params.session}`);
+          const adopted = yield* readoptRow(dir, row, pane, foreign, false, reason);
+          return { row: adopted, argv: [] as string[], readiness: "not checked (catalog adoption)", proof: null, sessionIdMatched: true, notes: [`adopted foreign session ${foreign.sessionId} into ${row.name} (was ${row.sessionId}): ${reason}`,
+            `that Pi still runs with its own environment and Rat King name; run agent_launch action:"restart" name:"${row.name}" to fork it into a pane with this row's Muster environment and the name ${project.slug}/${row.name}`] };
+        }
         const bound = row.pane ? yield* locatePane(row.pane) : null;
         const rebinding = yield* findRebinding(project, row, bound);
         if (rebinding.kind === "refused") return yield* input(rebinding.note);

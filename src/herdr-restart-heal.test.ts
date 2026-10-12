@@ -1,4 +1,4 @@
-import { renameSync } from "node:fs";
+import { renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { Effect } from "effect";
@@ -316,4 +316,31 @@ it("keeps interrupted lifecycle recovery", async () => {
   await runWith(s.h, projectStatus(s.dir, { act: true }));
   expect((await s.saved()).state).toBe("running");
   s.untouched();
+});
+
+// Ernestine, 2026-10-12: Joel made an unrelated live Pi (Socrates) the tokenmaxx desk; adopt only took the row's own session or fork parent.
+it("adopts an unrelated live session only when named explicitly with a reason, and records it on the row", async () => {
+  const s = await setup("interrupted");
+  const foreign = "01a0ff19-c75d-74c5-85d6-c269a2c1e18e";
+  const file = join(s.h.root, `2026-10-12T00-00-00-000Z_${foreign}.jsonl`);
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: foreign, timestamp: "2026-10-12T00:00:00.000Z", cwd: s.dir }) + "\n");
+  s.pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: file };
+  const adopt = (extra: object) => runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id, ...extra }));
+  await expect(adopt({})).rejects.toThrow("does not match the row or its fork parent");
+  await expect(adopt({ session: foreign })).rejects.toThrow("needs a reason");
+  await expect(adopt({ session: "01a0ff19-0000-0000-0000-000000000000", reason: "Joel" })).rejects.toThrow(`is not a Pi whose live session is 01a0ff19-0000`);
+  expect((await s.saved()).sessionId).toBe(s.row.sessionId);
+  const result = await adopt({ session: foreign, reason: "Joel: you are the desk now" });
+  const saved = await s.saved();
+  expect(saved).toMatchObject({ sessionId: foreign, sessionFile: file, pane: { paneId: s.pane.pane_id, openedByMuster: false } });
+  expect(saved.events?.at(-1)).toMatchObject({ type: "ADOPT_FOREIGN", detail: `${s.row.sessionId} -> ${foreign}: Joel: you are the desk now` });
+  expect(saved.restore?.argv).toContain(file);
+  expect(result.notes.join("\n")).toContain('agent_launch action:"restart" name:"worker"');
+  s.untouched();
+});
+
+it("refuses to adopt a foreign session over a live row", async () => {
+  const s = await setup("running");
+  await expect(runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id, session: "01a0ff19-c75d-74c5-85d6-c269a2c1e18e", reason: "x" })))
+    .rejects.toThrow("adopt a foreign session only over a row that is not live");
 });
