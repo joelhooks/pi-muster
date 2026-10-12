@@ -709,7 +709,11 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
       yield* Effect.gen(function* () {
         if (entry.kind === "note") {
           const sidecar = yield* decodeWith(decodeRemoteNote, entry.value);
-          if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane || sidecar.item.author !== row.sessionId) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
+          if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane || !sessionChain(row).includes(sidecar.item.author)) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
+          // drovr, 2026-10-12: sidecars stay on disk and the queue is per owner session, so an owner restart replayed old notes.
+          const ownerRow = project.agents.find(agent => agent.sessionId === row.owner);
+          const priorOwners = ownerRow ? sessionChain(ownerRow).filter(id => id !== row.owner) : [];
+          if (priorOwners.some(owner => readOwnerQueue(owner, env.home).items.some(record => record.item.uri === sidecar.item.uri))) return;
           // The catalog owns routing; a remote recipient can be stale after a handover.
           const added = yield* Effect.try({ try: () => ingestOwnerItem(row.owner, sidecar.item, env.home, project.slug), catch: error => new StoreError({ path: `remote note ${entry.id}`, message: String(error) }) });
           if (added && sidecar.sendFailed !== undefined) notes.push(`owner note from ${row.name} arrived by sidecar (Rat King send had failed: ${sidecar.sendFailed.replace(/[\r\n]+/g, " ").slice(0, 80)})`);
@@ -748,6 +752,17 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
   }
   return { notes, failedMachines };
 });
+
+/** Every session a row has run as, current first: restarts and foreign adopts record `<old> -> <new>` on the row. */
+export function sessionChain(row: Pick<AgentRow, "sessionId" | "events">): string[] {
+  const ids = [row.sessionId];
+  for (const event of [...(row.events ?? [])].reverse()) {
+    if (event.type !== "RESTARTED" && event.type !== "ADOPT_FOREIGN") continue;
+    const match = /^(\S+) -> (\S+?):?(?:\s|$)/.exec(event.detail ?? "");
+    for (const id of match ? [match[2]!, match[1]!] : []) if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
 
 /** Explicit inbox pulls only rows owned by the caller; a dead host never prevents local reads. */
 export const pullRemoteOwnerInbox = (currentDir?: string) => Effect.gen(function* () {

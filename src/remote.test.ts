@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
 import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
-import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";
@@ -742,6 +742,27 @@ describe("remote owner operations", () => {
       const wake = vi.fn(); const feed = ownerFeed({ session: launched.row.owner, home: s.h.home, appendEntry: vi.fn(), sendMessage: wake });
       expect(feed.flush()).toBe(1); expect(wake).toHaveBeenCalledTimes(1); feed.dispose();
     });
+    // drovr, 2026-10-12: sidecars stay on disk and the queue is per owner session, so an owner restart replayed a 10-11 note.
+    it("does not replay a note to an owner that restarted after taking it", async () => {
+      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
+      const posted = await post(s, launched, failing());
+      await s.run(ingestRemotePackets(s.dir));
+      const before = launched.row.owner;
+      await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents.map(row => row.name === launched.row.name ? { ...row, owner: "owner-2" } : row),
+        { ...launched.row, name: "owner-desk", machine: "local", pane: null, sessionId: "owner-2", events: [{ type: "RESTARTED", at: "2026-10-12T17:00:00.000Z", detail: `${before} -> owner-2 onto abc` }] }] }, undefined] as const)));
+      expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
+      expect(readOwnerQueue("owner-2", s.h.home).items).toHaveLength(0);
+      expect(readOwnerQueue(before, s.h.home).items.map(record => record.item.uri)).toEqual([posted.uri]);
+    });
+    it("accepts a note written under the worker's own earlier session", async () => {
+      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
+      const posted = await post(s, launched, failing());
+      await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === launched.row.name
+        ? { ...row, sessionId: "worker-2", events: [...(row.events ?? []), { type: "RESTARTED", at: "2026-10-12T17:00:00.000Z", detail: `${launched.row.sessionId} -> worker-2 onto abc` }] } : row) }, undefined] as const)));
+      const result = await s.run(ingestRemotePackets(s.dir));
+      expect(result.notes.join("\n")).not.toContain("invalid note sidecar identity");
+      expect(readOwnerQueue(launched.row.owner, s.h.home).items.map(record => record.item.uri)).toEqual([posted.uri]);
+    });
     it("does not duplicate when the Rat King send was delivered after all", async () => {
       const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
       const posted = await post(s, launched, failing());
@@ -773,4 +794,12 @@ describe("remote owner operations", () => {
       expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
     });
   });
+});
+
+it("lists a row's sessions newest first from its restart and foreign-adopt events", () => {
+  expect(sessionChain({ sessionId: "c", events: [
+    { type: "RESTARTED", at: "1", detail: "a -> b onto 123" }, { type: "LAUNCHED", at: "2", detail: "x -> y" },
+    { type: "ADOPT_FOREIGN", at: "3", detail: "b -> c: Joel: desk now" },
+  ] })).toEqual(["c", "b", "a"]);
+  expect(sessionChain({ sessionId: "only" })).toEqual(["only"]);
 });
