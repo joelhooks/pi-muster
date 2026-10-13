@@ -86,6 +86,8 @@ import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
 import type { LiveCounts } from "./tokens.ts";
 
 const MAX_WORKERS_PER_TAB = 4;
+/** pi-notes' own runtime state in any repo a Pi runs in (session binding, status, trace log). Other bridge files, such as receipts, may hold review work. */
+const NOTES_BRIDGE_RUNTIME: readonly string[] = [".pi/notes-bridge/events.jsonl", ".pi/notes-bridge/session.json", ".pi/notes-bridge/status.json"];
 const GATE_TIMEOUT_MS = 45 * 60_000;
 const CLOSE_READ_LINES = 40;
 /** Pi expands @files before its first message; extra instructions travel in one complete file. */
@@ -459,7 +461,7 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
   // when the source differs. Everything else needs a byte comparison.
   const candidates = dirty.filter(path => !preservedTranscripts.includes(path) && (isTranscriptPath(path) ||
     (!provenSidecars.includes(path) && !isGenerated(path, lane?.generated ?? []) &&
-    !isGenerated(path, [".rift", ".wzrrd/", ...(row.machine === "local" ? [".pi/notes-bridge/"] : [])]) && !/\.(log|pid)$/.test(path) &&
+    !isGenerated(path, [".rift", ".wzrrd/", ...(row.machine === "local" ? [".pi/notes-bridge/"] : [])]) && !NOTES_BRIDGE_RUNTIME.includes(path) && !/\.(log|pid)$/.test(path) &&
     !/^\.brain\/data\/[^/]+-status\.json$/.test(path))));
   const comparable = candidates.filter(path => !isTranscriptPath(path) && (isGenerated(path, generated) || path.startsWith(".pi/notes-bridge/")));
   // Exact templates from pi-notes 8a8c3da, initLocalBrain. Never allow a tracked edit by template hash.

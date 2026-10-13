@@ -709,6 +709,14 @@ describe("remote owner operations", () => {
     expect(existsSync(launched.row.cwd)).toBe(edited);
     expect(result.cloneError === null).toBe(!edited);
   });
+  // flowing-pi, 2026-10-13: every landed remote clone was kept for pi-notes' own runtime files.
+  it("removes a landed remote clone whose only dirt is pi-notes' runtime state", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const root = join(launched.row.cwd, ".pi/notes-bridge"); mkdirSync(root, { recursive: true });
+    for (const file of ["events.jsonl", "session.json", "status.json"]) writeFileSync(join(root, file), `runtime ${file}`);
+    const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(result.cloneError).toBeNull(); expect(existsSync(launched.row.cwd)).toBe(false);
+  });
   it("keeps unknown remote pi-notes bridge files rather than declaring the whole directory disposable", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const root = join(launched.row.cwd, ".pi/notes-bridge"); mkdirSync(root, { recursive: true }); writeFileSync(join(root, "edited-review.json"), "private note");
