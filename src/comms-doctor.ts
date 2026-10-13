@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { Effect } from "effect";
-import { decodeRatkingProbe, decodeRatkingStatus } from "./domain.ts";
+import { decodeAgentRow, decodeRatkingProbe, decodeRatkingStatus } from "./domain.ts";
 import { ratkingStateProbe } from "./comms-probe.ts";
 export { ratkingStateProbe } from "./comms-probe.ts";
 import { ratkingStatus } from "./ratking-status.ts";
@@ -35,12 +35,21 @@ export function doctorReport(expected: string, session: string, machine: string,
       : live ? `name matches; reader ${live.reader}` : "claim matches; lease is pi-ratking's",
   };
 }
+/** This Pi's own launch row, when Muster started it on a remote machine; undefined when absent or unreadable. */
+export const remoteLaunchRow = (env: Readonly<Record<string, string | undefined>>) => {
+  try { return env.MUSTER_REMOTE_ROW ? decodeAgentRow(JSON.parse(env.MUSTER_REMOTE_ROW)) : undefined; } catch { return undefined; }
+};
 interface Bus { emit(event: string, value: unknown): void; on(event: string, listener: (value: unknown) => void): void | (() => void) }
 export const commsDoctor = (options: { home: string; dir: string; session: string; row?: string; env: Readonly<Record<string, string | undefined>>; events: Bus }) => Effect.gen(function* () {
   const project = yield* load(options.dir).pipe(Effect.orElseSucceed(() => undefined));
-  const row = project?.agents.find(row => options.row ? row.name === options.row : row.sessionId === options.session);
-  if (options.row && !row) return yield* Effect.fail(new CommsError(`no row ${options.row}`));
-  const expected = row && project ? rowRatkingName(project, row) : options.env.RATKING_NAME;
+  // drovr, 2026-10-13: a remote row's Pi has no catalog; its launch row rides in MUSTER_REMOTE_ROW.
+  const launchRow = project ? undefined : remoteLaunchRow(options.env);
+  const row = project ? project.agents.find(row => options.row ? row.name === options.row : row.sessionId === options.session)
+    : launchRow && (!options.row || launchRow.name === options.row) ? launchRow : undefined;
+  if (options.row && !row) return yield* Effect.fail(new CommsError(project ? `no row ${options.row}`
+    : `no row ${options.row} here: this Pi has no Muster catalog${options.env.MUSTER_REMOTE_ROW ? " (it is a remote row; the catalog lives on its owner's machine)" : ""}`));
+  const slug = project?.slug ?? options.env.MUSTER_PROJECT_SLUG;
+  const expected = row && slug ? rowRatkingName({ slug }, row) : options.env.RATKING_NAME;
   if (!expected) return yield* Effect.fail(new CommsError("no expected Rat King name; set RATKING_NAME"));
   const session = row?.sessionId ?? options.session;
   const machine = row?.machine ?? options.env.MUSTER_MACHINE ?? "local";

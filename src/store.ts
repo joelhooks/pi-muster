@@ -45,7 +45,9 @@ export const exists = (dir: string) => existsSync(projectPath(dir));
 const readProject = (path: string, dir: string): Effect.Effect<Project, StoreError | NotFound> =>
   Effect.gen(function* () {
     if (!existsSync(path)) {
-      return yield* new NotFound({ kind: "project", id: dir, message: `no Muster project at ${path}; run project_open first` });
+      return yield* new NotFound({ kind: "project", id: dir, message: process.env.MUSTER_REMOTE_ROW
+        ? `no Muster project at ${path}: this Pi is a remote row, and its catalog lives on its owner's machine. Run owner tools (project_status, agent_launch, packet_land) from the owner; packet_report and owner notes work here`
+        : `no Muster project at ${path}; run project_open first` });
     }
     const raw = yield* Effect.try({
       try: () => JSON.parse(readFileSync(path, "utf8")) as unknown,

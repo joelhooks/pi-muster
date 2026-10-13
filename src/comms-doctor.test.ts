@@ -68,6 +68,17 @@ describe("pi-ratking doctor", () => {
     const events = createEventBus();
     expect(await Effect.runPromise(ratkingStatus(events, "old-extension", 5))).toBeUndefined();
   });
+  // drovr, 2026-10-13: on pennywise a restarted worker's doctor said "no row": the catalog lives on the owner's machine.
+  it("on a remote row's own machine, reads the row from MUSTER_REMOTE_ROW when there is no catalog", async () => {
+    const h = harness(); const dir = makeRepo(join(h.root, "repo"));
+    const { AgentRow, Schema } = await import("./domain.ts").then(async domain => ({ AgentRow: domain.AgentRow, Schema: (await import("effect")).Schema }));
+    const row = Schema.encodeSync(AgentRow)(Schema.decodeUnknownSync(AgentRow)({ name: "rung", role: "worker", lane: "work", state: "running", owner: "owner", sessionId: "rung-session", machine: "pennywise", cwd: "/remote/repo", branch: null, clone: null, brief: null, createdAt: h.now.toISOString(), sessionFile: null, parentSessionFile: null, pane: null, restarts: 0, nudgedAt: null, lastActivityAt: null, restore: null, profile: { model: "sol", thinking: "medium", label: "rung", noSkills: true, appendSystemPrompt: [], skills: [], extensions: [], env: {}, compactAt: null }, delivery: "none", updatedAt: h.now.toISOString() }));
+    const env = { MUSTER_REMOTE_ROW: JSON.stringify(row), MUSTER_MACHINE: "pennywise", MUSTER_PROJECT_SLUG: "drovr" };
+    const report = await runWith(h, commsDoctor({ home: h.home, dir, session: "rung-session", env, events: createEventBus() }));
+    expect(report).toMatchObject({ expected: "drovr/rung", session: "rung-session", machine: "pennywise" });
+    await expect(runWith(h, commsDoctor({ home: h.home, dir, session: "rung-session", row: "other", env, events: createEventBus() })))
+      .rejects.toThrow("no row other here: this Pi has no Muster catalog (it is a remote row; the catalog lives on its owner's machine)");
+  });
   it("reads a remote row's pi-ratking state on its own machine", async () => {
     const h = harness(); const dir = makeRepo(join(h.root, "repo"));
     await runWith(h, projectOpen({ dir, slug: "pilot", outcome: "doctor", nextAction: "test", reviewTrigger: "weekly", ephemeral: true, sidebar: false }));
