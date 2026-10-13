@@ -57,7 +57,7 @@ async function setup(patch: Record<string, unknown> = {}, answer = { status: "de
     events.emit("bellwether/pi-prompt/v1", { paneId: "pane-1", terminalId: "terminal-1", target: "worker", text: "Do this exact work", claim, ...patch });
     return claim.mock.calls.at(-1)?.[0];
   };
-  const record = (state: "working" | "idle", at = new Date().toISOString(), agent = "pilot/worker") => turns.record(decodeTurnRecord({
+  const record = (state: "working" | "idle" | "done", at = new Date().toISOString(), agent = "pilot/worker") => turns.record(decodeTurnRecord({
     $type: "sh.mschf.agentgraph.turn", agent, at, state, session: row.sessionId, turnId: `${row.sessionId}:1`, version: "0.1",
   }));
   return { prompt, claim, requests, record, turns, events, shutdown };
@@ -83,6 +83,19 @@ it("queues mail when only an older working record remains after 30 seconds", asy
   const s = await setup(); vi.useFakeTimers(); s.record("working", new Date(Date.now() - 5000).toISOString());
   const result = s.prompt()!; await vi.advanceTimersByTimeAsync(30_000);
   await expect(result).resolves.toEqual({ outcome: "queued", row: "worker", receipt: "real-mail-42" });
+});
+// S4 live proof, 2026-10-13: mail to a busy Pi ran as a follow-up inside the same run; only its done record followed.
+it("mail to a busy row is queued when the running turn's done record follows the send", async () => {
+  const s = await setup(); vi.useFakeTimers(); s.record("working", new Date(Date.now() - 5000).toISOString());
+  const result = s.prompt()!; await vi.advanceTimersByTimeAsync(5000); s.record("done");
+  await vi.advanceTimersByTimeAsync(10);
+  await expect(result).resolves.toEqual({ outcome: "queued", row: "worker", receipt: "real-mail-42" });
+});
+it("an idle row's done record alone does not prove a prompt", async () => {
+  const s = await setup(); vi.useFakeTimers(); s.record("done", new Date(Date.now() - 5000).toISOString());
+  const result = s.prompt()!; await vi.advanceTimersByTimeAsync(1000); s.record("done");
+  await vi.advanceTimersByTimeAsync(30_000);
+  await expect(result).resolves.toMatchObject({ outcome: "refused", reason: expect.stringContaining("PromptUnproven") });
 });
 it("refuses unproven mail with the real row and receipt, not another agent's working record", async () => {
   const s = await setup(); vi.useFakeTimers(); const result = s.prompt()!;

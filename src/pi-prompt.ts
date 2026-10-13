@@ -36,6 +36,7 @@ export function registerPiPrompt(events: Events, options: {
       const agent = `${project.slug}/${row.name}`;
       // Capture before sending: a working record may arrive before the send result does.
       const since = Date.now();
+      const busy = options.turns.latest(agent)?.state === "working";
       try {
         const delivery = await Effect.runPromise(ratkingSend(events, randomUUID, {
           to: agent, kind: RATKING_SEND_KIND,
@@ -44,7 +45,11 @@ export function registerPiPrompt(events: Events, options: {
         if (delivery.status !== "delivered" || !delivery.id) return { outcome: "refused", row: row.name,
           reason: delivery.status === "delivered" ? "Rat King send returned no message id" : delivery.detail ?? "Rat King send failed" };
         const receipt = delivery.id;
-        if (await options.turns.waitWorking(agent, since, 30_000)) return { outcome: "working", row: row.name, receipt };
+        // S4 live proof, 2026-10-13: mail to a busy Pi runs as a follow-up inside its current run, so no new working
+        // record comes; that run's done record, after the send, is the proof. Busy is judged before the send.
+        if (busy) {
+          if (await options.turns.waitWorking(agent, since, 30_000, true) || options.turns.latest(agent)?.state === "working") return { outcome: "queued", row: row.name, receipt };
+        } else if (await options.turns.waitWorking(agent, since, 30_000)) return { outcome: "working", row: row.name, receipt };
         if (options.turns.latest(agent)?.state === "working") return { outcome: "queued", row: row.name, receipt };
         return { outcome: "refused", row: row.name, receipt,
           reason: `PromptUnproven: ${row.name} showed no working turn within 30 s of mail ${receipt}. Debug: comms_doctor row:"${row.name}"` };

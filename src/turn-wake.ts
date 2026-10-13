@@ -15,9 +15,10 @@ export class TurnLog {
     for (const listener of this.listeners) listener(record);
   }
 
-  waitWorking(agent: string, sinceMs: number, timeoutMs: number): Promise<boolean> {
+  /** True on a working record since sinceMs; with ranAfterBusy, a done record since then counts too. */
+  waitWorking(agent: string, sinceMs: number, timeoutMs: number, ranAfterBusy = false): Promise<boolean> {
     const matches = (record: TurnRecord | undefined) => record?.agent === agent &&
-      record.state === "working" && Date.parse(record.at) >= sinceMs - 2000;
+      (record.state === "working" || (ranAfterBusy && record.state === "done")) && Date.parse(record.at) >= sinceMs - 2000;
     if (matches(this.latest(agent))) return Promise.resolve(true);
     return new Promise(resolve => {
       const finish = (working: boolean) => {
