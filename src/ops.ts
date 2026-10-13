@@ -79,7 +79,7 @@ import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
 import { watchFallback } from "./desk-local.ts";
-import { pushRemoteBinding, stderrClass, syncRemoteBindings } from "./remote.ts";
+import { pushRemoteBinding, syncRemoteBindings } from "./remote.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
@@ -3045,9 +3045,17 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   const proc = yield* Proc;
   const result = yield* proc.run("sh", [shim, verb, "--name", name], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
   if (result._tag === "Failure") return `Rat King name ${name} not ${verb}d: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
-  if (result.success.code !== 0) return `Rat King name ${name} not ${verb}d (exit ${result.success.code}: ${stderrClass(result.success.stderr)})`;
-  return `Rat King name ${name} ${done}`;
+  if (result.success.code === 0) return `Rat King name ${name} ${done}`;
+  // Tin-Tin, 2026-10-13: the mailbox CLI logs its CliError to stdout, so stderr alone read "exit 1: no stderr".
+  const said = cliErrorLine(`${result.success.stderr}\n${result.success.stdout}`);
+  if (/\(NameNotFound\)/.test(said ?? "")) return `Rat King name ${name} was never issued (a launch that failed before its Pi started); nothing to ${verb}`;
+  return `Rat King name ${name} not ${verb}d (exit ${result.success.code}: ${said ?? "no output"})`;
 });
+/** The first line that names an error in CLI output, stack frames dropped; null when none does. */
+export const cliErrorLine = (output: string) => {
+  const line = output.split(/\r?\n/).map(text => text.trim()).find(text => /error|refused|denied|not found|fail/i.test(text) && !/^at /.test(text));
+  return line ? line.replace(/^\[[\d:.]+\]\s*/, "").slice(0, 200) : null;
+};
 
 export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir, params).pipe(
   Effect.flatMap(result => result.row.state !== "closed" ? Effect.succeed(result) : Effect.gen(function* () {

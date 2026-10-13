@@ -269,6 +269,11 @@ it("retires the closed row's Rat King name through the fleet mailbox shim, and o
   writeFileSync(shim, "echo 'Error: reserved name' >&2; exit 3\n");
   const again = await f.close();
   expect(again.notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 3: Error: reserved name)`);
+  // Tin-Tin, 2026-10-13: the real CLI logs to stdout; a never-issued name is nothing to retire.
+  writeFileSync(shim, "echo '[19:22:42.010] ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (NameNotFound)'; echo '    at operatorCall (retire.ts:54:21)'; exit 1\n");
+  expect((await f.close()).notes).toContain(`Rat King name reap/${f.row.name} was never issued (a launch that failed before its Pi started); nothing to retire`);
+  writeFileSync(shim, "echo '[19:22:42.010] ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (Forbidden)'; exit 1\n");
+  expect((await f.close()).notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 1: ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (Forbidden))`);
 });
 
 // Ernestine, 2026-10-11: worker-worktree.sh remove refuses while a process has its cwd in the clone (dark-wizard 22c7f59).
