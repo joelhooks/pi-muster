@@ -9,7 +9,7 @@ import muster from "./extension-main.ts";
 import { projectOpen } from "./ops.ts";
 import { mutate } from "./store.ts";
 import { harness, runWith } from "./test-support.ts";
-import { deriveTokens } from "./tokens.ts";
+import { deriveTokens, lacksTurnEvidence } from "./tokens.ts";
 
 vi.mock("@joelhooks/pi-bellwether/herdr-client", async importOriginal => ({
   ...await importOriginal<typeof import("@joelhooks/pi-bellwether/herdr-client")>(),
@@ -55,8 +55,10 @@ it("uses gone for a lapsed lease and falls back for sessions outside the chain",
   expect(deriveTokens(project, [], {}, new Map([[key, s.record("idle", { session: "prior", turnId: "prior:1" })]])).agents).toBe("1 idle");
 });
 
-async function live() {
+async function live(turnEnabled = false) {
   const s = await setup();
+  if (turnEnabled) await runWith(s, mutate(s.home, project => Effect.succeed([{ ...project, agents: project.agents.map(row =>
+    ({ ...row, restore: { cwd: row.cwd, argv: [], env: { RATKING_TURN_RECORDS: "1" } } })) }, undefined] as const)));
   vi.stubEnv("HOME", s.home); vi.stubEnv("MUSTER_PROJECT", s.home); vi.stubEnv("MUSTER_MACHINE", "local");
   vi.stubEnv("MUSTER_ROLE", "boss"); vi.stubEnv("MUSTER_AGENT", "");
   vi.mocked(createHerdrClient).mockReturnValue(s.herdr.client());
@@ -95,6 +97,20 @@ it("the real listener publishes working, idle and blocked within one second, and
     expect(status.isError).not.toBe(true);
     expect(s.publishes()).toHaveLength(4);
     expect(s.publishes().at(-1)?.params.tokens).toMatchObject({ agents: "1 blocked" });
+  } finally { await s.stop(); }
+});
+// S5 live proof, 2026-10-13: three detached launch jobs, with empty turn logs, overwrote the desk's turn-derived token.
+it("a publisher without turn evidence for its turn-enabled rows leaves $agents to the owner", async () => {
+  const s = await live(true);
+  try {
+    const project = { ...s.project, agents: [{ ...s.row, restore: { cwd: s.row.cwd, argv: [], env: { RATKING_TURN_RECORDS: "1" } } }] };
+    expect(lacksTurnEvidence(project, new Map())).toBe(true);
+    expect(lacksTurnEvidence({ ...project, agents: [s.row] }, new Map())).toBe(false);
+    await s.status();
+    expect(s.publishes().at(-1)?.params.tokens).not.toHaveProperty("agents");
+    expect(s.publishes().at(-1)?.params.tokens).toHaveProperty("progress");
+    s.emit("working"); await vi.advanceTimersByTimeAsync(1000);
+    expect(s.publishes().at(-1)?.params.tokens).toMatchObject({ agents: "1 working" });
   } finally { await s.stop(); }
 });
 it("coalesces bursts, ignores other projects, and cancels the pending publish on shutdown", async () => {

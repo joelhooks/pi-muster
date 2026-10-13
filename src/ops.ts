@@ -81,7 +81,7 @@ import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsD
 import { readRegistry } from "./registry.ts";
 import { watchFallback } from "./desk-local.ts";
 import { pushRemoteBinding, syncRemoteBindings } from "./remote.ts";
-import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
+import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, lacksTurnEvidence, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
 import type { LiveCounts } from "./tokens.ts";
@@ -1202,10 +1202,13 @@ export const publishTokens = (project: Project, live: LiveCounts = {}) =>
     const env = yield* MusterEnv;
     if (!project.spaceId) return "no space bound; tokens not published";
     const desk = readDesk(queuePath(project.slug, env.home));
-    const tokens = deriveTokens(project, desk, live, turnLog().snapshot());
-    const shown = `now=${tokens.now ?? "-"} progress=${tokens.progress ?? "-"} agents=${tokens.agents ?? "-"} needs=${tokens.needs ?? "-"}`;
+    const turns = turnLog().snapshot();
+    const tokens = deriveTokens(project, desk, live, turns);
+    const keepAgents = lacksTurnEvidence(project, turns);
+    const shown = `now=${tokens.now ?? "-"} progress=${tokens.progress ?? "-"} agents=${keepAgents ? "(kept: no turn records in this process)" : tokens.agents ?? "-"} needs=${tokens.needs ?? "-"}`;
     if (project.sidebar === "off") return `sidebar off (shared space); would publish ${shown}`;
-    return yield* reportTokens(project.spaceId, TOKEN_SOURCE, { ...tokens }, env.now().getTime(), TOKEN_TTL_MS).pipe(
+    const { agents, ...rest } = tokens;
+    return yield* reportTokens(project.spaceId, TOKEN_SOURCE, keepAgents ? rest : { ...rest, agents }, env.now().getTime(), TOKEN_TTL_MS).pipe(
       Effect.as(`tokens: ${shown}`),
       Effect.catch((error) => Effect.succeed(`tokens not published: ${error.message}`)),
     );

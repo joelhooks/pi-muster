@@ -167,6 +167,19 @@ export function flowLine(project: Project, now: number = Date.now()): string {
 /** A null base is the repo default branch; `main`/`master`, optionally `<remote>/`, also ship with a release. */
 export const releaseBase = (base: string | null | undefined) => !base || /^(?:[\w.-]+\/)?(?:main|master)$/.test(base);
 
+/**
+ * S5 live proof, 2026-10-13: detached launch jobs and other Pis publish with an empty turn log, and their row-state
+ * `$agents` overwrote the owner's turn-derived one ("2 working · 1 idle" became "4 run"). A publisher that has no
+ * usable turn record for any live turn-enabled row leaves `$agents` alone; Herdr keeps a token a report omits.
+ */
+export function lacksTurnEvidence(project: Project, turns: ReadonlyMap<string, TurnRecord>): boolean {
+  const enabled = project.agents.filter(row => row.state !== "closed" && (row.restore?.env ?? row.profile.env).RATKING_TURN_RECORDS === "1");
+  return enabled.length > 0 && !enabled.some(row => {
+    const record = turns.get(`${project.slug}/${row.name}`);
+    return record !== undefined && sessionChain(row).includes(record.session);
+  });
+}
+
 export function deriveTokens(project: Project, desk: readonly DeskItem[], live: LiveCounts = {}, turns: ReadonlyMap<string, TurnRecord> = new Map()): Tokens {
   const work = project.lanes.filter((lane) => lane.kind === "work" && !lane.archived);
   const lanesDone = work.filter((lane) => lane.state === "closed" && lane.delivery !== "landed" && lane.delivery !== "deployed").length;
