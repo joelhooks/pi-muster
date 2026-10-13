@@ -273,6 +273,11 @@ export default function muster(host: ExtensionAPI) {
   const ProjectParam = Type.Optional(Type.String({ description: "Project dir (absolute). Default: MUSTER_PROJECT, then cwd." }));
 
   pi.on("tool_call", event => {
+    // rats-nest, 2026-10-13: workers obeyed the fleet's naming rule and renamed themselves, so Rat King mail lost
+    // their callsigns. A Muster row's name is its launch label; a desk changes it with agent_launch label.
+    if (event.toolName === "set_session_name" && env.MUSTER_AGENT && env.MUSTER_PROJECT && env.MUSTER_ROLE) {
+      return { block: true, reason: `Muster named this session at launch (row ${env.MUSTER_AGENT}); that name is your callsign on Rat King mail. Keep it: do not call set_session_name.` };
+    }
     // pi-ratking registers its tool as `ratking` by default; `intercom` is the older configured name (rats-nest, 2026-10-13).
     if (event.toolName !== "ratking" && event.toolName !== "intercom") return;
 

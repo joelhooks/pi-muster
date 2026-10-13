@@ -233,6 +233,16 @@ describe("readable message boundaries", () => {
     expect(fake.emitted).toEqual([]);
   });
 
+  // rats-nest, 2026-10-13: renamed workers lost their callsigns on Rat King mail.
+  it("refuses set_session_name only in a launched Muster session", async () => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const call = () => Promise.all(fake.hooks.get("tool_call")!.map(hook => hook({ toolName: "set_session_name", input: { name: "Turn Records Ask Integration" } })));
+    expect(await call()).toContainEqual({ block: true, reason: expect.stringContaining("do not call set_session_name") });
+    for (const key of Object.keys(process.env)) if (key.startsWith("MUSTER_")) delete process.env[key];
+    expect((await call()).every(value => value === undefined)).toBe(true);
+  });
+
   it("leaves ordinary Pi and unrelated intercom actions alone", async () => {
     const fake = fakePi();
     muster(fake.pi as never);
