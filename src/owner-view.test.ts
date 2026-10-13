@@ -98,7 +98,7 @@ describe("owner timeline", () => {
     expect(ownerTimelineData({ home, project: dir, reader: "reader", items: [item] }).authors).toEqual({});
   });
   it("shows receipt paths, expands record ids, and keeps narrow tool rows plain", () => {
-    for (const [path, woke, expected] of [["queue", false, "quiet"], ["queue", true, "woke owner"], ["intercom", true, "intercom fallback"]] as const) {
+    for (const [path, woke, expected] of [["queue", false, "quiet"], ["queue", true, "woke owner"], ["intercom", true, "legacy fallback"]] as const) {
       expect(ownerReceipt({ kind: "progress", title: "title", path, woke })).toContain(expected);
     }
     const text = '🐦 posted reply "title" → @owner · woke owner\nuri: muster://writer/record';

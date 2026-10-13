@@ -273,7 +273,8 @@ export default function muster(host: ExtensionAPI) {
   const ProjectParam = Type.Optional(Type.String({ description: "Project dir (absolute). Default: MUSTER_PROJECT, then cwd." }));
 
   pi.on("tool_call", event => {
-    if (event.toolName !== "intercom") return;
+    // pi-ratking registers its tool as `ratking` by default; `intercom` is the older configured name (rats-nest, 2026-10-13).
+    if (event.toolName !== "ratking" && event.toolName !== "intercom") return;
 
     if (!env.MUSTER_AGENT || !env.MUSTER_PROJECT || !env.MUSTER_ROLE) return;
     if (!["send", "ask", "reply"].includes(String(event.input.action)) || typeof event.input.message !== "string") return;

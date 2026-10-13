@@ -4209,7 +4209,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
       (agent) => {
         const row = rows.get(agent.name);
         const name = row?.side ? `  ${row.profile.label.split(" ")[0]} ${agent.name} ↳ ${row.side.parent}` : agent.name;
-        return `- ${name} ${agent.role}/${agent.lane} ${agent.state}${traces.has(agent.name) ? ` task=${traces.get(agent.name)!.derived} liveness=${traces.get(agent.name)!.liveness}` : ""} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} intercom=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}${agent.identity ? ` · identity: ${agent.identity}` : ""}${agent.capability ? ` · capability: ${agent.capability}` : ""}${agent.recovery ? ` · recovery: ${agent.recovery}` : ""}`;
+        return `- ${name} ${agent.role}/${agent.lane} ${agent.state}${traces.has(agent.name) ? ` task=${traces.get(agent.name)!.derived} liveness=${traces.get(agent.name)!.liveness}` : ""} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} mail=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}${agent.identity ? ` · identity: ${agent.identity}` : ""}${agent.capability ? ` · capability: ${agent.capability}` : ""}${agent.recovery ? ` · recovery: ${agent.recovery}` : ""}`;
       },
     ),
   ];

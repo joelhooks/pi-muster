@@ -1159,7 +1159,7 @@ describe("a lane from launch to close", () => {
     const h = harness();
     const { dir, launched } = await launchedWorker(h);
     const board = (await runWith(h, projectStatus(dir, { act: false }))).board;
-    expect(board).toMatch(new RegExp(`intercom=\\w+@${launched.row.sessionId.slice(0, 8)}`));
+    expect(board).toMatch(new RegExp(`mail=\\w+@${launched.row.sessionId.slice(0, 8)}`));
   });
 
   it("delivers the argv message without waiting for Herdr prompt registration", async () => {

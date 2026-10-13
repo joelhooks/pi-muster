@@ -222,12 +222,14 @@ describe("readable message boundaries", () => {
     expect(result.content[0]?.text).not.toContain(samples[3]);
   });
 
-  it.each(["send", "ask", "reply"])("blocks squashed intercom %s only in a launched Muster session", async action => {
+  it.each(["send", "ask", "reply"])("blocks squashed Rat King %s only in a launched Muster session", async action => {
     const fake = fakePi();
     muster(fake.pi as never);
-    const call = { toolName: "intercom", input: { action, message: JOINED } };
-    const results = await Promise.all(fake.hooks.get("tool_call")!.map(hook => hook(call)));
-    expect(results).toContainEqual({ block: true, reason: expect.stringContaining(HINT) });
+    // rats-nest, 2026-10-13: the tool is `ratking` by default; `intercom` is the older configured name.
+    for (const toolName of ["ratking", "intercom"]) {
+      const results = await Promise.all(fake.hooks.get("tool_call")!.map(hook => hook({ toolName, input: { action, message: JOINED } })));
+      expect(results).toContainEqual({ block: true, reason: expect.stringContaining(HINT) });
+    }
     expect(fake.emitted).toEqual([]);
   });
 
