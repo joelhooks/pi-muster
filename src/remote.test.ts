@@ -1,9 +1,12 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, renameSync, utimesSync, statSync, chmodSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { Effect, Layer } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
-import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource } from "./remote.ts";
+import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
 import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
@@ -822,4 +825,15 @@ it("lists a row's sessions newest first from its restart and foreign-adopt event
     { type: "ADOPT_FOREIGN", at: "3", detail: "b -> c: Joel: desk now" },
   ] })).toEqual(["c", "b", "a"]);
   expect(sessionChain({ sessionId: "only" })).toEqual(["only"]);
+});
+
+// Zeno, 2026-10-12: git's "fatal: not a git repository" was painted over desk TUIs on every owner pass.
+it("resolves sidecar roots outside git silently, locally and in the remote probe script", () => {
+  const plain = realpathSync(mkdtempSync(join(tmpdir(), "muster-nogit-")));
+  try {
+    expect(sidecarRoots(plain)).toEqual([join(plain, ".pi/muster")]);
+    const probe = spawnSync(process.execPath, ["--input-type=module", "-e", `${sidecarRootsScript}\nprocess.stdout.write(JSON.stringify(sidecarRoots(process.argv[1])));`, plain], { cwd: plain, encoding: "utf8" });
+    expect(probe.stderr).toBe("");
+    expect(JSON.parse(probe.stdout)).toEqual([join(plain, ".pi/muster")]);
+  } finally { rmSync(plain, { recursive: true, force: true }); }
 });

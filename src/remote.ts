@@ -28,9 +28,12 @@ export function writeRemoteNoteSidecar(env: Readonly<Record<string, string | und
     return path;
   } catch { return undefined; }
 }
-/** Use the worktree's own git directory, never the shared common directory. */
+/** Use the worktree's own git directory, never the shared common directory. Outside git only `.pi/muster` exists.
+ * Zeno, 2026-10-12: without stdio, git's "fatal: not a git repository" went to the Pi TUI on every owner pass. */
 function resolveSidecarRoots(cwd: string, exec: typeof execFileSync, pathJoin: typeof join, pathResolve: typeof resolve): string[] {
-  const gitDir = exec("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf8", timeout: 2000 }).trim();
+  let gitDir: string;
+  try { gitDir = exec("git", ["rev-parse", "--git-dir"], { cwd, encoding: "utf8", timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).trim(); }
+  catch { return [pathJoin(cwd, ".pi/muster")]; }
   return [pathJoin(pathResolve(cwd, gitDir), "muster"), pathJoin(cwd, ".pi/muster")];
 }
 export const sidecarRoots = (cwd: string) => resolveSidecarRoots(cwd, execFileSync, join, resolve);
