@@ -39,7 +39,7 @@ Create `~/.config/muster/machines.json` on the owner machine. Missing configurat
 
 Remote rows ride Rat King by name, like local ones. Under the legacy intercom policy, notes and packets reach the Flagg owner by SSH pull instead. Muster does not install a bridge.
 
-Remote `launch`, `fork`, and `restore` jobs run in the same locally detached process as local launches. The immediate receipt names the job and local log. Read the full owner-queue action before arming a pane watch. Configuration errors fail admission immediately; transport and prerequisite failures arrive as a `blocked` owner item with the machine name. The forward's control master expires after ten idle minutes; live held sockets use the same forward. A machine-wide launch lock serializes capacity checks across projects. If a crashed launch leaves a lock, the error names its path; inspect it before clearing it.
+Remote `launch`, `fork`, and `restore` jobs run in the same locally detached process as local launches. The immediate receipt names the job and local log. Read the full owner-queue action for launch proof. Pi turn records wake the current owner on done, blocked and crashed; no worker pane watch is needed. Configuration errors fail admission immediately; transport and prerequisite failures arrive as a `blocked` owner item with the machine name. The forward's control master expires after ten idle minutes; live held sockets use the same forward. A machine-wide launch lock serializes capacity checks across projects. If a crashed launch leaves a lock, the error names its path; inspect it before clearing it.
 
 ## Launch and recover
 

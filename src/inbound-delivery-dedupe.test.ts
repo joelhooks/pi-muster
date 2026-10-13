@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import { afterEach, expect, it, vi } from "vitest";
 import muster from "./extension-main.ts";
 import { appendOwnerItem, ownerPath, readOwnerQueue } from "./owner-queue.ts";
-import { harness } from "./test-support.ts";
+import { harness, runWith } from "./test-support.ts";
+import { Effect } from "effect";
+import { decodeAgentRow } from "./domain.ts";
+import { profileFor } from "./argv.ts";
+import { projectOpen, board } from "./ops.ts";
+import { mutate } from "./store.ts";
+import { mentions } from "./owner-queue.ts";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 async function setup() {
@@ -26,6 +32,64 @@ async function setup() {
   await lifecycle("session_start");
   return { ...h, events, session, sendUserMessage, sendMessage, start: () => lifecycle("session_start"), stop: () => lifecycle("session_shutdown") };
 }
+async function turnFixture() {
+  const s = await setup();
+  const opened = await runWith(s, projectOpen({ dir: s.home, slug: "turns", outcome: "turn wakes", reviewTrigger: "on request", nextAction: "test", criticalPath: [], space: "w1", sidebar: false, ephemeral: true, deskExtension: null }));
+  const at = "2026-10-13T00:00:00.000Z";
+  const row = decodeAgentRow({ name: "worker", role: "worker", lane: "work", cwd: s.home, clone: null,
+    profile: profileFor("worker", { label: "worker" }), sessionId: "turn-worker", sessionFile: null, parentSessionFile: null,
+    pane: null, owner: s.session, brief: null, state: "running", delivery: "proven", restarts: 0, restore: null, createdAt: at, updatedAt: at });
+  await runWith(s, mutate(s.home, p => Effect.succeed([{ ...p, agents: [row] }, undefined] as const)));
+  const emit = (state: string, id = `${s.root}-${state}`, patch = {}) => s.events.emit("ratking/record", {
+    id, from: state === "crashed" ? "operator" : "turns/worker", did: "did:web:worker.example.invalid",
+    record: { $type: "sh.mschf.agentgraph.turn", agent: "turns/worker", at, session: row.sessionId,
+      state, turnId: `${row.sessionId}:1`, version: "0.1", ...(state === "done" ? { stopReason: "stop" } : {}),
+      ...(["blocked", "crashed"].includes(state) ? { reason: "needs attention" } : {}), ...patch },
+  });
+  return { ...s, row, emit, project: { ...opened.project, agents: [row] } };
+}
+it.each(["done", "blocked", "crashed"])("%s turn delivery posts once and wakes the idle owner through its feed", async state => {
+  const s = await turnFixture();
+  try {
+    s.emit(state); s.emit(state);
+    await vi.waitFor(() => expect(s.sendMessage).toHaveBeenCalledOnce());
+    const items = readOwnerQueue(s.session, s.home).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]!.item.kind).toBe(state === "done" ? "done" : "blocked");
+    expect(items[0]!.item.text).toContain(state);
+    expect(mentions(items[0]!.item, s.session)).toBe(true);
+    expect(items[0]!.item.author).toBe(s.row.sessionId);
+    await s.start(); s.emit(state);
+    expect(readOwnerQueue(s.session, s.home).items).toHaveLength(1);
+  } finally { await s.stop(); }
+});
+it("silent, unknown and malformed turns post nothing; a takeover routes to the catalog's new owner", async () => {
+  const s = await turnFixture();
+  try {
+    s.emit("working"); s.emit("idle"); s.emit("done", `${s.root}-foreign`, { agent: "outside/worker" });
+    s.emit("done", `${s.root}-session`, { session: "unknown", turnId: "unknown:1" });
+    s.emit("done", `${s.root}-malformed`, { version: "bad" });
+    expect(readOwnerQueue(s.session, s.home).items).toEqual([]);
+    expect(s.sendMessage).not.toHaveBeenCalled();
+    const newOwner = "takeover-owner";
+    await runWith(s, mutate(s.home, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: newOwner })) }, undefined] as const)));
+    s.emit("crashed"); s.emit("crashed");
+    expect(readOwnerQueue(s.session, s.home).items).toEqual([]);
+    const items = readOwnerQueue(newOwner, s.home).items;
+    expect(items).toHaveLength(1); expect(mentions(items[0]!.item, newOwner)).toBe(true);
+    expect(items[0]!.item.text).toContain("crashed (lease lapsed)");
+  } finally { await s.stop(); }
+});
+it("status agent line prints the restart repair for an unsupported launch", async () => {
+  const s = await turnFixture();
+  try {
+    const line = { name: s.row.name, role: s.row.role, lane: s.row.lane, state: s.row.state, pane: null,
+      silentMin: null, cache: null, cost: null, intercom: "unknown" as const, action: null };
+    expect(board(s.project, [line], 0)).toContain('TurnUnsupported: worker was launched before turn records. Fix: agent_launch action:"restart" name:"worker". Debug: comms_doctor row:"worker"');
+    const supported = { ...s.row, restore: { cwd: s.row.cwd, argv: [], env: { RATKING_TURN_RECORDS: "1" } } };
+    expect(board({ ...s.project, agents: [supported] }, [line], 0)).not.toContain("TurnUnsupported");
+  } finally { await s.stop(); }
+});
 it("a repeated ratking message id produces exactly one followUp, including after another session-start hook", async () => {
   const s = await setup();
   const event = { id: `text-${s.root}`, from: "worker", did: "did:web:worker.example.invalid", verified: true, kind: "data",

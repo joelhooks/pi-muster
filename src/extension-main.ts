@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { projectPath } from "./store.ts";
+import { turnWake } from "./turn-wake.ts";
 import { deskWriteId, watchEntries, withDeskWrites } from "./desk-local.ts";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -13,7 +16,7 @@ import { Type } from "typebox";
 import { registerCompaction } from "./compact.ts";
 import { agentPromptOnce, paneRename } from "./herdr.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
-import { MAX_CADENCE_MINUTES } from "./domain.ts";
+import { MAX_CADENCE_MINUTES, decodeProject, decodeTurnRecord } from "./domain.ts";
 import { createComms, catalogCommsSender } from "./comms.ts";
 import { commsDoctor, commsDoctorText } from "./comms-doctor.ts";
 import { RATKING_MESSAGE, RatkingComms, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking, subscribedSwitchboards } from "./comms-ratking.ts";
@@ -40,7 +43,7 @@ import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "./
 import { registerDeskFeed } from "./desk-feed-ext.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "./owner-view.ts";
-import { capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem } from "./owner-queue.ts";
+import { appendOwnerItem, capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem } from "./owner-queue.ts";
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
@@ -316,8 +319,19 @@ export default function muster(host: ExtensionAPI) {
     const recordOff = pi.events.on("ratking/record", event => {
       if (typeof event !== "object" || event === null || !("record" in event) ||
         typeof event.record !== "object" || event.record === null || !("$type" in event.record) ||
-        event.record.$type !== "sh.mschf.ratking.desk.answer") return;
+        !["sh.mschf.ratking.desk.answer", "sh.mschf.agentgraph.turn"].includes(String(event.record.$type))) return;
       const id = deliveryId(event);
+      if (event.record.$type === "sh.mschf.agentgraph.turn") {
+        if (!env.MUSTER_PROJECT || !id || handledDeliveries.has(id)) return;
+        try {
+          const record = decodeTurnRecord(event.record);
+          const project = decodeProject(JSON.parse(readFileSync(projectPath(env.MUSTER_PROJECT), "utf8")));
+          const notice = turnWake(record, project);
+          if (!notice || !handledDeliveries.claim(id)) return;
+          appendOwnerItem(notice.owner, notice.item, homedir());
+        } catch { handledDeliveries.forget(id); /* malformed input or failed writes are not handled */ }
+        return;
+      }
       if (!id || !handledDeliveries.claim(id)) return;
       void Effect.runPromise(deskPhoneRecord(event).pipe(Effect.provide(layer(ctx))))
         .then(notice => ctx.ui.notify(notice, notice.includes("answer failed") ? "warning" : "info"))

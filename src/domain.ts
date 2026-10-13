@@ -805,6 +805,26 @@ export const DeskRecordItem = Schema.Struct({
 });
 export type DeskRecordItem = typeof DeskRecordItem.Type;
 export const decodeDeskRecordItem = Schema.decodeUnknownSync(DeskRecordItem);
+export const TurnRecord = Schema.Struct({
+  $type: Schema.Literal("sh.mschf.agentgraph.turn"),
+  agent: Schema.String.check(Schema.isPattern(/^(?:[a-z0-9]+(?:-[a-z0-9]+)*\/)?[a-z][a-z0-9_-]{0,31}$/u)),
+  at: Schema.String.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u), Schema.makeFilter(value => Number.isFinite(Date.parse(value)), { expected: "datetime" })),
+  session: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
+  state: Schema.Literals(["working", "done", "blocked", "idle", "crashed"]),
+  turnId: Schema.String.check(Schema.isPattern(/^.+:[0-9]+$/u), Schema.isMaxLength(128)),
+  version: Schema.Literal("0.1"),
+  stopReason: Schema.optionalKey(Schema.Literals(["stop", "aborted", "error", "length"])),
+  reason: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(280))),
+  generation: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER))),
+}).check(Schema.makeFilter(value =>
+  value.turnId.startsWith(`${value.session}:`) && Number.isSafeInteger(Number(value.turnId.slice(value.session.length + 1))) &&
+  (value.stopReason === undefined || value.state === "done") &&
+  (value.reason === undefined || value.state === "blocked" || value.state === "crashed") &&
+  (value.generation === undefined || value.state === "crashed"),
+  { expected: "session:n turnId; stopReason only on done; reason only on blocked or crashed; generation only on crashed" }));
+export type TurnRecord = typeof TurnRecord.Type;
+export const decodeTurnRecord = Schema.decodeUnknownSync(TurnRecord);
+
 export const DeskRecordAnswer = Schema.Struct({
   $type: Schema.Literal("sh.mschf.ratking.desk.answer"), project: Schema.String, itemId: Schema.String,
   inReplyTo: Schema.String, values: Schema.Record(Schema.String, Schema.Unknown),

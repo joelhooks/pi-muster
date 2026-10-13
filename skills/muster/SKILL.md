@@ -51,6 +51,8 @@ Role models and alternates come from the fleet roster. Pick an alternate when it
 
 Long builds need silence limits that allow them to finish. Cheap scouts need less context; a lane that must retain context needs a suitable compaction limit. Change project policy rather than working around it.
 
+Pi worker turns wake the catalog's current owner through turn records on done, blocked and crashed. No `herdr_watch agent_state` is needed for worker panes. If `project_status` reports `TurnUnsupported`, restart the named row to enable turn records.
+
 A launch receipt is not a live agent. Inspect blocked launch evidence before retrying. After a dependency upgrade, restart Pi rather than relying on a reload to replace cached modules.
 
 Warm-fork related work only after the source context is ready, with a fresh brief and separate checkout for another writer. An overruled instruction needs corrected conversation context, not a stack of “ignore that” messages. Rewinding context does not undo files or commits.

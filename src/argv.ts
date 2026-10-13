@@ -130,6 +130,7 @@ export function agentEnv(project: Project, row: AgentRow): Record<string, string
     ...(policyComms(project.policy) === "ratking" ? { MUSTER_COMMS: "ratking" } : {}),
     // pi-ratking claims this name; Muster mints nothing.
     RATKING_NAME: `${project.slug}/${row.name}`,
+    RATKING_TURN_RECORDS: "1",
   };
 }
 
