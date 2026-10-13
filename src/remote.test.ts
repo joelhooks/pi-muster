@@ -742,6 +742,14 @@ describe("remote owner operations", () => {
     await expect(s.launch("w5")).rejects.toThrow("lane tab is full");
     expect(existsSync(join(s.h.root, "clones", "w5"))).toBe(false);
   });
+  // pi-tui-research, 2026-10-13: a bundle-seeded source has no origin, so set-url failed after the clone existed.
+  it("adds origin to a remote clone whose source checkout has none", async () => {
+    const s = setup(); await s.open();
+    // worker-worktree.sh copies the source's remotes; with none, the clone has no origin either.
+    writeFileSync(s.h.workerWorktree, readFileSync(s.h.workerWorktree, "utf8").replace(/(git clone -q "\$2" "\$target")/, '$1 && git -C "$target" remote remove origin'));
+    const launched = await s.launch("no-origin");
+    expect(spawnSync("git", ["-C", launched.row.cwd, "remote", "get-url", "origin"], { encoding: "utf8" }).stdout.trim()).toBe(s.dir);
+  });
   it("relaunching a failed row reuses its earlier clone", async () => {
     const s = setup(); await s.open();
     const first = await s.launch("retry");

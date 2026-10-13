@@ -256,7 +256,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       clone = { source, branch: allocated.branch, base: allocated.base };
       cloneNotes.push(...allocated.notes);
       // A private/local base may not exist on GitHub: retain the mapped checkout as the fetch remote.
-      yield* git(cwd, "remote", "set-url", "origin", remoteSource);
+      // pi-tui-research, 2026-10-13: a source checkout seeded from a bundle has no origin, and set-url failed after the clone existed.
+      yield* git(cwd, "remote", "set-url", "origin", remoteSource).pipe(Effect.catch(() => git(cwd, "remote", "add", "origin", remoteSource)));
       yield* must("git", ["fetch", "--no-tags", "--", remoteSource, allocated.base?.sha ?? "HEAD"], { cwd, timeoutMs: 30_000 });
     }
     yield* must("test", ["-d", cwd], { cwd: "/", timeoutMs: 10_000 });
