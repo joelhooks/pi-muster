@@ -237,7 +237,18 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     let cwd = params.cwd ? mapPath(yield* requireAbsolute("cwd", params.cwd), machine) : existing?.cwd ?? parent?.cwd ?? remoteSource;
     let clone = existing?.clone ?? null;
     const cloneNotes: string[] = [...skillNotes];
-    if (params.clone && params.action !== "restore") {
+    // drovr, 2026-10-12: "lane tab is full" was found only after the clone existed, and every retry then failed on
+    // "already exists". Refuse before allocating; a retry reuses the failed attempt's clone, as a local launch does.
+    if (params.action !== "restore" && params.action !== "adopt") {
+      const laneRows = project.agents.filter(other => other.machine === nameOfMachine && other.lane === lane.slug && other.name !== name && other.state !== "closed" && other.pane);
+      if (laneRows.length >= MAX_WORKERS_PER_TAB && (yield* locatePane(laneRows[0]!.pane!))) return yield* input(`machine ${nameOfMachine}: lane tab is full`);
+    }
+    const reusable = params.clone && params.action !== "restore" && existing?.clone && existing.lane === lane.slug && !params.cwd
+      && (yield* must("test", ["-d", existing.cwd], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false))));
+    if (reusable) {
+      cwd = existing!.cwd;
+      cloneNotes.push(`reused clone ${cwd} from ${name}'s earlier attempt`);
+    } else if (params.clone && params.action !== "restore") {
       // onRemote supplies the remote Proc, so branch selection reads the remote source.
       cloneNotes.push(...(yield* ensureBaseRef(remoteSource, baseFetch)));
       const allocated = yield* cloneFor(remoteSource, name, lane, project.mode, machine.workerWorktree, params.hydrate === true);

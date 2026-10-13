@@ -735,6 +735,23 @@ describe("remote owner operations", () => {
     expect(closed.cloneError).toBeNull(); expect(existsSync(launched.row.cwd)).toBe(false);
   });
 
+  // drovr, 2026-10-12: "lane tab is full" came after the clone existed, so every retry failed on "already exists".
+  it("refuses a full lane tab before allocating a clone", async () => {
+    const s = setup(); await s.open();
+    for (const name of ["w1", "w2", "w3", "w4"]) await s.launch(name);
+    await expect(s.launch("w5")).rejects.toThrow("lane tab is full");
+    expect(existsSync(join(s.h.root, "clones", "w5"))).toBe(false);
+  });
+  it("relaunching a failed row reuses its earlier clone", async () => {
+    const s = setup(); await s.open();
+    const first = await s.launch("retry");
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === "retry" ? { ...row, state: "failed" as const, pane: null } : row) }, undefined] as const)));
+    s.remote.panes.delete(first.row.pane!.paneId);
+    const again = await s.launch("retry");
+    expect(again.row.cwd).toBe(first.row.cwd); expect(again.row.clone).toEqual(first.row.clone);
+    expect(again.notes.join("\n")).toContain(`reused clone ${first.row.cwd} from retry's earlier attempt`);
+  });
+
   it("saves remote logs, closes the bound pane and removes the clone through SSH", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
