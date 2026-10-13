@@ -1205,7 +1205,7 @@ export const publishTokens = (project: Project, live: LiveCounts = {}) =>
     const turns = turnLog().snapshot();
     const tokens = deriveTokens(project, desk, live, turns);
     // A stuck warning rides $agents and comes only from the owner's pass, so it always publishes.
-    const keepAgents = !live.stuck && lacksTurnEvidence(project, turns);
+    const keepAgents = !live.stuck && lacksTurnEvidence(project, turns, env.sessionId);
     const shown = `now=${tokens.now ?? "-"} progress=${tokens.progress ?? "-"} agents=${keepAgents ? "(kept: no turn records in this process)" : tokens.agents ?? "-"} needs=${tokens.needs ?? "-"}`;
     if (project.sidebar === "off") return `sidebar off (shared space); would publish ${shown}`;
     const { agents, ...rest } = tokens;

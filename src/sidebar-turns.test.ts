@@ -113,6 +113,16 @@ it("a publisher without turn evidence for its turn-enabled rows leaves $agents t
     expect(s.publishes().at(-1)?.params.tokens).toMatchObject({ agents: "1 working" });
   } finally { await s.stop(); }
 });
+// S5 live proof, 2026-10-13: after every worker closed, the desk's own turn-enabled row kept a stale $agents.
+it("the publisher's own row is not missing evidence, so closing every worker republishes $agents", async () => {
+  const s = await setup();
+  const enabled = { cwd: s.row.cwd, argv: [], env: { RATKING_TURN_RECORDS: "1" } };
+  const desk = { ...s.row, name: "desk", role: "desk" as const, sessionId: s.sessionId, restore: enabled };
+  const worker = { ...s.row, restore: enabled };
+  expect(lacksTurnEvidence({ ...s.project, agents: [desk] }, new Map(), s.sessionId)).toBe(false);
+  expect(lacksTurnEvidence({ ...s.project, agents: [desk, { ...worker, state: "closed" as const }] }, new Map(), s.sessionId)).toBe(false);
+  expect(lacksTurnEvidence({ ...s.project, agents: [desk, worker] }, new Map(), s.sessionId)).toBe(true);
+});
 it("coalesces bursts, ignores other projects, and cancels the pending publish on shutdown", async () => {
   const s = await live();
   try {

@@ -172,8 +172,11 @@ export const releaseBase = (base: string | null | undefined) => !base || /^(?:[\
  * `$agents` overwrote the owner's turn-derived one ("2 working · 1 idle" became "4 run"). A publisher that has no
  * usable turn record for any live turn-enabled row leaves `$agents` alone; Herdr keeps a token a report omits.
  */
-export function lacksTurnEvidence(project: Project, turns: ReadonlyMap<string, TurnRecord>): boolean {
-  const enabled = project.agents.filter(row => row.state !== "closed" && (row.restore?.env ?? row.profile.env).RATKING_TURN_RECORDS === "1");
+export function lacksTurnEvidence(project: Project, turns: ReadonlyMap<string, TurnRecord>, self?: string): boolean {
+  // The publisher's own row never has turn records in its own log (S5 proof: with every worker closed, the desk kept a
+  // stale "1 idle" for a closed row), so it is not evidence either way.
+  const enabled = project.agents.filter(row => row.state !== "closed" && (row.restore?.env ?? row.profile.env).RATKING_TURN_RECORDS === "1" &&
+    !(self && sessionChain(row).includes(self)));
   return enabled.length > 0 && !enabled.some(row => {
     const record = turns.get(`${project.slug}/${row.name}`);
     return record !== undefined && sessionChain(row).includes(record.session);
