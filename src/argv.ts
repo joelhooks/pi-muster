@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import type { AgentRow, LaunchProfile, Project, Role, RoleDefaults } from "./domain.ts";
-import { ROLE_DEFAULTS, policyComms } from "./domain.ts";
+import { CLAUDE_COMPACT_AT_MAX, ROLE_DEFAULTS, policyComms } from "./domain.ts";
 
 /** Loaders that keep function names (tsx, esbuild keepNames) wrap a serialized function's inner
  * functions in `__name(...)`. A bare remote `node -e` has no such helper, so every script that
@@ -35,6 +35,9 @@ function value(flag: string, text: string): readonly [string, string] {
  * prefix is set here, once: bridge lanes fail closed when the prompt changes
  * mid-session, and the prefix is the part every turn re-reads from cache.
  */
+/** A Claude row never compacts later than CLAUDE_COMPACT_AT_MAX, whatever its stored profile or project policy says. */
+export const compactCap = (model: string, compactAt: number) => model.startsWith("claude-bridge/") ? Math.min(compactAt, CLAUDE_COMPACT_AT_MAX) : compactAt;
+
 export function buildArgv(input: ArgvInput): string[] {
   const { profile } = input;
   const argv: string[] = [];
@@ -58,7 +61,7 @@ export function buildArgv(input: ArgvInput): string[] {
   for (const extension of new Set(extensions)) argv.push(...value("-e", extension));
   // Always explicit: without the flag the role default comes back, so "off" must say off.
   // Muster's extension registers --compact-at; a slim Pi does not load it and would reject the flag.
-  if (!profile.slim) argv.push("--compact-at", profile.compactAt === null ? "off" : String(profile.compactAt));
+  if (!profile.slim) argv.push("--compact-at", profile.compactAt === null ? "off" : String(compactCap(profile.model, profile.compactAt)));
   argv.push("--approve");
   const forbidden = argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg));
   if (forbidden.length > 0) throw new Error(`argv contains tool-registry flags: ${forbidden.join(", ")}`);

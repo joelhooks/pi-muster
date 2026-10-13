@@ -597,9 +597,13 @@ export interface RoleDefaults {
   readonly skills?: readonly string[];
 }
 
+/** Joel, 2026-10-12: Claude rows compact by 400k. Pi's own auto-compaction for claude-bridge 1M models fires at the
+ * same mark (reserveTokens 600k); this caps a row's stored or policy `--compact-at` so neither runs past it. */
+export const CLAUDE_COMPACT_AT_MAX = 400_000;
+
 export const ROLE_DEFAULTS: Readonly<Record<Role, RoleDefaults>> = {
-  desk: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 450_000, noSkills: false },
-  hawk: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 450_000, noSkills: false },
+  desk: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 400_000, noSkills: false },
+  hawk: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 400_000, noSkills: false },
   boss: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 400_000, noSkills: false },
   worker: { model: "openai-codex/gpt-6.1-sol", thinking: "medium", compactAt: 200_000, noSkills: true },
   judge: { model: "claude-bridge/claude-opus-5-5", thinking: "high", compactAt: 350_000, noSkills: false },

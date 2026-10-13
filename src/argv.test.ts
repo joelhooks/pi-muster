@@ -58,7 +58,7 @@ describe("buildArgv", () => {
   });
 
   it("keeps roles distinct: owners keep skills, workers trim the prefix", () => {
-    expect(profileFor("hawk", { label: "🦅 hawk" })).toMatchObject({ model: "claude-bridge/claude-opus-5-5", thinking: "high", noSkills: false, compactAt: 450000 });
+    expect(profileFor("hawk", { label: "🦅 hawk" })).toMatchObject({ model: "claude-bridge/claude-opus-5-5", thinking: "high", noSkills: false, compactAt: 400000 });
     expect(profileFor("worker", { label: "w" }).noSkills).toBe(true);
     expect(profileFor("judge", { label: "j", compactAt: null, thinking: null }).compactAt).toBeNull();
   });
@@ -108,4 +108,13 @@ describe("helpers", () => {
     expect(mintSessionId("probe_1", new Date("2026-09-29T04:49:07Z"))).toBe("probe_1-20260929T044907");
     expect(sessionDirFor("/Users/me/Code/x", "/h")).toBe("/h/.pi/agent/sessions/--Users-me-Code-x--");
   });
+});
+
+// Joel, 2026-10-12: Claude compacts by 400k; rows launched at 450k keep that value in their stored profile.
+it("caps --compact-at at 400k for Claude rows, whatever the stored profile says, and leaves other models and off alone", () => {
+  const at = (model: string, compactAt: number | null) => { const argv = buildArgv({ kind: "launch", sessionId: "s", sessionFile: null, parentSessionFile: null, musterExtension: "/muster", profile: { ...profileFor("desk", { label: "d" }), model, compactAt } }); return argv[argv.indexOf("--compact-at") + 1]; };
+  expect(at("claude-bridge/claude-opus-5-5", 450_000)).toBe("400000");
+  expect(at("claude-bridge/claude-opus-5-5", 300_000)).toBe("300000");
+  expect(at("claude-bridge/claude-opus-5-5", null)).toBe("off");
+  expect(at("openai-codex/gpt-6.1-sol", 450_000)).toBe("450000");
 });
