@@ -3088,10 +3088,27 @@ export const cliErrorLine = (output: string) => {
   return line ? line.replace(/^\[[\d:.]+\]\s*/, "").slice(0, 200) : null;
 };
 
+// Nicodemus, 2026-10-13: closing a pane kills the reader before it writes a clean stop, so its heartbeat lingered
+// with an expired lease and the nest's crash sweep read every close as a crash. Drop it once the row is closed.
+const READER_HEARTBEAT_SCRIPT = "const fs=require('node:fs');const p=require('node:path').join(require('node:os').homedir(),'.local/state/rat-king/pi/readers',process.argv[1]);try{fs.rmSync(p);console.log('removed')}catch(e){console.log(e.code==='ENOENT'?'absent':'kept '+e.code)}";
+const dropReaderHeartbeat = (project: Project, row: AgentRow) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  if (project.policy?.comms && project.policy.comms !== "ratking") return null;
+  const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
+  const file = `${name.replace("/", ".")}.json`;
+  const runner = yield* Proc;
+  const proc = row.machine === "local" ? runner : sshProc(row.machine, yield* machineConfig(row.machine), runner, env.home);
+  const result = yield* proc.run("node", ["-e", READER_HEARTBEAT_SCRIPT, file], { cwd: row.machine === "local" ? env.home : "/", timeoutMs: 15_000 }).pipe(Effect.result);
+  const said = result._tag === "Success" && result.success.code === 0 ? result.success.stdout.trim() : "unchecked";
+  return said === "removed" ? `reader heartbeat ${file} removed, so the crash sweep does not read this close as a crash`
+    : said === "absent" ? null : `reader heartbeat ${file} not removed (${said}); the crash sweep may report this close as a crash`;
+}).pipe(Effect.catch(() => Effect.succeed("reader heartbeat not removed (host unreachable); the crash sweep may report this close as a crash")));
+
 export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir, params).pipe(
   Effect.flatMap(result => result.row.state !== "closed" ? Effect.succeed(result) : Effect.gen(function* () {
-    const note = yield* retireRatkingName(yield* load(dir), result.row);
-    return note ? { ...result, notes: [...result.notes, note] } : result;
+    const project = yield* load(dir);
+    const notes = [yield* retireRatkingName(project, result.row), yield* dropReaderHeartbeat(project, result.row)].filter((note): note is string => !!note);
+    return notes.length ? { ...result, notes: [...result.notes, ...notes] } : result;
   })));
 
 /** States whose Pi may still be running its pi-until watches: a row that reported or landed keeps its Pi until closed. */

@@ -257,6 +257,25 @@ it("records SSH removal failures and retries an already-closed remote row throug
   expect(ssh.some(script => script.includes("'--force'"))).toBe(true);
 });
 
+// Nicodemus, 2026-10-13: a killed pane leaves its reader heartbeat behind, which the crash sweep reads as a crash.
+it("drops the closed row's reader heartbeat on its machine", async () => {
+  const f = await fixture();
+  const readers = join(f.h.home, ".local/state/rat-king/pi/readers");
+  mkdirSync(readers, { recursive: true });
+  const beat = join(readers, `reap.${f.row.name}.json`);
+  writeFileSync(beat, "{}");
+  const other = join(readers, "reap.someone-else.json");
+  writeFileSync(other, "{}");
+  const previous = process.env.HOME;
+  process.env.HOME = f.h.home;
+  try {
+    const closed = await f.close();
+    expect(existsSync(beat)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+    expect(closed.notes).toContain(`reader heartbeat reap.${f.row.name}.json removed, so the crash sweep does not read this close as a crash`);
+  } finally { process.env.HOME = previous; }
+});
+
 // Nicodemus, 2026-10-11: mail to a closed row's name was accepted and never read. Close retires the name.
 it("retires the closed row's Rat King name through the fleet mailbox shim, and only notes a failure", async () => {
   const f = await fixture();
