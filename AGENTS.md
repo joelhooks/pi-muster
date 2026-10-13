@@ -6,6 +6,10 @@ Muster 🐑 (`@joelhooks/pi-muster`) is the Pi package that runs Herdr project s
 
 `skills/muster/SKILL.md` holds judgment only. If a rule can be enforced, it lives in a tool, and the skill does not restate it.
 
+## Freeze (2026-10-13)
+
+Muster is being strangled down to its Herdr hands: spawn, fork, restart, adopt, locate, prompt, interrupt, readPane, clone create/assess/remove, closePane and layout. Joel approved a freeze: no new features outside those hands. Bug fixes to existing behaviour still land. New coordination features (queues, lanes, landing, cleanup, routing) go to their new owners, not here.
+
 ## Rules
 
 - Extension startup is side-effect free: it registers tools, a flag, and a command, and opens no socket, file, or bus channel. Tools resolve everything at call time.
