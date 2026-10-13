@@ -9,6 +9,8 @@ export class TurnLog {
 
   latest(agent: string): TurnRecord | undefined { return this.records.get(agent); }
 
+  snapshot(): ReadonlyMap<string, TurnRecord> { return new Map(this.records); }
+
   record(record: TurnRecord): void {
     const previous = this.records.get(record.agent);
     if (!previous || Date.parse(record.at) >= Date.parse(previous.at)) this.records.set(record.agent, record);
@@ -32,6 +34,10 @@ export class TurnLog {
     });
   }
 }
+
+/** All token publishers and the inbound listener share the same in-process evidence. */
+const processTurns = new TurnLog();
+export const turnLog = (): TurnLog => processTurns;
 
 /** Turn delivery is already authenticated by pi-ratking. The catalog owns routing. */
 export function turnWake(record: TurnRecord, project: Project): { owner: string; item: OwnerNoteInput } | null {

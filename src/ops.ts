@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { turnUnsupported } from "./turn-wake.ts";
+import { turnLog, turnUnsupported } from "./turn-wake.ts";
 import { spawn } from "node:child_process";
 import { appendFileSync, fsyncSync, closeSync, openSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -1202,7 +1202,7 @@ export const publishTokens = (project: Project, live: LiveCounts = {}) =>
     const env = yield* MusterEnv;
     if (!project.spaceId) return "no space bound; tokens not published";
     const desk = readDesk(queuePath(project.slug, env.home));
-    const tokens = deriveTokens(project, desk, live);
+    const tokens = deriveTokens(project, desk, live, turnLog().snapshot());
     const shown = `now=${tokens.now ?? "-"} progress=${tokens.progress ?? "-"} agents=${tokens.agents ?? "-"} needs=${tokens.needs ?? "-"}`;
     if (project.sidebar === "off") return `sidebar off (shared space); would publish ${shown}`;
     return yield* reportTokens(project.spaceId, TOKEN_SOURCE, { ...tokens }, env.now().getTime(), TOKEN_TTL_MS).pipe(

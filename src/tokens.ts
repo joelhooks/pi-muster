@@ -2,7 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { decodeDeploySection, DEPLOY_NAMES, DEPLOY_SECTION, type DeployLevel } from "./domain.ts";
 import { formatAge } from "./switchboard.ts";
-import type { AgentState, DeskItem, Lane, Project } from "./domain.ts";
+import type { AgentState, DeskItem, Lane, Project, TurnRecord } from "./domain.ts";
+import { sessionChain } from "./ops.ts";
 import { TERMINAL_PACKET_STATES } from "./domain.ts";
 
 /**
@@ -166,7 +167,7 @@ export function flowLine(project: Project, now: number = Date.now()): string {
 /** A null base is the repo default branch; `main`/`master`, optionally `<remote>/`, also ship with a release. */
 export const releaseBase = (base: string | null | undefined) => !base || /^(?:[\w.-]+\/)?(?:main|master)$/.test(base);
 
-export function deriveTokens(project: Project, desk: readonly DeskItem[], live: LiveCounts = {}): Tokens {
+export function deriveTokens(project: Project, desk: readonly DeskItem[], live: LiveCounts = {}, turns: ReadonlyMap<string, TurnRecord> = new Map()): Tokens {
   const work = project.lanes.filter((lane) => lane.kind === "work" && !lane.archived);
   const lanesDone = work.filter((lane) => lane.state === "closed" && lane.delivery !== "landed" && lane.delivery !== "deployed").length;
   const toLand = project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state)).length;
@@ -184,8 +185,20 @@ export function deriveTokens(project: Project, desk: readonly DeskItem[], live: 
   const now = project.state === "archived" || !headline ? null : clip(headline);
 
   const agentParts: string[] = live.stuck ? [`⚠️ ${live.stuck} stuck`] : [];
+  const turnCounts = { working: 0, blocked: 0, idle: 0, gone: 0 };
+  const fallback = project.agents.filter(row => {
+    if (row.state === "closed") return false;
+    const record = turns.get(`${project.slug}/${row.name}`);
+    if (!record || !sessionChain(row).includes(record.session)) return true;
+    const bucket = record.state === "crashed" ? "gone" : record.state === "done" ? "idle" : record.state;
+    turnCounts[bucket]++;
+    return false;
+  });
+  for (const [label, count] of Object.entries(turnCounts)) {
+    if (count > 0) agentParts.push(`${count} ${label}`);
+  }
   for (const [label, states] of AGENT_BUCKETS) {
-    const count = project.agents.filter((agent) => states.includes(agent.state)).length;
+    const count = fallback.filter((agent) => states.includes(agent.state)).length;
     if (count > 0) agentParts.push(`${count} ${label}`);
   }
 

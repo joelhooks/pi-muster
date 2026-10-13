@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { projectPath } from "./store.ts";
-import { TurnLog, turnWake } from "./turn-wake.ts";
+import { load, projectPath } from "./store.ts";
+import { turnLog, turnWake } from "./turn-wake.ts";
 import { registerPiPrompt } from "./pi-prompt.ts";
 import { deskWriteId, watchEntries, withDeskWrites } from "./desk-local.ts";
 import { homedir } from "node:os";
@@ -39,6 +39,7 @@ import {
   projectReview,
   projectStatus,
   projectUpdate,
+  publishTokens,
 } from "./ops.ts";
 import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
 import { registerDeskFeed } from "./desk-feed-ext.ts";
@@ -295,8 +296,20 @@ export default function muster(host: ExtensionAPI) {
   let offRatking: (() => void) | undefined;
   let offRecord: (() => void) | undefined;
   let offPrompt: (() => void) | undefined;
-  const turns = new TurnLog();
+  const turns = turnLog();
+  let tokenTimer: ReturnType<typeof setTimeout> | undefined;
+  const cancelTokenPublish = () => { clearTimeout(tokenTimer); tokenTimer = undefined; };
+  const scheduleTokenPublish = (ctx: ExtensionContext) => {
+    if (tokenTimer || !env.MUSTER_PROJECT) return;
+    const dir = env.MUSTER_PROJECT;
+    tokenTimer = setTimeout(() => {
+      tokenTimer = undefined;
+      void Effect.runPromise(load(dir).pipe(Effect.flatMap(publishTokens), Effect.provide(layer(ctx)))).catch(() => {});
+    }, 1000);
+    tokenTimer.unref();
+  };
   pi.on("session_start", (_event, ctx) => {
+    cancelTokenPublish();
     offRatking?.(); offRatking = undefined;
     offRecord?.(); offRecord = undefined;
     offPrompt?.();
@@ -330,8 +343,10 @@ export default function muster(host: ExtensionAPI) {
         try {
           const record = decodeTurnRecord(event.record);
           turns.record(record);
-          if (!env.MUSTER_PROJECT || !id || handledDeliveries.has(id)) return;
+          if (!env.MUSTER_PROJECT) return;
           const project = decodeProject(JSON.parse(readFileSync(projectPath(env.MUSTER_PROJECT), "utf8")));
+          if (project.agents.some(row => record.agent === `${project.slug}/${row.name}`)) scheduleTokenPublish(ctx);
+          if (!id || handledDeliveries.has(id)) return;
           const notice = turnWake(record, project);
           if (!notice || !handledDeliveries.claim(id)) return;
           appendOwnerItem(notice.owner, notice.item, homedir());
@@ -347,6 +362,7 @@ export default function muster(host: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    cancelTokenPublish();
     offPrompt?.(); offPrompt = undefined;
     offRatking?.(); offRatking = undefined;
     offRecord?.(); offRecord = undefined;
