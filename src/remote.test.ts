@@ -600,16 +600,25 @@ describe("remote owner operations", () => {
     expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
   });
   // rubicon-fitness, 2026-10-13: athlete-migration-sync-2 reused a closed row's worktree whose sidecar was never ingested; close refused.
-  it("notes and skips a never-ingested sidecar left by a closed row in the same lane", async () => {
+  // codetv-workshop, 2026-10-13: a closed row in another lane ran in the source checkout, and every clone copied its sidecars.
+  it("notes and skips never-ingested packet and note sidecars left by a closed row in any lane", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
-    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...launched.row, name: "earlier-row", state: "closed" as const, pane: null }] }, undefined] as const)));
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...launched.row, name: "earlier-row", lane: "elsewhere", state: "closed" as const, pane: null }] }, undefined] as const)));
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
-    const packet = { id, kind: "commit", artifact: null, lane: "work", agent: "earlier-row", report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-13T00:00:00.000Z", updatedAt: "2026-10-13T00:00:00.000Z" };
+    const packet = { id, kind: "commit", artifact: null, lane: "elsewhere", agent: "earlier-row", report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-13T00:00:00.000Z", updatedAt: "2026-10-13T00:00:00.000Z" };
     const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
     writeFileSync(join(root, "packet.json"), JSON.stringify({ project: "probe", machine: "remote", packet, reportText: "report" }));
     const result = await s.run(ingestRemotePackets(s.dir));
-    expect(result.notes).toEqual([`sidecar ${id.slice(0, 12)} was left by closed row earlier-row and never ingested; ignored for ${launched.row.name} (check it landed if that work matters)`]);
+    expect(result.notes).toEqual([`packet sidecar ${id.slice(0, 12)} was left by closed row earlier-row and never ingested; ignored for ${launched.row.name} (check it landed if that work matters)`]);
     expect((await s.run(load(s.dir))).packets).toEqual([]);
+    rmSync(root, { recursive: true });
+    const noteId = "61829ad01878d31ffe835240707d15449cb03c3640264bd3a631b3954be8e1b2";
+    mkdirSync(join(launched.row.cwd, ".pi/muster/notes"), { recursive: true });
+    const item = appendOwnerItem("old-owner", { author: "earlier-session", lane: "elsewhere", kind: "fyi", title: "old note" }, join(s.h.root, "remote-home"));
+    writeFileSync(join(launched.row.cwd, ".pi/muster/notes", `${noteId}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: "earlier-row", lane: "elsewhere", owner: "old-owner", item }));
+    const notesResult = await s.run(ingestRemotePackets(s.dir));
+    expect(notesResult.notes.some(note => note.startsWith(`note sidecar ${noteId.slice(0, 12)} was left by closed row earlier-row`))).toBe(true);
+    expect(notesResult.notes.join("\n")).not.toContain("ingest skipped");
   });
   it("keeps local status available and skips remaining machine rows after a transport failure", async () => {
     const s = setup(); await s.open(); await s.launch(); await s.launch("remote-two");

@@ -748,8 +748,13 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
       if (failedMachines.has(row.machine)) break;
       if (entry.error) { skipped(`sidecar ${entry.id}: ${entry.error}`); continue; }
       yield* Effect.gen(function* () {
+        // A closed row's sidecars travel with its checkout: a reused worktree, or a source checkout a row ran in, which
+        // every later clone copies (rubicon-fitness and codetv-workshop, 2026-10-13). Note them; never let them block close.
+        const leftByClosed = (agent: string) => agent !== row.name && project.agents.some(other => other.name === agent && other.state === "closed" && other.machine === row.machine);
+        const ignoreLeft = (agent: string) => notes.push(`${entry.kind} sidecar ${entry.id.slice(0, 12)} was left by closed row ${agent} and never ingested; ignored for ${row.name} (check it landed if that work matters)`);
         if (entry.kind === "note") {
           const sidecar = yield* decodeWith(decodeRemoteNote, entry.value);
+          if (sidecar.project === project.slug && leftByClosed(sidecar.agent)) return ignoreLeft(sidecar.agent);
           if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane || !sessionChain(row).includes(sidecar.item.author)) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
           // drovr, 2026-10-12: sidecars stay on disk and the queue is per owner session, so an owner restart replayed old notes.
           const ownerRow = project.agents.find(agent => agent.sessionId === row.owner);
@@ -766,12 +771,7 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         if (project.packets.some(prior => prior.id === entry.id)) return;
         const sidecar = yield* decodeWith(decodeRemotePacket, entry.value);
         const packet = sidecar.packet;
-        // rubicon-fitness, 2026-10-13: a row reusing a closed row's worktree found that row's never-ingested sidecar, and close refused.
-        const leftBy = packet.agent !== row.name ? project.agents.find(other => other.name === packet.agent && other.state === "closed" && other.machine === row.machine && other.lane === row.lane) : undefined;
-        if (leftBy && sidecar.project === project.slug) {
-          notes.push(`sidecar ${entry.id.slice(0, 12)} was left by closed row ${leftBy.name} and never ingested; ignored for ${row.name} (check it landed if that work matters)`);
-          return;
-        }
+        if (sidecar.project === project.slug && leftByClosed(packet.agent)) return ignoreLeft(packet.agent);
         if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
         const report = join(reportsDir(dir), row.lane, `${row.name}-${packet.id.slice(0,12)}.svx`);
         yield* mutate(dir, current => Effect.gen(function* () {
