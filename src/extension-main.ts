@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { projectPath } from "./store.ts";
-import { turnWake } from "./turn-wake.ts";
+import { TurnLog, turnWake } from "./turn-wake.ts";
+import { registerPiPrompt } from "./pi-prompt.ts";
 import { deskWriteId, watchEntries, withDeskWrites } from "./desk-local.ts";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -293,9 +294,13 @@ export default function muster(host: ExtensionAPI) {
   // Inbound Muster payloads over pi-ratking: owner posts land in this session's queue, messages follow up.
   let offRatking: (() => void) | undefined;
   let offRecord: (() => void) | undefined;
+  let offPrompt: (() => void) | undefined;
+  const turns = new TurnLog();
   pi.on("session_start", (_event, ctx) => {
     offRatking?.(); offRatking = undefined;
     offRecord?.(); offRecord = undefined;
+    offPrompt?.();
+    offPrompt = registerPiPrompt(pi.events, { project: env.MUSTER_PROJECT, session: ctx.sessionManager.getSessionId(), turns }) || undefined;
     if (!ratkingHere()) return;
     const off = pi.events.on(RATKING_MESSAGE, message => {
       const id = deliveryId(message);
@@ -322,14 +327,15 @@ export default function muster(host: ExtensionAPI) {
         !["sh.mschf.ratking.desk.answer", "sh.mschf.agentgraph.turn"].includes(String(event.record.$type))) return;
       const id = deliveryId(event);
       if (event.record.$type === "sh.mschf.agentgraph.turn") {
-        if (!env.MUSTER_PROJECT || !id || handledDeliveries.has(id)) return;
         try {
           const record = decodeTurnRecord(event.record);
+          turns.record(record);
+          if (!env.MUSTER_PROJECT || !id || handledDeliveries.has(id)) return;
           const project = decodeProject(JSON.parse(readFileSync(projectPath(env.MUSTER_PROJECT), "utf8")));
           const notice = turnWake(record, project);
           if (!notice || !handledDeliveries.claim(id)) return;
           appendOwnerItem(notice.owner, notice.item, homedir());
-        } catch { handledDeliveries.forget(id); /* malformed input or failed writes are not handled */ }
+        } catch { if (id) handledDeliveries.forget(id); /* malformed input or failed writes are not handled */ }
         return;
       }
       if (!id || !handledDeliveries.claim(id)) return;
@@ -341,6 +347,7 @@ export default function muster(host: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", () => {
+    offPrompt?.(); offPrompt = undefined;
     offRatking?.(); offRatking = undefined;
     offRecord?.(); offRecord = undefined;
     for (const service of comms.values()) service.dispose();

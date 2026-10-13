@@ -2,6 +2,36 @@ import type { Project, TurnRecord } from "./domain.ts";
 import type { OwnerNoteInput } from "./owner-queue.ts";
 import { sessionChain } from "./ops.ts";
 
+/** In-process proof only; working and idle never become owner-queue posts. */
+export class TurnLog {
+  private records = new Map<string, TurnRecord>();
+  private listeners = new Set<(record: TurnRecord) => void>();
+
+  latest(agent: string): TurnRecord | undefined { return this.records.get(agent); }
+
+  record(record: TurnRecord): void {
+    const previous = this.records.get(record.agent);
+    if (!previous || Date.parse(record.at) >= Date.parse(previous.at)) this.records.set(record.agent, record);
+    for (const listener of this.listeners) listener(record);
+  }
+
+  waitWorking(agent: string, sinceMs: number, timeoutMs: number): Promise<boolean> {
+    const matches = (record: TurnRecord | undefined) => record?.agent === agent &&
+      record.state === "working" && Date.parse(record.at) >= sinceMs - 2000;
+    if (matches(this.latest(agent))) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const finish = (working: boolean) => {
+        clearTimeout(timer);
+        this.listeners.delete(listener);
+        resolve(working);
+      };
+      const listener = (record: TurnRecord) => { if (matches(record)) finish(true); };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      this.listeners.add(listener);
+    });
+  }
+}
+
 /** Turn delivery is already authenticated by pi-ratking. The catalog owns routing. */
 export function turnWake(record: TurnRecord, project: Project): { owner: string; item: OwnerNoteInput } | null {
   if (record.state === "working" || record.state === "idle") return null;

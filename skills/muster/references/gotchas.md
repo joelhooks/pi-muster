@@ -22,7 +22,7 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 
 - To park a lane, use `lane_open open: false`; `lane_close discard: true` drops proposed work from the backlog without counting it as finished work.
 
-- Messages deliver when the recipient's turn ends. To steer a running turn in a pane you own, type into it.
+- Messages deliver when the recipient's turn ends. Prompt a live Pi worker with mail: `herdr_agent prompt` routes through Rat King for its owning session and proves life with a working turn record. A queued result means the busy worker has not started the mailed turn; do not type a duplicate into its pane.
 - Address agents by `<project>/<row>` through Muster's Comms tools; the alias follows rebinds. Never keep a cached session id. Rat King addresses rows by `<project>/<row>` name, never a session id.
 - Chatty messages drown owners: in one pilot, 34 of about 985 messages were results. FYI, progress and done go to `owner_note`, not the Rat King tool. Questions go to `owner_note kind=question`; answers thread through `owner_reply`.
 - Never tell a worker to `/quit`. In a tiny pane it arrived as the chat message "quit". Close the pane after sign-off with `agent_close`. With current Bellwether pane-close bus support, Muster retires the owner's matching watches before closing and reports `watches retired: <ids>`. On older Bellwether, cancel watches first with `herdr_watch action=cancel`, including named targets; fallback receipts name candidates, not confirmed live watches.
