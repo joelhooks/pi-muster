@@ -766,6 +766,12 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         if (project.packets.some(prior => prior.id === entry.id)) return;
         const sidecar = yield* decodeWith(decodeRemotePacket, entry.value);
         const packet = sidecar.packet;
+        // rubicon-fitness, 2026-10-13: a row reusing a closed row's worktree found that row's never-ingested sidecar, and close refused.
+        const leftBy = packet.agent !== row.name ? project.agents.find(other => other.name === packet.agent && other.state === "closed" && other.machine === row.machine && other.lane === row.lane) : undefined;
+        if (leftBy && sidecar.project === project.slug) {
+          notes.push(`sidecar ${entry.id.slice(0, 12)} was left by closed row ${leftBy.name} and never ingested; ignored for ${row.name} (check it landed if that work matters)`);
+          return;
+        }
         if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
         const report = join(reportsDir(dir), row.lane, `${row.name}-${packet.id.slice(0,12)}.svx`);
         yield* mutate(dir, current => Effect.gen(function* () {

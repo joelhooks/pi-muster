@@ -599,6 +599,18 @@ describe("remote owner operations", () => {
     expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
     expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
   });
+  // rubicon-fitness, 2026-10-13: athlete-migration-sync-2 reused a closed row's worktree whose sidecar was never ingested; close refused.
+  it("notes and skips a never-ingested sidecar left by a closed row in the same lane", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...launched.row, name: "earlier-row", state: "closed" as const, pane: null }] }, undefined] as const)));
+    const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
+    const packet = { id, kind: "commit", artifact: null, lane: "work", agent: "earlier-row", report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-13T00:00:00.000Z", updatedAt: "2026-10-13T00:00:00.000Z" };
+    const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "packet.json"), JSON.stringify({ project: "probe", machine: "remote", packet, reportText: "report" }));
+    const result = await s.run(ingestRemotePackets(s.dir));
+    expect(result.notes).toEqual([`sidecar ${id.slice(0, 12)} was left by closed row earlier-row and never ingested; ignored for ${launched.row.name} (check it landed if that work matters)`]);
+    expect((await s.run(load(s.dir))).packets).toEqual([]);
+  });
   it("keeps local status available and skips remaining machine rows after a transport failure", async () => {
     const s = setup(); await s.open(); await s.launch(); await s.launch("remote-two");
     const local = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local worker", clone: true, noSkills: true }));
