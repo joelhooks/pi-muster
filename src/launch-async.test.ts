@@ -93,8 +93,12 @@ describe("asynchronous launch admission", () => {
     expect(items[0]?.kind).toBe("action");
     expect(items[0]?.text.endsWith(result.body)).toBe(true);
     expect(mentions(items[0]!, h.sessionId)).toBe(true);
-    expect(result.body).toContain("delivery: proven");
-    expect(result.body).toContain("argv: pi");
+    // rats-nest, 2026-10-13: the owner queue gets a short 🐑 receipt; argv and routine prose stay in the launch log.
+    expect(result.body.split("\n")[0]).toMatch(new RegExp(`^🐑 launched ${row.name} · `));
+    expect(result.body).toContain("delivery proven");
+    expect(result.body).not.toContain("argv: pi");
+    expect(result.body).toContain(`full launch receipt: ${receipt.log}`);
+    expect(readFileSync(receipt.log!, "utf8")).toContain("argv: pi");
     await failWith(h, runLaunchJob(dir, receipt.jobId!));
     expect(readOwnerItems(h.sessionId, h.home)).toHaveLength(1);
   });

@@ -126,6 +126,20 @@ describe("version skew", () => {
     expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: "Board header · ⚠ Muster tools stale\nrow\nwarning" }], details: { board: "original" } });
   });
 
+  // rats-nest, 2026-10-13: the full warning on every tool result was noise.
+  it("prints a warning once until it changes, while project_status keeps its header mark", async () => {
+    const registered: Array<{ execute: (...args: unknown[]) => Promise<unknown> }> = [];
+    let warning = "warning one";
+    const pi = withVersionSkew({ registerTool: (tool: typeof registered[number]) => registered.push(tool) } as never, { check: async () => warning });
+    pi.registerTool({ name: "probe", parameters: {} as never, label: "test", description: "test", execute: async () => ({ content: [{ type: "text", text: "success" }], details: null }) });
+    pi.registerTool({ name: "project_status", parameters: {} as never, label: "test", description: "test", execute: async () => ({ content: [{ type: "text", text: "Board header\nrow" }], details: null }) });
+    expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: "success\nwarning one" }], details: null });
+    expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: "success" }], details: null });
+    expect(await registered[1]?.execute()).toEqual({ content: [{ type: "text", text: "Board header · ⚠ Muster tools stale\nrow" }], details: null });
+    warning = "warning two";
+    expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: "success\nwarning two" }], details: null });
+  });
+
   it("a failed check never fails the registered tool", async () => {
     const registered: Array<{ execute: (...args: unknown[]) => Promise<unknown> }> = [];
     const pi = withVersionSkew({ registerTool: (tool: typeof registered[number]) => registered.push(tool) } as never, { check: async () => { throw new Error("unreadable"); } });

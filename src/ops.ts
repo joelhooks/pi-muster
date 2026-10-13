@@ -2646,6 +2646,23 @@ export const launchResultText = (result: { row: AgentRow; argv: readonly string[
   `argv: pi ${result.argv.join(" ")}`, ...result.notes,
 ].join("\n");
 
+/** Routine launch prose an owner never acts on; the full text stays in the launch log (rats-nest, 2026-10-13). */
+const ROUTINE_LAUNCH_NOTE = /^(?:machine \S+: FIFO launch lock|machine \S+: fleet capability ready|machine \S+: brief and \d+ mapped referenced file|Your scratch path is |Pi binary: |work type \S+: route |worker model: |base: )/;
+/** The owner-queue form of a launch result: one 🐑 line, then what an owner needs to act. */
+export const launchOwnerText = (result: { row: AgentRow; argv: readonly string[]; readiness: string; proof: Proof | null; sessionIdMatched: boolean | null; notes: readonly string[] }, log: string) => {
+  const { row } = result;
+  const model = row.profile.model ? `${row.profile.model.split("/").at(-1)}${row.profile.thinking ? ` ${row.profile.thinking}` : ""}` : null;
+  const base = row.clone?.base ? `base ${row.clone.base.sha.slice(0, 7)}` : null;
+  const notes = [...new Set(result.notes)].filter(note => !ROUTINE_LAUNCH_NOTE.test(note));
+  return [
+    ["🐑 launched", row.name, "·", [row.pane?.paneId ?? "no pane", row.machine !== "local" ? row.machine : null, model, base].filter(Boolean).join(" · ")].join(" "),
+    `session ${row.sessionId}${result.sessionIdMatched === false ? " (Herdr's id, not the minted one)" : ""} · readiness ${result.readiness} · ${result.proof ? `delivery ${result.proof.state}${result.proof.state === "unproven" ? `: ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent"}`,
+    ...(row.restore?.env.RATKING_NAME ? [`mail: ${row.restore.env.RATKING_NAME}`] : []),
+    ...notes,
+    `full launch receipt: ${log}`,
+  ].join("\n");
+};
+
 export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const row = yield* mutate(dir, project => Effect.gen(function* () {
@@ -2664,7 +2681,11 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     console.error(body);
     const tail = yield* Effect.try({ try: () => readFileSync(job.log, "utf8").slice(-4000), catch: () => new InputError({ message: "log unavailable" }) }).pipe(Effect.orElseSucceed(() => "log unavailable"));
     body += `\nLog tail (UNTRUSTED):\n${tail}`;
-  } else body = launchResultText(result.value);
+  } else {
+    // The full receipt (argv, input map, routine notes) goes to the launch log; the owner queue gets the short form.
+    yield* Effect.try({ try: () => appendFileSync(job.log, `\n${launchResultText(result.value)}\n`), catch: () => new InputError({ message: "log unavailable" }) }).pipe(Effect.ignore);
+    body = launchOwnerText(result.value, job.log);
+  }
   const kind = failed ? "blocked" as const : "action" as const;
   yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);

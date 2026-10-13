@@ -121,6 +121,9 @@ export function createVersionSkew({ root, now = Date.now, loaded: evaluated = lo
 
 /** Keep the host API intact; every nested registrar receives this same facade. */
 export function withVersionSkew(pi: ExtensionAPI, skew: VersionSkew): ExtensionAPI {
+  // rats-nest, 2026-10-13: the same full warning on every tool result was noise. Show it once per distinct warning
+  // (a new disk commit changes it); project_status still marks its header every time.
+  let shown: string | undefined;
   const registerTool: ExtensionAPI["registerTool"] = (tool) => {
     pi.registerTool({
       ...tool,
@@ -129,15 +132,19 @@ export function withVersionSkew(pi: ExtensionAPI, skew: VersionSkew): ExtensionA
         let warning: string | undefined;
         try { warning = await skew.check(); } catch { /* never fail a tool for telemetry */ }
         if (!warning) return result;
+        const repeat = warning === shown;
+        shown = warning;
+        const marked = tool.name === "project_status" && !("isError" in result && result.isError);
+        if (repeat && !marked) return result;
         let first = true;
         return {
           ...result,
           content: [...result.content.map((item) => {
             if (item.type !== "text" || !first) return item;
             first = false;
-            const body = tool.name === "project_status" && !("isError" in result && result.isError) ? item.text.replace(/^(.*)$/m, "$1 · ⚠ Muster tools stale") : item.text;
-            return { ...item, text: `${body}\n${warning}` };
-          }), ...(first ? [{ type: "text" as const, text: warning }] : [])],
+            const body = marked ? item.text.replace(/^(.*)$/m, "$1 · ⚠ Muster tools stale") : item.text;
+            return { ...item, text: repeat ? body : `${body}\n${warning}` };
+          }), ...(first && !repeat ? [{ type: "text" as const, text: warning }] : [])],
         };
       },
     });
