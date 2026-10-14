@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { load, projectPath } from "./store.ts";
-import { turnLog, turnWake } from "./turn-wake.ts";
+import { turnLog } from "./turn-wake.ts";
 import { registerPiPrompt } from "./pi-prompt.ts";
 import { deskWriteId, watchEntries, withDeskWrites } from "./desk-local.ts";
 import { homedir } from "node:os";
@@ -45,7 +45,7 @@ import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "./
 import { registerDeskFeed } from "./desk-feed-ext.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "./owner-view.ts";
-import { appendOwnerItem, capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem } from "./owner-queue.ts";
+import { capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem } from "./owner-queue.ts";
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
@@ -342,17 +342,15 @@ export default function muster(host: ExtensionAPI) {
         !["sh.mschf.ratking.desk.answer", "sh.mschf.agentgraph.turn"].includes(String(event.record.$type))) return;
       const id = deliveryId(event);
       if (event.record.$type === "sh.mschf.agentgraph.turn") {
+        // pi-ratking renders done, blocked and crashed turns and wakes the owner (rat-king 9b183ea); Muster keeps only the
+        // in-process turn evidence and the $agents publish (strangler slice 5).
         try {
           const record = decodeTurnRecord(event.record);
           turns.record(record);
           if (!env.MUSTER_PROJECT) return;
           const project = decodeProject(JSON.parse(readFileSync(projectPath(env.MUSTER_PROJECT), "utf8")));
           if (project.agents.some(row => record.agent === `${project.slug}/${row.name}`)) scheduleTokenPublish(ctx);
-          if (!id || handledDeliveries.has(id)) return;
-          const notice = turnWake(record, project);
-          if (!notice || !handledDeliveries.claim(id)) return;
-          appendOwnerItem(notice.owner, notice.item, homedir());
-        } catch { if (id) handledDeliveries.forget(id); /* malformed input or failed writes are not handled */ }
+        } catch { /* malformed input or an unreadable catalog publishes nothing */ }
         return;
       }
       if (!id || !handledDeliveries.claim(id)) return;

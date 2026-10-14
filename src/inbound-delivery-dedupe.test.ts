@@ -48,36 +48,15 @@ async function turnFixture() {
   });
   return { ...s, row, emit, project: { ...opened.project, agents: [row] } };
 }
-it.each(["done", "blocked", "crashed"])("%s turn delivery posts once and wakes the idle owner through its feed", async state => {
+// Strangler slice 5: pi-ratking renders done, blocked and crashed turns and wakes the owner (rat-king 9b183ea).
+it.each(["done", "blocked", "crashed", "working", "idle"])("a %s turn record posts nothing and wakes nothing from Muster; pi-ratking owns its notice", async state => {
   const s = await turnFixture();
   try {
     s.emit(state); s.emit(state);
-    await vi.waitFor(() => expect(s.sendMessage).toHaveBeenCalledOnce());
-    const items = readOwnerQueue(s.session, s.home).items;
-    expect(items).toHaveLength(1);
-    expect(items[0]!.item.kind).toBe(state === "done" ? "done" : "blocked");
-    expect(items[0]!.item.text).toContain(state);
-    expect(mentions(items[0]!.item, s.session)).toBe(true);
-    expect(items[0]!.item.author).toBe(s.row.sessionId);
     await s.start(); s.emit(state);
-    expect(readOwnerQueue(s.session, s.home).items).toHaveLength(1);
-  } finally { await s.stop(); }
-});
-it("silent, unknown and malformed turns post nothing; a takeover routes to the catalog's new owner", async () => {
-  const s = await turnFixture();
-  try {
-    s.emit("working"); s.emit("idle"); s.emit("done", `${s.root}-foreign`, { agent: "outside/worker" });
-    s.emit("done", `${s.root}-session`, { session: "unknown", turnId: "unknown:1" });
-    s.emit("done", `${s.root}-malformed`, { version: "bad" });
     expect(readOwnerQueue(s.session, s.home).items).toEqual([]);
     expect(s.sendMessage).not.toHaveBeenCalled();
-    const newOwner = "takeover-owner";
-    await runWith(s, mutate(s.home, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: newOwner })) }, undefined] as const)));
-    s.emit("crashed"); s.emit("crashed");
-    expect(readOwnerQueue(s.session, s.home).items).toEqual([]);
-    const items = readOwnerQueue(newOwner, s.home).items;
-    expect(items).toHaveLength(1); expect(mentions(items[0]!.item, newOwner)).toBe(true);
-    expect(items[0]!.item.text).toContain("crashed (lease lapsed)");
+    expect(s.sendUserMessage).not.toHaveBeenCalled();
   } finally { await s.stop(); }
 });
 it("status agent line prints the restart repair for an unsupported launch", async () => {

@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { agentEnv, profileFor } from "./argv.ts";
 import { decodeAgentRow, decodeTurnRecord, type Project } from "./domain.ts";
-import { turnUnsupported, turnWake } from "./turn-wake.ts";
+import { turnUnsupported } from "./turn-wake.ts";
 
 const decodeWire = (value: unknown) => decodeTurnRecord(JSON.parse(JSON.stringify(value)));
 const at = "2026-10-13T00:00:00.000Z";
@@ -21,24 +21,6 @@ it("decodes valid turn records and refuses malformed fields and state-specific m
     { state: "crashed", stopReason: undefined, generation: -1 }, { session: "" }]) {
     expect(() => decodeWire({ ...record, ...patch })).toThrow();
   }
-});
-it.each(["done", "blocked", "crashed"] as const)("%s addresses and mentions the current owner", state => {
-  const decoded = decodeWire({ ...record, state, stopReason: state === "done" ? "stop" : undefined,
-    reason: state === "done" ? undefined : "needs attention", generation: state === "crashed" ? 2 : undefined });
-  const notice = turnWake(decoded, project)!;
-  expect(notice.owner).toBe("new-owner");
-  expect(notice.item).toMatchObject({ author: row.sessionId, mention: "new-owner", kind: state === "done" ? "done" : "blocked" });
-  expect(notice.item.title).toContain(state);
-  expect(notice.item.body).toContain(decoded.turnId);
-  expect(notice.item.body).toContain(state === "done" ? "stopReason: stop" : "reason: needs attention");
-});
-it.each(["working", "idle"] as const)("%s stays silent", state => {
-  expect(turnWake(decodeWire({ ...record, state, stopReason: undefined }), project)).toBeNull();
-});
-it("rejects agents and sessions outside the project row, but accepts the session chain", () => {
-  expect(turnWake(decodeWire({ ...record, agent: "elsewhere/worker" }), project)).toBeNull();
-  expect(turnWake(decodeWire({ ...record, session: "stranger", turnId: "stranger:1" }), project)).toBeNull();
-  expect(turnWake(decodeWire({ ...record, session: "old-session", turnId: "old-session:1" }), project)?.item.author).toBe("old-session");
 });
 it("enables records for every role and diagnoses recorded launch env rather than the current profile", () => {
   for (const role of ["desk", "boss", "worker", "hawk", "judge"] as const) {
