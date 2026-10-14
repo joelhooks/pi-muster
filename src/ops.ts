@@ -3694,22 +3694,25 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
       const source = sourceOf(project, lane, row);
-      const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base);
-      if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
+      // codetv-workshop, 2026-10-14: a pennywise lane's source path exists only on pennywise, so local git spawned in
+      // a missing cwd (spawn git ENOENT). A remote row's landing is proven on its own machine.
+      const git = row.machine === "local" ? proc : sshProc(row.machine, yield* machineConfig(row.machine), proc, env.home);
+      const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base).pipe(Effect.provideService(Proc, git));
+      if (/^[a-f0-9]{40,64}$/.test(base) || (yield* git.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
       if (hasRemote) {
-        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source });
+        const fetched = yield* git.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source });
         if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot attest against stale base refs` });
       }
-      const resolve = () => proc.run("git", ["rev-parse", "--verify", "--end-of-options", `${targetRef}^{commit}`], { cwd: source });
+      const resolve = () => git.run("git", ["rev-parse", "--verify", "--end-of-options", `${targetRef}^{commit}`], { cwd: source });
       let target = yield* resolve();
       if (target.code !== 0 && hasRemote) {
-        yield* proc.run("git", ["fetch", "-q", "--", remote, targetRef], { cwd: source });
+        yield* git.run("git", ["fetch", "-q", "--", remote, targetRef], { cwd: source });
         target = yield* resolve();
       }
       if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from ${remote} did not resolve it)` });
       landedAs = target.stdout.trim();
       const baseRef = hasRemote ? `refs/remotes/${remote}/${base}` : `refs/heads/${base}`;
-      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasRemote ? `${remote}/` : ""}${base}` });
+      if ((yield* git.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasRemote ? `${remote}/` : ""}${base}` });
       evidence = `owner-attested: landed inside ${landedAs}; ${evidence}`;
       note = "recorded an owner-attested landing";
     } else if (outcome === "committed") {

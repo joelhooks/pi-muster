@@ -512,6 +512,24 @@ describe("remote owner operations", () => {
     expect(readFileSync(join(s.dir, "work.txt"), "utf8")).toBe("packet\n");
   });
 
+  // codetv-workshop, 2026-10-14: a pennywise lane's repo path is absent on Flagg; attested landing ran git there locally.
+  it("an attested landing of a remote packet proves landedAs on the row's machine, never with local git", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote work");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "remote work", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs(); // the owner lands from Flagg, not from the row's machine
+    expect((await s.run(packetVerify(s.dir, commit))).packet.state).toBe("verified");
+    sh(s.dir, "fetch", "-q", cwd, commit); sh(s.dir, "merge", "--squash", "-q", commit); sh(s.dir, "commit", "-qm", "squash-merged elsewhere");
+    const landedAs = sh(s.dir, "rev-parse", "HEAD").trim();
+    s.calls.length = 0;
+    const landed = await s.run(packetLand(s.dir, { id: commit, outcome: "committed", landedAs, attested: true, evidence: "squash-merged as PR #1" }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs, attested: true });
+    expect(s.calls.filter(call => call.command === "git")).toEqual([]);
+    expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("merge-base"))).toBe(true);
+  });
+
   it("verifies and records a remote sibling branch", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
     sh(cwd, "checkout", "-qb", "worker/remote-next", "main");
