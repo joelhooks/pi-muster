@@ -291,6 +291,22 @@ describe("restart by fork", () => {
     expect(s.host.initialPrompts.at(-1)).toContain("re-arm the ones still needed: cad1");
   });
 
+  // rats-nest-desk, 2026-10-14: a fork copies ancestors' entries, so a restart listed 12 watches for 2 live.
+  it("leaves out watches started before the parent session began, and lists one line per label", () => {
+    const at = (iso: string) => iso;
+    const started = (id: string, label: string, timestamp: string) => JSON.stringify({ type: "custom", customType: "pi-until-started", timestamp, data: { receipt: { id, label, kind: "recurring", intervalMs: 7_200_000 } } });
+    const journal = [
+      JSON.stringify({ type: "session", id: "parent", timestamp: at("2026-10-14T12:00:00.000Z") }),
+      started("anc1", "fleet health digest", "2026-10-13T08:00:00.000Z"),
+      started("anc2", "seaweed memory", "2026-10-12T08:00:00.000Z"),
+      started("live1", "fleet health digest", "2026-10-14T12:05:00.000Z"),
+      started("live2", "seaweed memory", "2026-10-14T12:06:00.000Z"),
+      started("live3", "seaweed memory", "2026-10-14T12:07:00.000Z"),
+    ].join("\n");
+    const watches = ops.openUntilWatches(journal, Date.parse("2026-10-14T13:00:00.000Z"));
+    expect(watches).toEqual([`live1 "fleet health digest" (recurring, every 7200 s)`, `live3 "seaweed memory" (recurring, every 7200 s)`]);
+  });
+
   it("refusals for another owner's row name project_status takeover, the only takeover restart and adopt have", async () => {
     const s = await setup();
     s.h.sessionId = "outsider";

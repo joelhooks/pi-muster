@@ -2276,42 +2276,51 @@ const untilFinishedLines = (text: string) => text.split("\n").filter(line => lin
 /** Prints only pi-until session entries, then the host's pi-until finish events: a remote journal never crosses ssh whole. */
 const UNTIL_LINES_SCRIPT = "const fs=require('node:fs');const read=p=>{try{return fs.readFileSync(p,'utf8')}catch{return ''}};"
   + "const t=(process.env.PI_UNTIL_TELEMETRY_FILE||'').trim()||require('node:path').join(require('node:os').homedir(),'.pi/agent/pi-until/events.jsonl');"
-  + "process.stdout.write([...read(process.argv[1]).split('\\n').filter(line=>line.includes('\"pi-until-')),...read(t).split('\\n').filter(line=>line.includes('\"event\":\"finished\"'))].join('\\n'))";
+  + "const j=read(process.argv[1]).split('\\n');process.stdout.write([j[0]||'',...j.filter(line=>line.includes('\"pi-until-')),...read(t).split('\\n').filter(line=>line.includes('\"event\":\"finished\"'))].join('\\n'))";
 
 /** pi-until watches a journal started and never finished, one short line each. A cancel writes no
  * receipt, so a listed watch may already be gone: the successor checks before re-arming. */
 export function openUntilWatches(journal: string, now = Date.now()): string[] {
-  const open = new Map<string, string>();
+  const open = new Map<string, { label: string; line: string }>();
   const finished = new Set<string>();
+  // A fork copies its ancestors' entries with their own timestamps, and pi-until carries no watch across a fork, so a
+  // watch started before this journal's session header died with an ancestor (rats-nest-desk listed 12 for 2 live, 2026-10-14).
+  let sessionStart = Number.NaN;
+  const inherited = (at: unknown) => Number.isFinite(sessionStart) && typeof at === "string" && Date.parse(at) < sessionStart;
   // A watch past its deadline has ended, receipt or not (a timeout or a cancel can leave none).
   const expired = (at: unknown) => typeof at === "string" && Number.isFinite(Date.parse(at)) && Date.parse(at) <= now;
   const describe = (id: string, label: unknown, kind: unknown, interval: unknown, quickRef?: unknown) =>
     `${id} "${String(label ?? "").slice(0, 80)}" (${String(kind ?? "until")}${typeof interval === "number" ? `, every ${Math.round(interval / 1000)} s` : ""}${typeof quickRef === "string" && quickRef ? `; ${quickRef.slice(0, 120)}` : ""})`;
   for (const line of journal.split("\n")) {
     if (!line.includes("\"pi-until-") && !line.includes('"event":"finished"')) continue;
-    let entry: { type?: unknown; customType?: unknown; data?: Record<string, unknown>; event?: unknown; id?: unknown };
+    let entry: { type?: unknown; customType?: unknown; data?: Record<string, unknown>; event?: unknown; id?: unknown; timestamp?: unknown };
     try { entry = JSON.parse(line); } catch { continue; }
+    if (entry.type === "session" && Number.isNaN(sessionStart) && typeof entry.timestamp === "string") { sessionStart = Date.parse(entry.timestamp); continue; }
     // A telemetry finish (any status, cancels included) ends the watch whichever session ran it: forks inherit
     // ancestors' start entries, so a watch cancelled days ago in an older session was still listed (2026-10-12).
     if (entry.event === "finished" && typeof entry.id === "string") { finished.add(entry.id); continue; }
     if (entry.type !== "custom" || typeof entry.data !== "object" || entry.data === null) continue;
+    if (entry.customType !== "pi-until-finished" && inherited(entry.timestamp)) continue;
     const data = entry.data;
     if (entry.customType === "pi-until-started") {
       const receipt = data.receipt as Record<string, unknown> | undefined;
       const snapshot = data.snapshot as Record<string, unknown> | undefined;
       if (typeof receipt?.id === "string" && expired(receipt.expiresAt)) open.delete(receipt.id);
-      else if (typeof receipt?.id === "string") open.set(receipt.id, describe(receipt.id, receipt.label, receipt.kind, receipt.intervalMs, snapshot?.quickRef));
+      else if (typeof receipt?.id === "string") open.set(receipt.id, { label: String(receipt.label ?? ""), line: describe(receipt.id, receipt.label, receipt.kind, receipt.intervalMs, snapshot?.quickRef) });
     } else if (entry.customType === "pi-until-suspended" && Array.isArray(data.watches)) {
       for (const watch of data.watches as Array<{ definition?: Record<string, unknown>; facts?: Record<string, unknown> }>) {
         const id = watch.facts?.id;
         const snapshot = watch.definition?.snapshot as Record<string, unknown> | undefined;
         if (typeof id === "string" && expired(watch.facts?.expiresAt)) open.delete(id);
-        else if (typeof id === "string") open.set(id, describe(id, watch.definition?.label, watch.definition?.kind, watch.definition?.intervalMs, snapshot?.quickRef));
+        else if (typeof id === "string") open.set(id, { label: String(watch.definition?.label ?? ""), line: describe(id, watch.definition?.label, watch.definition?.kind, watch.definition?.intervalMs, snapshot?.quickRef) });
       }
     } else if (entry.customType === "pi-until-finished" && typeof data.id === "string") open.delete(data.id);
   }
   for (const id of finished) open.delete(id);
-  return [...open.values()].slice(-12);
+  // One line per label, the latest: re-arming a repeat twice would page twice.
+  const byLabel = new Map<string, string>();
+  for (const { label, line } of open.values()) { byLabel.delete(label); byLabel.set(label, line); }
+  return [...byLabel.values()].slice(-12);
 }
 
 /** Move every row `from` owns in other registered catalogs to `to`, with a scoped owner forward per project.
