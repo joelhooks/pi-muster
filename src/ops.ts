@@ -753,8 +753,13 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         // every later clone copies (rubicon-fitness and codetv-workshop, 2026-10-13). Note them; never let them block close.
         const leftByClosed = (agent: string) => agent !== row.name && project.agents.some(other => other.name === agent && other.state === "closed" && other.machine === row.machine);
         const ignoreLeft = (agent: string) => notes.push(`${entry.kind} sidecar ${entry.id.slice(0, 12)} was left by closed row ${agent} and never ingested; ignored for ${row.name} (check it landed if that work matters)`);
+        // A clone copies its source's .git/muster, so a row of another project that once ran in that source leaves its
+        // sidecars in every later clone; one naming another agent can't be this row's report (aih-support-sweep, 2026-10-14).
+        // One naming this row with a foreign project still fails identity: it may be this row's own report under a drifted slug.
+        const ignoreForeign = (other: string) => notes.push(`${entry.kind} sidecar ${entry.id.slice(0, 12)} belongs to project ${other}, copied from the clone's source; ignored for ${row.name} (that project's owner should check it landed)`);
         if (entry.kind === "note") {
           const sidecar = yield* decodeWith(decodeRemoteNote, entry.value);
+          if (sidecar.project !== project.slug && sidecar.agent !== row.name) return ignoreForeign(sidecar.project);
           if (sidecar.project === project.slug && leftByClosed(sidecar.agent)) return ignoreLeft(sidecar.agent);
           if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane || !sessionChain(row).includes(sidecar.item.author)) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
           // drovr, 2026-10-12: sidecars stay on disk and the queue is per owner session, so an owner restart replayed old notes.
@@ -772,6 +777,7 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         if (project.packets.some(prior => prior.id === entry.id)) return;
         const sidecar = yield* decodeWith(decodeRemotePacket, entry.value);
         const packet = sidecar.packet;
+        if (sidecar.project !== project.slug && packet.agent !== row.name) return ignoreForeign(sidecar.project);
         if (sidecar.project === project.slug && leftByClosed(packet.agent)) return ignoreLeft(packet.agent);
         if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
         const report = join(reportsDir(dir), row.lane, `${row.name}-${packet.id.slice(0,12)}.svx`);

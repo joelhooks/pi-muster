@@ -619,7 +619,7 @@ describe("remote owner operations", () => {
     expect(s.remote.calls.filter(call => call.method === "pane.send_input" && String(call.params.text).startsWith("/muster-rewind"))).toHaveLength(1);
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("openSessionTree"))).toBe(true);
   }, 30_000);
-  it("rejects a sidecar from a different project without changing the owner catalog", async () => {
+  it("rejects a sidecar from a different project that names this row, without changing the owner catalog", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
     const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
@@ -665,6 +665,25 @@ describe("remote owner operations", () => {
     const notesResult = await s.run(ingestRemotePackets(s.dir));
     expect(notesResult.notes.some(note => note.startsWith(`note sidecar ${noteId.slice(0, 12)} was left by closed row earlier-row`))).toBe(true);
     expect(notesResult.notes.join("\n")).not.toContain("ingest skipped");
+  });
+  // aih-support-sweep, 2026-10-14: codetv-workshop rows had run in the pennywise ai-hero source checkout; every aih clone
+  // copied their sidecars, ingest refused them as "invalid sidecar identity" and close refused lgseat2 and giftnow.
+  it("notes and skips packet and note sidecars that belong to another project", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
+    const packet = { id, kind: "commit", artifact: null, lane: "cb-security", agent: "cb-bump", report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-08T00:00:00.000Z", updatedAt: "2026-10-08T00:00:00.000Z" };
+    const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, "packet.json"), JSON.stringify({ project: "other-project", machine: "remote", packet, reportText: "report" }));
+    const noteId = "058320c05962e3c644bad3c823b1b04cbd2bbea7af7968b3ee94244aae6cd652";
+    mkdirSync(join(launched.row.cwd, ".pi/muster/notes"), { recursive: true });
+    const item = appendOwnerItem("other-owner", { author: "cb-bump-session", lane: "cb-security", kind: "fyi", title: "other note" }, join(s.h.root, "remote-home"));
+    writeFileSync(join(launched.row.cwd, ".pi/muster/notes", `${noteId}.json`), JSON.stringify({ project: "other-project", machine: "remote", agent: "cb-bump", lane: "cb-security", owner: "other-owner", item }));
+    const result = await s.run(ingestRemotePackets(s.dir));
+    expect(result.notes).toEqual(expect.arrayContaining([
+      `packet sidecar ${id.slice(0, 12)} belongs to project other-project, copied from the clone's source; ignored for ${launched.row.name} (that project's owner should check it landed)`,
+      `note sidecar ${noteId.slice(0, 12)} belongs to project other-project, copied from the clone's source; ignored for ${launched.row.name} (that project's owner should check it landed)`]));
+    expect(result.notes.join("\n")).not.toContain("ingest skipped");
+    expect((await s.run(load(s.dir))).packets).toEqual([]);
   });
   it("keeps local status available and skips remaining machine rows after a transport failure", async () => {
     const s = setup(); await s.open(); await s.launch(); await s.launch("remote-two");
