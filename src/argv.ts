@@ -117,19 +117,22 @@ export function profileFor(role: Role, input: ProfileInput, d: RoleDefaults = RO
 
 /** Environment a launched agent receives. Muster's worker tools read these; nothing else does. */
 export function agentEnv(project: Project, row: AgentRow): Record<string, string> {
+  const self = `${project.slug}/${row.name}`;
   return {
     ...row.profile.env,
     ...(row.role === "desk" ? { HERDR_DESK_PROJECT: project.slug } : {}),
     MUSTER_PROJECT: project.dir,
     MUSTER_AGENT: row.name,
     MUSTER_OWNER: row.owner,
-    ...(row.ownerName ? { MUSTER_OWNER_NAME: row.ownerName } : {}),
+    // A desk that restarts itself owns its own row. Its own name as owner would send every turn record to itself,
+    // which Rat King refuses as Self (183 refusals on the muster desk, 2026-10-14).
+    ...(row.ownerName && row.ownerName !== self ? { MUSTER_OWNER_NAME: row.ownerName } : {}),
     MUSTER_LANE: row.lane,
     MUSTER_ROLE: row.role,
     // Unset policy is ratking, so rows ride pi-ratking by default.
     ...(policyComms(project.policy) === "ratking" ? { MUSTER_COMMS: "ratking" } : {}),
     // pi-ratking claims this name; Muster mints nothing.
-    RATKING_NAME: `${project.slug}/${row.name}`,
+    RATKING_NAME: self,
     RATKING_TURN_RECORDS: "1",
   };
 }

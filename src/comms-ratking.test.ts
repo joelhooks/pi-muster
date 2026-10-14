@@ -48,6 +48,13 @@ describe("names", () => {
     expect(env.MUSTER_OWNER_NAME).toBe("titan");
   });
 
+  // 2026-10-14: the muster desk, restarted by itself, sent every turn record to its own name and Rat King refused it.
+  it("a self-owned row gets no owner name, so its turn records do not go to itself", () => {
+    const env = agentEnv({ slug: "muster", dir: "/p" } as Project, { ...row({ name: "desk", owner: "desk-session", ownerName: "muster/desk" }), profile: { env: {} }, lane: "desk", role: "desk" } as AgentRow);
+    expect(env.RATKING_NAME).toBe("muster/desk");
+    expect(env.MUSTER_OWNER_NAME).toBeUndefined();
+  });
+
   it("a launch writes RATKING_NAME into the launcher, and records a rowless owner's own name", async () => {
     process.env.RATKING_NAME = "titan";
     const h = harness(); const dir = join(h.home, "project"); mkdirSync(dir, { recursive: true });
