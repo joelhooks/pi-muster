@@ -122,10 +122,11 @@ describe("transport", () => {
     const parent = appendOwnerItem("owner-session", { author: "worker-session", kind: "question", title: "which way?" }, home);
     expect(ratkingInbound({ id: "rk-1", from: "pilot/worker", verified: true, body: JSON.stringify({ type: "owner", recipient: "owner-session", item: parent }) }, { owner() {}, message() {} })).toBe("owner");
     const fake = fakeRatking(() => ({ status: "delivered", id: "rk-2", seq: 2 }));
-    const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => { throw new Error("a reply needs no name"); } });
+    const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => ({ name: "pilot/desk", session: "owner-session" }) });
     const reply = appendOwnerItem("worker-session", { author: "owner-session", kind: "fyi", title: "left", replyTo: parent.uri }, home, false);
     expect(await Effect.runPromise(comms.postOwner!("worker-session", reply))).toMatchObject({ status: "delivered" });
-    expect(fake.requests[0]).toMatchObject({ replyTo: "rk-1", kind: "data" });
+    expect(fake.requests[0]).toMatchObject({ replyTo: "rk-1", kind: "message" });
+    expect(fake.requests[0]).not.toHaveProperty("quiet"); // an owner reply wakes the asker
     expect(fake.requests[0]).not.toHaveProperty("to");
   });
 
@@ -136,9 +137,7 @@ describe("transport", () => {
     const send = vi.fn(() => Effect.succeed({ status: "delivered" as const }));
     const ok = await Effect.runPromise(deliverOwnerItem({ owner: "titan-session", home, session: "worker-session", project: "pilot", item: { author: "worker-session", kind: "done", title: "shipped" }, comms, send }));
     expect(ok).toMatchObject({ path: "ratking", lost: false, delivery: { status: "delivered" } });
-    expect(fake.requests[0]).toMatchObject({ kind: "data" }); // owner traffic never reaches the model raw
-    const body = JSON.parse(String(fake.requests[0]!.body));
-    expect(body).toMatchObject({ type: "owner", recipient: "titan-session", item: { author: "worker-session" } });
+    expect(fake.requests[0]).toMatchObject({ to: "titan", kind: "message", quiet: true, summary: "done ghost · shipped" });
     const lost = await Effect.runPromise(deliverOwnerItem({ owner: "ghost-session", home, session: "worker-session", project: "pilot", item: { author: "worker-session", kind: "done", title: "shipped" }, comms, send }));
     // A failed send is parked in the owner's local queue, never thrown away.
     expect(lost).toMatchObject({ path: "ratking", lost: false, stored: "local-queue", failureCode: "UnknownName", delivery: { status: "failed" } });
@@ -163,21 +162,42 @@ describe("owner mail shadow", () => {
     expect(String(fake.requests[0]!.summary).length).toBeLessThanOrEqual(280);
     expect(fake.requests[0]).not.toHaveProperty("attachments");
     expect(fake.requests[0]).not.toHaveProperty("record");
+    expect(fake.requests[0]).not.toHaveProperty("quiet");
   });
 
-  it("fyi remains data, and a threaded action reply keeps replyTo", async () => {
+  it.each(["fyi", "progress", "done"] as const)("%s sends quiet plain mail with the same summary and body shape", async kind => {
+    const home = mkdtempSync(join(tmpdir(), "owner-mail-quiet-"));
+    const fake = fakeRatking(() => ({ status: "delivered", id: "plain-id", seq: 1 }));
+    const catalogs = [catalog("pilot", [row({ name: "worker", sessionId: "worker-session" }), row({ name: "desk", sessionId: "owner-session" })])];
+    const comms = RatkingComms({ events: fake.events, createId, sender: () => "worker-session", target: to => ratkingTarget(to, { catalogs, env: {} }) });
+    const result = await Effect.runPromise(deliverOwnerItem({ owner: "owner-session", home, session: "worker-session", project: "pilot", comms,
+      item: { author: "worker-session", kind, title: "Status", body: "Detail.", lane: "work", refs: ["commit:123"] }, send: () => { throw new Error("legacy send"); } }));
+    expect(result.delivery.status).toBe("delivered");
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]).toMatchObject({ to: "pilot/desk", kind: "message", quiet: true, summary: `${kind} pilot/worker · Status`, body: "Status\nDetail.\n\nlane work · refs commit:123" });
+    expect(fake.requests[0]).not.toHaveProperty("record");
+  });
+
+  it.each(["fyi", "progress", "done"] as const)("inbound accepts %s mail", kind => {
+    const owner = vi.fn();
+    const handle = { owner, message: vi.fn(), catalogs: () => [catalog("pilot", [row({ name: "worker", sessionId: "worker-session" })])] };
+    const mail = { id: `in-${kind}`, verified: true, from: "pilot/worker", kind: "message", summary: `${kind} pilot/worker · Note`, body: "Detail\n\nlane - · refs " };
+    expect(ratkingInbound(mail, handle)).toBe("owner");
+    expect(owner.mock.calls[0]![0]).toMatchObject({ kind, uri: mail.id, renderedBy: "ratking" });
+  });
+
+  it("a threaded action reply keeps replyTo and wakes", async () => {
     const home = mkdtempSync(join(tmpdir(), "owner-mail-reply-"));
     const fake = fakeRatking(() => ({ status: "delivered", id: "reply-id", seq: 1 }));
     const comms = RatkingComms({ events: fake.events, createId, sender: () => "worker-session", target: to => ({ name: to === "worker-session" ? "pilot/worker" : "pilot/desk", session: String(to) }) });
     const parent = appendOwnerItem("owner-session", { author: "worker-session", kind: "fyi", title: "Quiet" }, home);
-    await Effect.runPromise(comms.postOwner!("owner-session", parent));
-    expect(fake.requests[0]).toMatchObject({ kind: "data", body: JSON.stringify({ type: "owner", recipient: "owner-session", item: parent }) });
     ratkingInbound({ verified: true, id: "parent-mail", body: JSON.stringify({ type: "owner", recipient: "owner-session", item: parent }) }, { owner() {}, message() {} });
     ingestOwnerItem("worker-session", parent, home);
     const reply = appendOwnerItem("worker-session", { author: "worker-session", kind: "action", title: "Act", replyTo: parent.uri }, home, false);
     await Effect.runPromise(comms.postOwner!("owner-session", reply));
-    expect(fake.requests[1]).toMatchObject({ kind: "message", replyTo: "parent-mail", summary: "action pilot/worker · Act" });
-    expect(fake.requests[1]).not.toHaveProperty("to");
+    expect(fake.requests[0]).toMatchObject({ kind: "message", replyTo: "parent-mail", summary: "action pilot/worker · Act" });
+    expect(fake.requests[0]).not.toHaveProperty("to");
+    expect(fake.requests[0]).not.toHaveProperty("quiet");
   });
 
   it("reconstructs exactly one queue record by mail id, leaves inbox readable and never renders or wakes", async () => {
@@ -204,13 +224,14 @@ describe("owner mail shadow", () => {
     // owner_reply's unchanged route: parent.author is the row session, and the remembered URI threads mail.
     const parent = records.items[0]!.item;
     const fake = fakeRatking(() => ({ status: "delivered", id: "owner-answer", seq: 2, to: "pilot/worker" }));
-    const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => { throw new Error("threaded reply needs no target lookup"); } });
+    const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => ({ name: "pilot/desk", session: "owner-session" }) });
     const answer = await Effect.runPromise(deliverOwnerItem({ owner: parent.author, home, session: "owner-session", project: "pilot", comms,
       item: { author: "owner-session", kind: "fyi", title: "Approved", text: "Approved", replyTo: parent.uri, mention: parent.author }, send: () => { throw new Error("no legacy send"); } }));
     expect(answer.delivery).toMatchObject({ status: "delivered", detail: "ratking → pilot/worker" });
     expect(fake.requests).toHaveLength(1);
-    expect(fake.requests[0]).toMatchObject({ replyTo: mail.id, kind: "data" });
-    expect(JSON.parse(String(fake.requests[0]!.body))).toMatchObject({ recipient: "worker-session", item: { reply: { parent: { uri: mail.id } } } });
+    expect(fake.requests[0]).toMatchObject({ replyTo: mail.id, kind: "message", summary: "fyi pilot/desk · Approved" });
+    expect(fake.requests[0]).not.toHaveProperty("quiet");
+    expect(fake.requests[0]).not.toHaveProperty("to");
 
     // A mixed-version body has no marker: the existing feed must still render it.
     const legacy = appendOwnerItem("owner-session", { author: "worker-session", kind: "action", title: "Old post", mention: "owner-session" }, home, false);

@@ -22,7 +22,7 @@ export const RATKING_MESSAGE = "ratking/message";
  * Muster's JSON payloads ride as pi-ratking kind "data" (rat-king cfade48): they reach `ratking/message`
  * listeners only, never the model, and Muster's inbound hook turns them into queue items or follow-ups.
  * pi-ratking decodes kind as "message", "ask" or "data"; an older pi-ratking refuses "data".
- * Quiet owner traffic remains data; question, blocked and action posts use plain mail during the shadow.
+ * Owner items are plain mail (quiet for fyi, progress and done); the data-kind {type:"owner"} body is decoded inbound for older senders only.
  */
 export const RATKING_KIND = "data";
 /**
@@ -154,7 +154,10 @@ export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: rea
 }
 
 type SendRequest = ({ readonly to: string } | { readonly replyTo: string }) &
-  ({ readonly body: string; readonly kind?: string; readonly record?: never } | { readonly record: { readonly $type: string }; readonly body?: never }) & { readonly encrypt?: boolean; readonly summary?: string };
+  ({ readonly body: string; readonly kind?: string; readonly record?: never } | { readonly record: { readonly $type: string }; readonly body?: never }) & { readonly encrypt?: boolean; readonly summary?: string; readonly quiet?: boolean };
+
+/** Owner kinds that ride as quiet mail when they are not replies: they land in the queue without waking the owner. */
+const QUIET_OWNER_KINDS: readonly string[] = ["fyi", "progress", "done"];
 
 /** One request, one result by requestId. Not delivered is a failed delivery with pi-ratking's code; there is no fallback. */
 export function ratkingSend(events: EventBus, createId: () => string, request: SendRequest, timeoutMs = SEND_TIMEOUT_MS): Effect.Effect<CommsDelivery> {
@@ -216,22 +219,17 @@ export function RatkingComms(options: {
       }),
       Effect.catch(error => Effect.succeed(failed(error)))),
     postOwner: (to, item) => {
-      const body = (recipient: string) => JSON.stringify({ type: "owner", recipient, item });
-      if (["question", "blocked", "action"].includes(item.kind)) {
-        const author = options.sender();
-        if (!author) return Effect.succeed<CommsDelivery>({ status: "failed", detail: "NOT DELIVERED: sender session missing (ratking)" });
-        return target(author).pipe(Effect.flatMap(party => {
-          const title = item.text.split("\n")[0]?.replace(/^@\S+\s+/, "") ?? "";
-          const mail = { kind: "message", summary: `${item.kind} ${party.name} · ${title}`.replace(/\s+/g, " ").slice(0, 280),
-            body: `${item.text}\n\nlane ${item.lane ?? "-"} · refs ${(item.refs ?? []).join(" ")}` };
-          const replyTo = item.reply ? repliesByUri.get(item.reply.parent.uri) : undefined;
-          if (replyTo) return send({ replyTo, ...mail });
-          return target(to).pipe(Effect.flatMap(({ name }) => send({ to: name, ...mail })));
-        }), Effect.catch(error => Effect.succeed(failed(error))));
-      }
-      const replyTo = item.reply ? repliesByUri.get(item.reply.parent.uri) : undefined;
-      if (replyTo) return send({ replyTo, kind: RATKING_KIND, body: body(typeof to === "string" ? to : item.author) });
-      return target(to).pipe(Effect.flatMap(({ name, session }) => send({ to: name, kind: RATKING_KIND, body: body(session) })), Effect.catch(error => Effect.succeed(failed(error))));
+      const author = options.sender();
+      if (!author) return Effect.succeed<CommsDelivery>({ status: "failed", detail: "NOT DELIVERED: sender session missing (ratking)" });
+      const quiet = QUIET_OWNER_KINDS.includes(item.kind) && !item.reply; // a reply answers someone waiting: it wakes
+      return target(author).pipe(Effect.flatMap(party => {
+        const title = item.text.split("\n")[0]?.replace(/^@\S+\s+/, "") ?? "";
+        const mail = { kind: "message", summary: `${item.kind} ${party.name} · ${title}`.replace(/\s+/g, " ").slice(0, 280),
+          body: `${item.text}\n\nlane ${item.lane ?? "-"} · refs ${(item.refs ?? []).join(" ")}`, ...(quiet ? { quiet: true } : {}) };
+        const replyTo = item.reply ? repliesByUri.get(item.reply.parent.uri) : undefined;
+        if (replyTo) return send({ replyTo, ...mail });
+        return target(to).pipe(Effect.flatMap(({ name }) => send({ to: name, ...mail })));
+      }), Effect.catch(error => Effect.succeed(failed(error))));
     },
     reply: (id, message) => send({ replyTo: id, body: message }),
     ask: () => Effect.fail(new Unsupported("Muster asks through owner_note; ratking ask is the tool's")),
@@ -266,7 +264,7 @@ export function ratkingInbound(message: unknown, handle: { readonly owner: (item
   try { payload = decodeNetworkPayload(JSON.parse(body)); } catch {
     const mail = message as { from?: unknown; summary?: unknown; kind?: unknown };
     if (mail.kind !== "message" || typeof mail.from !== "string" || typeof mail.summary !== "string") return "ignored";
-    const heading = /^(question|blocked|action) (\S+) · /.exec(mail.summary);
+    const heading = /^(question|blocked|action|fyi|progress|done) (\S+) · /.exec(mail.summary);
     const facts = /(?:^|\n)lane (\S+) · refs ([^\n]*)$/.exec(body);
     if (!heading || heading[2] !== mail.from || !facts) return "ignored";
     const project = handle.catalogs?.().find(project => project.agents.some(row => rowRatkingName(project, row) === mail.from));

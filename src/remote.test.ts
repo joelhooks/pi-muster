@@ -296,11 +296,12 @@ describe("remote owner operations", () => {
     expect(send).not.toHaveBeenCalled(); expect(posted.pendingPull).toBe(false);
     expect(posted.delivery.status).toBe("delivered");
     expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
-    if (wakeKind(kind)) {
+    {
       expect(fake.requests).toHaveLength(1);
+      expect((fake.requests[0] as { quiet?: boolean }).quiet === true).toBe(kind === "progress");
       expect(fake.requests[0]).toMatchObject({ to: launched.row.owner, kind: "message", summary: `${kind} probe/remote-w · Need owner eyes` });
       expect(readOwnerQueue(launched.row.owner, s.h.home).items[0]?.item).toMatchObject({ uri: posted.delivery.id, author: launched.row.sessionId, kind, renderedBy: "ratking" });
-    } else expect(readOwnerQueue(launched.row.owner, s.h.home).items[0]?.item).toMatchObject({ uri: posted.uri, kind });
+    }
     const before = readFileSync(ownerPath(launched.row.owner, s.h.home), "utf8");
     await s.run(ingestRemotePackets(s.dir));
     expect(readFileSync(ownerPath(launched.row.owner, s.h.home), "utf8")).toBe(before);

@@ -168,12 +168,12 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
 
     // The owner: owner_reply, desk_send and the Switchboard nudge from desk_post.
     for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_LANE", "MUSTER_OWNER", "MUSTER_OWNER_NAME"]) delete process.env[key];
-    process.env.MUSTER_ROLE = "boss";
+    process.env.MUSTER_ROLE = "boss"; process.env.RATKING_NAME = "titan";
     const owner = piWith(piRatking);
     const reply = await owner.get("owner_reply")!.execute("id", { uri, text: "left" }, undefined, undefined, ctx(h.sessionId));
     expect(reply).not.toHaveProperty("isError");
-    expect(fake.requests.at(-1)).toMatchObject({ replyTo: uri, kind: "data" });
-    expect(JSON.parse(String(fake.requests.at(-1)!.body))).toMatchObject({ recipient: worker.sessionId });
+    expect(fake.requests.at(-1)).toMatchObject({ replyTo: uri, kind: "message" });
+    expect(fake.requests.at(-1)).not.toHaveProperty("quiet");
     const desk = await owner.get("desk_send")!.execute("id", { to: "pilot/desk", text: "hello desk" }, undefined, undefined, ctx(h.sessionId));
     expect(text(desk)).toContain("delivery: ratking · delivered");
     expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/desk", kind: "data" });
