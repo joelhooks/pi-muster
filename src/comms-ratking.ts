@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
+import { POST_NSID } from "./owner-lexicon.ts";
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readdirSync, readFileSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { commsAddress } from "./comms.ts";
 
-import { decodeDeskRouteReceipt, decodeNetworkPayload, decodeProject, type NetworkPayload, type OwnerItem, type Project } from "./domain.ts";
+import { decodeDeskRouteReceipt, decodeNetworkPayload, decodeOwnerItem, decodeProject, type NetworkPayload, type OwnerItem, type Project } from "./domain.ts";
 import { readRegistry } from "./registry.ts";
 import { readRemoteBinding } from "./remote.ts";
 import { projectPath } from "./store.ts";
@@ -20,7 +22,7 @@ export const RATKING_MESSAGE = "ratking/message";
  * Muster's JSON payloads ride as pi-ratking kind "data" (rat-king cfade48): they reach `ratking/message`
  * listeners only, never the model, and Muster's inbound hook turns them into queue items or follow-ups.
  * pi-ratking decodes kind as "message", "ask" or "data"; an older pi-ratking refuses "data".
- * Owner traffic stays inside a ratking project, whose rows and owner run the ratking Muster, so it is data.
+ * Quiet owner traffic remains data; question, blocked and action posts use plain mail during the shadow.
  */
 export const RATKING_KIND = "data";
 /**
@@ -152,7 +154,7 @@ export function ratkingTarget(to: CommsTarget, options: { readonly catalogs: rea
 }
 
 type SendRequest = ({ readonly to: string } | { readonly replyTo: string }) &
-  ({ readonly body: string; readonly kind?: string; readonly record?: never } | { readonly record: { readonly $type: string }; readonly body?: never }) & { readonly encrypt?: boolean };
+  ({ readonly body: string; readonly kind?: string; readonly record?: never } | { readonly record: { readonly $type: string }; readonly body?: never }) & { readonly encrypt?: boolean; readonly summary?: string };
 
 /** One request, one result by requestId. Not delivered is a failed delivery with pi-ratking's code; there is no fallback. */
 export function ratkingSend(events: EventBus, createId: () => string, request: SendRequest, timeoutMs = SEND_TIMEOUT_MS): Effect.Effect<CommsDelivery> {
@@ -215,6 +217,18 @@ export function RatkingComms(options: {
       Effect.catch(error => Effect.succeed(failed(error)))),
     postOwner: (to, item) => {
       const body = (recipient: string) => JSON.stringify({ type: "owner", recipient, item });
+      if (["question", "blocked", "action"].includes(item.kind)) {
+        const author = options.sender();
+        if (!author) return Effect.succeed<CommsDelivery>({ status: "failed", detail: "NOT DELIVERED: sender session missing (ratking)" });
+        return target(author).pipe(Effect.flatMap(party => {
+          const title = item.text.split("\n")[0]?.replace(/^@\S+\s+/, "") ?? "";
+          const mail = { kind: "message", summary: `${item.kind} ${party.name} · ${title}`.replace(/\s+/g, " ").slice(0, 280),
+            body: `${item.text}\n\nlane ${item.lane ?? "-"} · refs ${(item.refs ?? []).join(" ")}` };
+          const replyTo = item.reply ? repliesByUri.get(item.reply.parent.uri) : undefined;
+          if (replyTo) return send({ replyTo, ...mail });
+          return target(to).pipe(Effect.flatMap(({ name }) => send({ to: name, ...mail })));
+        }), Effect.catch(error => Effect.succeed(failed(error))));
+      }
       const replyTo = item.reply ? repliesByUri.get(item.reply.parent.uri) : undefined;
       if (replyTo) return send({ replyTo, kind: RATKING_KIND, body: body(typeof to === "string" ? to : item.author) });
       return target(to).pipe(Effect.flatMap(({ name, session }) => send({ to: name, kind: RATKING_KIND, body: body(session) })), Effect.catch(error => Effect.succeed(failed(error))));
@@ -244,12 +258,33 @@ export const RatkingMissing: CommsShape = {
 };
 
 /** One inbound ratking message. Muster acts only on its own verified payloads; pi-ratking already shows the rest. */
-export function ratkingInbound(message: unknown, handle: { readonly owner: (item: OwnerItem, id: string) => void; readonly message: (payload: Extract<NetworkPayload, { type: "message" }>) => void }): "owner" | "message" | "ignored" {
+export function ratkingInbound(message: unknown, handle: { readonly owner: (item: OwnerItem, id: string) => void; readonly message: (payload: Extract<NetworkPayload, { type: "message" }>) => void; readonly catalogs?: () => readonly Project[]; readonly rejected?: (reason: string) => void }): "owner" | "message" | "ignored" {
   if (typeof message !== "object" || message === null) return "ignored";
   const { body, verified, id } = message as { body?: unknown; verified?: unknown; id?: unknown };
   if (typeof body !== "string" || verified !== true || typeof id !== "string") return "ignored";
   let payload: NetworkPayload;
-  try { payload = decodeNetworkPayload(JSON.parse(body)); } catch { return "ignored"; }
+  try { payload = decodeNetworkPayload(JSON.parse(body)); } catch {
+    const mail = message as { from?: unknown; summary?: unknown; kind?: unknown };
+    if (mail.kind !== "message" || typeof mail.from !== "string" || typeof mail.summary !== "string") return "ignored";
+    const heading = /^(question|blocked|action) (\S+) · /.exec(mail.summary);
+    const facts = /(?:^|\n)lane (\S+) · refs ([^\n]*)$/.exec(body);
+    if (!heading || heading[2] !== mail.from || !facts) return "ignored";
+    const project = handle.catalogs?.().find(project => project.agents.some(row => rowRatkingName(project, row) === mail.from));
+    const row = project?.agents.find(row => rowRatkingName(project, row) === mail.from);
+    if (!project || !row || row.state === "closed" || !row.sessionId) {
+      handle.rejected?.(`owner mail ${id} ignored: sender has no open row with a session in the registered catalogs`);
+      return "ignored";
+    }
+    const text = `${mail.summary}\n${body.slice(0, facts.index).trimEnd()}`;
+    const item = decodeOwnerItem({ $type: POST_NSID, uri: id,
+      cid: createHash("sha256").update(`${id}\n${mail.from}\n${text}`).digest("hex").slice(0, 32),
+      author: row.sessionId, createdAt: new Date().toISOString(), text, kind: heading[1], project: project.slug,
+      renderedBy: "ratking", ...(facts[1] === "-" ? {} : { lane: facts[1] }),
+      refs: facts[2]!.split(/\s+/).filter(Boolean) });
+    rememberRatkingMessage(item.uri, id);
+    handle.owner(item, id);
+    return "owner";
+  }
   if (payload.type === "owner") {
     rememberRatkingMessage(payload.item.uri, id);
     handle.owner(payload.item, id);

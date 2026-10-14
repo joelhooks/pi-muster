@@ -6,11 +6,12 @@ import { Effect, Layer } from "effect";
 import { Comms } from "./runtime.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createComms, selectComms } from "./comms.ts";
-import { RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, ratkingLoaded, ratkingTarget, registeredCatalogs, subscribedSwitchboards } from "./comms-ratking.ts";
+import { RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, subscribedSwitchboards } from "./comms-ratking.ts";
 import { decodeProject, roleDefaults } from "./domain.ts";
 import muster from "./extension-main.ts";
 const OUTBOX_REQUEST_EVENT = "intercom:outbox:request";
-import { ingestOwnerItem } from "./owner-queue.ts";
+import { ownerFeed } from "./owner-feed.ts";
+import { ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate, pullRemoteOwnerInbox } from "./ops.ts";
 import { dataDir, load, mutate, projectPath } from "./store.ts";
 import { deskPost } from "./ops.ts";
@@ -146,10 +147,19 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
     Object.assign(process.env, { MUSTER_ROLE: "worker", MUSTER_PROJECT: dir, MUSTER_AGENT: "worker", MUSTER_LANE: "work", MUSTER_OWNER: h.sessionId, MUSTER_OWNER_NAME: "titan" });
     const note = await piWith(piRatking).get("owner_note")!.execute("id", { kind: "question", title: "which way?" }, undefined, undefined, ctx(worker.sessionId));
     expect(note).not.toHaveProperty("isError");
-    expect(fake.requests.at(-1)).toMatchObject({ to: "titan", kind: "data" });
-    const uri = (note.details as { uri: string }).uri;
-    // The owner's pi-ratking reader hands the payload to Muster, which queues it.
-    ingestOwnerItem(h.sessionId, JSON.parse(String(fake.requests.at(-1)!.body)).item, h.home);
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests.at(-1)).toMatchObject({ to: "titan", kind: "message", summary: "question pilot/worker · which way?" });
+    const uri = "rk-1";
+    // The rowless owner's reader resolves the worker across its registered catalogs.
+    ratkingInbound({ ...fake.requests[0], id: uri, verified: true, from: "pilot/worker" }, {
+      catalogs: () => [project], owner: item => { ingestOwnerItem(h.sessionId, item, h.home); }, message() {},
+    });
+    expect(readOwnerQueue(h.sessionId, h.home).items).toHaveLength(1);
+    expect(readOwnerQueue(h.sessionId, h.home).items[0]!.item).toMatchObject({ uri, author: worker.sessionId, renderedBy: "ratking" });
+    const wake = vi.fn();
+    const feed = ownerFeed({ session: h.sessionId, home: h.home, appendEntry() {}, sendMessage: wake });
+    expect(feed.flush()).toBe(0); expect(feed.beforeTurn()).toBeUndefined();
+    expect(wake).not.toHaveBeenCalled(); feed.dispose();
 
     // Without pi-ratking the same note fails at once, never over intercom.
     const lost = await piWith([]).get("owner_note")!.execute("id", { kind: "fyi", title: "lost" }, undefined, undefined, ctx(worker.sessionId));
@@ -162,7 +172,8 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
     const owner = piWith(piRatking);
     const reply = await owner.get("owner_reply")!.execute("id", { uri, text: "left" }, undefined, undefined, ctx(h.sessionId));
     expect(reply).not.toHaveProperty("isError");
-    expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/worker", kind: "data" });
+    expect(fake.requests.at(-1)).toMatchObject({ replyTo: uri, kind: "data" });
+    expect(JSON.parse(String(fake.requests.at(-1)!.body))).toMatchObject({ recipient: worker.sessionId });
     const desk = await owner.get("desk_send")!.execute("id", { to: "pilot/desk", text: "hello desk" }, undefined, undefined, ctx(h.sessionId));
     expect(text(desk)).toContain("delivery: ratking · delivered");
     expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/desk", kind: "data" });

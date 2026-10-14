@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, cpSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -9,6 +9,7 @@ import type { HerdrClient, HerdrRequest } from "@joelhooks/pi-bellwether/herdr-c
 
 import { sessionDirFor } from "./argv.ts";
 import type { ProcShape } from "./runtime.ts";
+import { registeredCatalogs } from "./comms-ratking.ts";
 import { fakeRatking } from "./ratking-fake.ts";
 import { readRegistry } from "./registry.ts";
 import { load, projectPath } from "./store.ts";
@@ -383,7 +384,7 @@ export function harness(): Harness {
           startupLoad: () => h.startupLoad,
           emitPaneClose: h.emitPaneClose,
         }),
-        Layer.succeed(Comms)({ ...fakeRatking(home, () => h.sessionId, sent).service, sessions: () => Effect.succeed(h.live) }),
+        Layer.succeed(Comms)({ ...fakeRatking(home, () => h.sessionId, sent, () => readdirSync(root, { withFileTypes: true }).filter(entry => entry.isDirectory()).flatMap(entry => registeredCatalogs(home, join(root, entry.name)))).service, sessions: () => Effect.succeed(h.live) }),
       );
     },
   };

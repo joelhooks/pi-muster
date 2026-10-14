@@ -71,6 +71,8 @@ export const OwnerItem = Schema.Struct({
   $type: Schema.Literal(POST_NSID), uri: Schema.String, cid: Schema.String,
   author: SessionId, createdAt: Schema.String, text: Schema.String, kind: OwnerKind,
   signed: Schema.optionalKey(Schema.Unknown),
+  /** Shadow mail already rendered and woke through pi-ratking; inbox remains readable. */
+  renderedBy: Schema.optionalKey(Schema.Literal("ratking")),
   /** Missing on legacy posts: those never follow a project-scoped forward. */
   project: Schema.optionalKey(Schema.String),
   /** Optional cached delivery metadata; older queues usually contain only the post. */

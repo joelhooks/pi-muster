@@ -12,7 +12,8 @@ import { decodePolicy, type AgentRow, type Project } from "./domain.ts";
 import muster from "./extension-main.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
 import { registerOwnerFeed } from "./owner-feed-ext.ts";
-import { appendOwnerItem, deliverOwnerItem, readOwnerQueue } from "./owner-queue.ts";
+import { ownerFeed } from "./owner-feed.ts";
+import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { load } from "./store.ts";
 import { harness, runWith } from "./test-support.ts";
 
@@ -145,6 +146,93 @@ describe("transport", () => {
     expect(send).not.toHaveBeenCalled();
     const receipts = readFileSync(networkReceiptPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(receipts.map(receipt => receipt.path)).toEqual(["ratking", "ratking"]);
+  });
+});
+
+describe("owner mail shadow", () => {
+  it.each(["action", "question", "blocked"] as const)("%s sends one readable mail attributed to the worker, not the operator", async kind => {
+    const home = mkdtempSync(join(tmpdir(), "owner-mail-"));
+    const fake = fakeRatking(() => ({ status: "delivered", id: "plain-id", seq: 1 }));
+    const catalogs = [catalog("pilot", [row({ name: "worker", sessionId: "worker-session" }), row({ name: "desk", sessionId: "owner-session" })])];
+    const comms = RatkingComms({ events: fake.events, createId, sender: () => "worker-session", target: to => ratkingTarget(to, { catalogs, env: {} }) });
+    const result = await Effect.runPromise(deliverOwnerItem({ owner: "owner-session", home, session: "worker-session", project: "pilot", comms,
+      item: { author: "worker-session", kind, title: "Approve packet", body: "Evidence attached in refs.", lane: "work", refs: ["commit:123", "report.md"] }, send: () => { throw new Error("legacy send"); } }));
+    expect(result.delivery.status).toBe("delivered");
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]).toMatchObject({ to: "pilot/desk", kind: "message", summary: `${kind} pilot/worker · Approve packet`, body: "@owner-session Approve packet\nEvidence attached in refs.\n\nlane work · refs commit:123 report.md" });
+    expect(String(fake.requests[0]!.summary).length).toBeLessThanOrEqual(280);
+    expect(fake.requests[0]).not.toHaveProperty("attachments");
+    expect(fake.requests[0]).not.toHaveProperty("record");
+  });
+
+  it("fyi remains data, and a threaded action reply keeps replyTo", async () => {
+    const home = mkdtempSync(join(tmpdir(), "owner-mail-reply-"));
+    const fake = fakeRatking(() => ({ status: "delivered", id: "reply-id", seq: 1 }));
+    const comms = RatkingComms({ events: fake.events, createId, sender: () => "worker-session", target: to => ({ name: to === "worker-session" ? "pilot/worker" : "pilot/desk", session: String(to) }) });
+    const parent = appendOwnerItem("owner-session", { author: "worker-session", kind: "fyi", title: "Quiet" }, home);
+    await Effect.runPromise(comms.postOwner!("owner-session", parent));
+    expect(fake.requests[0]).toMatchObject({ kind: "data", body: JSON.stringify({ type: "owner", recipient: "owner-session", item: parent }) });
+    ratkingInbound({ verified: true, id: "parent-mail", body: JSON.stringify({ type: "owner", recipient: "owner-session", item: parent }) }, { owner() {}, message() {} });
+    ingestOwnerItem("worker-session", parent, home);
+    const reply = appendOwnerItem("worker-session", { author: "worker-session", kind: "action", title: "Act", replyTo: parent.uri }, home, false);
+    await Effect.runPromise(comms.postOwner!("owner-session", reply));
+    expect(fake.requests[1]).toMatchObject({ kind: "message", replyTo: "parent-mail", summary: "action pilot/worker · Act" });
+    expect(fake.requests[1]).not.toHaveProperty("to");
+  });
+
+  it("reconstructs exactly one queue record by mail id, leaves inbox readable and never renders or wakes", async () => {
+    const home = mkdtempSync(join(tmpdir(), "owner-mail-inbound-"));
+    const project = catalog("pilot", [row({ name: "worker", sessionId: "worker-session" })]);
+    const wake = vi.fn();
+    const feed = ownerFeed({ session: "owner-session", home, appendEntry() {}, sendMessage: wake });
+    const followUp = vi.fn();
+    const handle = { catalogs: () => [catalog("owner-project", [row({ name: "desk", sessionId: "owner-session" })]), project], owner: (item: Parameters<typeof ingestOwnerItem>[1]) => { ingestOwnerItem("owner-session", item, home); }, message: followUp };
+    const mail = { id: "shadow-mail-id", verified: true, from: "pilot/worker", kind: "message", summary: "action pilot/worker · Review", body: "Evidence\n\nlane work · refs commit:123 report.md" };
+    expect(ratkingInbound(mail, handle)).toBe("owner");
+    expect(ratkingInbound(mail, handle)).toBe("owner");
+    const records = readOwnerQueue("owner-session", home);
+    expect(records.cursor).toBe(1);
+    expect(records.items[0]!.item).toMatchObject({ uri: mail.id, author: "worker-session", kind: "action", text: "action pilot/worker · Review\nEvidence", lane: "work", refs: ["commit:123", "report.md"], project: "pilot", renderedBy: "ratking" });
+    expect(feed.inbox().items).toHaveLength(1);
+    expect(feed.flush()).toBe(0);
+    expect(await feed.poll(() => true)).toBe(0);
+    expect(feed.beforeTurn()).toBeUndefined();
+    expect(wake).not.toHaveBeenCalled();
+    expect(followUp).not.toHaveBeenCalled();
+    feed.dispose();
+
+    // owner_reply's unchanged route: parent.author is the row session, and the remembered URI threads mail.
+    const parent = records.items[0]!.item;
+    const fake = fakeRatking(() => ({ status: "delivered", id: "owner-answer", seq: 2, to: "pilot/worker" }));
+    const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => { throw new Error("threaded reply needs no target lookup"); } });
+    const answer = await Effect.runPromise(deliverOwnerItem({ owner: parent.author, home, session: "owner-session", project: "pilot", comms,
+      item: { author: "owner-session", kind: "fyi", title: "Approved", text: "Approved", replyTo: parent.uri, mention: parent.author }, send: () => { throw new Error("no legacy send"); } }));
+    expect(answer.delivery).toMatchObject({ status: "delivered", detail: "ratking → pilot/worker" });
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]).toMatchObject({ replyTo: mail.id, kind: "data" });
+    expect(JSON.parse(String(fake.requests[0]!.body))).toMatchObject({ recipient: "worker-session", item: { reply: { parent: { uri: mail.id } } } });
+
+    // A mixed-version body has no marker: the existing feed must still render it.
+    const legacy = appendOwnerItem("owner-session", { author: "worker-session", kind: "action", title: "Old post", mention: "owner-session" }, home, false);
+    expect(ratkingInbound({ id: "old-mail-id", verified: true, body: JSON.stringify({ type: "owner", recipient: "owner-session", item: legacy }) }, handle)).toBe("owner");
+    const oldFeed = ownerFeed({ session: "owner-session", home, appendEntry() {}, sendMessage: wake });
+    expect(oldFeed.flush()).toBe(1);
+    expect(wake).toHaveBeenCalledOnce();
+    expect(wake.mock.calls[0]![0].content).toContain("Old post");
+    oldFeed.dispose();
+  });
+
+  it("ignores foreign, unverified, malformed and falsely operator-attributed plain mail", () => {
+    const owner = vi.fn();
+    const handle = { owner, message: vi.fn(), catalogs: () => [catalog("pilot", [row({ name: "worker" })])] };
+    const mail = { id: "guard", verified: true, from: "pilot/worker", kind: "message", summary: "action pilot/worker · Review", body: "Evidence\nlane - · refs " };
+    for (const patch of [{ from: "other/worker" }, { verified: false }, { summary: "action Joel · Review" }, { summary: "action operator · Review" }, { body: "missing facts" }, { kind: "data" }]) expect(ratkingInbound({ ...mail, ...patch }, handle)).toBe("ignored");
+    const rejected = vi.fn();
+    for (const sender of [row({ name: "worker", state: "closed" }), row({ name: "worker", sessionId: "" })]) {
+      expect(ratkingInbound(mail, { ...handle, catalogs: () => [catalog("pilot", [sender])], rejected })).toBe("ignored");
+    }
+    expect(rejected).toHaveBeenCalledTimes(2);
+    expect(owner).not.toHaveBeenCalled();
   });
 });
 

@@ -291,18 +291,24 @@ describe("remote owner operations", () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     const send = vi.fn(() => Effect.succeed({ status: "failed" as const, detail: "no reverse intercom" }));
-    const posted = await s.run(deliverOwnerItem({ owner: launched.row.owner, home: join(s.h.root, "remote-home"), session: launched.row.sessionId, project: "probe", item: { author: launched.row.sessionId, lane: launched.row.lane, kind, title: "Need owner eyes", body: "Full note", refs: ["source"] }, comms: fakeRatking(s.h.home, () => "probe/remote-w", []).service, send }));
+    const fake = fakeRatking(s.h.home, () => "probe/remote-w", [], () => [decodeProject(JSON.parse(readFileSync(projectPath(s.dir), "utf8")))]);
+    const posted = await s.run(deliverOwnerItem({ owner: launched.row.owner, home: join(s.h.root, "remote-home"), session: launched.row.sessionId, project: "probe", item: { author: launched.row.sessionId, lane: launched.row.lane, kind, title: "Need owner eyes", body: "Full note", refs: ["source"] }, comms: fake.service, send }));
     expect(send).not.toHaveBeenCalled(); expect(posted.pendingPull).toBe(false);
     expect(posted.delivery.status).toBe("delivered");
     expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
-    expect(readOwnerQueue(launched.row.owner, s.h.home).items[0]?.item).toMatchObject({ uri: posted.uri, kind });
+    if (wakeKind(kind)) {
+      expect(fake.requests).toHaveLength(1);
+      expect(fake.requests[0]).toMatchObject({ to: launched.row.owner, kind: "message", summary: `${kind} probe/remote-w · Need owner eyes` });
+      expect(readOwnerQueue(launched.row.owner, s.h.home).items[0]?.item).toMatchObject({ uri: posted.delivery.id, author: launched.row.sessionId, kind, renderedBy: "ratking" });
+    } else expect(readOwnerQueue(launched.row.owner, s.h.home).items[0]?.item).toMatchObject({ uri: posted.uri, kind });
     const before = readFileSync(ownerPath(launched.row.owner, s.h.home), "utf8");
     await s.run(ingestRemotePackets(s.dir));
     expect(readFileSync(ownerPath(launched.row.owner, s.h.home), "utf8")).toBe(before);
     expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(1);
     const wake = vi.fn();
     const feed = ownerFeed({ session: launched.row.owner, home: s.h.home, appendEntry: vi.fn(), sendMessage: wake });
-    expect(feed.flush()).toBe(wakeKind(kind) ? 1 : 0); expect(wake).toHaveBeenCalledTimes(wakeKind(kind) ? 1 : 0);
+    expect(feed.flush()).toBe(0); expect(wake).not.toHaveBeenCalled();
+    if (wakeKind(kind)) expect(feed.beforeTurn()).toBeUndefined();
     expect(feed.flush()).toBe(0); feed.dispose();
   });
   it("uses the catalog owner when the sidecar names another owner", async () => {
@@ -884,7 +890,7 @@ describe("remote owner operations", () => {
     });
     it("a delivered send writes no sidecar", async () => {
       const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
-      const posted = await post(s, launched, fakeRatking(s.h.home, () => "probe/remote-w", []).service);
+      const posted = await post(s, launched, fakeRatking(s.h.home, () => "probe/remote-w", [], () => [decodeProject(JSON.parse(readFileSync(projectPath(s.dir), "utf8")))]).service);
       expect(posted.lost).toBe(false); expect(posted.stored).toBeUndefined();
       expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
     });

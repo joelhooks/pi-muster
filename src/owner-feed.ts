@@ -48,7 +48,7 @@ export function ownerFeed(deps: { session: string; home: string; project?: strin
   const parentReaders = new Map<string, ReturnType<typeof ownerSourceReader>>();
   const read = () => readOwnerSources(deps.session, deps.home);
   const sourceCursor = (source: string) => Object.hasOwn(sources, source) ? sources[source]! : 0;
-  const pending = (snapshot = read()) => snapshot.flatMap(source => source.items.filter(({ item, line }) => line > sourceCursor(source.source) && !delivered.has(item.uri)).map(record => ({ ...record, source: source.source, aliases: source.aliases })));
+  const pending = (snapshot = read()) => snapshot.flatMap(source => source.items.filter(({ item, line }) => line > sourceCursor(source.source) && !delivered.has(item.uri) && item.renderedBy !== "ratking").map(record => ({ ...record, source: source.source, aliases: source.aliases })));
   const save = () => deps.appendEntry(OWNER_CURSOR, { cursor, sources: { ...sources }, delivered: [...delivered] });
   const context = (records: ReturnType<typeof pending>) => ({
     via: Object.fromEntries(records.filter(r => r.source !== deps.session).map(r => [r.item.uri, r.source])),

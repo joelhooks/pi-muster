@@ -320,6 +320,8 @@ export default function muster(host: ExtensionAPI) {
       if (!id || handledDeliveries.has(id)) return;
       try {
         ratkingInbound(message, {
+          rejected: reason => console.warn(`[muster] ${reason}`),
+          catalogs: () => registeredCatalogs(homedir(), env.MUSTER_PROJECT ?? ctx.cwd),
           owner: item => {
             if (!handledDeliveries.claim(id)) return;
             // ingestOwnerItem also rejects an existing URI, even under a different delivery id/CID.
