@@ -2,7 +2,7 @@
 
 ## Project shape
 
-Muster 🐑 (`@joelhooks/pi-muster`) is the Pi package that runs Herdr project spaces: projects, lanes, packets, agents, and the desk. Bellwether owns the generic Herdr runtime. Muster imports only Bellwether's `exports` (`herdr-client`, `intercom`, `sidebar`, `wake`, `watch`) and never its extension file.
+Muster 🐑 (`@joelhooks/pi-muster`) is the Pi package that runs Herdr project spaces: projects, lanes, packets, agents, and the desk. Bellwether owns the generic Herdr runtime. Muster imports only Bellwether's `herdr-client` export and never its extension file.
 
 `skills/muster/SKILL.md` holds judgment only. If a rule can be enforced, it lives in a tool, and the skill does not restate it.
 
