@@ -3693,10 +3693,12 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (outcome === "committed" && params.attested) {
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
-      const source = sourceOf(project, lane, row);
       // codetv-workshop, 2026-10-14: a pennywise lane's source path exists only on pennywise, so local git spawned in
-      // a missing cwd (spawn git ENOENT). A remote row's landing is proven on its own machine.
-      const git = row.machine === "local" ? proc : sshProc(row.machine, yield* machineConfig(row.machine), proc, env.home);
+      // a missing cwd (spawn git ENOENT). A remote row's landing is proven on its own machine, in the source mapped there:
+      // clone.source is recorded in owner paths (/Users/joel/... for a Flagg owner, muster desk 2026-10-14).
+      const machine = row.machine === "local" ? undefined : yield* machineConfig(row.machine);
+      const source = machine ? mapPath(sourceOf(project, lane, row), machine) : sourceOf(project, lane, row);
+      const git = machine ? sshProc(row.machine, machine, proc, env.home) : proc;
       const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base).pipe(Effect.provideService(Proc, git));
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* git.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
       if (hasRemote) {

@@ -537,6 +537,27 @@ describe("remote owner operations", () => {
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("merge-base"))).toBe(true);
   });
 
+  // muster desk, 2026-10-14: clone.source is an owner path (/Users/joel/...); proving it unmapped on pennywise failed
+  // check-ref-format in a missing cwd and read as "requires a base branch, not main".
+  it("an attested remote landing proves in the row machine's mapping of an owner-path source", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote work");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "remote work", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs();
+    expect((await s.run(packetVerify(s.dir, commit))).packet.state).toBe("verified");
+    sh(s.dir, "fetch", "-q", cwd, commit); sh(s.dir, "merge", "--squash", "-q", commit); sh(s.dir, "commit", "-qm", "squash-merged elsewhere");
+    const landedAs = sh(s.dir, "rev-parse", "HEAD").trim();
+    const ownerSource = join(s.h.root, "owner-only", "repo");
+    const project = JSON.parse(readFileSync(projectPath(s.dir), "utf8"));
+    project.agents[0].clone.source = ownerSource;
+    writeFileSync(projectPath(s.dir), JSON.stringify(project));
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, paths: { [ownerSource]: s.dir } }) });
+    const landed = await s.run(packetLand(s.dir, { id: commit, outcome: "committed", landedAs, attested: true, evidence: "desk landed it" }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs, attested: true });
+  });
+
   it("verifies and records a remote sibling branch", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
     sh(cwd, "checkout", "-qb", "worker/remote-next", "main");
