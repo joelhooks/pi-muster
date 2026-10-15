@@ -845,6 +845,28 @@ describe("pane binding safety", () => {
     expect(h.herdr.calls.filter((call) => call.method === "tab.create")).toHaveLength(1);
   });
 
+  // Flagg reboot, 2026-10-14: closing a space deleted its id, and restore failed with "workspace not found".
+  it("restore rebuilds a gone space once, rebinds the project and opens the lane there", async () => {
+    const { h, dir, row } = await rootWorker();
+    const dead = (await runWith(h, load(dir))).spaceId!;
+    h.herdr.workspaces.delete(dead);
+    h.herdr.panes.delete(row.pane!.paneId);
+    await runWith(h, projectStatus(dir));
+    h.herdr.calls.length = 0;
+    const restored = await runWith(h, agentLaunch(dir, { action: "restore", name: "first", slot: "root" }));
+    const project = await runWith(h, load(dir));
+    expect(project.spaceId).not.toBe(dead);
+    expect(h.herdr.workspaces.has(project.spaceId!)).toBe(true);
+    expect(h.herdr.calls.filter(call => call.method === "workspace.create")).toHaveLength(1);
+    expect(h.herdr.calls.find(call => call.method === "tab.create")?.params).toMatchObject({ workspace_id: project.spaceId });
+    expect(restored.row.state).toBe("running");
+    expect(restored.notes.join("\n")).toContain(`space ${dead} was gone; rebuilt as ${project.spaceId}`);
+    // A second open finds the rebuilt space live and creates nothing.
+    h.herdr.calls.length = 0;
+    await runWith(h, laneOpen(dir, { slug: "probe", label: "🧪 probe", goal: "one packet" }));
+    expect(h.herdr.calls.filter(call => call.method === "workspace.create")).toHaveLength(0);
+  });
+
   it("finds a moved terminal without opening another tab", async () => {
     const { h, dir, row } = await rootWorker();
     const pane = h.herdr.panes.get(row.pane!.paneId)!;

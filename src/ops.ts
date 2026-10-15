@@ -1644,6 +1644,32 @@ const laneFieldChanges = (latest: Lane, next: Lane) => {
   return changes;
 };
 
+/**
+ * The project's live space id. A reboot or a closed space leaves a dead id, and every tab create then failed with
+ * "workspace not found" (Flagg reboot, 2026-10-14). Rebuild the space once under the catalog lock and rebind it.
+ */
+type SpaceBinding = { readonly spaceId: string | null; readonly note: string | null };
+export const ensureSpace = (dir: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const project = yield* load(dir);
+  if (!project.spaceId) return { spaceId: null, note: null } as SpaceBinding;
+  const live = (ids: readonly { readonly workspace_id: string }[], id: string) => ids.some(space => space.workspace_id === id);
+  if (live(yield* workspaceList(), project.spaceId)) return { spaceId: project.spaceId, note: null } as SpaceBinding;
+  return yield* mutate(dir, current => Effect.gen(function* () {
+    // Another launch may have rebuilt it while this one waited for the lock.
+    if (current.spaceId && current.spaceId !== project.spaceId && live(yield* workspaceList(), current.spaceId)) {
+      const kept: SpaceBinding = { spaceId: current.spaceId, note: null };
+      return [current, kept] as const;
+    }
+    const created = yield* workspaceCreate(current.label, current.dir);
+    const spaceId = created.workspace.workspace_id;
+    const note = `space ${project.spaceId} was gone; rebuilt as ${spaceId}`;
+    const next: Project = { ...current, spaceId, sidebar: current.sidebar === "off" ? "off" : "owned", updatedAt: iso(env) };
+    const rebuilt: SpaceBinding = { spaceId, note };
+    return [next, rebuilt] as const;
+  }));
+});
+
 export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: number | undefined }) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -1754,7 +1780,8 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const liveRoot = root ? yield* locatePane(root) : null;
     let note: string | null = null;
     if (!liveRoot) {
-      const tab = yield* tabCreate(project.spaceId as string, params.repo ?? base.repo ?? project.dir, base.label).pipe(Effect.tapError(() =>
+      const space = yield* ensureSpace(dir);
+      const tab = yield* tabCreate(space.spaceId ?? project.spaceId as string, params.repo ?? base.repo ?? project.dir, base.label).pipe(Effect.tapError(() =>
         mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findLane(current, slug);
           const state = base.state === "open" ? latest.state : yield* stepLane(slug, latest.state, { type: "OPEN_FAILED", prior: base.state });
@@ -1763,6 +1790,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       tabId = tab.tab.tab_id;
       root = { paneId: tab.root_pane.pane_id, terminalId: tab.root_pane.terminal_id, tabId, openedByMuster: true };
       if (base.root) note = `root pane was gone; opened tab ${tabId} pane ${root.paneId}`;
+      if (space.note) note = note ? `${space.note}; ${note}` : space.note;
     } else if (root) {
       tabId = liveRoot.tab_id;
       root = { ...root, paneId: liveRoot.pane_id, tabId };

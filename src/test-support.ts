@@ -135,8 +135,10 @@ export class FakeHerdr {
         return { type: "workspace_created", workspace: { workspace_id: id }, tab: { tab_id: tab }, root_pane: this.paneInfo(root) };
       }
       case "tab.create": {
-        const tab = this.next("t");
         const ws = String(params.workspace_id);
+        // Real Herdr refuses a tab in a workspace that no longer exists (a closed space, or a reboot).
+        if (!this.workspaces.has(ws)) throw new HerdrApiError({ operation: method, code: "workspace_not_found", message: `workspace ${ws} not found` });
+        const tab = this.next("t");
         this.tabs.set(tab, { tab_id: tab, workspace_id: ws, label: String(params.label) });
         const root = this.addPane(ws, tab, String(params.cwd));
         return { type: "tab_created", tab: { tab_id: tab, workspace_id: ws, label: params.label }, root_pane: this.paneInfo(root) };
