@@ -39,6 +39,9 @@ interface EventBus {
   on(event: string, listener: (payload: unknown) => void): (() => void) | void;
 }
 
+/** Send-only Rat King name for launch receipts. Its key lives on Flagg. */
+export const LAUNCHER_NAME = "muster/launcher";
+
 /** A row's Rat King name. pi-ratking claims it from RATKING_NAME. */
 export const rowRatkingName = (project: Pick<Project, "slug">, row: { readonly name: string }) => `${project.slug}/${row.name}`;
 
@@ -256,7 +259,7 @@ export const RatkingMissing: CommsShape = {
 };
 
 /** One inbound ratking message. Muster acts only on its own verified payloads; pi-ratking already shows the rest. */
-export function ratkingInbound(message: unknown, handle: { readonly owner: (item: OwnerItem, id: string) => void; readonly message: (payload: Extract<NetworkPayload, { type: "message" }>) => void; readonly catalogs?: () => readonly Project[]; readonly rejected?: (reason: string) => void }): "owner" | "message" | "ignored" {
+export function ratkingInbound(message: unknown, handle: { readonly owner: (item: OwnerItem, id: string) => void; readonly message: (payload: Extract<NetworkPayload, { type: "message" }>) => void; readonly catalogs?: () => readonly Project[]; readonly session?: string; readonly rejected?: (reason: string) => void }): "owner" | "message" | "ignored" {
   if (typeof message !== "object" || message === null) return "ignored";
   const { body, verified, id } = message as { body?: unknown; verified?: unknown; id?: unknown };
   if (typeof body !== "string" || verified !== true || typeof id !== "string") return "ignored";
@@ -267,6 +270,20 @@ export function ratkingInbound(message: unknown, handle: { readonly owner: (item
     const heading = /^(question|blocked|action|fyi|progress|done) (\S+) · /.exec(mail.summary);
     const facts = /(?:^|\n)lane (\S+) · refs ([^\n]*)$/.exec(body);
     if (!heading || heading[2] !== mail.from || !facts) return "ignored";
+    if (mail.from === LAUNCHER_NAME) {
+      // The launcher is send-only and has no row; it speaks only the two launch receipts.
+      if (heading[1] !== "action" && heading[1] !== "blocked") return "ignored";
+      const own = handle.session ? handle.catalogs?.().find(project => project.agents.some(row => row.sessionId === handle.session)) : undefined;
+      const text = `${mail.summary}\n${body.slice(0, facts.index).trimEnd()}`;
+      const item = decodeOwnerItem({ $type: POST_NSID, uri: id,
+        cid: createHash("sha256").update(`${id}\n${mail.from}\n${text}`).digest("hex").slice(0, 32),
+        author: "muster-launcher", createdAt: new Date().toISOString(), text, kind: heading[1],
+        ...(own ? { project: own.slug } : {}), renderedBy: "ratking", ...(facts[1] === "-" ? {} : { lane: facts[1] }),
+        refs: facts[2]!.split(/\s+/).filter(Boolean) });
+      rememberRatkingMessage(item.uri, id);
+      handle.owner(item, id);
+      return "owner";
+    }
     const project = handle.catalogs?.().find(project => project.agents.some(row => rowRatkingName(project, row) === mail.from));
     const row = project?.agents.find(row => rowRatkingName(project, row) === mail.from);
     if (!project || !row || row.state === "closed" || !row.sessionId) {

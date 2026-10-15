@@ -64,6 +64,7 @@ import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
+import { type LaunchMailResult, launchOwnerRatkingName, ratkingCliPath, sendLaunchMail } from "./launch-mail.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
@@ -2707,6 +2708,11 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     body = launchOwnerText(result.value, job.log);
   }
   const kind = failed ? "blocked" as const : "action" as const;
+  const title = `Launch ${row.name} ${failed ? "failed" : "finished"}`;
+  // One plain Rat King mail from muster/launcher. Only a mail that did not go out falls back to the direct JSONL append.
+  const ownerRatking = launchOwnerRatkingName(job.owner, registeredCatalogs(env.home, dir));
+  const mail: LaunchMailResult = ownerRatking === undefined ? { sent: false }
+    : yield* sendLaunchMail({ cli: ratkingCliPath(process.env, env.home), cwd: dir, to: ownerRatking, kind, title, body, lane: row.lane, log: job.log });
   yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);
     const latestJob = yield* readJob(env.home, id);
@@ -2716,7 +2722,7 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
       ...(failed ? { events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: body }] } : {}) };
     // The caller is local even when the worker is remote or network-backed.
     // Record an outcome only once the waking result is durable in its queue.
-    yield* Effect.try({ try: () => appendOwnerItem(job.owner, { author: `muster-launch-${id}`, project: current.slug, lane: row.lane, kind, title: `Launch ${row.name} ${failed ? "failed" : "finished"}`, body, refs: [job.log] }, env.home), catch: () => new InputError({ message: `launch result could not be queued; log: ${job.log}` }) });
+    if (!mail.sent) yield* Effect.try({ try: () => appendOwnerItem(job.owner, { author: `muster-launch-${id}`, project: current.slug, lane: row.lane, kind, title, body: mail.reason ? `${body}\n(rat king mail not sent: ${mail.reason})` : body, refs: [job.log] }, env.home), catch: () => new InputError({ message: `launch result could not be queued; log: ${job.log}` }) });
     yield* writeLaunchJob(env.home, { ...latestJob, sessionId: next.sessionId, state: yield* stepLaunchJob(id, latestJob.state, { type: failed ? "FAIL" : "SUCCEED" }), outcome: kind });
     return [withRow(current, next), next] as const;
   }));

@@ -321,6 +321,7 @@ export default function muster(host: ExtensionAPI) {
       try {
         ratkingInbound(message, {
           rejected: reason => console.warn(`[muster] ${reason}`),
+          session: ctx.sessionManager.getSessionId(),
           catalogs: () => registeredCatalogs(homedir(), env.MUSTER_PROJECT ?? ctx.cwd),
           owner: item => {
             if (!handledDeliveries.claim(id)) return;
