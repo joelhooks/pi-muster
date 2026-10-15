@@ -67,6 +67,7 @@
     "src/ratking-status.ts",
     "src/recent-deliveries.ts",
     "src/turn-wake.ts",
+    "src/launch-mail.ts",
     "src/pi-prompt.ts",
     "src/desk-local.ts",
     "src/comms-ratking.ts",
