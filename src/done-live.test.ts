@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
@@ -130,6 +130,24 @@ describe("live delivery and WIP", () => {
     const line = flowLine(await runWith(s.h, load(s.dir)), s.h.now.getTime());
     expect(line).toBe("WIP 0/3 · 3 open · backlog empty · landed, not live: none · last proven just now · cycle now · 1/wk");
   });
+  // drovr 22991118, 2026-10-14: a packet parked on Joel's decision by design read as a stall.
+  it("a packet an open decision or approval names is waiting on Joel, not stalled", async () => {
+    const s = await setup();
+    await s.lane("one");
+    await landed(s, "one");
+    const sha = "22991118a086c0ffee0123456789abcdef012345";
+    await runWith(s.h, mutate(s.dir, p => Effect.succeed([{ ...p, packets: p.packets.map(packet => ({ ...packet, id: sha, state: "verified" as const })) }, null] as const)));
+    s.h.now = new Date(s.h.now.getTime() + 31 * 60_000);
+    const p = await runWith(s.h, load(s.dir));
+    expect(flowLine(p, s.h.now.getTime())).toContain("⚠ not flowing");
+    const id = p.packets[0]!.id;
+    const ask = (kind: "decision" | "approval" | "fyi", patch = {}) => ({ id: `d-${kind}`, ts: s.h.now.toISOString(), from: "owner", kind, title: `ship ${id.slice(0, 8)}?`, ...patch });
+    expect(flowLine(p, s.h.now.getTime(), [ask("decision")])).not.toContain("⚠ not flowing");
+    expect(flowLine(p, s.h.now.getTime(), [ask("approval", { title: "ship it?", refs: [`packet:${id.slice(0, 12)}`] })])).not.toContain("⚠ not flowing");
+    expect(flowLine(p, s.h.now.getTime(), [ask("fyi")])).toContain("⚠ not flowing");
+    expect(flowLine(p, s.h.now.getTime(), [ask("decision"), { id: "r", ts: s.h.now.toISOString(), from: "desk", kind: "done", title: "ruled", resolves: "d-decision" }])).toContain("⚠ not flowing");
+    expect(board(p, [], 1, s.h.now.getTime(), null, new Map(), [ask("decision")])).not.toContain("⚠ not flowing");
+  });
   it("flags a reported or verified packet waiting more than landWaitMin", async () => {
     const s = await setup();
     await s.lane("one");
@@ -140,19 +158,36 @@ describe("live delivery and WIP", () => {
     await runWith(s.h, projectUpdate(s.dir, { policy: { landWaitMin: 60, flowStallMin: 240 } }));
     expect(flowLine(await runWith(s.h, load(s.dir)), s.h.now.getTime())).not.toContain("⚠ not flowing");
   });
-  it("both feeds include a fresh line every turn, even with no notices", async () => {
+  // Joel, 2026-10-14 ("should remove that shit"): in the desk note's text the flow line read as words Joel wrote.
+  it("the desk note never carries the flow line in its text; it rides in details only", async () => {
+    const s = await setup();
+    mkdirSync(join(registryPath(s.h.home), ".."), { recursive: true });
+    writeFileSync(registryPath(s.h.home), JSON.stringify({ slug: "flow", dir: s.dir, spaceId: "w1", ts: s.h.now.toISOString() }) + "\n");
+    const queue = join(s.dir, "desk.jsonl");
+    const desk = deskFeed({ project: "flow", home: s.h.home, path: queue, now: () => s.h.now.getTime(), appendEntry: () => {}, sendMessage: () => {} });
+    desk.restore([]);
+    await s.lane("one");
+    s.h.now = new Date(s.h.now.getTime() + 121 * 60_000);
+    // The first turn may carry the pull line; it never carries the flow line.
+    expect(desk.beforeTurn()?.message.content ?? "").not.toMatch(/WIP \d|not flowing/);
+    desk.turnEnded();
+    expect(desk.beforeTurn()).toBeUndefined(); // no notice and no slot change: no note just for the flow line
+    desk.turnEnded();
+    appendFileSync(queue, JSON.stringify({ id: "n1", ts: s.h.now.toISOString(), from: "owner", kind: "done", title: "finished" }) + "\n");
+    const note = desk.beforeTurn()?.message;
+    expect(note?.content).toContain("finished");
+    expect(note?.content).not.toMatch(/WIP \d|not flowing|landed, not live/);
+    expect(note?.details.flow).toContain("⚠ not flowing · WIP 1/3");
+  });
+  it("the owner feed includes a fresh line every turn, even with no notices", async () => {
     const s = await setup();
     const owner = ownerFeed({ session: "owner", home: s.h.home, project: s.dir, appendEntry: () => {}, sendMessage: () => {} });
     mkdirSync(join(registryPath(s.h.home), ".."), { recursive: true });
     writeFileSync(registryPath(s.h.home), JSON.stringify({ slug: "flow", dir: s.dir, spaceId: "w1", ts: s.h.now.toISOString() }) + "\n");
-    const desk = deskFeed({ project: "flow", home: s.h.home, path: join(s.dir, "empty.jsonl"), now: () => s.h.now.getTime(), appendEntry: () => {}, sendMessage: () => {} });
-    desk.restore([]);
     expect(owner.beforeTurn()?.message.content).toContain("WIP 0/3");
-    expect(desk.beforeTurn()?.message.content).toContain("WIP 0/3");
     await s.lane("one");
-    owner.turnEnded(); desk.turnEnded();
+    owner.turnEnded();
     expect(owner.beforeTurn()?.message.content).toContain("WIP 1/3");
-    expect(desk.beforeTurn()?.message.content).toContain("WIP 1/3");
     owner.dispose();
   });
   it("lets the Muster desk feed own the line without an owner-feed duplicate", async () => {

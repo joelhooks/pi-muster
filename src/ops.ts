@@ -25,7 +25,7 @@ import {
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
-import type { LaunchJob, AgentRow, CheckOutcome, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
+import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
 import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
 import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
@@ -4258,7 +4258,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
     const tracer = yield* traceProjectTasks(final, panes, ingestion.failedMachines);
-    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : []), ...unknownCommsNote(final.policy)] };
+    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces, desk), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : []), ...unknownCommsNote(final.policy)] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
@@ -4274,7 +4274,7 @@ export function reviewDue(project: Project, nowMs: number): string | null {
   return last ? `⚠ review overdue: last project_review ${days}d ago` : `⚠ review overdue: no project_review in ${days}d`;
 }
 
-export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null, traces: ReadonlyMap<string, TaskTrace> = new Map()): string {
+export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null, traces: ReadonlyMap<string, TaskTrace> = new Map(), desk: readonly DeskItem[] = []): string {
   const lanes = project.lanes.filter((lane) => !lane.archived);
   const posture = deployPosture(project);
   const due = reviewDue(project, nowMs);
@@ -4295,7 +4295,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
   const out = [
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
     deployPostureLine(project),
-    flowLine(project, nowMs),
+    flowLine(project, nowMs, desk),
     `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state} [deploy ${laneDeployLevel(lane, posture.level)}]`).join(", ") || "none"}`,
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,

@@ -117,7 +117,18 @@ export function wipRefusal(project: Project, slug: string, kind: Lane["kind"], n
   if (kind !== "work" || limit === null || lanes.some(lane => lane.slug === slug) || lanes.length < limit) return null;
   return `WIP ${lanes.length}/${limit}: ${lanes.map(lane => `${lane.slug} (${lane.delivery ?? "none"}, ${formatAge(Math.max(0, now - Date.parse(lane.createdAt)))})`).join(", ")}. Park it in the backlog with lane_open open: false; rank it with rank, or lift the project's wipLimit with project_update.`;
 }
-export function flowLine(project: Project, now: number = Date.now()): string {
+/**
+ * Packets an open decision or approval names (by id or a 7+ hex prefix) wait on Joel by design: they are not stalled
+ * (drovr 22991118, 2026-10-14).
+ */
+export function parkedOnJoel(project: Project, desk: readonly DeskItem[]): Set<string> {
+  const asks = openDeskItems(desk).filter(item => item.kind === "decision" || item.kind === "approval");
+  const tokens = asks.flatMap(item => [item.title, item.body ?? "", ...(item.refs ?? [])].join(" ").toLowerCase().match(/[0-9a-f]{7,64}/g) ?? []);
+  return new Set(project.packets.filter(packet => tokens.some(token => packet.id.startsWith(token))).map(packet => packet.id));
+}
+
+export function flowLine(project: Project, now: number = Date.now(), desk: readonly DeskItem[] = []): string {
+  const parked = parkedOnJoel(project, desk);
   const lanes = inFlight(project);
   const limit = project.policy?.wipLimit ?? null;
   const history = project.lanes.filter(lane => lane.kind === "work").flatMap(lane => lane.deliveryHistory ??
@@ -137,7 +148,7 @@ export function flowLine(project: Project, now: number = Date.now()): string {
   const lastMove = Math.max(lastProven ?? 0, ...history.map(entry => Date.parse(entry.at)));
   const oldest = lanes.length ? Math.min(...lanes.map(lane => Date.parse(lane.createdAt))) : now;
   const stalled = lanes.length > 0 && now - Math.max(lastMove, oldest) > (project.policy?.flowStallMin ?? 120) * 60_000;
-  const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
+  const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && !parked.has(packet.id) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
   const { level } = deployPosture(project);
   const watching = project.lanes.filter(lane => lane.kind === "work" && lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2);
   const landedAll = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");

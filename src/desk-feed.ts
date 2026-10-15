@@ -163,7 +163,8 @@ export function deskFeed(deps: FeedDeps) {
       const items = take();
       for (const item of items) count("desk_note", item.id);
       const project = snapshot();
-      const flow = project ? flowLine(project, now()) : undefined;
+      // The flow line rides in details only: in the note's text it read as words Joel wrote (Joel, 2026-10-14).
+      const flow = project ? flowLine(project, now(), readSince(deps.path, 0).items) : undefined;
       let pull: string | undefined;
       if (project) {
         const slots = openSlots(project);
@@ -177,9 +178,9 @@ export function deskFeed(deps: FeedDeps) {
           }
         }
       }
-      if (!items.length && !flow) return undefined;
+      if (!items.length && !pull) return undefined;
       const message = note(items);
-      return { message: { ...message, details: { ...message.details, ...(flow ? { flow } : {}), ...(pull ? { pull } : {}) }, content: [flow, pull, items.length ? message.content : undefined].filter(Boolean).join("\n") } };
+      return { message: { ...message, details: { ...message.details, ...(flow ? { flow } : {}), ...(pull ? { pull } : {}) }, content: [pull, items.length ? message.content : undefined].filter(Boolean).join("\n") } };
     },
     turnStarted() {
       busy = true;
