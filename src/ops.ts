@@ -120,6 +120,14 @@ const sessionRestore = (profile: LaunchProfile, file: string | null, project: Pr
   return { ...selected, live, notes: [...notes, selected.note] };
 });
 
+/**
+ * The remote row's scratch note names the cleanup method. dcg denies `rm -rf` and `find -delete` under home, and a
+ * path-scoped dcg allow doesn't scope its target, so a worker told only "clean it" piled scratch up (pennywise, 2026-10-15).
+ */
+export function scratchCleanupNote(scratch: string): string {
+  return `Your scratch path is ${scratch}. This row owns it. Clean your disposable scratch before close with \`gio trash <path>\` on Linux or \`trash <path>\` on macOS: it is reversible and dcg allows it. Never use \`rm -rf\` or \`find -delete\`. Report anything that must survive. Close removes the directory only if empty. If dcg refuses cleanup, stop and report the path and size; do not try a second destructive command.`;
+}
+
 /** Muster's own per-attempt scratch note (writeLaunchFile's m-<uuid>.prompt.txt in the launch dir), not a caller prompt. */
 export const isScratchNote = (path: string, promptDir: string) => dirname(path) === promptDir && /^m-[0-9a-f-]{36}\.prompt\.txt$/.test(basename(path));
 
@@ -292,7 +300,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const promptDir = (yield* git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")
       .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
     yield* must("mkdir", ["-p", scratch], { cwd, timeoutMs: 10_000 });
-    const scratchNote = `Your scratch path is ${scratch}. This row owns it. Clean your disposable scratch before close; report anything that must survive. Close removes the directory only if empty. If dcg refuses cleanup, stop and report the path and size; do not try a second destructive command.${syncedBrief ? `\n${syncedBrief.note}` : ""}`;
+    const scratchNote = `${scratchCleanupNote(scratch)}${syncedBrief ? `\n${syncedBrief.note}` : ""}`;
     const contextFile = yield* writeLaunchFile(promptDir, scratchNote, "prompt.txt");
     // A retried or restored row inherits the last attempt's scratch note; replace it, never stack another.
     row = { ...row, profile: { ...row.profile, appendSystemPrompt: [...row.profile.appendSystemPrompt.filter(path => !isScratchNote(path, promptDir)), contextFile] } };
