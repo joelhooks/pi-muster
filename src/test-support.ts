@@ -48,6 +48,8 @@ export class FakeHerdr {
   promptFails = false;
   firstTurn: "clean" | "error" | "paste" | "missing" | "mismatch" = "clean";
   firstTurnError = "broken model route";
+  /** Journal entries written after the first turn, such as Pi's thinking_level_change when it clamps a level. Unlinked, so they lead the branch. */
+  turnEntries: object[] = [];
   typedPrompts: string[] = [];
   initialPrompts: string[] = [];
   launcherScripts: string[] = [];
@@ -266,6 +268,7 @@ export class FakeHerdr {
     const append = (line: string) => { const held = this.deferredJournals.get(file); if (held === undefined) appendFileSync(file, line); else this.deferredJournals.set(file, held + line); };
     append(`${JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text }] } })}\n`);
     if (this.firstTurn !== "missing") append(`${JSON.stringify({ type: "message", message: { role: "assistant", content: [], stopReason: this.firstTurn === "error" ? "error" : "stop", ...(this.firstTurn === "error" ? { errorMessage: this.firstTurnError } : {}) } })}\n`);
+    for (const entry of this.turnEntries) append(`${JSON.stringify(entry)}\n`);
   }
 
   client(): HerdrClient {

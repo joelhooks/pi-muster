@@ -109,12 +109,28 @@ const startPrompt = (row: AgentRow, prompt: string | undefined, dir: string) => 
 });
 
 
+const readSessionText = (file: string | null, remote: boolean): Effect.Effect<string, InputError | ProcError, Proc> => !file ? Effect.succeed("") : remote
+  ? must("node", ["--input-type=module", "-e", SESSION_MODEL_READ_SCRIPT, file], { cwd: "/", timeoutMs: 20_000 })
+  : Effect.try({ try: () => readFileSync(file, "utf8"), catch: error => new InputError({ message: String(error) }) });
+
+/**
+ * Pi silently clamps a thinking level its model catalog does not list. 14 Sol workers launched at xhigh ran at high
+ * because models.json had no thinkingLevelMap (Overthruster, 2026-10-16). The session's newest thinking_level_change is the truth.
+ */
+export function thinkingClampNote(requested: Thinking | null | undefined, effective: Thinking | undefined): string | null {
+  if (!requested || !effective || requested === effective) return null;
+  return `⚠ thinking clamped: requested ${requested}, effective ${effective}. Pi's model catalog does not list ${requested} for this model (check models.json thinkingLevelMap), then restart the row with thinking: "${requested}".`;
+}
+
+/** Best effort after the first turn: an unreadable session says so instead of failing a live launch. */
+const thinkingClamp = (file: string | null, requested: Thinking | null | undefined, remote: boolean) =>
+  !file || !requested ? Effect.succeed(null) : readSessionText(file, remote).pipe(
+    Effect.map(text => thinkingClampNote(requested, parseSessionModel(text).thinking)),
+    Effect.catch(error => Effect.succeed(`thinking level unchecked: ${error.message}`)));
+
 const sessionRestore = (profile: LaunchProfile, file: string | null, project: Project, role: Role, roster?: import("./domain.ts").Roster, params: Pick<AgentLaunchInput, "model" | "thinking"> = {}, remote = false) => Effect.gen(function* () {
   const notes: string[] = [];
-  const reading: Effect.Effect<string, InputError | ProcError, Proc> = !file ? Effect.succeed("") : remote
-    ? must("node", ["--input-type=module", "-e", SESSION_MODEL_READ_SCRIPT, file], { cwd: "/", timeoutMs: 20_000 })
-    : Effect.try({ try: () => readFileSync(file, "utf8"), catch: error => new InputError({ message: String(error) }) });
-  const text = yield* reading.pipe(Effect.catch(error => Effect.sync(() => { notes.push(`session model unavailable: ${error.message}; warning: using launch profile`); return ""; })));
+  const text = yield* readSessionText(file, remote).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`session model unavailable: ${error.message}; warning: using launch profile`); return ""; })));
   const live = parseSessionModel(text);
   const selected = yield* decodeWith(() => restoreProfile({ profile, live, roster, project: project.slug, role, ...params }), null);
   return { ...selected, live, notes: [...notes, selected.note] };
@@ -376,6 +392,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       const prompt = message.expected;
       const proof = prompt ? yield* proveStartedPrompt(wait.sessionFile, prompt, inheritedEntries, "repairPrompt" in message ? message.repairPrompt : undefined) : null;
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
+      const clamp = proof ? yield* thinkingClamp(wait.sessionFile, launchProfile.thinking, true) : null;
+      if (clamp) cloneNotes.push(`machine ${nameOfMachine}: ${clamp}`);
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
       return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(policyComms(project.policy)), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
@@ -2497,6 +2515,8 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
         notes.push("startup omitted the argv continuation; submitted it once after readiness and rechecked the original fork boundary");
       }
       if (proof.state !== "proven") return yield* input(`restart failed before rebind: ${proof.detail}; old agent untouched`);
+      const clamp = yield* thinkingClamp(wait.sessionFile, profile.thinking, Boolean(machine));
+      if (clamp) notes.push(clamp);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
         events: [...(old.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
         restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: environment } };
@@ -3090,6 +3110,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       if (proof.state === "unproven") skillNotes.push(`delivery: unproven: ${proof.detail}. Read the pane before this single repair call; do not resend if already working: ${JSON.stringify({ tool: "herdr_agent", args: { action: "prompt", target: launched.binding.paneId, prompt: proof.repairPrompt ?? text } })}`);
       running = yield* patchRow(dir, row.name, "running", [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(running.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
     }
+    const clamp = proof ? yield* thinkingClamp(launched.sessionFile, launchProfile.thinking, false) : null;
+    if (clamp) skillNotes.push(clamp);
     skillNotes.push(yield* readPiReceipt(agentEnvironment.HOME ?? env.home, piReceiptId));
     const tokens = yield* publishTokens(yield* load(dir));
     return {
