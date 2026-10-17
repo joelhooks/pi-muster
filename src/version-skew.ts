@@ -57,6 +57,18 @@ function packageVersion(root: string, files: readonly string[]): Version | undef
   return Number.isFinite(newest) ? { kind: "package", id: `${data.version}@${newest}` } : undefined;
 }
 
+interface Between { readonly count: number; readonly marked: ReadonlyArray<{ sha: string; why: string }> }
+
+/** Commits from loaded to disk, and the reasons any of them gave in a `Restart-Needed:` trailer. One bounded git call. */
+const marks = (root: string, base: string, id: string) => new Promise<Between | undefined>((done) => {
+  execFile("git", ["log", "--format=%h%x09%(trailers:key=Restart-Needed,valueonly,separator=%x20)", `${base}..${id}`], { cwd: root, timeout: 2_000 }, (error, stdout) => {
+    if (error) return done(undefined);
+    const lines = stdout.split("\n").filter(Boolean);
+    const marked = lines.map(line => { const [sha = "", why = ""] = line.split("\t"); return { sha, why: why.trim() }; }).filter(mark => mark.why);
+    done({ count: lines.length, marked });
+  });
+});
+
 export interface VersionSkew {
   check(): Promise<string | undefined>;
 }
@@ -84,27 +96,20 @@ export function createVersionSkew({ root, now = Date.now, loaded: evaluated = lo
   let checkedAt = -Infinity;
   let warning: string | undefined;
   let pending: Promise<string | undefined> | undefined;
-  const counts = new Map<string, number | undefined>();
+  const between = new Map<string, Between | undefined>();
   const check = async () => {
     const disk = read();
     if (!loaded || !disk || loaded.kind !== disk.kind || loaded.id === disk.id) return;
-    let count: number | undefined;
-    if (loaded.kind === "git" && disk.kind === "git") {
-      if (!counts.has(disk.id)) {
-        const id = disk.id;
-        const base = loaded.id;
-        const value = await new Promise<number | undefined>((done) => {
-          execFile("git", ["rev-list", "--count", `${base}..${id}`], { cwd: root, timeout: 2_000 }, (error, stdout) => {
-            const output = stdout.trim();
-            done(!error && /^\d+$/.test(output) ? Number(output) : undefined);
-          });
-        });
-        counts.set(id, value);
-      }
-      count = counts.get(disk.id);
-    }
-    const short = (version: Version) => version.kind === "git" ? version.id.slice(0, 7) : version.id;
-    return `⚠ Muster tools are stale: loaded ${short(loaded)}, on disk ${short(disk)}${count === undefined ? "" : ` (${count} commits)`}. Restart it onto current code with agent_launch action: "restart" (an owner, or a desk for itself); never /reload.`;
+    // Improvement loop #1 (Switchboard, 2026-10-17): the warning fired in 52 conversations in two weeks for commits no
+    // live session needed. Only a commit marked `Restart-Needed: <why>` warns; a package install cannot be read, so it is quiet.
+    if (loaded.kind !== "git" || disk.kind !== "git") return;
+    if (!between.has(disk.id)) between.set(disk.id, await marks(root, loaded.id, disk.id));
+    const found = between.get(disk.id);
+    const span = `loaded ${loaded.id.slice(0, 7)}, on disk ${disk.id.slice(0, 7)}`;
+    const restart = 'Restart it onto current code with agent_launch action: "restart" (an owner, or a desk for itself); never /reload.';
+    if (!found) return `⚠ Muster tools may be stale: ${span}, and its restart marks could not be read. ${restart}`;
+    if (!found.marked.length) return;
+    return `⚠ Muster tools need a restart: ${span} (${found.count} commits). ${found.marked.map(mark => `${mark.sha}: ${mark.why}`).join("; ")}. ${restart}`;
   };
   return {
     check() {

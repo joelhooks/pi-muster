@@ -19,6 +19,7 @@ Muster is being strangled down to its Herdr hands: spawn, fork, restart, adopt, 
 - Never emit `--tools`, `--exclude-tools`, `--no-tools`, or `--no-builtin-tools`.
 - Close a pane only by id plus terminal id, and only if Muster opened it. Act on a row's pane only from the session that owns it.
 - Commits Muster makes are `shitratgit[bot]`'s. Muster never pushes.
+- Running sessions load new code at their next natural restart. Add a `Restart-Needed: <why>` trailer only when a live session on older code would do harm or fail: a changed tool schema, a cross-session protocol change, or a bug that hurts while loaded. Only marked commits warn running sessions. When in doubt, mark.
 - Durable state never lives under a temp dir unless the project is `ephemeral`.
 
 ## Checks

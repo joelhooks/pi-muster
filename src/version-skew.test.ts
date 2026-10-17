@@ -20,8 +20,8 @@ function repo() {
   commit(root);
   return root;
 }
-function commit(root: string) {
-  git(root, "commit", "-q", "--allow-empty", "-m", "next");
+function commit(root: string, restartNeeded?: string) {
+  git(root, "commit", "-q", "--allow-empty", "-m", restartNeeded ? `next\n\nRestart-Needed: ${restartNeeded}` : "next");
   return git(root, "rev-parse", "HEAD");
 }
 function clock(root: string) {
@@ -36,20 +36,25 @@ describe("version skew", () => {
     const root = repo();
     const running = git(root, "rev-parse", "HEAD");
     const evaluated = loadedVersion(root);
-    const disk = commit(root);
+    const disk = commit(root, "tool schema changed");
     const warning = await createVersionSkew({ root, loaded: evaluated }).check();
     expect(warning).toContain(`loaded ${running.slice(0, 7)}, on disk ${disk.slice(0, 7)}`);
   });
 
-  it("adds nothing at the loaded commit, then names both shas and the distance", async () => {
+  // Improvement loop #1 (Switchboard, 2026-10-17): 52 conversations were told to restart for commits none of them needed.
+  it("stays quiet for unmarked commits, then names the marked ones, both shas and the distance", async () => {
     const root = repo();
     const loaded = git(root, "rev-parse", "HEAD");
     const { skew, tick } = clock(root);
     expect(await skew.check()).toBeUndefined();
     commit(root);
+    commit(root);
+    tick();
+    expect(await skew.check()).toBeUndefined();
+    const marked = commit(root, "restart keeps the Rat King name");
     const disk = commit(root);
     tick();
-    expect(await skew.check()).toBe(`⚠ Muster tools are stale: loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (2 commits). Restart it onto current code with agent_launch action: "restart" (an owner, or a desk for itself); never /reload.`);
+    expect(await skew.check()).toBe(`⚠ Muster tools need a restart: loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (4 commits). ${marked.slice(0, 7)}: restart keeps the Rat King name. Restart it onto current code with agent_launch action: "restart" (an owner, or a desk for itself); never /reload.`);
     git(root, "checkout", "--detach", loaded);
     tick();
     expect(await skew.check()).toBeUndefined();
@@ -60,7 +65,7 @@ describe("version skew", () => {
     git(root, "pack-refs", "--all", "--prune");
     const loaded = git(root, "rev-parse", "HEAD");
     const { skew } = clock(root);
-    const disk = commit(root);
+    const disk = commit(root, "protocol");
     git(root, "pack-refs", "--all", "--prune");
     expect(await skew.check()).toContain(`loaded ${loaded.slice(0, 7)}, on disk ${disk.slice(0, 7)} (1 commits)`);
   });
@@ -70,7 +75,7 @@ describe("version skew", () => {
     expect(await createVersionSkew({ root }).check()).toBeUndefined();
   });
 
-  it("falls back to package version and newest loaded-file mtime", async () => {
+  it("a package install, with no commits to read marks from, stays quiet", async () => {
     const root = mkdtempSync(join(tmpdir(), "muster-package-"));
     mkdirSync(join(root, "extensions"));
     mkdirSync(join(root, "src"));
@@ -85,7 +90,7 @@ describe("version skew", () => {
     expect(await skew.check()).toBeUndefined();
     utimesSync(source, 3, 3);
     tick();
-    expect(await skew.check()).toContain("loaded 1.0.0@2000, on disk 1.0.0@3000.");
+    expect(await skew.check()).toBeUndefined();
   });
 
   it("two calls within a minute take one disk snapshot, also when concurrent", async () => {
@@ -102,10 +107,10 @@ describe("version skew", () => {
     expect(reads.mock.calls.filter(([path]) => path === join(root, ".git", "HEAD"))).toHaveLength(2);
   });
 
-  it("caches count once per disk commit and omits it when git fails", async () => {
+  it("reads marks once per disk commit, and says so when git cannot read them", async () => {
     const root = repo();
     const { skew, tick } = clock(root);
-    const disk = commit(root);
+    const disk = commit(root, "needed");
     expect(await skew.check()).toContain("(1 commits)");
     writeFileSync(join(root, ".git", "config"), "invalid config\n");
     tick();
@@ -114,8 +119,8 @@ describe("version skew", () => {
     writeFileSync(join(root, ".git", "HEAD"), `${"a".repeat(40)}\n`);
     tick();
     const warning = await skew.check();
-    expect(warning).toContain("on disk aaaaaaa.");
-    expect(warning).not.toContain("commits)");
+    expect(warning).toContain("may be stale: loaded");
+    expect(warning).toContain("on disk aaaaaaa, and its restart marks could not be read.");
     expect(disk).not.toBe(readFileSync(join(root, ".git", "HEAD"), "utf8").trim());
   });
 
