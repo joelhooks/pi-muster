@@ -686,8 +686,13 @@ describe("project_open", () => {
     h.herdr.tokens.clear();
     await runWith(h, deskPost(dir, { kind: "fyi", title: "x" }));
     expect(h.herdr.tokens.size).toBe(0);
-    const bad = await failWith(h, projectOpen({ dir, cadenceMinutes: 90 }));
-    expect(bad.message).toContain("cache TTL");
+    // Rule hunt, 2026-10-17: past the cache TTL is a cost alarm, not a refusal; only pi-until's range refuses.
+    const slow = await runWith(h, projectOpen({ dir, cadenceMinutes: 90 }));
+    expect(slow.cadence?.args.intervalSeconds).toBe(5400);
+    expect(slow.notes.join("\n")).toContain("⚠ cadence 90 min is past the one-hour prompt cache");
+    expect((await runWith(h, projectOpen({ dir, cadenceMinutes: 15 }))).notes.join("\n")).not.toContain("⚠ cadence");
+    const bad = await failWith(h, projectOpen({ dir, cadenceMinutes: 1441 }));
+    expect(bad.message).toContain("cadenceMinutes must be 1-1440");
   });
 });
 

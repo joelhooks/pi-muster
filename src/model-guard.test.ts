@@ -52,7 +52,7 @@ it.each([ ["opus", "claude-bridge/claude-opus-5-5"], ["sol", "openai-codex/gpt-6
 it.each(["sonnet", "anthropic/claude-sonnet-5", "anthropic/claude-sonnet-5-5", "fable", "fable:high", "claude-bridge/claude-fable-5-1", "nope"])("rejects forbidden/unknown choice %s", async (model) => {
   const { h, launch } = await setup();
   const error = await failWith(h, launch(model));
-  expect(error.message).toMatch(model.includes("sonnet") ? /Sonnet is not used/ : model.includes("fable") ? /Fable is off fleet-wide \(Joel, 2026-10-04\); use opus/ : /aliases: opus, sol$/);
+  expect(error.message).toMatch(model.includes("sonnet") ? /Sonnet is not used/ : model.includes("fable") ? /Fable is off fleet-wide: .*Next: relaunch with model: "opus"/ : /aliases: opus, sol$/);
 });
 it("allows Joel's named front-desk Sonnet route there only, and Fable nowhere", async () => {
   const front = await setup("front-desk");

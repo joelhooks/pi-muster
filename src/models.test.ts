@@ -22,13 +22,15 @@ it("refuses a roster alias targeting sonnet", () => {
 });
 it("refuses Fable by alias, roster alias and route, and keeps the built-in fable alias gone", () => {
   const roster = decodeRoster({ version: 1, aliases: { fable: "claude-bridge/claude-fable-5-1", judge: "claude-bridge/claude-fable-5-1" }, roles: {} });
-  for (const choice of ["fable", "judge", "claude-bridge/claude-fable-5-1:high"]) expect(() => resolveModel(choice, roster, "front-desk")).toThrow("Fable is off fleet-wide (Joel, 2026-10-04); use opus");
+  for (const choice of ["fable", "judge", "claude-bridge/claude-fable-5-1:high"]) expect(() => resolveModel(choice, roster, "front-desk")).toThrow(/Fable is off fleet-wide: .* is refused\. .*Next: relaunch with model: "opus"/);
   expect(() => resolveModel("fable")).toThrow("Fable is off");
   expect(roleDefaults(undefined, undefined, "judge").model).toBe("claude-bridge/claude-opus-5-5");
 });
 it("scopes the Sonnet exception to front-desk and its exact route", () => {
   expect(resolveModel("claude-bridge/claude-sonnet-5-5:medium", undefined, "front-desk")).toEqual({ model: "claude-bridge/claude-sonnet-5-5", thinking: "medium" });
   expect(() => resolveModel("claude-bridge/claude-sonnet-5-5")).toThrow("Sonnet is not used");
+  // Errors are prompts (rule hunt, 2026-10-17): the refusal names Joel's exceptions and the next call.
+  expect(() => resolveModel("claude-bridge/claude-sonnet-5-5", undefined, "drovr", "boss")).toThrow(/Sonnet is not used for boss rows in drovr: .*"we can offer exploratry use of sonnet 55 for workers".*front-desk may use claude-bridge\/claude-sonnet-5-5.*Next: model: "sol" or "opus"/);
   expect(() => resolveModel("claude-bridge/claude-sonnet-5-5", undefined, "drovr")).toThrow("Sonnet is not used");
   expect(() => resolveModel("anthropic/claude-sonnet-5-5", undefined, "front-desk")).toThrow("Sonnet is not used");
 });

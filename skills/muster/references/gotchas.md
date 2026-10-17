@@ -12,9 +12,9 @@ Traps from the first pilot projects (2026-09) that stay judgment. Anything that 
 ## Bridge lanes (`pi-claude-bridge`)
 
 - Prompt capture fails closed on wakes. A Rat King, pi-until, or `sendMessage` wake skips `before_agent_start`, so the bridge must match Pi's live prompt to one it recorded on a user turn. After a `/reload` or restart that changed tools, rules, skills, or custom sections, nothing matches, and every wake ends with `stopReason: error` and 0 tokens until an ordinary user message refreshes the capture. A lane woken only by timers never gets that message. `project_status` types that message into its own stuck lanes and shows others' as `⚠️ stuck`; `agent_launch action=restore` sends it with the work prompt.
-- A spent quota ends every bridge lane's turn and nothing resumes them. After the reset, re-prompt each lane. Switch accounts near a limit; if every account is past 80% of its 7-day window, stop opening Opus lanes.
-- Mid-turn compaction continues on a fresh Claude Code process and loses the prompt cache about 58% of the time. The cold first turn after compaction often runs without tools until the bridge's listing gate covers every fresh query. Do not lower compaction thresholds on live lanes before that fix lands: every lane above the new line compacts on its next turn at once.
-- Opus lanes near 975k fail one request with "Prompt is too long". Per-role `--compact-at` keeps them far below.
+- A spent quota ends every bridge lane's turn and nothing resumes them. After the reset, re-prompt each lane. Switch accounts near a limit. Before opening Opus lanes, read and cite `~/.local/state/muster/fleet-capacity.md`: a pool near its 7-day limit is an alarm to weigh against the lane, not a wall, and a critical lane may still need Opus.
+- Mid-turn compaction continues on a fresh Claude Code process and loses the prompt cache about 58% of the time. The cold first turn after compaction often runs without tools until the bridge's listing gate covers every fresh query. Lowering a compaction threshold on live lanes makes every lane above the new line compact on its next turn at once; stagger the change.
+- Opus lanes near 975k fail one request with "Prompt is too long". Per-role `--compact-at` and Pi's own reserve keep them far below; a launch above 400k says so in its receipt.
 - The bridge cannot run inside pi-subagents children.
 - Bridge workers' own `until` wakes often fail to resume them. Workers run suites and deploy rungs in the foreground with a long bash timeout.
 

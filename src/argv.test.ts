@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { FORBIDDEN_FLAGS, buildArgv, mintSessionId, profileFor, sessionDirFor, sessionIdFromFile, shellPrelude, slimProblem } from "./argv.ts";
+import { FORBIDDEN_FLAGS, buildArgv, compactAlarm, mintSessionId, profileFor, sessionDirFor, sessionIdFromFile, shellPrelude, slimProblem } from "./argv.ts";
 import { roleDefaults } from "./domain.ts";
 
 const profile = profileFor("worker", {
@@ -111,9 +111,14 @@ describe("helpers", () => {
 });
 
 // Joel, 2026-10-12: Claude compacts by 400k; rows launched at 450k keep that value in their stored profile.
-it("caps --compact-at at 400k for Claude rows, whatever the stored profile says, and leaves other models and off alone", () => {
+// Rule hunt, 2026-10-17: the 400k Claude cap was a silent clamp. It is an alarm in the receipt now; the request stands.
+it("passes --compact-at as requested and names a Claude row above 400k as an alarm", () => {
   const at = (model: string, compactAt: number | null) => { const argv = buildArgv({ kind: "launch", sessionId: "s", sessionFile: null, parentSessionFile: null, musterExtension: "/muster", profile: { ...profileFor("desk", { label: "d" }), model, compactAt } }); return argv[argv.indexOf("--compact-at") + 1]; };
-  expect(at("claude-bridge/claude-opus-5-5", 450_000)).toBe("400000");
+  expect(at("claude-bridge/claude-opus-5-5", 450_000)).toBe("450000");
+  expect(compactAlarm("claude-bridge/claude-opus-5-5", 450_000)).toContain("⚠ compact-at 450000 is above 400000");
+  expect(compactAlarm("claude-bridge/claude-opus-5-5", 400_000)).toBeNull();
+  expect(compactAlarm("claude-bridge/claude-opus-5-5", null)).toBeNull();
+  expect(compactAlarm("openai-codex/gpt-6.1-sol", 450_000)).toBeNull();
   expect(at("claude-bridge/claude-opus-5-5", 300_000)).toBe("300000");
   expect(at("claude-bridge/claude-opus-5-5", null)).toBe("off");
   expect(at("openai-codex/gpt-6.1-sol", 450_000)).toBe("450000");

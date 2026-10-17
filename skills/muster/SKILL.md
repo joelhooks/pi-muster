@@ -92,6 +92,6 @@ Read [done means live and proven](references/done.md) when finishing delivery. M
 
 ## Clocks and cost
 
-Pi-until owns every clock. Keep owner passes under 60 minutes; the prompt cache goes cold after an hour. An empty pass ends in one line. The desk may write and diagnose directly; delegate only when the critical path or a named risk warrants it.
+Pi-until owns every clock. A pass more than an hour apart finds the prompt cache cold and rebuilds the prefix: a cost to weigh, not a wall, and sometimes cheaper than polling. An empty pass ends in one line. The desk may write and diagnose directly; delegate only when the critical path or a named risk warrants it.
 
 Read [remote lanes](references/remote-lanes.md) for worker panes on a saved machine. The desk and landings stay on the owner machine. Read [gotchas](references/gotchas.md) when a lane stalls, a bridge lane misbehaves, or restoration surprises you.

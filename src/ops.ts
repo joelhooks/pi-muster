@@ -13,6 +13,7 @@ import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import {
   agentEnv,
   buildArgv,
+  compactAlarm,
   extensionsFor,
   mintSessionId,
   profileFor,
@@ -26,7 +27,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
-import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
+import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, CACHE_WARM_CADENCE_MINUTES, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
 import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
 import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
@@ -1361,7 +1362,7 @@ export const projectOpen = (params: ProjectOpenInput) =>
     const dir = yield* requireAbsolute("dir", params.dir);
     if (!existsSync(dir) || !statSync(dir).isDirectory()) return yield* input(`project dir ${dir} does not exist`);
     if (params.cadenceMinutes != null && (params.cadenceMinutes < 1 || params.cadenceMinutes > MAX_CADENCE_MINUTES)) {
-      return yield* input(`cadenceMinutes must be 1-${MAX_CADENCE_MINUTES}: a wake past the one-hour cache TTL rebuilds the whole prefix cold`);
+      return yield* input(`cadenceMinutes must be 1-${MAX_CADENCE_MINUTES} (pi-until's longest fixed cadence); got ${params.cadenceMinutes}. Next: project_open with cadenceMinutes in range, or null for no cadence.`);
     }
     const now = iso(env);
     let adopted = exists(dir);
@@ -1466,6 +1467,8 @@ export const projectOpen = (params: ProjectOpenInput) =>
     notes.push(yield* publishTokens(final));
     notes.push(`brain: ${yield* writeBrain(final)}`);
     notes.push(deployPostureLine(final));
+    // Cost, not a wall: past the one-hour TTL each wake rebuilds the prompt prefix cold (rule hunt, 2026-10-17).
+    if (final.cadenceMinutes && final.cadenceMinutes > CACHE_WARM_CADENCE_MINUTES) notes.push(`⚠ cadence ${final.cadenceMinutes} min is past the one-hour prompt cache: each wake rebuilds the whole prefix cold. Fine when waiting is cheaper than polling; ${CACHE_WARM_CADENCE_MINUTES} min or less keeps it warm.`);
     return { project: final, adopted, cadence: cadenceCall(final), notes };
   });
 
@@ -2753,6 +2756,7 @@ export const launchResultText = (result: { row: AgentRow; argv: readonly string[
   ...(result.row.restore?.env.RATKING_NAME ? [`Rat King name: ${result.row.restore.env.RATKING_NAME} (send to this name; a row launched under another name has its own mailbox)`] : []),
   result.proof ? `delivery: ${result.proof.state}${result.proof.state === "unproven" ? ` — ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent",
   ...(result.row.clone ? [`clone base: ${result.row.clone.base ? `${result.row.clone.base.ref} ${result.row.clone.base.sha}` : "unproven (old catalog)"}`] : []),
+  ...[compactAlarm(result.row.profile.model, result.row.profile.compactAt)].filter((note): note is string => note !== null),
   `argv: pi ${result.argv.join(" ")}`, ...result.notes,
 ].join("\n");
 
@@ -2768,6 +2772,7 @@ export const launchOwnerText = (result: { row: AgentRow; argv: readonly string[]
     ["🐑 launched", row.name, "·", [row.pane?.paneId ?? "no pane", row.machine !== "local" ? row.machine : null, model, base].filter(Boolean).join(" · ")].join(" "),
     `session ${row.sessionId}${result.sessionIdMatched === false ? " (Herdr's id, not the minted one)" : ""} · readiness ${result.readiness} · ${result.proof ? `delivery ${result.proof.state}${result.proof.state === "unproven" ? `: ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent"}`,
     ...(row.restore?.env.RATKING_NAME ? [`mail: ${row.restore.env.RATKING_NAME}`] : []),
+    ...[compactAlarm(row.profile.model, row.profile.compactAt)].filter((note): note is string => note !== null),
     ...notes,
     `full launch receipt: ${log}`,
   ].join("\n");

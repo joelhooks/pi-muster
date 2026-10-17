@@ -35,8 +35,14 @@ function value(flag: string, text: string): readonly [string, string] {
  * prefix is set here, once: bridge lanes fail closed when the prompt changes
  * mid-session, and the prefix is the part every turn re-reads from cache.
  */
-/** A Claude row never compacts later than CLAUDE_COMPACT_AT_MAX, whatever its stored profile or project policy says. */
-export const compactCap = (model: string, compactAt: number) => model.startsWith("claude-bridge/") ? Math.min(compactAt, CLAUDE_COMPACT_AT_MAX) : compactAt;
+/**
+ * A Claude row above CLAUDE_COMPACT_AT_MAX is an alarm, not a clamp (rule hunt, 2026-10-17): Opus near 975k fails one
+ * request, and Pi's own reserve compacts first. The launch receipt names the risk; the requested threshold stands.
+ */
+export const compactAlarm = (model: string, compactAt: number | null): string | null =>
+  model.startsWith("claude-bridge/") && compactAt !== null && compactAt > CLAUDE_COMPACT_AT_MAX
+    ? `⚠ compact-at ${compactAt} is above ${CLAUDE_COMPACT_AT_MAX} on ${model}: an Opus turn near 975k context fails one request ("Prompt is too long"). Pi's own reserve may compact earlier; lower compactAt if this row runs long.`
+    : null;
 
 export function buildArgv(input: ArgvInput): string[] {
   const { profile } = input;
@@ -61,7 +67,7 @@ export function buildArgv(input: ArgvInput): string[] {
   for (const extension of new Set(extensions)) argv.push(...value("-e", extension));
   // Always explicit: without the flag the role default comes back, so "off" must say off.
   // Muster's extension registers --compact-at; a slim Pi does not load it and would reject the flag.
-  if (!profile.slim) argv.push("--compact-at", profile.compactAt === null ? "off" : String(compactCap(profile.model, profile.compactAt)));
+  if (!profile.slim) argv.push("--compact-at", profile.compactAt === null ? "off" : String(profile.compactAt));
   argv.push("--approve");
   const forbidden = argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg));
   if (forbidden.length > 0) throw new Error(`argv contains tool-registry flags: ${forbidden.join(", ")}`);

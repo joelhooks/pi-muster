@@ -22,8 +22,9 @@ const allowed = (model: string, project?: string, role?: Role) =>
   MODEL_EXCEPTIONS.some((e) => e.project === project && e.model === model) || ROLE_MODEL_EXCEPTIONS.some((e) => e.role === role && e.model === model);
 
 function refuse(model: string, project?: string, role?: Role) {
-  if (/fable/i.test(model)) throw new Error("Fable is off fleet-wide (Joel, 2026-10-04); use opus");
-  if (/sonnet/i.test(model) && !allowed(model, project, role)) throw new Error("Sonnet is not used (Joel, 2026-10-03; workers may opt into claude-bridge/claude-sonnet-5-5); use sol or opus");
+  // Errors are prompts (rule hunt, 2026-10-17): what failed, why, what is accepted, and the next call.
+  if (/fable/i.test(model)) throw new Error(`Fable is off fleet-wide: ${model} is refused. Fleet policy runs Claude Code Fable only when Joel asks for it, outside Muster's rows. Accepted: opus, sol, or another roster route. Next: relaunch with model: "opus".`);
+  if (/sonnet/i.test(model) && !allowed(model, project, role)) throw new Error(`Sonnet is not used for ${role ?? "this"} rows${project ? ` in ${project}` : ""}: ${model} is refused. Joel's exceptions: workers may opt into claude-bridge/claude-sonnet-5-5 ("${ROLE_MODEL_EXCEPTIONS[0]?.ruling}", ${ROLE_MODEL_EXCEPTIONS[0]?.date}), and ${MODEL_EXCEPTIONS.map(e => `${e.project} may use ${e.model}`).join("; ")}. Next: model: "sol" or "opus", or role: "worker" with model: "claude-bridge/claude-sonnet-5-5".`);
 }
 
 export function resolveModel(choice: string, roster?: Roster, project?: string, role?: Role): { model: string; thinking?: Thinking } {

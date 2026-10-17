@@ -40,7 +40,10 @@ export const NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 export const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const SESSION_ID_RE = /^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 /** Longest wake interval that keeps the provider's prompt cache warm (TTL about one hour). */
-export const MAX_CADENCE_MINUTES = 55;
+/** Past this a wake finds the one-hour prompt cache cold. A cost alarm, not a wall (rule hunt, 2026-10-17). */
+export const CACHE_WARM_CADENCE_MINUTES = 55;
+/** pi-until's longest fixed cadence (86400 s). */
+export const MAX_CADENCE_MINUTES = 1440;
 
 export const AgentName = Schema.String.check(
   Schema.isPattern(NAME_RE, { message: "agent name must match [a-z][a-z0-9_-]{0,31}" }),
