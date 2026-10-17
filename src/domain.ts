@@ -217,7 +217,8 @@ export const MachineConfig = Schema.Struct({
   workerWorktree: RemotePath,
   env: Schema.Record(Schema.String.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/)), Schema.String),
   wrap: Schema.Array(Schema.String).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
-  socket: RemotePath.pipe(Schema.withDecodingDefaultKey(Effect.succeed("/home/joel/.config/herdr/herdr.sock"))),
+  /** The remote Herdr socket. Unset, it is Herdr's own default under the remote HOME, resolved when the forward opens. */
+  socket: Schema.optionalKey(RemotePath),
   comms: Schema.optionalKey(Schema.Struct({ config: RemotePath })),
   /** At most one machine: `agent_launch clone: true` without `machine` launches there (fleet SOP 2026-10-07). */
   cloneDefault: Schema.optionalKey(Schema.Boolean),

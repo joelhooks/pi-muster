@@ -33,7 +33,7 @@ async function fixture() {
 
 function receipt(home: string, tree: string, patch = {}) {
   const root = join(home, ".local/state/muster/gates"); mkdirSync(root, { recursive: true });
-  writeFileSync(join(root, "gate.json"), JSON.stringify({ runId: "run", host: "pennywise", tree, slot: 0, durationMs: 1, exit: 0, ...patch }));
+  writeFileSync(join(root, "gate.json"), JSON.stringify({ runId: "run", host: "remote1", tree, slot: 0, durationMs: 1, exit: 0, ...patch }));
 }
 
 describe("pure task status", () => {

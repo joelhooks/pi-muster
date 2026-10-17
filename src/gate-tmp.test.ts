@@ -51,7 +51,7 @@ describe("claimGateTmp", () => {
   it("does nothing when off, non-darwin, or on another host, even with an explicit executable", () => {
     const warn = vi.spyOn(console, "error");
     expect(claimGateTmp("off", flagg)).toBeUndefined();
-    expect(claimGateTmp("/missing", { platform: "linux", name: "pennywise" })).toBeUndefined();
+    expect(claimGateTmp("/missing", { platform: "linux", name: "remote1" })).toBeUndefined();
     expect(claimGateTmp("/missing", { platform: "darwin", name: "blaine" })).toBeUndefined();
     expect(warn).not.toHaveBeenCalled();
   });

@@ -87,7 +87,7 @@ describe("ratking is the default", { timeout: 30_000 }, () => {
 
 describe("detection", () => {
   it("pi-ratking registered as intercom is pi-ratking, not pi-intercom", () => {
-    const ratking = [{ name: "intercom", sourceInfo: { path: "/home/joel/Code/joelhooks/rat-king/packages/pi-ratking/src/extension.ts", source: "local" } }];
+    const ratking = [{ name: "intercom", sourceInfo: { path: "/home/alice/Code/joelhooks/rat-king/packages/pi-ratking/src/extension.ts", source: "local" } }];
     expect(ratkingLoaded(ratking)).toBe(true);
     expect(ratkingLoaded(ratking, "intercom")).toBe(true);
     const intercom = [{ name: "intercom", sourceInfo: { path: "/n/pi-intercom/index.ts", source: "npm:pi-intercom" } }];
@@ -218,17 +218,17 @@ describe("rowless owners", { timeout: 30_000 }, () => {
       row.name === "other" ? { ...row, ownerName: "old-owner" } : row.name === "worker" ? row : { ...row, owner: "someone-else" }) }, undefined] as const)));
     const workerTarget = () => ratkingTarget(h.sessionId, { catalogs: registeredCatalogs(h.home, dir), env: { MUSTER_OWNER: h.sessionId } });
     expect(workerTarget()).toEqual({ name: "old-owner", session: h.sessionId });
-    process.env.RATKING_NAME = "pennywise-owner";
+    process.env.RATKING_NAME = "remote1-owner";
     await runWith(h, projectStatus(dir));
     const rows = (await runWith(h, load(dir))).agents;
-    expect(rows.filter(row => row.owner === h.sessionId).map(row => [row.name, row.ownerName])).toEqual([["worker", "pennywise-owner"], ["other", "pennywise-owner"]]);
+    expect(rows.filter(row => row.owner === h.sessionId).map(row => [row.name, row.ownerName])).toEqual([["worker", "remote1-owner"], ["other", "remote1-owner"]]);
     expect(rows.filter(row => row.owner !== h.sessionId).every(row => row.ownerName === undefined)).toBe(true);
-    expect(workerTarget()).toEqual({ name: "pennywise-owner", session: h.sessionId });
+    expect(workerTarget()).toEqual({ name: "remote1-owner", session: h.sessionId });
     // owner_inbox's pull backfills too.
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(({ ownerName: _, ...row }) => row) }, undefined] as const)));
     expect(workerTarget).toThrow("no Rat King name");
     await runWith(h, pullRemoteOwnerInbox(dir));
-    expect(workerTarget()).toEqual({ name: "pennywise-owner", session: h.sessionId });
+    expect(workerTarget()).toEqual({ name: "remote1-owner", session: h.sessionId });
   });
 
   it("the owner itself answers to its own RATKING_NAME first", () => {

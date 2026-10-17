@@ -8,16 +8,16 @@ Create `~/.config/muster/machines.json` on the owner machine. Missing configurat
 
 ```json
 {
-  "pennywise": {
-    "herdr": "pennywise",
-    "ssh": "pennywise",
-    "socket": "/home/joel/.config/herdr/herdr.sock",
+  "remote1": {
+    "herdr": "remote1",
+    "ssh": "remote1",
+    "socket": "/home/alice/.config/herdr/herdr.sock",
     "paths": {
-      "/Users/joel/Code": "/home/joel/Code",
-      "/Users/joel/.agent/projects": "/home/joel/.agent/projects"
+      "/Users/alice/Code": "/home/alice/Code",
+      "/Users/alice/.agent/projects": "/home/alice/.agent/projects"
     },
-    "musterExtension": "/home/joel/Code/joelhooks/pi-muster",
-    "workerWorktree": "/home/joel/Code/joelhooks/dark-wizard/scripts/worker-worktree.sh",
+    "musterExtension": "/home/alice/Code/joelhooks/pi-muster",
+    "workerWorktree": "/home/alice/Code/tools/worker-worktree.sh",
     "env": { "CUDA_VISIBLE_DEVICES": "" },
     "wrap": ["/usr/local/bin/pw-worker-scope", "--name", "{name}", "--"],
     "maxPanes": 3
@@ -30,7 +30,7 @@ Create `~/.config/muster/machines.json` on the owner machine. Missing configurat
 ## Prerequisites
 
 - Key-based, noninteractive SSH from the owner to the configured target.
-- A running Herdr server at the configured socket. On pennywise it must run as a user service with linger. The machine owner starts and maintains it, not Muster.
+- A running Herdr server at the configured socket (`socket` is optional; unset, it is `~/.config/herdr/herdr.sock` under the remote HOME). On remote1 it must run as a user service with linger. The machine owner starts and maintains it, not Muster.
 - `pi`, `node`, `git` and `rift` on the remote noninteractive PATH.
 - A readable Muster package with installed dependencies at `musterExtension`.
 - An executable `worker-worktree.sh` at `workerWorktree`, and its rift dependencies.
@@ -48,13 +48,13 @@ After opening the project and its lane, call:
 ```json
 {
   "action": "launch",
-  "machine": "pennywise",
-  "name": "drovr-worker",
+  "machine": "remote1",
+  "name": "example-worker",
   "role": "worker",
   "lane": "work",
-  "label": "🔨 drovr worker",
+  "label": "🔨 example worker",
   "clone": true,
-  "brief": "/Users/joel/.agent/projects/drovr/briefs/work.md"
+  "brief": "/Users/alice/.agent/projects/example/briefs/work.md"
 }
 ```
 

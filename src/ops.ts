@@ -139,7 +139,7 @@ const sessionRestore = (profile: LaunchProfile, file: string | null, project: Pr
 
 /**
  * The remote row's scratch note names the cleanup method. dcg denies `rm -rf` and `find -delete` under home, and a
- * path-scoped dcg allow doesn't scope its target, so a worker told only "clean it" piled scratch up (pennywise, 2026-10-15).
+ * path-scoped dcg allow doesn't scope its target, so a worker told only "clean it" piled scratch up (remote1, 2026-10-15).
  */
 export function scratchCleanupNote(scratch: string): string {
   return `Your scratch path is ${scratch}. This row owns it. Clean your disposable scratch before close with \`gio trash <path>\` on Linux or \`trash <path>\` on macOS: it is reversible and dcg allows it. Never use \`rm -rf\` or \`find -delete\`. Report anything that must survive. Close removes the directory only if empty. If dcg refuses cleanup, stop and report the path and size; do not try a second destructive command.`;
@@ -224,7 +224,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
   const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...custodyNotes, ...workerChoice.notes, ...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
-  // A machine can serve a provider under another name (pennywise runs openai-codex models through cliproxy-codex).
+  // A machine can serve a provider under another name (remote1 runs openai-codex models through cliproxy-codex).
   const [provider, ...modelRest] = selected.model.split("/");
   const mappedProvider = provider ? machine.providerMap?.[provider] : undefined;
   const remoteModel = mappedProvider && modelRest.length ? [mappedProvider, ...modelRest].join("/") : selected.model;
@@ -594,7 +594,7 @@ export const baseRemoteFetch = (localSource: string, base: string | null | undef
   return url.code === 0 && url.stdout.trim() ? { remote: match[1]!, branch: match[2]!, url: url.stdout.trim() } : null;
 });
 
-/** KITT, 2026-10-12: a walgit lane base resolved on Flagg, but pennywise's checkout has only origin, so clone create
+/** KITT, 2026-10-12: a walgit lane base resolved on Flagg, but remote1's checkout has only origin, so clone create
  * and close's harvest check failed on it. The row's host fetches just that branch from the desk's URL into the same
  * remote-tracking ref. It never adds a remote and never pushes; a host that has the remote keeps its own fetch. */
 export const ensureBaseRef = (remoteSource: string, fetch: { remote: string; branch: string; url: string } | null) => Effect.gen(function* () {
@@ -3805,9 +3805,9 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (outcome === "committed" && params.attested) {
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
-      // codetv-workshop, 2026-10-14: a pennywise lane's source path exists only on pennywise, so local git spawned in
+      // codetv-workshop, 2026-10-14: a remote1 lane's source path exists only on remote1, so local git spawned in
       // a missing cwd (spawn git ENOENT). A remote row's landing is proven on its own machine, in the source mapped there:
-      // clone.source is recorded in owner paths (/Users/joel/... for a Flagg owner, muster desk 2026-10-14).
+      // clone.source is recorded in owner paths (/Users/alice/... for a Flagg owner, muster desk 2026-10-14).
       const machine = row.machine === "local" ? undefined : yield* machineConfig(row.machine);
       const source = machine ? mapPath(sourceOf(project, lane, row), machine) : sourceOf(project, lane, row);
       const git = machine ? sshProc(row.machine, machine, proc, env.home) : proc;

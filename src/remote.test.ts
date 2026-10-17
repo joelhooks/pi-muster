@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { Effect, Layer } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
-import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource } from "./remote.ts";
+import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource, herdrSocketFor } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
 import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
@@ -60,7 +60,8 @@ describe("machine boundary", () => {
     const machine = config({ paths: { "/local": "/remote", "/local/specific": "/special" } });
     expect(mapPath("/local/specific/repo", machine)).toBe("/special/repo");
     expect(mapPath("/locality/repo", machine)).toBe("/locality/repo");
-    expect(machine.socket).toBe("/home/joel/.config/herdr/herdr.sock");
+    expect(machine.socket).toBeUndefined();
+    expect(herdrSocketFor("/home/alice")).toBe("/home/alice/.config/herdr/herdr.sock");
     expect(mapWorkerPath(join(process.cwd(), "skills/muster/SKILL.md"), config())).toBe("/remote/muster/skills/muster/SKILL.md");
     expect(() => config({ ssh: "-o evil" })).toThrow();
     expect(() => config({ maxPanes: 0 })).toThrow();
@@ -80,7 +81,7 @@ describe("machine boundary", () => {
     expect(run.mock.calls[0]?.[1]).toContain("BatchMode=yes");
     expect(String(run.mock.calls[0]?.[1].at(-1))).toContain("'\\''");
   });
-  // Bravestarr, 2026-10-11: a remote restart's binding push ran ssh inside onRemote's ssh: `cd /Users/joel` on pennywise.
+  // Bravestarr, 2026-10-11: a remote restart's binding push ran ssh inside onRemote's ssh: `cd /Users/alice` on remote1.
   it("wrapping an ssh-wrapped runner again makes one ssh, not ssh inside ssh", async () => {
     const run = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed({ code: 0, stdout: "", stderr: "" }));
     const outer = sshProc("remote", config(), { run }, "/local-home");
@@ -99,14 +100,20 @@ describe("machine boundary", () => {
   });
   it("creates a socket forward only when its master is absent", async () => {
     const s = setup();
-    const capture: string[][] = [];
-    const proc: ProcShape = { run: (_command, args) => { capture.push([...args]); return Effect.succeed({ code: args.includes("check") ? 1 : 0, stdout: "", stderr: "" }); } };
-    const client = await Effect.runPromise(remoteClient("remote", config()).pipe(Effect.provideService(MusterEnv, { ...s.env, remoteHerdr: undefined }), Effect.provideService(Proc, proc)));
-    expect(client.socketPath()).toContain(".config/muster/fwd");
-    expect(capture[1]).toContain("ExitOnForwardFailure=yes");
-    expect(capture[1]).toContain("-L");
-    // A master that idled out leaves its forwarded socket behind; the next bind must replace it.
-    expect(capture[1]).toContain("StreamLocalBindUnlink=yes");
+    const forward = async (machine: MachineConfig) => {
+      const capture: string[][] = [];
+      const proc: ProcShape = { run: (_command, args) => { capture.push([...args]); return Effect.succeed({ code: args.includes("check") ? 1 : 0, stdout: args.some(arg => arg.includes("process.env.HOME")) ? "/home/probed\n" : "", stderr: "" }); } };
+      const client = await Effect.runPromise(remoteClient("remote", machine).pipe(Effect.provideService(MusterEnv, { ...s.env, remoteHerdr: undefined }), Effect.provideService(Proc, proc)));
+      expect(client.socketPath()).toContain(".config/muster/fwd");
+      const ssh = capture.find(args => args.includes("ExitOnForwardFailure=yes"))!;
+      // A master that idled out leaves its forwarded socket behind; the next bind must replace it.
+      expect(ssh).toContain("StreamLocalBindUnlink=yes");
+      return ssh[ssh.indexOf("-L") + 1]!.split(":").at(-1);
+    };
+    // The remote socket defaults to Herdr's own path under the remote HOME, never an operator's path (public repo, 2026-10-17).
+    expect(await forward(config({ socket: "/run/herdr.sock" }))).toBe("/run/herdr.sock");
+    expect(await forward(config({ env: { HOME: "/home/alice" } }))).toBe("/home/alice/.config/herdr/herdr.sock");
+    expect(await forward(config())).toBe("/home/probed/.config/herdr/herdr.sock");
   });
 });
 
@@ -359,11 +366,11 @@ describe("remote owner operations", () => {
   }, 30_000);
   it("names a failed binding push's stderr class without its row text", () => {
     expect(stderrClass("\nSyntaxError: Unexpected token 'x', \"{\"env\":{\"K\":\"secret\"}\" is not valid JSON\n    at JSON.parse")).toBe("SyntaxError: Unexpected token …");
-    expect(stderrClass("joel@pennywise: Permission denied (publickey).")).toBe("joel@pennywise: Permission denied (publickey).");
+    expect(stderrClass("alice@remote1: Permission denied (publickey).")).toBe("alice@remote1: Permission denied (publickey).");
     expect(stderrClass("ENOENT {\"path\":\"/x\"}")).toBe("ENOENT …");
     expect(stderrClass("")).toBe("no stderr");
   });
-  // Bravestarr, 2026-10-11: a restart's binding push failed, so pennywise workers kept naming the retired owner session.
+  // Bravestarr, 2026-10-11: a restart's binding push failed, so remote1 workers kept naming the retired owner session.
   it("an owner pass re-sends a stale remote binding once, then writes nothing", async () => {
     const s = setup(); await s.open(); const { row } = await s.launch();
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(a => a.name === row.name ? { ...a, owner: "new-owner" } : a) }, undefined] as const)));
@@ -398,10 +405,10 @@ describe("remote owner operations", () => {
     expect(readFileSync(restored.row.brief!, "utf8")).toBe("fold the second wave\n");
   });
   it("maps a transferred brief copy back to its owner-side source", () => {
-    const machine = config({ paths: { "/Users/joel": "/home/joel" } });
-    const transfer = "/home/joel/.cache/muster-transfers/drovr/w2-fold", hash = "a".repeat(64);
-    expect(transferredBriefSource(`${transfer}/files/${hash}/home/joel/.agent/b.md`, transfer, machine)).toBe("/Users/joel/.agent/b.md");
-    expect(transferredBriefSource("/home/joel/other/b.md", transfer, machine)).toBeNull();
+    const machine = config({ paths: { "/Users/alice": "/home/alice" } });
+    const transfer = "/home/alice/.cache/muster-transfers/drovr/w2-fold", hash = "a".repeat(64);
+    expect(transferredBriefSource(`${transfer}/files/${hash}/home/alice/.agent/b.md`, transfer, machine)).toBe("/Users/alice/.agent/b.md");
+    expect(transferredBriefSource("/home/alice/other/b.md", transfer, machine)).toBeNull();
   });
   it("restore recovers a running remote row whose bound pane is gone", async () => {
     const s = setup(); await s.open(); const { row } = await s.launch();
@@ -424,7 +431,7 @@ describe("remote owner operations", () => {
     expect(restored.argv).toContain("/only-remote/SKILL.md");
   });
   it("drops a skill that is unreadable on the remote machine with a note, instead of failing the launch", async () => {
-    // Live 2026-10-07: /Users/joel/.agents/skills paths are not mapped to pennywise, and every launch failed.
+    // Live 2026-10-07: /Users/alice/.agents/skills paths are not mapped to remote1, and every launch failed.
     const s = setup(); await s.open();
     const original = s.proc.run;
     vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh" && args.at(-1)?.includes("'test' '-r' '/flagg-only/SKILL.md'")
@@ -519,7 +526,7 @@ describe("remote owner operations", () => {
     expect(readFileSync(join(s.dir, "work.txt"), "utf8")).toBe("packet\n");
   });
 
-  // codetv-workshop, 2026-10-14: a pennywise lane's repo path is absent on Flagg; attested landing ran git there locally.
+  // codetv-workshop, 2026-10-14: a remote1 lane's repo path is absent on Flagg; attested landing ran git there locally.
   it("an attested landing of a remote packet proves landedAs on the row's machine, never with local git", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
     writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote work");
@@ -537,7 +544,7 @@ describe("remote owner operations", () => {
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("merge-base"))).toBe(true);
   });
 
-  // muster desk, 2026-10-14: clone.source is an owner path (/Users/joel/...); proving it unmapped on pennywise failed
+  // muster desk, 2026-10-14: clone.source is an owner path (/Users/alice/...); proving it unmapped on remote1 failed
   // check-ref-format in a missing cwd and read as "requires a base branch, not main".
   it("an attested remote landing proves in the row machine's mapping of an owner-path source", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
@@ -666,7 +673,7 @@ describe("remote owner operations", () => {
     expect(notesResult.notes.some(note => note.startsWith(`note sidecar ${noteId.slice(0, 12)} was left by closed row earlier-row`))).toBe(true);
     expect(notesResult.notes.join("\n")).not.toContain("ingest skipped");
   });
-  // aih-support-sweep, 2026-10-14: codetv-workshop rows had run in the pennywise ai-hero source checkout; every aih clone
+  // aih-support-sweep, 2026-10-14: codetv-workshop rows had run in the remote1 ai-hero source checkout; every aih clone
   // copied their sidecars, ingest refused them as "invalid sidecar identity" and close refused lgseat2 and giftnow.
   it("notes and skips packet and note sidecars that belong to another project", async () => {
     const s = setup(); await s.open(); const launched = await s.launch();
@@ -809,7 +816,7 @@ describe("remote owner operations", () => {
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect(result.cloneError).toContain(".pi/notes-bridge/edited-review.json"); expect(existsSync(launched.row.cwd)).toBe(true);
   });
-  // KITT, 2026-10-12: a walgit lane base resolved on Flagg, but pennywise's checkout had only origin.
+  // KITT, 2026-10-12: a walgit lane base resolved on Flagg, but remote1's checkout had only origin.
   it("fetches a named-remote lane base the remote checkout lacks, for clone create and close", async () => {
     const s = setup(); await s.open();
     const bare = join(s.h.root, "walgit.git"); sh(s.h.root, "init", "-q", "--bare", bare);

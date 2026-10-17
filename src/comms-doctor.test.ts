@@ -40,7 +40,7 @@ describe("pi-ratking doctor", () => {
     json(join(state, "cursors/pilot.worker.json"), { afterSeq: 41 });
     const lease = join(state, "leases/pilot.worker.json"); json(lease, { did: "did:web:x.invalid", generation: 2, leaseId: "3mxotutt6zkau" });
     const now = Date.now(); utimesSync(lease, (now - age * 1000) / 1000, (now - age * 1000) / 1000);
-    const report = doctorReport("pilot/worker", "worker-session", "pennywise", ratkingStateProbe(h.home, "pilot/worker"), undefined, now);
+    const report = doctorReport("pilot/worker", "worker-session", "remote1", ratkingStateProbe(h.home, "pilot/worker"), undefined, now);
     expect(report).toMatchObject({ mismatch: flagged, leaseGeneration: 2, claim: { session: null, afterSeq: 41, lease: { generation: 2 } } });
     expect(report.verdict).toContain(verdict);
   });
@@ -68,14 +68,14 @@ describe("pi-ratking doctor", () => {
     const events = createEventBus();
     expect(await Effect.runPromise(ratkingStatus(events, "old-extension", 5))).toBeUndefined();
   });
-  // drovr, 2026-10-13: on pennywise a restarted worker's doctor said "no row": the catalog lives on the owner's machine.
+  // drovr, 2026-10-13: on remote1 a restarted worker's doctor said "no row": the catalog lives on the owner's machine.
   it("on a remote row's own machine, reads the row from MUSTER_REMOTE_ROW when there is no catalog", async () => {
     const h = harness(); const dir = makeRepo(join(h.root, "repo"));
     const { AgentRow, Schema } = await import("./domain.ts").then(async domain => ({ AgentRow: domain.AgentRow, Schema: (await import("effect")).Schema }));
-    const row = Schema.encodeSync(AgentRow)(Schema.decodeUnknownSync(AgentRow)({ name: "rung", role: "worker", lane: "work", state: "running", owner: "owner", sessionId: "rung-session", machine: "pennywise", cwd: "/remote/repo", branch: null, clone: null, brief: null, createdAt: h.now.toISOString(), sessionFile: null, parentSessionFile: null, pane: null, restarts: 0, nudgedAt: null, lastActivityAt: null, restore: null, profile: { model: "sol", thinking: "medium", label: "rung", noSkills: true, appendSystemPrompt: [], skills: [], extensions: [], env: {}, compactAt: null }, delivery: "none", updatedAt: h.now.toISOString() }));
-    const env = { MUSTER_REMOTE_ROW: JSON.stringify(row), MUSTER_MACHINE: "pennywise", MUSTER_PROJECT_SLUG: "drovr" };
+    const row = Schema.encodeSync(AgentRow)(Schema.decodeUnknownSync(AgentRow)({ name: "rung", role: "worker", lane: "work", state: "running", owner: "owner", sessionId: "rung-session", machine: "remote1", cwd: "/remote/repo", branch: null, clone: null, brief: null, createdAt: h.now.toISOString(), sessionFile: null, parentSessionFile: null, pane: null, restarts: 0, nudgedAt: null, lastActivityAt: null, restore: null, profile: { model: "sol", thinking: "medium", label: "rung", noSkills: true, appendSystemPrompt: [], skills: [], extensions: [], env: {}, compactAt: null }, delivery: "none", updatedAt: h.now.toISOString() }));
+    const env = { MUSTER_REMOTE_ROW: JSON.stringify(row), MUSTER_MACHINE: "remote1", MUSTER_PROJECT_SLUG: "drovr" };
     const report = await runWith(h, commsDoctor({ home: h.home, dir, session: "rung-session", env, events: createEventBus() }));
-    expect(report).toMatchObject({ expected: "drovr/rung", session: "rung-session", machine: "pennywise" });
+    expect(report).toMatchObject({ expected: "drovr/rung", session: "rung-session", machine: "remote1" });
     await expect(runWith(h, commsDoctor({ home: h.home, dir, session: "rung-session", row: "other", env, events: createEventBus() })))
       .rejects.toThrow("no row other here: this Pi has no Muster catalog (it is a remote row; the catalog lives on its owner's machine)");
   });

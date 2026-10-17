@@ -19,10 +19,10 @@ describe("launch papercuts (drovr, 2026-10-11)", () => {
     await Effect.runPromise(readableBrief(brief));
     await expect(Effect.runPromise(readableBrief(join(dir, "never.md")))).rejects.toThrow("brief is not readable");
   }, 10_000);
-  // Ernestine for Joel, 2026-10-15: workers reached for a recursive force delete, dcg denied it, and scratch piled up on pennywise.
+  // Ernestine for Joel, 2026-10-15: workers reached for a recursive force delete, dcg denied it, and scratch piled up on remote1.
   it("names a cleanup dcg allows in the remote scratch note, and forbids the denied deletes", () => {
-    const note = scratchCleanupNote("/home/joel/.cache/drovr/merge-train");
-    expect(note).toContain("Your scratch path is /home/joel/.cache/drovr/merge-train.");
+    const note = scratchCleanupNote("/home/alice/.cache/drovr/merge-train");
+    expect(note).toContain("Your scratch path is /home/alice/.cache/drovr/merge-train.");
     expect(note).toContain("`gio trash <path>` on Linux");
     expect(note).toContain("`trash <path>` on macOS");
     expect(note).toMatch(/Never use `rm -r[f]` or `find -delete`/);

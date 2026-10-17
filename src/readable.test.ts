@@ -34,7 +34,7 @@ describe("squashed", () => {
     "", "internationalization", "electroencephalographically", "shortCamelCase", "4/4 tests passed.",
     "Collection fence: 4/4 behavior/property tests passed.",
     "src/CollectionFence/BehaviorPropertyTests.ts", "./SomeLongCamelCaseDirectory/file", "../x/y", "~/x",
-    "/Users/joel/CollectionFenceBehaviorPropertyTests", "foo/SomeLongCamelCaseDirectory/file.ts",
+    "/Users/alice/CollectionFenceBehaviorPropertyTests", "foo/SomeLongCamelCaseDirectory/file.ts",
     "docs/design/collectionfence/behaviortests/propertytests",
     "collectionfence/behaviortests/propertytests", "foo/SomeLongCamelCaseDirectory/file",
     "CollectionFenceBehaviorPropertyTests.ts",

@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Effect, Schema } from "effect";
@@ -198,7 +198,7 @@ const localRunner = new WeakMap<ProcShape, ProcShape>();
  * already an sshProc; a nested call (a remote restart's binding push) wraps the local runner beneath it instead. */
 export function sshProc(name: string, machine: MachineConfig, outer: ProcShape, localCwd: string): ProcShape {
   const runner = localRunner.get(outer) ?? outer;
-  // A Pi already on that machine (a remote owner such as a pennywise lane boss) runs in place: a host cannot ssh to itself.
+  // A Pi already on that machine (a remote owner such as a remote1 lane boss) runs in place: a host cannot ssh to itself.
   const proc: ProcShape = process.env.MUSTER_MACHINE === name ? { run: (command, args, options) => runner.run(command, args, { ...options, env: { ...machine.env, ...options.env } }) } : { run: (command, args, options) => {
     const env = { ...machine.env, ...options.env };
     const script = `cd ${shellQuote(options.cwd)} && exec env ${Object.entries(env).map(([k,v]) => `${k}=${shellQuote(v)}`).join(" ")} ${[command, ...args].map(shellQuote).join(" ")}`;
@@ -211,20 +211,25 @@ export function sshProc(name: string, machine: MachineConfig, outer: ProcShape, 
   return proc;
 }
 
+/** Herdr's default socket under a remote HOME. A machine config's `socket` overrides it. */
+export const herdrSocketFor = (home: string): string => home ? join(home, ".config/herdr/herdr.sock") : "";
+
 /** SSH owns the forward's lifecycle. Reuse a live control master; without one, the hashed local socket is a leftover
  * from a master that outlived ControlPersist, so StreamLocalBindUnlink replaces it. */
 export const remoteClient = (name: string, machine: MachineConfig) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   if (env.remoteHerdr) return yield* env.remoteHerdr(name, machine);
   const proc = yield* Proc;
-  const hash = createHash("sha256").update(JSON.stringify([machine.ssh, machine.socket])).digest("hex").slice(0, 12);
+  const remoteSocket = machine.socket ?? herdrSocketFor((machine.env.HOME ?? (yield* remoteNode(name, machine, "process.stdout.write(process.env.HOME ?? '')"))).trim());
+  if (!isAbsolute(remoteSocket)) return yield* new InputError({ message: `machine ${name}: remote HOME is not absolute; set socket` });
+  const hash = createHash("sha256").update(JSON.stringify([machine.ssh, remoteSocket])).digest("hex").slice(0, 12);
   const root = join(env.home, ".config/muster/fwd");
   const socket = join(root, `${hash}.sock`);
   const control = join(root, `${hash}.ctl`);
   yield* Effect.try({ try: () => mkdirSync(root, { recursive: true, mode: 0o700 }), catch: error => new InputError({ message: `machine ${name}: forward directory: ${String(error)}` }) });
   const check = yield* proc.run("ssh", ["-S", control, "-O", "check", machine.ssh], { cwd: env.home, timeoutMs: 10_000 });
   if (check.code !== 0) {
-    const result = yield* proc.run("ssh", ["-f", "-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes", "-o", "ControlMaster=yes", "-o", "ControlPersist=600", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-S", control, "-L", `${socket}:${machine.socket}`, machine.ssh], { cwd: env.home, timeoutMs: 15_000 });
+    const result = yield* proc.run("ssh", ["-f", "-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=yes", "-o", "ControlMaster=yes", "-o", "ControlPersist=600", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-S", control, "-L", `${socket}:${remoteSocket}`, machine.ssh], { cwd: env.home, timeoutMs: 15_000 });
     if (result.code !== 0) return yield* new ProcError({ command: `ssh forward ${name}`, code: result.code, stderr: result.stderr, message: `machine ${name}: socket forward failed: ${result.stderr.slice(-500)}` });
   }
   return createHerdrClient({ socketPath: socket });
