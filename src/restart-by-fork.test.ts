@@ -63,6 +63,21 @@ describe("restart by fork", () => {
     expect(s.host.calls.filter(call => ["pane.send_input", "pane.send_keys", "pane.close"].includes(call.method) && call.params.pane_id === moved.pane_id)).toEqual([]);
   });
 
+  // Ernestine, 2026-10-17: rat-king 0b233bf renamed a restarted desk because a fork answering to its parent's name is a
+  // sibling to pi-ratking. A restart says it succeeds the parent, for this launch only.
+  it("restart keeps the row's Rat King name and names the session it succeeds, without saving that on the row", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    const name = old.restore?.env.RATKING_NAME;
+    expect(name).toMatch(/\/w1$|\//);
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    const script = s.host.launcherScripts.at(-1)!;
+    expect(script).toContain(`RATKING_SUCCEEDS='${old.sessionId}'`);
+    expect(script).toContain(`RATKING_NAME='${name}'`);
+    expect(result.row.restore?.env.RATKING_NAME).toBe(name);
+    expect(result.row.restore?.env).not.toHaveProperty("RATKING_SUCCEEDS");
+  });
+
   // Ernestine SOP, 2026-10-12: a provider switch happens only by restart with model; restart used to ignore model.
   it("switches the model and thinking at the fork when restart names them, and keeps them on the row", async () => {
     const s = await setup();

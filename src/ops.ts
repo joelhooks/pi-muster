@@ -2229,6 +2229,12 @@ const laneWorkers = (project: Project, lane: Lane, name: string, rootTerminal: s
   (agent) => agent.lane === lane.slug && agent.name !== name && agent.state !== "closed" && agent.pane && agent.pane.terminalId !== rootTerminal,
 );
 
+/** A row's saved environment never claims succession: only the restart that forks the parent does. */
+const withoutSuccession = (environment: Record<string, string>) => {
+  const { RATKING_SUCCEEDS: _succeeds, ...rest } = environment;
+  return rest;
+};
+
 const sideDeskFence = (parent: string) =>
   `You are a side desk of ${parent}. Talk with Joel and evolve designs. Write briefs and decision notes, and hand them to the parent desk with desk_send. A side desk never prompts or launches lanes or workers, never lands packets, and never acts on prod.`;
 
@@ -2503,6 +2509,10 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // provisional → proven → rebound → activated. Failed provisional forks never
   // acquire the identity lease. Network work is submitted only after activation.
   const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}) };
+  // Ernestine, 2026-10-17: since rat-king 0b233bf a fork answering to its parent's name is renamed, and drovr's restarted
+  // desk came up as drovr/drovr-desk-2-drovr-desk. A restart is a successor, not a sibling: pi-ratking (3b5dbc9) lets
+  // RATKING_NAME stand when RATKING_SUCCEEDS names the parent session. Restart only; a fork or side desk never sets it.
+  environment.RATKING_SUCCEEDS = old.sessionId;
   const bin = join(machine?.musterExtension ?? env.musterRoot, "bin");
   if (machine || environment.PATH !== undefined) environment.PATH = [bin, environment.PATH ?? (yield* must("printenv", ["PATH"], { cwd: old.cwd })).trim()].join(":");
   const launchDir = remote ? (yield* git(old.cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")).trim() : join(env.home, ".pi/agent");
@@ -2562,7 +2572,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (clamp) notes.push(clamp);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
         events: [...(old.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
-        restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: environment } };
+        restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: withoutSuccession(environment) } };
       const stillOld = yield* locatePane(oldPane);
       if (!stillOld || !paneProvesSession(stillOld, old)) return yield* input("old Pi changed during restart; rebind refused");
       row = yield* mutate(dir, current => Effect.gen(function* () {

@@ -41,6 +41,7 @@ describe("fork from a session with no row", () => {
       expect(result.row).toMatchObject({ name: "side", lane: "staff", cwd: dir, parentSessionFile: file });
       expect(result.row.restore?.env.RATKING_NAME).toBe("switchboard/side");
       expect(h.herdr.launcherScripts.at(-1)).toContain("RATKING_NAME='switchboard/side'");
+      expect(h.herdr.launcherScripts.at(-1)).not.toContain("RATKING_SUCCEEDS"); // a fork is a sibling, never a successor
       expect(process.env.RATKING_NAME).toBe("switchboard");
       expect((await runWith(h, load(dir))).agents.map(row => row.name)).toEqual(["side"]);
     }
