@@ -127,6 +127,19 @@ export function parkedOnJoel(project: Project, desk: readonly DeskItem[]): Set<s
   return new Set(project.packets.filter(packet => tokens.some(token => packet.id.startsWith(token))).map(packet => packet.id));
 }
 
+/**
+ * In-flight lanes landed but not live, oldest first, as "slug age". Owl (drovr), 2026-10-12: a lane landed on a
+ * long-lived branch waits for that branch to merge, not for a release.
+ */
+export function landedNotLive(project: Project, now: number = Date.now()): { landed: string[]; onBranch: Map<string, string[]> } {
+  const at = (lane: Lane) => Date.parse(lane.deliveryAt ?? lane.updatedAt);
+  const all = inFlight(project).filter(lane => lane.delivery === "landed" || lane.delivery === "deployed").sort((a, b) => at(a) - at(b));
+  const age = (lane: Lane) => `${lane.slug} ${formatAge(Math.max(0, now - at(lane)))}`;
+  const onBranch = new Map<string, string[]>();
+  for (const lane of all) if (!releaseBase(lane.base)) onBranch.set(lane.base!, [...(onBranch.get(lane.base!) ?? []), age(lane)]);
+  return { landed: all.filter(lane => releaseBase(lane.base)).map(age), onBranch };
+}
+
 export function flowLine(project: Project, now: number = Date.now(), desk: readonly DeskItem[] = []): string {
   const parked = parkedOnJoel(project, desk);
   const lanes = inFlight(project);
@@ -151,22 +164,19 @@ export function flowLine(project: Project, now: number = Date.now(), desk: reado
   const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && !parked.has(packet.id) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
   const { level } = deployPosture(project);
   const watching = project.lanes.filter(lane => lane.kind === "work" && lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2);
-  const landedAll = lanes.filter(lane => lane.delivery === "landed" || lane.delivery === "deployed");
-  // Owl (drovr), 2026-10-12: a lane landed on a long-lived branch waits for that branch to merge, not for a release.
-  const landed = landedAll.filter(lane => releaseBase(lane.base));
-  const onBranch = new Map<string, typeof landedAll>();
-  for (const lane of landedAll) if (!releaseBase(lane.base)) onBranch.set(lane.base!, [...(onBranch.get(lane.base!) ?? []), lane]);
-  const age = (lane: (typeof landedAll)[number]) => `${lane.slug} ${formatAge(Math.max(0, now - Date.parse(lane.deliveryAt ?? lane.updatedAt)))}`;
+  const { landed, onBranch } = landedNotLive(project, now);
+  // Joel, 2026-10-16 ("looks like ass"): past three lanes the headline carries a count and the oldest; the board lists them.
+  const brief = (waiting: readonly string[]) => waiting.length <= 3 ? waiting.join(", ") : `${waiting.length}, oldest ${waiting[0]}`;
   const slots = openSlots(project);
   const next = backlog(project)[0];
   const retro = project.lanes.find(lane => lane.kind === "retro" && (lane.state === "open" || lane.state === "draining"));
   const ago = (at: number) => { const age = formatAge(Math.max(0, now - at)); return age === "now" ? "just now" : `${age} ago`; };
   return [
-    `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${lanes.length}/${limit ?? "off"}`,
+    `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${limit === null ? `${lanes.length}, no limit` : `${lanes.length}/${limit}`}`,
     ...(slots ? [`${slots} open`, next ? `next: ${next.slug}` : "backlog empty"] : []),
     ...(retro ? [`retro: running ${retro.slug}`] : []),
-    `landed, not live: ${landed.map(age).join(", ") || "none"}`,
-    ...[...onBranch].map(([branch, waiting]) => `waiting on ${branch} to merge: ${waiting.map(age).join(", ")}`),
+    `landed, not live: ${brief(landed) || "none"}`,
+    ...[...onBranch].map(([branch, waiting]) => `waiting on ${branch} to merge: ${brief(waiting)}`),
     ...(watching.length ? [`watching: ${watching.map(lane => lane.slug).join(", ")}`] : []),
     ...(lanes.length ? [`oldest in flight ${formatAge(Math.max(0, now - oldest))}`] : []),
     ...(lastProven !== undefined ? [`last proven ${ago(lastProven)}`] : []),

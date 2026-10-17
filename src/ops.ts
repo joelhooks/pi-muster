@@ -82,10 +82,11 @@ import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsD
 import { readRegistry } from "./registry.ts";
 import { watchFallback } from "./desk-local.ts";
 import { pushRemoteBinding, syncRemoteBindings } from "./remote.ts";
-import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, lacksTurnEvidence, deployPosture, deployPostureLine, laneDeployLevel, flowLine, openDeskItems, wipRefusal } from "./tokens.ts";
+import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, lacksTurnEvidence, deployPosture, deployPostureLine, laneDeployLevel, flowLine, landedNotLive, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
 import type { LiveCounts } from "./tokens.ts";
+import type { DeployLevel } from "./domain.ts";
 
 const MAX_WORKERS_PER_TAB = 4;
 /** pi-notes' own runtime state in any repo a Pi runs in (session binding, status, trace log). Other bridge files, such as receipts, may hold review work. */
@@ -4304,6 +4305,41 @@ export function reviewDue(project: Project, nowMs: number): string | null {
   return last ? `⚠ review overdue: last project_review ${days}d ago` : `⚠ review overdue: no project_review in ${days}d`;
 }
 
+/** Wrap a list under a heading at about 100 columns, two-space indented. */
+function wrapped(items: readonly string[], width = 100): string[] {
+  const lines: string[] = [];
+  for (const item of items) {
+    const last = lines.at(-1);
+    if (last !== undefined && last.length + 2 + item.length <= width) lines[lines.length - 1] = `${last}, ${item}`;
+    else lines.push(`  ${item}`);
+  }
+  return lines;
+}
+
+/** The flow line counts landed lanes past three; the board names them, oldest first (Joel, 2026-10-16). */
+function landedBlock(project: Project, nowMs: number): string[] {
+  const { landed, onBranch } = landedNotLive(project, nowMs);
+  return [
+    ...(landed.length > 3 ? [`landed, not live (${landed.length}, oldest first):`, ...wrapped(landed)] : []),
+    ...[...onBranch].filter(([, waiting]) => waiting.length > 3).flatMap(([branch, waiting]) => [`waiting on ${branch} to merge (${waiting.length}, oldest first):`, ...wrapped(waiting)]),
+  ];
+}
+
+/** Lanes grouped by state; closed lanes are a count, and a lane's deploy level shows only where it differs from the project's. */
+function laneBlock(lanes: readonly Lane[], level: DeployLevel): string[] {
+  if (!lanes.length) return ["lanes: none"];
+  const name = (lane: Lane) => { const own = laneDeployLevel(lane, level); return own === level ? lane.slug : `${lane.slug} [deploy ${own}]`; };
+  const states = (["open", "draining", "proposed"] as const).map(state => [state, lanes.filter(lane => lane.state === state)] as const).filter(([, group]) => group.length);
+  const closed = lanes.filter(lane => lane.state === "closed").length;
+  return [
+    `lanes: ${[...states.map(([state, group]) => `${group.length} ${state}`), ...(closed ? [`${closed} closed`] : [])].join(", ")}`,
+    ...states.flatMap(([state, group]) => {
+      const line = `  ${state}: ${group.map(name).join(", ")}`;
+      return line.length <= 100 ? [line] : [`  ${state}:`, ...wrapped(group.map(name), 98).map(item => `  ${item}`)];
+    }),
+  ];
+}
+
 export function board(project: Project, agents: readonly AgentLine[], openDesk: number, nowMs: number = Date.now(), gates: string | null = null, traces: ReadonlyMap<string, TaskTrace> = new Map(), desk: readonly DeskItem[] = []): string {
   const lanes = project.lanes.filter((lane) => !lane.archived);
   const posture = deployPosture(project);
@@ -4326,7 +4362,8 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
     deployPostureLine(project),
     flowLine(project, nowMs, desk),
-    `lanes: ${lanes.map((lane) => `${lane.slug}=${lane.state} [deploy ${laneDeployLevel(lane, posture.level)}]`).join(", ") || "none"}`,
+    ...landedBlock(project, nowMs),
+    ...laneBlock(lanes, posture.level),
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,
     ...(gates ? [gates] : []),

@@ -121,6 +121,24 @@ describe("live delivery and WIP", () => {
     const line = flowLine(await runWith(s.h, load(s.dir)), s.h.now.getTime());
     expect(line).toContain("landed, not live: broadcasts now, mirror now · waiting on storage-wave-3 to merge: switch now, archive now");
   });
+  // Joel, 2026-10-16 ("formatting on a lot of these looks like ass"): 15 landed lanes made a run-on flow line.
+  it("keeps the flow line to a headline and lists many landed lanes on the board, oldest first", async () => {
+    const s = await setup(null);
+    const slugs = ["alpha", "bravo", "charlie", "delta", "echo"];
+    for (const slug of slugs) { await s.lane(slug); await landed(s, slug); s.h.now = new Date(s.h.now.getTime() + 3_600_000); }
+    await s.lane("open-one");
+    await runWith(s.h, laneOpen(s.dir, { slug: "later", label: "later", goal: "g", open: false }));
+    await runWith(s.h, mutate(s.dir, p => Effect.succeed([{ ...p, lanes: [...p.lanes, { ...p.lanes.find(lane => lane.slug === "later")!, slug: "gone", state: "closed" as const }] }, undefined] as const)));
+    const p = await runWith(s.h, load(s.dir));
+    const line = flowLine(p, s.h.now.getTime());
+    expect(line).toContain("WIP 6, no limit");
+    expect(line).toContain("landed, not live: 5, oldest alpha 5h");
+    expect(line).not.toContain("bravo");
+    const text = board(p, [], 0, s.h.now.getTime());
+    expect(text).toContain("landed, not live (5, oldest first):\n  alpha 5h, bravo 4h, charlie 3h, delta 2h, echo 1h\n");
+    expect(text).toContain("lanes: 6 open, 1 proposed, 1 closed\n  open: alpha, bravo, charlie, delta, echo, open-one\n  proposed: later\n");
+    expect(text).not.toMatch(/gone|\[deploy/);
+  });
   it("reads naturally with nothing in flight and a fresh proof", async () => {
     const s = await setup();
     await s.lane("one");

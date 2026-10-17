@@ -111,6 +111,6 @@ describe("pull flow", () => {
     expect(flowLine(decodeProject({ ...p, lanes: [] }))).toContain("3 open · backlog empty");
     expect(flowLine(decodeProject({ ...p, policy: { wipLimit: null } }))).not.toContain("open · next:");
     const { policy: _policy, ...uncapped } = p;
-    expect(flowLine(decodeProject(uncapped))).toContain("WIP 1/off"); // uncapped by default (Joel, 2026-10-10)
+    expect(flowLine(decodeProject(uncapped))).toContain("WIP 1, no limit"); // uncapped by default (Joel, 2026-10-10)
   });
 });

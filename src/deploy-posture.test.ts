@@ -36,7 +36,7 @@ it("status names VISION precedence, mismatch and lane level", async () => {
   const status = await runWith(h, projectStatus(dir, { act: false }));
   expect(status.board).toContain("Level: 3 (jfdi), source: VISION.md");
   expect(status.board).toContain("policy 1 differs");
-  expect(status.board).toContain("one=open [deploy 3]");
+  expect(status.board).toContain("  open: one\n"); // at the project level, so no per-lane suffix (Joel, 2026-10-16)
 });
 it("overrides lower only, recording their rubric rule", async () => {
   const { h, dir } = await setup(3);
@@ -91,9 +91,10 @@ it("missing and malformed sections keep default 1 and print the add-section temp
 it("a later VISION change lowers effective lane permission at call time", async () => {
   const { h, dir } = await setup(3);
   await runWith(h, laneOpen(dir, { slug: "low", label: "low", goal: "ship", open: false, deployLevel: 2, deployRule: "shared-infra" }));
+  expect((await runWith(h, projectStatus(dir, { act: false }))).board).toContain("  proposed: low [deploy 2]");
   writeFileSync(join(dir, "VISION.md"), "## Deploy posture\nLevel: 1 (prove)\n");
   const status = await runWith(h, projectStatus(dir, { act: false }));
-  expect(status.board).toContain("low=proposed [deploy 1]");
+  expect(status.board).toContain("  proposed: low\n"); // now equal to the project level, so no suffix
 });
 it("malformed VISION is reported and falls back to policy", async () => {
   const { h, dir } = await setup(9, 2);
