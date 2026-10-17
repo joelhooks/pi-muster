@@ -2004,6 +2004,35 @@ export interface AgentLaunchInput {
 }
 
 /** Keep warm selection independent of side-desk fork topology. */
+/**
+ * A fork's parent is a catalog row, or the calling session itself when it has no row: the Switchboard owns its project
+ * but is not a row (Ernestine, 2026-10-17). `from` is then the caller's session id or absolute session file, never
+ * another session's. The stand-in parent carries the journal's cwd and live model; role, lane and label come from the
+ * call. The fork's own RATKING_NAME is `<project>/<name>`, and pi-ratking takes the env name over a restored one.
+ */
+const SIDE_ROWLESS = "side: true forks a desk row; a session with no row forks without it, and the fork splits into its lane's tab";
+const forkParent = (project: Project, params: AgentLaunchInput) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const from = params.from ?? "";
+  if (project.agents.some(row => row.name === from) || !(from === env.sessionId || isAbsolute(from))) return yield* findRow(project, from);
+  const file = isAbsolute(from) ? from : findSessionFile(process.cwd(), from, env.home);
+  if (!file || !existsSync(file)) return yield* input(`fork from session ${from}: no session file found`);
+  if (sessionIdFromFile(file) !== env.sessionId) return yield* input("a fork from a session with no row must come from that session itself");
+  if (params.side) return yield* input(SIDE_ROWLESS);
+  if (!params.role || !params.lane || !params.label) return yield* input("a fork from a session with no row needs role, lane and label");
+  const text = yield* Effect.try({ try: () => readFileSync(file, "utf8"), catch: error => new InputError({ message: `fork from ${file}: ${String(error)}` }) });
+  const header = yield* Effect.try({ try: () => JSON.parse(text.slice(0, text.indexOf("\n"))) as { cwd?: unknown }, catch: () => new InputError({ message: `fork from ${file}: unreadable session header` }) });
+  if (typeof header.cwd !== "string") return yield* input(`fork from ${file}: the session header has no cwd`);
+  const live = parseSessionModel(text);
+  const model = params.model ?? live.model;
+  if (!model) return yield* input(`fork from ${file}: no model in the session; pass model`);
+  const at = iso(env);
+  return yield* decodeWith(decodeAgentRow, { name: "self", role: params.role, lane: params.lane, cwd: header.cwd, clone: null,
+    profile: { label: params.label, model, thinking: live.thinking ?? null, appendSystemPrompt: [], noSkills: false, skills: [], extensions: [], env: {}, compactAt: null },
+    sessionId: env.sessionId, sessionFile: file, parentSessionFile: null, pane: null, owner: env.sessionId, brief: null,
+    state: "running", delivery: "none", restarts: 0, restore: null, createdAt: at, updatedAt: at });
+});
+
 const warmForkSource = (dir: string, parent: AgentRow | null, at: string | undefined) =>
   at === undefined ? Effect.succeed(parent?.sessionFile ?? null) : Effect.try({
     try: () => {
@@ -2218,6 +2247,7 @@ const guardSideDesk = (project: Project, sessionId: string, tool: string) =>
 
 const sideParent = (project: Project, from: string | undefined, sessionId: string) =>
   Effect.gen(function* () {
+    if (from && !project.agents.some(row => row.name === from) && (from === sessionId || isAbsolute(from))) return yield* input(SIDE_ROWLESS);
     const parent = yield* findRow(project, from ?? "");
     if (parent.role !== "desk" || parent.side || parent.state === "closed") return yield* input("side desks need a live, non-side desk parent");
     if (parent.sessionId !== sessionId && parent.owner !== sessionId) return yield* input("only the parent desk or the session that owns it can create or adopt a side desk");
@@ -2620,7 +2650,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
     let existing = project.agents.find(row => row.name === params.name);
     if (params.action === "restore" && existing) existing = yield* recoverRestoreOnMachine(existing);
-    const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
+    const parent = params.action === "fork" ? yield* forkParent(project, params) : null;
     const previous = parent ?? existing;
     if (params.action === "launch" && params.machine !== undefined && existing && params.machine !== existing.machine) return yield* input(`explicit machine ${params.machine} differs from row ${existing.name}'s ${existing.machine}; cross-machine relaunch cannot reuse its cwd, clone or session. Choose a new row name on ${params.machine}; the old row is unchanged`);
     const machine = params.machine ?? previous?.machine ?? (params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined) ?? "local";
@@ -2671,7 +2701,9 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const profile = profileFor(role, { ...(parent?.profile ?? existing?.profile), label, model: resolved.model, thinking: params.thinking ?? resolved.thinking ?? defaults.thinking }, defaults);
     const priorState = existing?.state ?? "planned";
     const state = yield* stepAgent(params.name, priorState, { type: params.action === "restore" ? "QUEUE_RESTORE" : "LAUNCH" });
-    const launchJob: LaunchJob = { id, project: project.slug, name: params.name, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()), pid: null, log, startedAt: iso(env), state: "queued", priorState, owner: env.sessionId, request: params };
+    const launchJob: LaunchJob = { id, project: project.slug, name: params.name, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()), pid: null, log, startedAt: iso(env), state: "queued", priorState, owner: env.sessionId,
+      // A stand-in parent is pinned to its session file, so the launch job forks the same journal.
+      request: parent && !project.agents.includes(parent) && parent.sessionFile ? { ...params, from: parent.sessionFile } : params };
     const reserved: AgentRow = { ...existing, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
       cwd: machine === "local" ? cwd : mapPath(cwd, yield* machineConfig(machine)), clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: launchJob.sessionId,
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
@@ -2907,7 +2939,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       if (existing && !relaunchable) {
         return yield* input(`row ${name} is ${existing.state}; restore it, or pick a new name`);
       }
-      const parent = params.action === "fork" ? yield* findRow(project, params.from ?? "") : null;
+      const parent = params.action === "fork" ? yield* forkParent(project, params) : null;
       if (params.action === "fork" && !parent?.sessionFile) return yield* input(`fork needs --from a row with a session file`);
       const parentSessionFile = yield* warmForkSource(dir, parent, params.at);
       const role = side ? "desk" : params.role ?? parent?.role ?? existing?.role;
