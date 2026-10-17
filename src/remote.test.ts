@@ -840,7 +840,7 @@ describe("remote owner operations", () => {
   it("refuses a full lane tab before allocating a clone", async () => {
     const s = setup(); await s.open();
     for (const name of ["w1", "w2", "w3", "w4"]) await s.launch(name);
-    await expect(s.launch("w5")).rejects.toThrow("lane tab is full");
+    await expect(s.launch("w5")).rejects.toThrow(/already has 4 worker panes \(w1, w2, w3, w4\).*nothing was allocated.*Next: agent_close/);
     expect(existsSync(join(s.h.root, "clones", "w5"))).toBe(false);
   });
   // pi-tui-research, 2026-10-13: a bundle-seeded source has no origin, so set-url failed after the clone existed.

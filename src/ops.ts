@@ -90,6 +90,13 @@ import type { LiveCounts } from "./tokens.ts";
 import type { DeployLevel } from "./domain.ts";
 
 const MAX_WORKERS_PER_TAB = 4;
+/**
+ * A full lane tab, as a prompt. Asked before any clone is allocated (rule hunt, 2026-10-17; drovr, 2026-10-12: the refusal
+ * came after the clone, and every retry failed on "already exists"). Pi will not start in a narrower pane.
+ */
+const tabFullPrompt = (lane: string, workers: readonly AgentRow[], where = "") =>
+  `lane ${lane}${where} already has ${workers.length} worker panes (${workers.map(agent => agent.name).join(", ")}); Pi will not start in a narrower pane, so nothing was allocated. ` +
+  `Next: agent_close a finished worker, or lane_open a new lane (e.g. slug "${lane}-2") and launch there.`;
 /** pi-notes' own runtime state in any repo a Pi runs in (session binding, status, trace log). Other bridge files, such as receipts, may hold review work. */
 const NOTES_BRIDGE_RUNTIME: readonly string[] = [".pi/notes-bridge/events.jsonl", ".pi/notes-bridge/session.json", ".pi/notes-bridge/status.json"];
 const GATE_TIMEOUT_MS = 45 * 60_000;
@@ -271,7 +278,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     // "already exists". Refuse before allocating; a retry reuses the failed attempt's clone, as a local launch does.
     if (params.action !== "restore" && params.action !== "adopt") {
       const laneRows = project.agents.filter(other => other.machine === nameOfMachine && other.lane === lane.slug && other.name !== name && other.state !== "closed" && other.pane);
-      if (laneRows.length >= MAX_WORKERS_PER_TAB && (yield* locatePane(laneRows[0]!.pane!))) return yield* input(`machine ${nameOfMachine}: lane tab is full`);
+      if (laneRows.length >= MAX_WORKERS_PER_TAB && (yield* locatePane(laneRows[0]!.pane!))) return yield* input(tabFullPrompt(lane.slug, laneRows, ` on ${nameOfMachine}`));
     }
     const reusable = params.clone && params.action !== "restore" && existing?.clone && existing.lane === lane.slug && !params.cwd
       && (yield* must("test", ["-d", existing.cwd], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false))));
@@ -342,7 +349,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       const spaceId = matches[0]?.workspace_id ?? (yield* workspaceCreate(project.label, remoteSource)).workspace.workspace_id;
       const laneRows = project.agents.filter(other => other.machine === nameOfMachine && other.lane === lane.slug && other.state !== "closed" && other.pane);
       const sibling = laneRows[0]?.pane ? yield* locatePane(laneRows[0].pane) : null;
-      if (sibling && laneRows.length >= MAX_WORKERS_PER_TAB) return yield* input(`machine ${nameOfMachine}: lane tab is full`);
+      if (sibling && laneRows.length >= MAX_WORKERS_PER_TAB) return yield* input(tabFullPrompt(lane.slug, laneRows, ` on ${nameOfMachine}`));
       const pane = sibling ? yield* paneSplit(sibling.pane_id, "right", cwd) : (yield* tabCreate(spaceId, cwd, lane.label)).root_pane;
       const binding: PaneBinding = { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true };
       row = yield* patchRow(dir, name, row.state, [], { pane: binding });
@@ -2208,17 +2215,17 @@ const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaun
       if (rootInUse) return yield* input(`lane ${lane.slug}'s root pane already runs an agent; use slot split`);
       return { paneId: root.pane_id, terminalId: root.terminal_id, tabId: root.tab_id, openedByMuster: true } satisfies PaneBinding;
     }
-    const workers = project.agents.filter(
-      (agent) => agent.lane === lane.slug && agent.name !== row.name && agent.state !== "closed" && agent.pane && agent.pane.terminalId !== root.terminal_id,
-    );
-    if (workers.length >= MAX_WORKERS_PER_TAB) {
-      return yield* input(`lane ${lane.slug} already has ${MAX_WORKERS_PER_TAB} worker panes; Pi will not start in a narrower pane. Open an overflow lane.`);
-    }
+    const workers = laneWorkers(project, lane, row.name, root.terminal_id);
+    if (workers.length >= MAX_WORKERS_PER_TAB) return yield* input(tabFullPrompt(lane.slug, workers));
     const last = workers.at(-1)?.pane;
     const target = last ? yield* locatePane(last) : null;
     const pane = yield* paneSplit(target ? target.pane_id : root.pane_id, target ? "down" : "right", row.cwd);
     return { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true } satisfies PaneBinding;
   });
+
+const laneWorkers = (project: Project, lane: Lane, name: string, rootTerminal: string | undefined) => project.agents.filter(
+  (agent) => agent.lane === lane.slug && agent.name !== name && agent.state !== "closed" && agent.pane && agent.pane.terminalId !== rootTerminal,
+);
 
 const sideDeskFence = (parent: string) =>
   `You are a side desk of ${parent}. Talk with Joel and evolve designs. Write briefs and decision notes, and hand them to the parent desk with desk_send. A side desk never prompts or launches lanes or workers, never lands packets, and never acts on prod.`;
@@ -2956,6 +2963,10 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       if (!label) return yield* input("a new agent needs a label, e.g. \"🔨 session store\"");
       let cwd = params.cwd ? yield* requireAbsolute("cwd", params.cwd) : (parent?.cwd ?? existing?.cwd ?? null);
       let clone: AgentRow["clone"] = existing?.clone ?? null;
+      // Ask the tab before allocating anything; paneFor asks again against live Herdr.
+      const splits = (params.slot ?? (role === "worker" ? "split" : "root")) === "split" && !params.pane;
+      const workers = laneWorkers(project, lane, name, lane.root?.terminalId);
+      if (splits && workers.length >= MAX_WORKERS_PER_TAB) return yield* input(tabFullPrompt(lane.slug, workers));
       if (clone && existsSync(existing?.cwd ?? "")) {
         cwd = existing?.cwd ?? cwd;
       } else if (params.clone) {
