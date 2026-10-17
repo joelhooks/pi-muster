@@ -56,29 +56,17 @@ describe("opt-in retro lane", () => {
     expect(flowLine(decodeProject({ ...project, lanes: closed.map(l => ({ ...l, discarded: true })) }), h.now.getTime())).not.toContain("retro:");
     expect(flowLine(decodeProject({ ...project, lanes: [{ ...lane, state: "draining" }] }), h.now.getTime())).toContain("retro: running retro");
   });
-  it("refuses a second open or draining retro by name, even with override", async () => {
-    const { h, dir } = await setup();
-    const first = { slug: "retro-first", label: "retro", goal: "review", kind: "retro" as const };
-    await runWith(h, laneOpen(dir, first));
-    expect((await runWith(h, laneOpen(dir, first))).created).toBe(false);
-    await runWith(h, laneOpen(dir, { slug: "parked-retro", label: "retro", goal: "review", kind: "retro", open: false }));
-    for (const state of ["open", "draining"] as const) {
-      if (state === "draining") await runWith(h, mutate(dir, p => Effect.gen(function* () {
-        const draining = yield* stepLane(first.slug, "open", { type: "DRAIN" });
-        return [{ ...p, lanes: p.lanes.map(lane => lane.slug === first.slug ? { ...lane, state: draining } : lane) }, null] as const;
-      })));
-      const tabs = h.herdr.tabs.size;
-      const failure = await failWith(h, laneOpen(dir, { slug: "parked-retro", label: "retro", goal: "review", kind: "retro", override: "Joel wants another" }));
-      expect(failure.message).toContain("retro-first");
-      expect(failure.message).toContain("retro");
-      expect(h.herdr.tabs.size).toBe(tabs);
-    }
-  });
-  it("reserves the single retro slot across concurrent opens", async () => {
+  // Rule hunt, 2026-10-17: the one-retro rule named no harm. Two retros with disjoint scopes may run at once.
+  it("opens a second retro while one is open or draining, concurrently too", async () => {
     const { h, dir } = await setup();
     const results = await Promise.allSettled(["retro-a", "retro-b"].map(slug => runWith(h, laneOpen(dir, { slug, label: slug, goal: "review", kind: "retro" }))));
-    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
-    expect((await runWith(h, load(dir))).lanes.filter(lane => lane.kind === "retro" && lane.state === "open")).toHaveLength(1);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(2);
+    await runWith(h, mutate(dir, p => Effect.gen(function* () {
+      const draining = yield* stepLane("retro-a", "open", { type: "DRAIN" });
+      return [{ ...p, lanes: p.lanes.map(lane => lane.slug === "retro-a" ? { ...lane, state: draining } : lane) }, null] as const;
+    })));
+    expect((await runWith(h, laneOpen(dir, { slug: "retro-c", label: "retro", goal: "review", kind: "retro" }))).lane.state).toBe("open");
+    expect((await runWith(h, load(dir))).lanes.filter(lane => lane.kind === "retro").map(lane => lane.state).sort()).toEqual(["draining", "open", "open"]);
   });
   it("opens a retro at WIP 3/3 while still refusing work", async () => {
     const { h, dir } = await setup();

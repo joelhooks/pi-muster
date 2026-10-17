@@ -5,7 +5,7 @@ import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { describe, expect, it, vi } from "vitest";
 import { decodeAgentRow, decodeProject } from "./domain.ts";
 import { board, laneClose, laneDeliver, laneOpen, packetLand, projectOpen, projectUpdate, reportMarkdown } from "./ops.ts";
-import { flowLine, inFlight } from "./tokens.ts";
+import { awaitingProof, flowLine, inFlight } from "./tokens.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 import { OwnerTimelineView, readOwnerTimelineData } from "./owner-view.ts";
@@ -58,20 +58,23 @@ describe("live delivery and WIP", () => {
     await s.lane("parked");
     expect(inFlight(await runWith(s.h, load(s.dir)))).toHaveLength(2);
   });
-  it("landed work still counts after its tab closes, until proven or waived", async () => {
+  // Rule hunt, 2026-10-17: a landed sweep chain held a WIP slot for three days waiting on a human proof.
+  it("landed work frees its WIP slot but stays owed a proof until proven or waived", async () => {
     const s = await setup(1);
     await s.lane("one");
     await landed(s, "one");
     await runWith(s.h, laneClose(s.dir, "one"));
     let p = await runWith(s.h, load(s.dir));
     expect(p.lanes.find(l => l.slug === "one")?.delivery).toBe("landed");
-    expect(inFlight(p)).toHaveLength(1);
-    expect((await failWith(s.h, laneOpen(s.dir, { slug: "two", label: "two", goal: "ship" }))).message).toContain("one (landed,");
+    expect(inFlight(p)).toHaveLength(0);
+    expect(awaitingProof(p).map(l => l.slug)).toEqual(["one"]);
+    expect(flowLine(p, s.h.now.getTime())).toContain("landed, not live: one");
+    expect(flowLine(p, s.h.now.getTime() + 121 * 60_000)).toContain("⚠ not flowing"); // a stale proof alone is the alarm
     await runWith(s.h, laneDeliver(s.dir, { slug: "one", stage: "deployed", evidence: "loaded commit in the service" }));
     p = await runWith(s.h, load(s.dir));
-    expect(inFlight(p)).toHaveLength(1);
+    expect(awaitingProof(p)).toHaveLength(1);
     await runWith(s.h, laneDeliver(s.dir, { slug: "one", stage: "proven", evidence: "live request returns the new response" }));
-    expect(inFlight(await runWith(s.h, load(s.dir)))).toHaveLength(0);
+    expect(awaitingProof(await runWith(s.h, load(s.dir)))).toHaveLength(0);
     await s.lane("two");
     await runWith(s.h, laneClose(s.dir, "two"));
     await runWith(s.h, laneDeliver(s.dir, { slug: "two", stage: "waived", evidence: "docs only, nothing to deploy" }));
@@ -109,7 +112,7 @@ describe("live delivery and WIP", () => {
     await landed(s, "one");
     const p = await runWith(s.h, load(s.dir));
     expect(flowLine(p, s.h.now.getTime())).not.toContain("⚠ not flowing");
-    expect(board(p, [], 0, s.h.now.getTime())).toContain("WIP 1/3 · 2 open · backlog empty · landed, not live: one");
+    expect(board(p, [], 0, s.h.now.getTime())).toContain("WIP 0/3 · 3 open · backlog empty · landed, not live: one");
   });
   // Owl (drovr), 2026-10-12: five lanes landed on storage-wave-3 read as waiting on a release no one could ship.
   it("splits lanes landed on a long-lived base branch from lanes waiting on a release", async () => {
@@ -131,7 +134,7 @@ describe("live delivery and WIP", () => {
     await runWith(s.h, mutate(s.dir, p => Effect.succeed([{ ...p, lanes: [...p.lanes, { ...p.lanes.find(lane => lane.slug === "later")!, slug: "gone", state: "closed" as const }] }, undefined] as const)));
     const p = await runWith(s.h, load(s.dir));
     const line = flowLine(p, s.h.now.getTime());
-    expect(line).toContain("WIP 6, no limit");
+    expect(line).toContain("WIP 1, no limit"); // the five landed lanes hold no slot
     expect(line).toContain("landed, not live: 5, oldest alpha 5h");
     expect(line).not.toContain("bravo");
     const text = board(p, [], 0, s.h.now.getTime());

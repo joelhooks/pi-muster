@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { expect, it } from "vitest";
 import { laneDeliver, laneOpen, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate } from "./store.ts";
-import { flowLine, inFlight } from "./tokens.ts";
+import { awaitingProof, flowLine, inFlight } from "./tokens.ts";
 import { appendDesk, deskRecord, queuePath } from "./desk.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 
@@ -26,10 +26,12 @@ it("VISION 2 frees an open deployed lane's slot and keeps it watching", async ()
   expect(flowLine(p)).toContain("watching: one");
   await runWith(h, laneOpen(dir, { slug: "two", label: "two", goal: "ship" }));
 });
-it("no posture keeps deployed work in WIP", async () => {
+it("no posture keeps deployed work owed a proof, without holding WIP", async () => {
   const { h, dir } = await setup();
   await runWith(h, laneDeliver(dir, { slug: "one", stage: "deployed", evidence: "shipped" }));
-  expect(inFlight(await runWith(h, load(dir)))).toHaveLength(1);
+  const p = await runWith(h, load(dir));
+  expect(inFlight(p)).toHaveLength(0);
+  expect(awaitingProof(p).map(lane => lane.slug)).toEqual(["one"]);
 });
 it("status names VISION precedence, mismatch and lane level", async () => {
   const { h, dir } = await setup(3, 1);

@@ -1,11 +1,11 @@
 # Done means live and proven
 
-A merged packet is not a finished lane. The project's VISION.md declares deploy posture; policy is the fallback and level 1 is the default. Levels 0 and 1 hold WIP until live proof. Levels 2 and 3 free WIP at deploy. The owner carries delivery through these checks:
+A merged packet is not a finished lane. The project's VISION.md declares deploy posture; policy is the fallback and level 1 is the default. Landed work waiting on proof holds no WIP slot; the flow line lists it with its age, and a stale proof is the alarm. Levels 0 and 1 still owe a live proof before the lane is done; levels 2 and 3 are done at deploy. The owner carries delivery through these checks:
 
 1. **Built:** committed, with tests that fail without the change, and the gate passes.
 2. **Landed:** merged to main, pushed with `shitrat`, then the same branch mirrored to walgit with the `walgit-sync` skill (`ls-remote` SHA must match). A walgit failure doesn't undo the landing; report its exact error.
 3. **Deployed:** live where it runs. For pi-muster, pull on the hosts, then restart the sessions using it with `agent_launch action: "restart"` (never `/reload`); the version-skew warning names who is stale. For a project repo, ship behind a flag when behaviour changes.
-4. **Proven:** at levels 0 and 1, record a check against the live system before freeing WIP. At level 2, the desk follows watch evidence for deployed-not-proven lanes whether or not a retro runs. Level 3 needs no proof step.
+4. **Proven:** at levels 0 and 1, record a check against the live system. At level 2, the desk follows watch evidence for deployed-not-proven lanes whether or not a retro runs. Level 3 needs no proof step.
 5. **Observable:** name one working signal, one failing signal, and where each appears. Record the flag state and rollback.
 
 For docs-only work or a probe with nothing to deploy, record why delivery is waived. Rejected and `no_changes` packets need no delivery. Closing a tab does not prove its work live.

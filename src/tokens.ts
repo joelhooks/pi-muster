@@ -90,13 +90,20 @@ export function deployPostureLine(project: Project): string {
   return [`Deploy posture: Level: ${posture.level} (${DEPLOY_NAMES[posture.level]}), source: ${posture.source}`, ...posture.notes].join("\n");
 }
 
-/** Role and retro tabs are not feature WIP. Archived undelivered work still counts. */
+/**
+ * Work lanes in progress. Role and retro tabs are not feature WIP. Landed work waiting on its live proof no longer
+ * holds a slot (rule hunt, 2026-10-17: a landed sweep chain held WIP for three days); `awaitingProof` tracks it instead.
+ */
 export function inFlight(project: Project): Lane[] {
+  return project.lanes.filter(lane => lane.kind === "work" && (lane.state === "open" || lane.state === "draining") &&
+    lane.delivery !== "landed" && lane.delivery !== "deployed");
+}
+/** Landed or deployed work still owed a live proof. The flow line shows its age, and a stale one is the alarm, not a wall. */
+export function awaitingProof(project: Project): Lane[] {
   const { level } = deployPosture(project);
-  return project.lanes.filter(lane => lane.kind === "work" &&
+  return project.lanes.filter(lane => lane.kind === "work" && (lane.delivery === "landed" || lane.delivery === "deployed") &&
     !(lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2) &&
-    (lane.state === "open" || lane.state === "draining" ||
-      (lane.state === "closed" && (lane.delivery === "landed" || lane.delivery === "deployed"))));
+    (lane.state === "open" || lane.state === "draining" || lane.state === "closed"));
 }
 /** Unranked work follows ranked work; creation order breaks ties. */
 export function backlog(project: Project): Lane[] {
@@ -108,10 +115,7 @@ export function openSlots(project: Project): number | null {
   return limit === null ? null : Math.max(0, limit - inFlight(project).length);
 }
 export function wipRefusal(project: Project, slug: string, kind: Lane["kind"], now: number): string | null {
-  if (kind === "retro") {
-    const running = project.lanes.find(lane => lane.kind === "retro" && lane.slug !== slug && (lane.state === "open" || lane.state === "draining"));
-    return running ? `retro: ${running.slug} is ${running.state}; finish it before opening another retro lane.` : null;
-  }
+  // Retros sit outside WIP, and two with disjoint scopes may run at once (rule hunt, 2026-10-17: no harm named).
   const lanes = inFlight(project);
   const limit = project.policy?.wipLimit ?? null;
   if (kind !== "work" || limit === null || lanes.some(lane => lane.slug === slug) || lanes.length < limit) return null;
@@ -133,7 +137,7 @@ export function parkedOnJoel(project: Project, desk: readonly DeskItem[]): Set<s
  */
 export function landedNotLive(project: Project, now: number = Date.now()): { landed: string[]; onBranch: Map<string, string[]> } {
   const at = (lane: Lane) => Date.parse(lane.deliveryAt ?? lane.updatedAt);
-  const all = inFlight(project).filter(lane => lane.delivery === "landed" || lane.delivery === "deployed").sort((a, b) => at(a) - at(b));
+  const all = awaitingProof(project).sort((a, b) => at(a) - at(b));
   const age = (lane: Lane) => `${lane.slug} ${formatAge(Math.max(0, now - at(lane)))}`;
   const onBranch = new Map<string, string[]>();
   for (const lane of all) if (!releaseBase(lane.base)) onBranch.set(lane.base!, [...(onBranch.get(lane.base!) ?? []), age(lane)]);
@@ -160,7 +164,10 @@ export function flowLine(project: Project, now: number = Date.now(), desk: reado
   const lastProven = proven[0]?.at;
   const lastMove = Math.max(lastProven ?? 0, ...history.map(entry => Date.parse(entry.at)));
   const oldest = lanes.length ? Math.min(...lanes.map(lane => Date.parse(lane.createdAt))) : now;
-  const stalled = lanes.length > 0 && now - Math.max(lastMove, oldest) > (project.policy?.flowStallMin ?? 120) * 60_000;
+  // A stale proof is the alarm now that waiting work holds no slot.
+  const owed = [...lanes, ...awaitingProof(project)];
+  const oldestOwed = owed.length ? Math.min(...owed.map(lane => Date.parse(lane.createdAt))) : now;
+  const stalled = owed.length > 0 && now - Math.max(lastMove, oldestOwed) > (project.policy?.flowStallMin ?? 120) * 60_000;
   const unlanded = project.packets.some(packet => !TERMINAL_PACKET_STATES.includes(packet.state) && !parked.has(packet.id) && now - Date.parse(packet.reportedAt) > (project.policy?.landWaitMin ?? 30) * 60_000);
   const { level } = deployPosture(project);
   const watching = project.lanes.filter(lane => lane.kind === "work" && lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2);

@@ -4,7 +4,7 @@ Improve the agent's environment from finished work, not from guesses about the c
 
 ## Dispatch
 
-Open a lane with a fresh slug and `kind: "retro"` even at full work WIP; only one retro lane may be open or draining. There is no standing judge slot. The owner launches a short-lived judge-role agent with the trigger, selected lanes, read scope, and one absolute artifact path under `.brain/data/muster/retros/`. Use `project_review`'s `retroLanes` and worker session files to find evidence relevant to the chosen scope.
+Open a lane with a fresh slug and `kind: "retro"` even at full work WIP. Two retros with disjoint scopes may run at once. There is no standing judge slot. The owner launches a short-lived judge-role agent with the trigger, selected lanes, read scope, and one absolute artifact path under `.brain/data/muster/retros/`. Use `project_review`'s `retroLanes` and worker session files to find evidence relevant to the chosen scope.
 
 The judge returns an artifact packet containing ranked findings in a `.svx`. It never edits steering files, skills, or code inline. The owner verifies and records the artifact, routes candidates, then calls `project_review` with `retro: true` to set `lastRetroAt`. Ordinary project reviews do not consume the batch. This marker records completion time, not a selective per-lane cursor; bound the review cutoff and state any lanes it did not cover. Do not hold unrelated lane closures for a retro.
 
