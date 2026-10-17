@@ -1,3 +1,4 @@
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 import { ROLE_DEFAULTS } from "./domain.ts";
@@ -24,7 +25,28 @@ export function roleThreshold(role: string | undefined): number | null | undefin
   return role && role in ROLE_DEFAULTS ? ROLE_DEFAULTS[role as Role].compactAt : undefined;
 }
 
-export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>) {
+export interface PiCompaction { readonly enabled: boolean; readonly reserveTokens: number }
+
+/**
+ * Pi compacts on its own, inside the run, above `contextWindow - reserveTokens`. When that is at or below compactAt,
+ * compact-at only duplicates it, and its `ctx.compact()` aborts the run and leaves the session idle mid-summary: a wake
+ * then starts a turn on the old context and Pi starts a second compaction (drovr-desk-2, 2026-10-17, MacLeod).
+ */
+export function piCompactsFirst(threshold: number, contextWindow: number, settings: PiCompaction | undefined): number | null {
+  if (!settings?.enabled || !(contextWindow > 0)) return null;
+  const auto = contextWindow - settings.reserveTokens;
+  return auto <= threshold ? auto : null;
+}
+
+/** Pi 1.3 resolves reserveTokens per model (compaction.modelOverrides); 0.79 ignores the argument. Unreadable settings keep compact-at on. */
+const readPiCompaction = (cwd: string, model?: unknown): PiCompaction | undefined => {
+  try {
+    const settings = SettingsManager.create(cwd);
+    return (settings.getCompactionSettings as (model?: unknown) => PiCompaction).call(settings, model);
+  } catch { return undefined; }
+};
+
+export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string, string | undefined>>, piCompaction: (cwd: string, model?: unknown) => PiCompaction | undefined = readPiCompaction) {
   pi.registerFlag("compact-at", {
     description: "Compact at agent_end when context tokens exceed this count, or 'off'. Muster sets it per role as a cache-cost policy.",
     type: "string",
@@ -53,7 +75,8 @@ export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string
 
   pi.on("agent_end", (_event, ctx) => {
     if (threshold === null) return;
-    const tokens = ctx.getContextUsage()?.tokens;
+    const usage = ctx.getContextUsage();
+    const tokens = usage?.tokens;
     if (tokens === null || tokens === undefined) return;
     if (tokens <= threshold) {
       armed = true;
@@ -61,6 +84,11 @@ export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string
     }
     if (!armed) return;
     armed = false;
+    const auto = piCompactsFirst(threshold, usage?.contextWindow ?? 0, piCompaction(ctx.cwd, ctx.model));
+    if (auto !== null) {
+      if (ctx.hasUI) ctx.ui.notify(`compact-at: Pi compacts this model at ${auto} tokens, inside the run; standing down at ${threshold}`, "info");
+      return;
+    }
     if (ctx.hasUI) ctx.ui.notify(`compact-at: ${tokens} > ${threshold} tokens, compacting`, "info");
     ctx.compact({
       onError: (error) => {
