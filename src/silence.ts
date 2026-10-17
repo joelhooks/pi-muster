@@ -2,7 +2,7 @@ import { silenceLimits } from "./domain.ts";
 import type { AgentState, SilenceLimits } from "./domain.ts";
 import type { AgentEvent } from "./machines.ts";
 
-export type SilenceAction = "none" | "nudge" | "restart";
+export type SilenceAction = "none" | "nudge" | "restart" | "alarm";
 
 export interface SilenceDecision {
   readonly events: readonly AgentEvent[];
@@ -14,13 +14,17 @@ const NONE: SilenceDecision = { events: [], action: "none" };
 /**
  * The silence check. A pane can show `working` while one tool call hangs, so
  * the evidence is the session file's age, not the screen. At the nudge limit
- * (default 30 minutes) the owner sends `esc` and a note; at the restart limit
+ * (default 30 minutes) the owner sends a note, with `esc` first unless the pane is working; at the restart limit
  * (default 60, or never) it starts a fresh session and re-prompts from the
  * brief. Fresh activity returns a silent row to running.
  *
  * A quiet session is only suspect while its turn runs. A Pi that Herdr reports idle, done or
  * blocked has ended its turn and is waiting (on its owner, on Joel, on a watch); nudging or
  * restarting it rebuilds its whole context for nothing. Unknown status keeps the file-age check.
+ *
+ * A pane Herdr reports `working` is never restarted (rule hunt, 2026-10-17: a 45 minute gate is a quiet tool call, and
+ * the restart killed it). Past the restart limit it is an alarm for its owner; only a pane with no turn running, where
+ * Herdr no longer sees the agent, is restarted.
  */
 export function silenceDecision(state: AgentState, silentForMs: number, limits: SilenceLimits = silenceLimits(undefined), paneStatus?: string): SilenceDecision {
   if (paneStatus === "idle" || paneStatus === "done" || paneStatus === "blocked")
@@ -33,11 +37,19 @@ export function silenceDecision(state: AgentState, silentForMs: number, limits: 
     case "silent":
       return quiet ? { events: [{ type: "NUDGE" }], action: "nudge" } : { events: [{ type: "ACTIVE" }], action: "none" };
     case "nudged":
-      if (limits.restartMs !== null && silentForMs >= limits.restartMs) return { events: [{ type: "RESTART" }], action: "restart" };
+      if (limits.restartMs !== null && silentForMs >= limits.restartMs)
+        return paneStatus === "working" ? { events: [], action: "alarm" } : { events: [{ type: "RESTART" }], action: "restart" };
       return quiet ? NONE : { events: [{ type: "ACTIVE" }], action: "none" };
     default:
       return NONE;
   }
+}
+
+/** Escape aborts the running tool call, so a working pane gets the note alone; Pi queues it until the call returns. */
+export const nudgeKeys = (paneStatus?: string): string[] => paneStatus === "working" ? [] : ["Escape"];
+
+export function silenceAlarm(silentForMs: number): string {
+  return `alarm: working but silent ${Math.floor(silentForMs / 60_000)}m; a long gate is fine, a hung tool call is not. Read the pane; if it is hung, agent_launch action=restart.`;
 }
 
 export function nudgeNote(silentForMs: number): string {

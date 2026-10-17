@@ -409,7 +409,8 @@ describe("restart by fork", () => {
 
   it.each([false, true])("status silence restart uses the same proven replacement (remote %s)", async remote => {
     const s = await setup(remote);
-    s.host.agentStatus = "working"; // silent mid-turn, not waiting
+    s.host.agentStatus = "working"; // replacements start working
+    s.host.panes.get(s.launch.row.pane!.paneId)!.agent_status = "unknown"; // no turn running: Pi is gone, not busy
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, state: "nudged" })) }, undefined] as const)));
     s.h.now = new Date(Date.now() + 90 * 60_000);
     const result = await s.run(projectStatus(s.dir));
@@ -420,8 +421,9 @@ describe("restart by fork", () => {
 
   it("a self silence restart returns the same exit receipt and stops the old owner's pass", async () => {
     const s = await setup(false, "desk");
-    s.host.agentStatus = "working"; // silent mid-turn, not waiting
+    s.host.agentStatus = "working"; // replacements start working
     const old = s.launch.row;
+    s.host.panes.get(old.pane!.paneId)!.agent_status = "unknown"; // no turn running: Pi is gone, not busy
     s.h.sessionId = old.sessionId;
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: old.sessionId, state: "nudged" })) }, undefined] as const)));
     s.h.now = new Date(Date.now() + 90 * 60_000);

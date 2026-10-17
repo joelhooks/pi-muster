@@ -235,6 +235,8 @@ describe("slow Pi startup", () => {
     age(31);
     await runWith(h, projectStatus(dir));
     age(61);
+    // Restart needs no turn running: Herdr no longer sees the agent in either pane.
+    for (const row of [launched.row, second.row]) h.herdr.panes.get(row.pane!.paneId)!.agent_status = "unknown";
     let failedReplacement: string | undefined;
     const handle = h.herdr.handle.bind(h.herdr);
     vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => {
@@ -351,6 +353,7 @@ describe("slow Pi startup", () => {
     age(31);
     await runWith(h, projectStatus(dir));
     age(61);
+    h.herdr.panes.get(launched.row.pane!.paneId)!.agent_status = "unknown"; // no turn running
     h.startupLoad = { load: 20, cpus: 8 };
     let elapsed = 0;
     h.sleep = ms => { elapsed += ms; h.now = new Date(h.now.getTime() + ms); };
@@ -2064,10 +2067,11 @@ describe("project_status", () => {
     expect(gone.agents[0]?.action).toBe("pane gone: interrupted");
   });
 
-  it("nudges at 30 minutes and restarts by fork at 60, only for its own rows", async () => {
+  it("nudges at 30 minutes and restarts by fork at 60 once Herdr sees no turn, only for its own rows", async () => {
     const h = harness();
     const { dir, launched } = await launchedWorker(h);
     restartCode(h, dir);
+    h.herdr.panes.get(launched.row.pane!.paneId)!.agent_status = "unknown";
     const file = launched.row.sessionFile as string;
     const age = (minutes: number) => {
       const when = new Date(h.now.getTime() - minutes * 60_000);
@@ -2094,6 +2098,30 @@ describe("project_status", () => {
     expect(row?.sessionId).not.toBe(launched.row.sessionId);
     expect(row?.parentSessionFile).toBe(file);
     expect(h.herdr.calls.some((call) => call.method === "pane.send_input" && String(call.params.text).startsWith("exec sh"))).toBe(true);
+  });
+
+  // Rule hunt, 2026-10-17: a quiet working pane may be watching a long gate. Note it, alarm its owner, never kill it.
+  it("nudges a quiet working pane without Escape and alarms instead of restarting it", async () => {
+    const h = harness();
+    const { dir, launched } = await launchedWorker(h);
+    restartCode(h, dir);
+    const file = launched.row.sessionFile as string;
+    const age = (minutes: number) => {
+      const when = new Date(h.now.getTime() - minutes * 60_000);
+      utimesSync(file, when, when);
+    };
+    h.herdr.panes.get(launched.row.pane!.paneId)!.agent_status = "working";
+    h.sessionId = "owner-session";
+    age(31);
+    const before = h.herdr.calls.filter((call) => call.method === "pane.send_keys").length;
+    expect((await runWith(h, projectStatus(dir))).agents[0]?.state).toBe("nudged");
+    expect(h.herdr.calls.filter((call) => call.method === "pane.send_keys")).toHaveLength(before);
+    age(61);
+    const alarmed = await runWith(h, projectStatus(dir));
+    expect(alarmed.agents[0]?.action).toContain("alarm: working but silent 61m");
+    const row = (await runWith(h, load(dir))).agents[0];
+    expect(row?.restarts ?? 0).toBe(0);
+    expect(row?.sessionId).toBe(launched.row.sessionId);
   });
 });
 

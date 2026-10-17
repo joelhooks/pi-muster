@@ -9,7 +9,7 @@ import { silenceLimits } from "./domain.ts";
 import type { DeskItem, Project } from "./domain.ts";
 import { workPrompt } from "./ops.ts";
 import { costFromLines, readSessionCost, turnCost } from "./session-file.ts";
-import { CAPTURE_REFRESH_MARK, captureRefreshNote, silenceDecision } from "./silence.ts";
+import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeKeys, silenceAlarm, silenceDecision } from "./silence.ts";
 
 const NUDGE_AFTER_MS = 30 * 60_000;
 const RESTART_AFTER_MS = 60 * 60_000;
@@ -24,6 +24,16 @@ describe("silence thresholds", () => {
     expect(silenceDecision("running", RESTART_AFTER_MS + 1).action).toBe("nudge");
     expect(silenceDecision("nudged", RESTART_AFTER_MS - 1)).toEqual({ events: [], action: "none" });
     expect(silenceDecision("nudged", RESTART_AFTER_MS)).toEqual({ events: [{ type: "RESTART" }], action: "restart" });
+  });
+  // Rule hunt, 2026-10-17: a worker watching a 45 minute gate is quiet and working; restarting it killed the gate.
+  it("never restarts a pane Herdr reports working: past the limit it is an alarm, and the nudge sends no Escape", () => {
+    expect(silenceDecision("running", NUDGE_AFTER_MS, undefined, "working").action).toBe("nudge");
+    expect(silenceDecision("nudged", RESTART_AFTER_MS * 3, undefined, "working")).toEqual({ events: [], action: "alarm" });
+    expect(silenceDecision("nudged", RESTART_AFTER_MS, undefined, "unknown").action).toBe("restart");
+    expect(nudgeKeys("working")).toEqual([]);
+    expect(nudgeKeys("unknown")).toEqual(["Escape"]);
+    expect(silenceAlarm(75 * 60_000)).toContain("working but silent 75m");
+    expect(silenceAlarm(75 * 60_000)).toContain("agent_launch action=restart");
   });
   it("follows project policy, including never restarting", () => {
     const patient = silenceLimits({ nudgeAfterMin: 90, restartAfterMin: null });

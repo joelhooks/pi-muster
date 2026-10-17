@@ -71,7 +71,7 @@ import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
-import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeNote, silenceDecision } from "./silence.ts";
+import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeKeys, nudgeNote, silenceAlarm, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { launchDefaults } from "./fleet-steer.ts";
 import { retroJudgeModel } from "./retro-cadence.ts";
@@ -1045,11 +1045,13 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
     const silent = mtime === null ? null : Math.max(0, env.now().getTime() - mtime);
     if (rebinding.kind === "none" && !reAdoption && pane && silent !== null && ["running", "silent", "nudged", "restarted"].includes(current.state)) {
       const decision = silenceDecision(current.state, silent, silenceLimits(project.policy), pane.agent_status);
-      if (decision.action !== "none") {
+      if (decision.action === "alarm") action = `${silenceAlarm(silent)} (${row.machine})`;
+      else if (decision.action !== "none") {
         action = `${decision.action} due on ${row.machine}`;
         if (act && mine && (decision.action !== "nudge" || current.pane?.openedByMuster)) {
           if (decision.action === "nudge") {
-            yield* paneSendKeys(pane.pane_id, ["Escape"]);
+            const keys = nudgeKeys(pane.agent_status);
+            if (keys.length) yield* paneSendKeys(pane.pane_id, keys);
             yield* paneRun(pane.pane_id, nudgeNote(silent));
             current = yield* patchRow(dir, row.name, current.state, decision.events);
           } else {
@@ -4248,12 +4250,14 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       if (silentFor !== null && pane && working && !capture) {
         const decision = silenceDecision(current.state, silentFor, limits, pane.agent_status);
         const mine = current.owner === env.sessionId;
-        if (decision.action !== "none" && !(act && mine && (decision.action !== "nudge" || current.pane?.openedByMuster))) {
+        if (decision.action === "alarm") action = silenceAlarm(silentFor);
+        else if (decision.action !== "none" && !(act && mine && (decision.action !== "nudge" || current.pane?.openedByMuster))) {
           action = `${decision.action} due (${mine ? "act: false" : `owner ${current.owner}`})`;
         } else if (decision.events.length > 0) {
           const paneId = pane.pane_id;
           if (decision.action === "nudge") {
-            yield* paneSendKeys(paneId, ["Escape"]);
+            const keys = nudgeKeys(pane.agent_status);
+            if (keys.length) yield* paneSendKeys(paneId, keys);
             yield* paneRun(paneId, nudgeNote(silentFor));
             action = `nudged after ${Math.floor(silentFor / 60_000)}m`;
           } else if (decision.action === "restart") {

@@ -506,7 +506,9 @@ describe("remote owner operations", () => {
     expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(false);
     expect(s.calls.filter(call => call.command === "ssh" && call.args.at(-1)?.includes("mtimeMs"))).toHaveLength(1);
     await s.run(projectStatus(s.dir));
-    expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(true);
+    // A working pane gets the note alone; Escape would abort its running tool call (rule hunt, 2026-10-17).
+    expect(s.remote.calls.some(call => call.method !== "pane.send_keys" && call.params.pane_id === "moved" && String(call.params.text ?? call.params.command ?? "").includes("written nothing"))).toBe(true);
+    expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(false);
   });
   it("verifies and lands a remote-only packet over SSH", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
