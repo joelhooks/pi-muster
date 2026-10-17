@@ -61,7 +61,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
-import { decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
+import { DEFAULT_GATE_TIMEOUT_MIN, decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
@@ -99,7 +99,14 @@ const tabFullPrompt = (lane: string, workers: readonly AgentRow[], where = "") =
   `Next: agent_close a finished worker, or lane_open a new lane (e.g. slug "${lane}-2") and launch there.`;
 /** pi-notes' own runtime state in any repo a Pi runs in (session binding, status, trace log). Other bridge files, such as receipts, may hold review work. */
 const NOTES_BRIDGE_RUNTIME: readonly string[] = [".pi/notes-bridge/events.jsonl", ".pi/notes-bridge/session.json", ".pi/notes-bridge/status.json"];
-const GATE_TIMEOUT_MS = 45 * 60_000;
+/**
+ * A gate's time limit comes from project policy (rule hunt, 2026-10-17: a fixed 45 minutes cut off slower suites).
+ * Running past it is a prompt naming the policy to raise, not a bare timeout.
+ */
+export const gateTimeoutMs = (project: Project) => (project.policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN) * 60_000;
+const gateTimedOut = (project: Project) => (error: { readonly message: string }) => /^timed out after/.test(error.message)
+  ? new GuardFailed({ guard: "gate-timeout", message: `gate ran past ${gateTimeoutMs(project) / 60_000} minutes and was stopped; nothing was landed. If the suite is slow rather than hung, raise it with project_update policy: { gateTimeoutMin: N } and packet_land again.` })
+  : null;
 const CLOSE_READ_LINES = 40;
 /** Pi expands @files before its first message; extra instructions travel in one complete file. */
 const startPrompt = (row: AgentRow, prompt: string | undefined, dir: string) => Effect.gen(function* () {
@@ -3576,8 +3583,8 @@ const runGate = (source: string, gate: string, context: {
         "--repo", basename(source), "--source", source, "--tree", tree,
         "--head", head, "--branch", branch, "--wait", "1200", "--receipt", receiptPath,
         "--", "sh", "-c", gate,
-      ], { cwd: source, timeoutMs: GATE_TIMEOUT_MS }).pipe(
-        Effect.mapError((error) => new GuardFailed({ guard: "gate-runner", message: error.message })),
+      ], { cwd: source, timeoutMs: gateTimeoutMs(project) }).pipe(
+        Effect.mapError((error) => gateTimedOut(project)(error) ?? new GuardFailed({ guard: "gate-runner", message: error.message })),
       );
       if (!existsSync(receiptPath)) {
         if (result.code === 75) {
@@ -3604,8 +3611,8 @@ const runGate = (source: string, gate: string, context: {
     }
     // The CLI owns registration and sampling. Pi gets no timer or admission loop.
     const result = yield* proc.run(process.execPath, [fileURLToPath(new URL("../bin/muster-heavy.ts", import.meta.url)), "--", "sh", "-c", gate], {
-      cwd: source, timeoutMs: GATE_TIMEOUT_MS, env: { HOME: env.home },
-    });
+      cwd: source, timeoutMs: gateTimeoutMs(project), env: { HOME: env.home },
+    }).pipe(Effect.mapError(error => gateTimedOut(project)(error) ?? error));
     return { ...result, receipt: null };
   });
 

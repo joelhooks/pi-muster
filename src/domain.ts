@@ -478,6 +478,8 @@ export const Policy = Schema.Struct({
   wipLimit: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)))),
   flowStallMin: Schema.optionalKey(Minutes),
   landWaitMin: Schema.optionalKey(Minutes),
+  /** How long a packet_land gate may run before Muster stops waiting. Default 45; a slow suite raises it. */
+  gateTimeoutMin: Schema.optionalKey(Minutes),
   /**
    * Read it through `policyComms`. Unset means ratking. Any string decodes and is written back unchanged: a value a
    * newer Muster adds never fails the file, and an unset key is never filled in, because a Muster older than d3d8d03
@@ -718,6 +720,7 @@ export const SkillSettings = Schema.Struct({ skills: Schema.optionalKey(Schema.A
 export const decodeSkillSettings = Schema.decodeUnknownSync(SkillSettings);
 
 export const DEFAULT_NUDGE_AFTER_MIN = 30;
+export const DEFAULT_GATE_TIMEOUT_MIN = 45;
 export const DEFAULT_RESTART_AFTER_MIN = 60;
 
 export interface SilenceLimits {
@@ -771,6 +774,7 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
     ...(patch.wipLimit !== undefined ? { wipLimit: patch.wipLimit } : {}),
     ...(patch.flowStallMin !== undefined ? { flowStallMin: patch.flowStallMin } : {}),
     ...(patch.landWaitMin !== undefined ? { landWaitMin: patch.landWaitMin } : {}),
+    ...(patch.gateTimeoutMin !== undefined ? { gateTimeoutMin: patch.gateTimeoutMin } : {}),
     ...(patch.nudgeAfterMin !== undefined ? { nudgeAfterMin: patch.nudgeAfterMin } : {}),
     ...(patch.restartAfterMin !== undefined ? { restartAfterMin: patch.restartAfterMin } : {}),
     ...(Object.keys(roles).length > 0 ? { roles } : {}),
@@ -786,7 +790,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, gateTimeoutMin: policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 /** Legacy comms hints decode tolerantly; mergePolicy never writes them. */

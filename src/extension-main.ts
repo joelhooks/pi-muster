@@ -840,6 +840,7 @@ export default function muster(host: ExtensionAPI) {
           wipLimit: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
           flowStallMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
           landWaitMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+          gateTimeoutMin: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "Minutes a packet_land gate may run; default 45" })),
           nudgeAfterMin: Type.Optional(Type.Number()),
           restartAfterMin: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
           roles: Type.Optional(

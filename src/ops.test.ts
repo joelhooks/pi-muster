@@ -1296,7 +1296,24 @@ describe("a lane from launch to close", () => {
     expect(drained.closed).toBe(false);
     expect(drained.lane.state).toBe("draining");
 
+    // Rule hunt, 2026-10-17: the gate's limit is project policy, and running past it is a prompt, with nothing landed.
+    await runWith(h, projectUpdate(dir, { policy: { gateTimeoutMin: 90 } }));
+    const gateLimits: number[] = [];
+    let stall = true;
+    const proc = h.proc;
+    h.proc = { run: (command, args, options) => {
+      if (!String(args[0] ?? "").endsWith("muster-heavy.ts")) return proc.run(command, args, options);
+      gateLimits.push(options.timeoutMs ?? 0);
+      if (!stall) return proc.run(command, args, options);
+      stall = false;
+      return Effect.fail(new ProcError({ command, code: null, stderr: "", message: `timed out after ${options.timeoutMs}ms` }));
+    } };
+    const stopped = await failWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+    expect(stopped.message).toContain("gate ran past 90 minutes and was stopped; nothing was landed");
+    expect(stopped.message).toContain("policy: { gateTimeoutMin: N }");
     const landed = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", gate: "test -f work.txt" }));
+    expect(gateLimits).toEqual([90 * 60_000, 90 * 60_000]);
+    h.proc = proc;
     expect(landed.packet.state).toBe("committed");
     const head = sh(dir, "log", "-1", "--format=%an|%cn|%P");
     expect(head.split("|")[0]).toBe("shitratgit[bot]");
@@ -1319,7 +1336,7 @@ describe("a lane from launch to close", () => {
     expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 0/1 lanes");
     await runWith(h, laneDeliver(dir, { slug: "probe", stage: "proven", evidence: "live check passed" }));
     expect(h.herdr.tokens.get("w1")?.progress).toBe("🐑 1/1 lanes");
-  });
+  }, 30_000);
 
   it("lands then closes once in the same process, even when close was constructed before landing", async () => {
     const h = harness();
