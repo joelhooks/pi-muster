@@ -11,6 +11,7 @@ function harness(settings: PiCompaction | undefined, contextWindow = 1_000_000) 
     on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
   };
   let tokens = 0;
+  let failure: string | undefined;
   const compacted: number[] = [];
   const notes: string[] = [];
   const seen: unknown[] = [];
@@ -18,13 +19,13 @@ function harness(settings: PiCompaction | undefined, contextWindow = 1_000_000) 
     cwd: "/repo", model: { provider: "claude-bridge", id: "claude-opus-5-5" }, hasUI: true,
     sessionManager: { getEntries: () => [] },
     getContextUsage: () => ({ tokens, contextWindow, percent: null }),
-    compact: () => { compacted.push(tokens); },
+    compact: (options?: { onError?: (error: Error) => void }) => { compacted.push(tokens); if (failure) options?.onError?.(new Error(failure)); },
     ui: { notify: (text: string) => { notes.push(text); } },
   };
   registerCompaction(pi as never, { PI_COMPACT_AT: "400000" }, (_cwd, model) => { seen.push(model); return settings; });
   handlers.get("session_start")?.({}, ctx);
   const turn = (at: number) => { tokens = at; handlers.get("agent_end")?.({}, ctx); };
-  return { turn, compacted, notes, seen };
+  return { turn, compacted, notes, seen, fail: (message: string) => { failure = message; } };
 }
 
 describe("compact-at and Pi's own auto-compaction", () => {
@@ -50,5 +51,20 @@ describe("compact-at and Pi's own auto-compaction", () => {
       h.turn(450_000);
       expect(h.compacted).toEqual([450_000]);
     }
+  });
+  // MacLeod, 2026-10-17: Pi 1.3.0-p4 refuses a manual compaction while its own is running.
+  it("treats Pi's own compaction in progress as handled: no retry, no error; other failures retry", () => {
+    const busy = harness({ enabled: true, reserveTokens: 16_384 });
+    busy.fail("Compaction already in progress");
+    busy.turn(450_000);
+    busy.turn(460_000);
+    expect(busy.compacted).toEqual([450_000]);
+    expect(busy.notes).toEqual(["compact-at: 450000 > 400000 tokens, compacting", "compact-at: Pi is already compacting; standing down"]);
+    const broken = harness({ enabled: true, reserveTokens: 16_384 });
+    broken.fail("provider exploded");
+    broken.turn(450_000);
+    broken.turn(460_000);
+    expect(broken.compacted).toEqual([450_000, 460_000]);
+    expect(broken.notes).toContain("compact-at: compaction failed: provider exploded");
   });
 });

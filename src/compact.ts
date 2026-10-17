@@ -92,6 +92,12 @@ export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string
     if (ctx.hasUI) ctx.ui.notify(`compact-at: ${tokens} > ${threshold} tokens, compacting`, "info");
     ctx.compact({
       onError: (error) => {
+        // Pi 1.3.0-p4 refuses a manual compaction while its own runs (MacLeod, 2026-10-17). Pi's brings the context
+        // down, so this crossing is handled: no retry, no error.
+        if (/compaction already in progress/i.test(error.message)) {
+          if (ctx.hasUI) ctx.ui.notify("compact-at: Pi is already compacting; standing down", "info");
+          return;
+        }
         armed = true;
         if (ctx.hasUI) ctx.ui.notify(`compact-at: compaction failed: ${error.message}`, "error");
       },
