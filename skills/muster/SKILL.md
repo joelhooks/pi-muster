@@ -75,6 +75,7 @@ Read [done means live and proven](references/done.md) when finishing delivery. M
 - A deploy gate needs a captured base-versus-head surface diff. An allowed-diff list reasoned from code is not evidence.
 - Move a rollback target only on CLEAN, and write the verdict line last. Never turn a failed or partial gate into a pass.
 - Artifacts need acceptance evidence, not a fictional deployment.
+- Proofs run on real captures: a real plan, real state, a real host. A hand-made fixture can't see shapes nobody thought to write down. On 2026-10-17 that missed renamed state ids (alchemy-celld 0.1.3), a restartOn digest, and the real Alchemy plan shape (drovr #1916, which blocked every release).
 
 ## Escalation and communication
 
