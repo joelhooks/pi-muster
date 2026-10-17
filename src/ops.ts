@@ -25,7 +25,7 @@ import {
 } from "./argv.ts";
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
-import { AUTOLAND_CAP, AUTOLAND_RECHECK_MS, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
+import { AUTOLAND_CAP, autolandDue, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
 import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, CACHE_WARM_CADENCE_MINUTES, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
 import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
@@ -4312,7 +4312,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       const snapshot = yield* load(dir);
       const candidates = snapshot.packets.filter(packet => autolandEligible(packet) &&
         snapshot.agents.some(row => row.name === packet.agent && row.owner === env.sessionId) &&
-        (!packet.autolandCheckedAt || now - Date.parse(packet.autolandCheckedAt) >= AUTOLAND_RECHECK_MS))
+        autolandDue(snapshot, packet, now))
         .sort((a, b) => a.reportedAt.localeCompare(b.reportedAt)).slice(0, AUTOLAND_CAP);
       for (const packet of candidates) {
         let landing = yield* findLanding(snapshot, packet, { notes: autolandNotes });
@@ -4330,7 +4330,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           const latest = yield* findPacket(current, packet.id);
           const row = yield* findRow(current, latest.agent);
           if (!autolandEligible(latest) || row.owner !== env.sessionId ||
-            (latest.autolandCheckedAt && now - Date.parse(latest.autolandCheckedAt) < AUTOLAND_RECHECK_MS)) return [current, false] as const;
+            !autolandDue(current, latest, now)) return [current, false] as const;
           const checked = { ...latest, autolandCheckedAt: iso(env) };
           if (!landing) return [withPacket(current, checked), false] as const;
           const result = yield* recordPacketOutcome(current, checked, "no_changes", landing.sha, landingEvidence(landing, landing.base), iso(env));

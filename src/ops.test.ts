@@ -2411,6 +2411,22 @@ describe("project_status autoland", () => {
     f.h.now = new Date(f.h.now.getTime() + 1);
     await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(22);
   }, 20_000);
+  // Rule hunt, 2026-10-17 (P3): recheck when something moved, not when ten minutes passed.
+  it("rechecks at once when another packet lands or the packet is reported again, and not otherwise", async () => {
+    const f = await candidate();
+    let fetches = 0; f.h.proc = { run: (cmd, args, opts) => { if (args[0] === "fetch") fetches++; return liveProc.run(cmd, args, opts); } };
+    await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(1);
+    const tick = () => { f.h.now = new Date(f.h.now.getTime() + 60_000); };
+    tick(); await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(1);
+    const original = (await runWith(f.h, load(f.dir))).packets[0]!;
+    await runWith(f.h, mutate(f.dir, p => Effect.succeed([{ ...p, packets: [...p.packets,
+      { ...original, id: "f".repeat(40), state: "committed", updatedAt: f.h.now.toISOString() }] }, null] as const)));
+    tick(); await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(2);
+    tick(); await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(2);
+    await runWith(f.h, mutate(f.dir, p => Effect.succeed([{ ...p, packets: p.packets.map(a => a.id === original.id ? { ...a, reportedAt: f.h.now.toISOString() } : a) }, null] as const)));
+    tick(); await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(3);
+    tick(); await runWith(f.h, projectStatus(f.dir)); expect(fetches).toBe(3);
+  }, 20_000);
 });
 
 // Roland, 2026-10-10: an idle worker waiting on a Joel call was restarted every hour, each time rebuilding its cache.

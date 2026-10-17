@@ -16,6 +16,18 @@ const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 export const AUTOLAND_CAP = 10;
 export const AUTOLAND_RECHECK_MS = 10 * 60_000;
 export const autolandEligible = (packet: Packet) => packet.kind === "commit" && (packet.state === "reported" || packet.state === "verified");
+/**
+ * A check is due when something it depends on moved since the last one, not when a clock says so (rule hunt,
+ * 2026-10-17): the packet was reported again, or another packet in the project landed, so the base may hold it now.
+ * The ten-minute recheck stays as the backstop for landings Muster never sees (a merged PR, a push by hand).
+ */
+export const autolandDue = (project: Project, packet: Packet, now: number) => {
+  if (!packet.autolandCheckedAt) return true;
+  const checked = Date.parse(packet.autolandCheckedAt);
+  if (now - checked >= AUTOLAND_RECHECK_MS || Date.parse(packet.reportedAt) > checked) return true;
+  return project.packets.some(other => other.id !== packet.id && (other.state === "committed" || other.state === "no_changes") &&
+    Date.parse(other.updatedAt) > checked);
+};
 
 /** Evidence only: fetches refs, never changes the index, checkout, PR or agent. */
 export const findLanding = (project: Project, packet: Packet, options: { notes?: string[]; fetch?: boolean } = {}) =>
