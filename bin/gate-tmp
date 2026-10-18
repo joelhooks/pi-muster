@@ -142,7 +142,9 @@ detach_if_idle() {
   if hdiutil detach "$dev" >/dev/null 2>&1; then
     note "detach dev=$dev ms=$(( $(ms) - started ))"
   else
-    note "detach busy dev=$dev"
+    # Switchboard, 2026-10-18: 21 orphaned `op daemon`s kept their cwd on the disk; name the holders.
+    holders=$(lsof -Fpc "$root" 2>/dev/null | awk '/^p/ { pid = substr($0, 2) } /^c/ { if (!seen[pid]++) printf "%s%s:%s", (n++ ? " " : ""), substr($0, 2), pid }')
+    note "detach busy dev=$dev held by ${holders:-unknown}"
   fi
 }
 

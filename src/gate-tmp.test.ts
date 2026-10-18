@@ -50,7 +50,7 @@ describe("gate-tmp sweep", () => {
 
 // Switchboard, 2026-10-18: the RAM disk held 16 GB for 3.7 days while using 158 MB; its pages are never freed until detach.
 describe("gate-tmp claim and release", () => {
-  function disk(options: { mounted?: boolean; busy?: boolean } = {}) {
+  function disk(options: { mounted?: boolean; busy?: boolean; holders?: string } = {}) {
     const { root } = fixture();
     const volume = join(root, "volume");
     mkdirSync(volume);
@@ -60,6 +60,7 @@ describe("gate-tmp claim and release", () => {
     const bin = join(root, "bin");
     mkdirSync(bin);
     const tools: Record<string, string> = {
+      lsof: options.holders === undefined ? "exit 1" : `printf '${options.holders}'`,
       uname: "echo Darwin", hostname: "echo Flagg", mdutil: "echo 'Indexing disabled'", newfs_hfs: "exit 0",
       mount: `[ -e '${state}' ] && echo '/dev/disk99 on ${volume} (hfs)'; exit 0`,
       diskutil: `echo "diskutil $*" >> '${calls}'; case "$1" in mount) touch '${state}' ;; unmount) rm -f '${state}' ;; esac`,
@@ -109,12 +110,15 @@ describe("gate-tmp claim and release", () => {
     expect(d.called()).toContain("hdiutil attach -nobrowse -nomount ram://");
     expect(d.logged()).toMatch(/recreate dev=\/dev\/disk99 ms=\d+/);
   });
-  it("leaves a busy disk attached and logs it, never forcing", () => {
-    const d = disk({ busy: true });
+  it("leaves a busy disk attached and logs who holds it, never forcing", () => {
+    const d = disk({ busy: true, holders: "p2350\\ncop\\nf0\\np6242\\ncop\\n" });
     const dir = d.gate("claim", String(process.pid)).stdout.trim();
     expect(d.gate("release", dir).status).toBe(0);
     expect(existsSync(d.state)).toBe(true);
-    expect(d.logged()).toContain("detach busy dev=/dev/disk99");
+    expect(d.logged()).toContain("detach busy dev=/dev/disk99 held by op:2350 op:6242");
+    const quiet = disk({ busy: true });
+    quiet.gate("release", quiet.gate("claim", String(process.pid)).stdout.trim());
+    expect(quiet.logged()).toContain("held by unknown");
   });
   it("takes over a lock whose holder died, and refuses a release outside the volume", () => {
     const d = disk();
