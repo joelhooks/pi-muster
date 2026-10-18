@@ -10,7 +10,7 @@ const homes: string[] = [];
 function setup() { const home = mkdtempSync(join(tmpdir(), "heavy-jobs-test-")); homes.push(home); return { home }; }
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true }); });
 function cli(home: string, args: string[], env: Record<string, string> = {}) {
-  return spawnSync(process.execPath, [resolve("bin/muster-heavy.ts"), ...args], { encoding: "utf8", timeout: 20000, env: { ...process.env, HOME: home, ...env } });
+  return spawnSync(process.execPath, [resolve("bin/muster-heavy.ts"), ...args], { encoding: "utf8", timeout: 20000, env: { ...process.env, HOME: home, MUSTER_HEAVY_GATE_TMP: "off", ...env } });
 }
 
 describe("job registry", () => {
@@ -181,7 +181,7 @@ describe("register-and-run CLI", () => {
   }, 25000);
   it("starts two commands concurrently and forwards a signal, leaving finalized records", async () => {
     const { home } = setup();
-    const start = (label: string) => spawn(process.execPath, [resolve("bin/muster-heavy.ts"), "--wait", "3600", "--", "sh", "-c", `echo ${label}; sleep 20`], { env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+    const start = (label: string) => spawn(process.execPath, [resolve("bin/muster-heavy.ts"), "--wait", "3600", "--", "sh", "-c", `echo ${label}; sleep 20`], { env: { ...process.env, HOME: home, MUSTER_HEAVY_GATE_TMP: "off" }, stdio: ["ignore", "pipe", "pipe"] });
     const a = start("first"); const b = start("second");
     const finished = [a, b].map(child => new Promise<number | null>(resolve => child.on("close", code => resolve(code))));
     try {

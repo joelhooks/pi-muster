@@ -23,11 +23,16 @@ export function claimGateTmp(setting = process.env.MUSTER_HEAVY_GATE_TMP, host =
   if (setting === "off" || host.platform !== "darwin" || host.name.split(".")[0]?.toLowerCase() !== "flagg") return undefined;
   const ensure = setting || join(dirname(fileURLToPath(import.meta.url)), "gate-tmp");
   try {
-    const root = execFileSync(ensure, ["ensure"], { encoding: "utf8", timeout: 30_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
-    if (!root.startsWith("/") || root.includes("\n")) throw new Error("ensure did not return one absolute root");
-    const dir = mkdtempSync(join(root, `run-${process.pid}-`));
+    // claim and release share gate-tmp's lock: the last release detaches the disk and frees its memory (Switchboard, 2026-10-18).
+    const dir = execFileSync(ensure, ["claim", String(process.pid)], { encoding: "utf8", timeout: 40_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+    if (!dir.startsWith("/") || dir.includes("\n")) throw new Error("claim did not return one absolute run directory");
     let released = false;
-    return { dir, release: () => { if (!released) { rmSync(dir, { recursive: true, force: true }); released = true; } } };
+    return { dir, release: () => {
+      if (released) return;
+      released = true;
+      try { execFileSync(ensure, ["release", dir], { timeout: 40_000, stdio: ["ignore", "ignore", "pipe"] }); }
+      catch { rmSync(dir, { recursive: true, force: true }); }
+    } };
   } catch (error) {
     const stderr = error && typeof error === "object" && "stderr" in error ? String(error.stderr).trim() : "";
     const reason = (stderr || (error instanceof Error ? error.message : String(error))).replace(/\s+/g, " ");
