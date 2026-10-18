@@ -2529,10 +2529,11 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   const snapshotDir = remote ? launchDir : join(env.home, ".local/state/muster/restart-snapshots");
   if (!remote) yield* must("mkdir", ["-p", snapshotDir], { cwd: old.cwd });
   const snapshot = join(snapshotDir, `restart-${row.sessionId}.jsonl`);
-  const snapshotScript = `import {snapshotRestartSession} from ${JSON.stringify(`${machine?.musterExtension ?? env.musterRoot}/src/restart-snapshot.ts`)}; snapshotRestartSession(process.argv[1], process.argv[2]);`;
+  const snapshotScript = `import {snapshotRestartSession} from ${JSON.stringify(`${machine?.musterExtension ?? env.musterRoot}/src/restart-snapshot.ts`)}; snapshotRestartSession(process.argv[1], process.argv[2], process.argv[3] || undefined);`;
   // Use the executing checkout's helper locally (the install root can be older).
-  if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile!, snapshot], { cwd: old.cwd });
-  else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
+  // The fork starts at the thinking level it launches with; the snapshot records it (Pi would not).
+  if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile!, snapshot, profile.thinking ?? ""], { cwd: old.cwd });
+  else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot, profile.thinking ?? undefined), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
   // pi-until persists live watches only when Pi quits or reloads, so a fork cannot carry them. Name them instead.
   const watchLines = remote
     ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, snapshot], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))

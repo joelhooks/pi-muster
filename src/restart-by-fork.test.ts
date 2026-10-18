@@ -1,4 +1,5 @@
-import { appendFileSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,8 +28,9 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
     if (command === "ssh") {
       const script = args.at(-1) ?? "";
       if (script.includes("snapshotRestartSession")) return Effect.sync(() => {
-        const paths = [...script.matchAll(/'([^']+)'/g)].map(match => match[1]!);
-        snapshotRestartSession(paths.at(-2)!, paths.at(-1)!);
+        const quoted = [...script.matchAll(/'([^']*)'/g)].map(match => match[1]!);
+        const at = quoted.map(arg => arg.endsWith(".jsonl")).lastIndexOf(true);
+        snapshotRestartSession(quoted[at - 1]!, quoted[at]!, quoted[at + 1] || undefined);
         return { code: 0, stdout: "", stderr: "" };
       });
       if (script.includes("'muster-prerequisites'") || script.includes(" 'test'") || script.includes(" 'pi'")) return Effect.succeed({ code: 0, stdout: "", stderr: "" });
@@ -87,6 +89,31 @@ describe("restart by fork", () => {
     expect(result.argv).toContain("openai-codex/gpt-6.1-sol:medium");
     expect(result.row.profile).toMatchObject({ model: "openai-codex/gpt-6.1-sol", thinking: "medium" });
     expect(result.notes.join("\n")).toContain("from explicit model");
+  });
+
+  // Ernestine, 2026-10-18: Pi kept a fork's launch thinking level in memory only, so the forked file still said high,
+  // the clamp check warned falsely, and resuming the file went back to high.
+  it("records the launch thinking level as the snapshot leaf when the parent recorded another", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    appendFileSync(old.sessionFile!, "\n" + JSON.stringify({ type: "thinking_level_change", id: "t1", parentId: null, timestamp: "2026-10-15T00:00:00Z", thinkingLevel: "high" }) + "\n");
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, thinking: "medium" }));
+    const snapshot = readFileSync(result.argv[result.argv.indexOf("--fork") + 1]!, "utf8").trimEnd().split("\n").map(line => JSON.parse(line));
+    const leaf = snapshot.at(-1);
+    expect(leaf).toMatchObject({ type: "thinking_level_change", thinkingLevel: "medium" });
+    expect(leaf.parentId).toBe([...snapshot].slice(0, -1).reverse().find(entry => typeof entry.id === "string")?.id);
+    expect(result.notes.join("\n")).not.toContain("thinking clamped");
+  });
+
+  it("leaves the snapshot alone when the parent already records the launch level, or records none", () => {
+    const dir = mkdtempSync(join(tmpdir(), "muster-snapshot-thinking-"));
+    const header = JSON.stringify({ type: "session", version: 3, id: "s", timestamp: "2026-10-18T00:00:00Z", cwd: dir });
+    const level = JSON.stringify({ type: "thinking_level_change", id: "t1", parentId: null, timestamp: "2026-10-18T00:00:00Z", thinkingLevel: "medium" });
+    for (const [name, text] of [["same", `${header}\n${level}\n`], ["none", `${header}\n`]] as const) {
+      writeFileSync(join(dir, `${name}.jsonl`), text);
+      snapshotRestartSession(join(dir, `${name}.jsonl`), join(dir, `${name}-snap.jsonl`), "medium");
+      expect(readFileSync(join(dir, `${name}-snap.jsonl`), "utf8")).toBe(text);
+    }
   });
 
   it("after a foreign adopt, restart forks the adopted session with the row's environment", async () => {
