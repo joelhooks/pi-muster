@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { turnLog, turnUnsupported } from "./turn-wake.ts";
 import { spawn } from "node:child_process";
-import { appendFileSync, fsyncSync, closeSync, openSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
@@ -227,7 +227,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     ...(params.thinking !== undefined ? { thinking: params.thinking } : {}),
     ...(params.skills !== undefined ? { skills: params.skills } : {}),
     ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}), ...(params.slim !== undefined ? { slim: params.slim } : {}),
-    ...(params.extensions !== undefined ? { extensions: params.extensions } : {}),
+    ...(params.extensions !== undefined ? { extensions: params.action === "restore" ? mergedExtensions(existing?.profile.extensions, params.extensions) : params.extensions } : {}),
     ...(params.env !== undefined ? { env: params.env } : {}),
     ...(params.appendSystemPrompt !== undefined ? { appendSystemPrompt: params.appendSystemPrompt } : {}),
     ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}),
@@ -2236,7 +2236,39 @@ const laneWorkers = (project: Project, lane: Lane, name: string, rootTerminal: s
   (agent) => agent.lane === lane.slug && agent.name !== name && agent.state !== "closed" && agent.pane && agent.pane.terminalId !== rootTerminal,
 );
 
-/** A row's saved environment never claims succession: only the restart that forks the parent does. */
+/** The first line of a session file, read without loading a journal that may run to tens of MB. */
+const sessionHeader = (file: string): { id?: unknown; parentSession?: unknown } | null => {
+  let fd: number | undefined;
+  try {
+    fd = openSync(file, "r");
+    const buffer = Buffer.alloc(16_384);
+    const line = buffer.subarray(0, readSync(fd, buffer, 0, buffer.length, 0)).toString("utf8").split("\n")[0] ?? "";
+    const header = JSON.parse(line) as unknown;
+    return header && typeof header === "object" ? header as { id?: unknown; parentSession?: unknown } : null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+};
+
+/**
+ * Switchboard, 2026-10-19: 17 of 29 restored rows came back under derived Rat King names. pi-ratking reads every
+ * resume of a session that a restart forked as a fork of its parent, and keeps the row's name only when
+ * RATKING_SUCCEEDS names that parent, which the saved environment drops. A restore names it again: the id in the
+ * header of the file this session's header names as its parent, as pi-ratking reads it. Null for a session with no parent.
+ */
+export const resumeSuccession = (sessionFile: string | null | undefined): string | null => {
+  const parentFile = sessionFile ? sessionHeader(sessionFile)?.parentSession : undefined;
+  if (typeof parentFile !== "string" || !parentFile) return null;
+  const id = sessionHeader(parentFile)?.id;
+  return typeof id === "string" && id ? id : null;
+};
+
+/** Extensions named on a restore join the row's list. Replacing it dropped the bridge, ratking and until (Switchboard, 2026-10-19). */
+const mergedExtensions = (kept: readonly string[] | undefined, added: readonly string[]) => [...new Set([...(kept ?? []), ...added])];
+
+/** A row's saved environment never claims succession: only the restart that forks the parent does, and a restore re-derives it. */
 const withoutSuccession = (environment: Record<string, string>) => {
   const { RATKING_SUCCEEDS: _succeeds, ...rest } = environment;
   return rest;
@@ -2947,7 +2979,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         ...(params.skills !== undefined ? { skills: [...params.skills] } : params.slim ? { skills: [] } : {}),
         ...(params.noSkills !== undefined ? { noSkills: params.noSkills } : {}),
         ...(params.slim !== undefined ? { slim: params.slim } : {}),
-        ...(params.extensions !== undefined ? { extensions: [...params.extensions] } : {}),
+        ...(params.extensions !== undefined ? { extensions: mergedExtensions(existing.profile.extensions, params.extensions) } : {}),
         ...(params.env !== undefined ? { env: { ...params.env } } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}) };
       const selected = yield* sessionRestore(profileFor(existing.role, { ...overridden, slim: overridden.slim }), sessionFile, project, existing.role, roster, params);
@@ -3082,7 +3114,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       musterExtension: project.musterExtension,
       ...message,
     });
-    const agentEnvironment: Record<string, string> = agentEnv(project, row);
+    const succeeds = kind === "restore" ? resumeSuccession(row.sessionFile) : null;
+    const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...(succeeds ? { RATKING_SUCCEEDS: succeeds } : {}) };
     const musterBin = join(env.musterRoot, "bin");
     // A profile PATH is typed literally. Otherwise only the prepend is typed: a ~1 KB
     // owner PATH overflows the pane's input line and leaves the quote open.
@@ -3162,7 +3195,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         profile: liveRestore.profile,
         musterExtension: project.musterExtension,
       }),
-      env: agentEnvironment,
+      env: withoutSuccession(agentEnvironment),
     };
     let running = yield* patchRow(dir, row.name, row.state, launched.pending ? [] : [{ type: "STARTED" }], {
       ...(launched.pending ? { delivery: "none" as const } : {}),

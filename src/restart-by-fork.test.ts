@@ -80,6 +80,41 @@ describe("restart by fork", () => {
     expect(result.row.restore?.env).not.toHaveProperty("RATKING_SUCCEEDS");
   });
 
+  // Switchboard, 2026-10-19: restoring a session that a restart forked claimed `<row>-<label>`, since pi-ratking reads
+  // its resume as a fork. The restore names the parent it succeeds, and adds extensions instead of replacing them.
+  it("a restore of a restarted session names the session it succeeds and keeps the row's extensions", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    const restarted = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    // The journal Pi writes for the fork: its header names the restart snapshot, whose header is the old session.
+    const snapshot = join(dirname(old.sessionFile!), "snapshot.jsonl");
+    writeFileSync(snapshot, readFileSync(old.sessionFile!, "utf8"));
+    const journal = join(dirname(old.sessionFile!), `fork_${restarted.row.sessionId}.jsonl`);
+    writeFileSync(journal, `${JSON.stringify({ type: "session", version: 3, id: restarted.row.sessionId, parentSession: snapshot })}\n`);
+    expect(JSON.parse(readFileSync(snapshot, "utf8").split("\n")[0]!).id).toBe(old.sessionId);
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === "worker" ? { ...row, sessionFile: journal, profile: { ...row.profile, extensions: ["/x/bridge.ts", "/x/ratking.ts"] } } : row) }, undefined] as const)));
+    await s.run(ops.agentClose(s.dir, { name: "worker" }));
+    const restored = await s.run(agentLaunch(s.dir, { action: "restore", name: "worker", extensions: ["/x/state.ts", "/x/ratking.ts"] }));
+    const script = s.host.launcherScripts.at(-1)!;
+    expect(script).toContain(`RATKING_SUCCEEDS='${s.launch.row.sessionId}'`);
+    expect(restored.row.restore?.env).not.toHaveProperty("RATKING_SUCCEEDS");
+    expect(restored.row.profile.extensions).toEqual(["/x/bridge.ts", "/x/ratking.ts", "/x/state.ts"]);
+  });
+
+  it("a session with no parent names no successor", () => {
+    const root = mkdtempSync(join(tmpdir(), "succession-"));
+    const lone = join(root, "lone.jsonl");
+    writeFileSync(lone, `${JSON.stringify({ type: "session", id: "lone" })}\n`);
+    const parent = join(root, "parent.jsonl");
+    writeFileSync(parent, `${JSON.stringify({ type: "session", id: "old-session" })}\n{"type":"message"}\n`);
+    const child = join(root, "child.jsonl");
+    writeFileSync(child, `${JSON.stringify({ type: "session", id: "new-session", parentSession: parent })}\n`);
+    expect(ops.resumeSuccession(lone)).toBeNull();
+    expect(ops.resumeSuccession(child)).toBe("old-session");
+    expect(ops.resumeSuccession(join(root, "missing.jsonl"))).toBeNull();
+    expect(ops.resumeSuccession(null)).toBeNull();
+  });
+
   // Ernestine SOP, 2026-10-12: a provider switch happens only by restart with model; restart used to ignore model.
   it("switches the model and thinking at the fork when restart names them, and keeps them on the row", async () => {
     const s = await setup();
