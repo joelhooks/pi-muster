@@ -767,6 +767,30 @@ describe("pane binding safety", () => {
     expect(restored.notes).toContain(`Rat King name ${slug}/first unretired: it takes mail again`);
   });
 
+  it("names the owner desk as the retired name's successor", async () => {
+    const { h, dir } = await rootWorker();
+    const shim = join(h.home, ".config/muster/fleet-mailbox.sh");
+    mkdirSync(join(shim, ".."), { recursive: true });
+    writeFileSync(shim, `printf '%s\\n' "$*" >> "${h.root}/mailbox-args"; exit 0\n`);
+    await runWith(h, mutate(dir, current => Effect.succeed([{ ...current, agents: current.agents.map(row => ({ ...row, ownerName: "probe/desk" })) }, undefined] as const)));
+    const slug = (await runWith(h, load(dir))).slug;
+    const closed = await runWith(h, agentClose(dir, { name: "first" }));
+    expect(readFileSync(join(h.root, "mailbox-args"), "utf8").trim()).toBe(`retire --name ${slug}/first --successor probe/desk`);
+    expect(closed.notes).toContain(`Rat King name ${slug}/first retired: sends to it now fail Retired, naming probe/desk`);
+  });
+
+  it("still retires without a successor when the mailbox refuses it", async () => {
+    const { h, dir } = await rootWorker();
+    const shim = join(h.home, ".config/muster/fleet-mailbox.sh");
+    mkdirSync(join(shim, ".."), { recursive: true });
+    writeFileSync(shim, `printf '%s\\n' "$*" >> "${h.root}/mailbox-args"; case "$*" in *--successor*) echo "CliError: InvalidName: Invalid successor"; exit 1;; esac; exit 0\n`);
+    await runWith(h, mutate(dir, current => Effect.succeed([{ ...current, agents: current.agents.map(row => ({ ...row, ownerName: "probe/typo" })) }, undefined] as const)));
+    const slug = (await runWith(h, load(dir))).slug;
+    const closed = await runWith(h, agentClose(dir, { name: "first" }));
+    expect(readFileSync(join(h.root, "mailbox-args"), "utf8").trim().split("\n")).toEqual([`retire --name ${slug}/first --successor probe/typo`, `retire --name ${slug}/first`]);
+    expect(closed.notes).toContain(`Rat King name ${slug}/first retired without a successor (--successor probe/typo refused): sends to it now fail Retired`);
+  });
+
   it.each(["pane", "terminal"])("keeps a shared %s binding until the last row closes", async (identity) => {
     const { h, dir, row } = await rootWorker();
     const binding = row.pane!;

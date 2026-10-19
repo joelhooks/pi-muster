@@ -3222,11 +3222,20 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   const env = yield* MusterEnv;
   if (project.policy?.comms && project.policy.comms !== "ratking") return null;
   const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
-  const done = verb === "retire" ? "retired: sends to it now fail Retired" : "unretired: it takes mail again";
+  // Nicodemus, 2026-10-19: a plain Retired left senders guessing; name the owner desk so they are redirected to it.
+  const successor = verb === "retire" && row.ownerName && row.ownerName !== name ? row.ownerName : null;
+  const done = verb === "retire" ? `retired: sends to it now fail Retired${successor ? `, naming ${successor}` : ""}` : "unretired: it takes mail again";
   const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
   if (!existsSync(shim)) return `Rat King name ${name} not ${verb}d: no ${shim}`;
   const proc = yield* Proc;
-  const result = yield* proc.run("sh", [shim, verb, "--name", name], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
+  const run = (args: readonly string[]) => proc.run("sh", [shim, verb, "--name", name, ...args], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
+  let result = yield* run(successor ? ["--successor", successor] : []);
+  // A refused successor must not cost the retire: retry without one and say so, rather than point mail at a bad name.
+  if (successor && (result._tag === "Failure" || result.success.code !== 0)) {
+    const plain = yield* run([]);
+    if (plain._tag === "Success" && plain.success.code === 0) return `Rat King name ${name} retired without a successor (--successor ${successor} refused): sends to it now fail Retired`;
+    result = plain;
+  }
   if (result._tag === "Failure") return `Rat King name ${name} not ${verb}d: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
   if (result.success.code === 0) return `Rat King name ${name} ${done}`;
   // Tin-Tin, 2026-10-13: the mailbox CLI logs its CliError to stdout, so stderr alone read "exit 1: no stderr".
