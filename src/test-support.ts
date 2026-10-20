@@ -59,7 +59,8 @@ export class FakeHerdr {
   paneTail = "last lines";
   /** Reject this many agent.prompt calls with agent_not_ready, as Herdr does before it registers a fresh agent name. */
   promptNotReady = 0;
-  private seq = 0;
+  /** The last id handed out; a forked harness copies it so new ids never repeat the template's. */
+  seq = 0;
 
   constructor(readonly home: string) {
     this.workspaces.set("w1", { workspace_id: "w1", label: "fake" });
@@ -429,7 +430,7 @@ export function populateHarness(h: Harness, template: Harness, dir: string) {
   h.sessionId = template.sessionId;
   for (const [key, tokens] of template.herdr.tokens) h.herdr.tokens.set(key, { ...tokens });
   h.ids.used = template.ids.used;
-  (h.herdr as unknown as { seq: number }).seq = (template.herdr as unknown as { seq: number }).seq;
+  h.herdr.seq = template.herdr.seq;
   return { h, dir: copiedDir, relocate };
 }
 

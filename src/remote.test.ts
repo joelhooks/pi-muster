@@ -82,7 +82,9 @@ async function launchedFork() {
     for (const entry of readdirSync(path, { withFileTypes: true }) as Dirent[]) {
       const full = join(path, entry.name);
       if (entry.isDirectory()) { if (entry.name !== "objects") walk(full); continue; }
-      if (!entry.isFile() || statSync(full).size > 1_000_000) continue;
+      if (!entry.isFile()) continue;
+      // A skipped file could keep template paths; fail loudly instead of leaving them behind.
+      if (statSync(full).size > 1_000_000) throw new Error(`launchedFork: ${full} is over 1 MB; relocate it explicitly`);
       const text = readFileSync(full, "utf8");
       if (text.includes(template.h.root)) writeFileSync(full, relocate(text));
     }
@@ -92,8 +94,8 @@ async function launchedFork() {
   for (const [id, pane] of templateRemote.panes) remote.panes.set(id, { ...pane, cwd: relocate(pane.cwd), ...(pane.agent_session ? { agent_session: { ...pane.agent_session, value: relocate(pane.agent_session.value) } } : {}) });
   for (const [id, tab] of templateRemote.tabs) remote.tabs.set(id, { ...tab });
   for (const [id, workspace] of templateRemote.workspaces) remote.workspaces.set(id, { ...workspace });
-  (remote as unknown as { seq: number }).seq = (templateRemote as unknown as { seq: number }).seq;
-  (h.herdr as unknown as { seq: number }).seq = (template.h.herdr as unknown as { seq: number }).seq;
+  remote.seq = templateRemote.seq;
+  h.herdr.seq = template.h.herdr.seq;
   const s = setup({ h, dir, remote });
   return { s, launched: { row: (await s.run(load(dir))).agents.find(row => row.name === "remote-w")! } };
 }
