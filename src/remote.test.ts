@@ -1,6 +1,6 @@
-import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, renameSync, utimesSync, statSync, chmodSync, unlinkSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, renameSync, utimesSync, statSync, chmodSync, unlinkSync, rmdirSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Effect, Layer } from "effect";
@@ -176,6 +176,29 @@ describe("remote launch hygiene", () => {
     expect(notes.join(" ")).toContain(`skipped dead ticket 0000000000000001 (pid ${dead} is gone)`);
     expect(readdirSync(`${lock}.queue`)).toEqual([]);
     expect(existsSync(lock)).toBe(false);
+  });
+  // Switchboard, 2026-10-20: two waiters reaping one dead head could remove the next live head's lock.
+  it("a claimed dead head blocks the queue while its claimant lives, and is reclaimed once it dies", async () => {
+    const s = setup(); const lock = join(s.h.home, ".config/muster/launch-locks/remote");
+    const dead = spawnSync("true").pid!;
+    const claimant = spawn("sleep", ["30"]);
+    mkdirSync(`${lock}.queue`, { recursive: true }); mkdirSync(lock);
+    writeFileSync(join(`${lock}.queue`, `0000000000000001.reap-${claimant.pid}`), String(dead));
+    writeFileSync(`${lock}.counter`, "1");
+    try {
+      await expect(s.run(withMachineLaunchLock("remote", Effect.void, () => {}, 1_000))).rejects.toThrow("has not moved");
+      expect(existsSync(lock)).toBe(true);
+    } finally { claimant.kill(); await new Promise(resolve => claimant.once("exit", resolve)); }
+    const notes: string[] = [];
+    await s.run(withMachineLaunchLock("remote", Effect.void, text => notes.push(text), 2_000));
+    expect(notes.join(" ")).toContain(`skipped dead ticket 0000000000000001 (its claimant, pid ${claimant.pid} is gone)`);
+    expect(readdirSync(`${lock}.queue`)).toEqual([]);
+    expect(existsSync(lock)).toBe(false);
+  });
+  it("releases cleanly when its lock or ticket is already gone", async () => {
+    const s = setup(); const lock = join(s.h.home, ".config/muster/launch-locks/remote");
+    await s.run(withMachineLaunchLock("remote", Effect.sync(() => { rmdirSync(lock); for (const file of readdirSync(`${lock}.queue`)) unlinkSync(join(`${lock}.queue`, file)); })));
+    expect(readdirSync(`${lock}.queue`)).toEqual([]);
   });
   it("bounds stale-lock waits and removes only its own queue ticket", async () => {
     const s = setup(); const lock = join(s.h.home, ".config/muster/launch-locks/remote");
