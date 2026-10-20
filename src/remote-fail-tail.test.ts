@@ -120,10 +120,13 @@ describe("remote launch failure evidence", () => {
     await s.run(projectStatus(s.dir, { act: true })); expect((await s.row()).state).toBe("interrupted");
   });
 
-  it("preserves the remote pending result after its startup budget", async () => {
+  // Barnum and KITT, 2026-10-20: a start still pending after its budget is a delay, not a failure.
+  it("keeps a remote start still pending after its budget launching, with an adopt note", async () => {
     const s = await setup({ paneTail: "Creating a new session..." });
-    await expect(s.launch()).rejects.toThrow("(pending)");
-    expect((await s.row()).events?.find(event => event.type === "LAUNCH_FAILED")?.detail).toContain("Creating a new session...");
+    const result = await s.launch();
+    expect(result.notes.join("\n")).toContain("slow start: Pi still starting");
+    expect((await s.row()).state).toBe("launching");
+    expect((await s.row()).events?.some(event => event.type === "LAUNCH_FAILED")).toBe(false);
   });
 
   it("falls back to pane evidence when the log cannot be read", async () => {

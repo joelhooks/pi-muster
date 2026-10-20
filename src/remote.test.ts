@@ -1,4 +1,6 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, renameSync, utimesSync, statSync, chmodSync, unlinkSync, rmdirSync } from "node:fs";
+import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
+import { sessionDirFor } from "./argv.ts";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -8,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
 import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource, herdrSocketFor } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
-import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, runLaunchJob, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
 import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";
@@ -1014,6 +1016,116 @@ describe("remote owner operations", () => {
     writeFileSync(s.h.workerWorktree, readFileSync(s.h.workerWorktree, "utf8").replace(/(git clone -q "\$2" "\$target")/, '$1 && git -C "$target" remote remove origin'));
     const launched = await s.launch("no-origin");
     expect(spawnSync("git", ["-C", launched.row.cwd, "remote", "get-url", "origin"], { encoding: "utf8" }).stdout.trim()).toBe(s.dir);
+  });
+  // Barnum and KITT, 2026-10-20: under load a remote launch was recorded failed while its Pi was starting.
+  it("finds a remote session file Herdr has not detected yet, from the remote sessions dir", async () => {
+    const s = setup(); await s.open();
+    s.remote.startSessions = false;
+    s.setBefore((command, args) => {
+      if (command !== "ssh" || !args.at(-1)?.includes("muster launch log") || !s.remote.launcherScripts.length) return undefined;
+      const script = s.remote.launcherScripts.at(-1)!;
+      const id = /'--session-id' '([^']+)'/.exec(script)?.[1] ?? /--session-id ([^ ]+)/.exec(script)?.[1];
+      const cwd = /^cd '([^']*)'/m.exec(script)![1]!;
+      const dir = sessionDirFor(cwd, s.h.home);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `2026-10-20T00-00-00-000Z_${id}.jsonl`), `${JSON.stringify({ type: "session", id, cwd })}\n`);
+      return undefined;
+    });
+    const launched = await s.launch("offpane");
+    expect(launched.row.state).toBe("running");
+    expect(launched.row.sessionFile).toMatch(/_offpane-.*\.jsonl$/);
+  });
+  it("leaves a remote launch whose pane hosts a starting Pi launching, never failed", async () => {
+    const s = setup(); await s.open();
+    s.remote.startSessions = false;
+    const launched = await s.launch("slow");
+    expect(launched.row.state).toBe("launching");
+    expect(launched.row.pane).not.toBeNull();
+    expect(launched.notes.join("\n")).toMatch(/slow start: Pi still starting in .*row left launching.*"action":"adopt","name":"slow"/s);
+  });
+  it("refuses to reuse a clone while the earlier attempt's Pi still runs in it", async () => {
+    const s = setup(); await s.open();
+    const first = await s.launch("twice");
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === "twice" ? { ...row, state: "failed" as const } : row) }, undefined] as const)));
+    await expect(s.launch("twice")).rejects.toThrow(`its earlier attempt is still running in pane ${first.row.pane!.paneId}`);
+  });
+  it("the owner pass leaves a launching row alone when its job died but its pane hosts a Pi", async () => {
+    const s = setup(); await s.open();
+    s.remote.startSessions = false;
+    const launched = await s.launch("orphan");
+    const dead = spawnSync("true").pid!;
+    const id = "0badc0de-0000-4000-8000-000000000001";
+    mkdirSync(join(s.h.home, ".local/state/muster/launches"), { recursive: true });
+    writeFileSync(join(s.h.home, ".local/state/muster/launches", `${id}.json`), JSON.stringify({ id, project: "probe", name: "orphan", sessionId: launched.row.sessionId, pid: dead,
+      log: join(s.h.home, "job.log"), startedAt: new Date(s.h.now.getTime() - 60_000).toISOString(), state: "running", priorState: "planned", owner: s.h.sessionId,
+      request: { action: "launch", machine: "remote", name: "orphan", role: "worker", lane: "work", label: "remote worker", clone: true, noSkills: true } }));
+    const board = await s.run(projectStatus(s.dir, { act: true }));
+    expect(JSON.stringify(board)).toContain(`pane ${launched.row.pane!.paneId} hosts a Pi; adopt it`);
+    expect((await s.run(load(s.dir))).agents.find(row => row.name === "orphan")!.state).toBe("launching");
+    // The job is closed as an action, so the next pass reaches the row's status instead of the dead job again.
+    expect(JSON.parse(readFileSync(join(s.h.home, ".local/state/muster/launches", `${id}.json`), "utf8")).outcome).toBe("action");
+    expect((await s.run(projectStatus(s.dir, { act: true }))).agents.find(line => line.name === "orphan")?.action ?? "").not.toContain(`launch job ${id}`);
+  });
+  it("the owner pass leaves a dead job's row alone when Herdr cannot be asked", async () => {
+    const s = setup(); await s.open();
+    s.remote.startSessions = false;
+    const launched = await s.launch("unknown");
+    const id = "0badc0de-0000-4000-8000-000000000002";
+    mkdirSync(join(s.h.home, ".local/state/muster/launches"), { recursive: true });
+    writeFileSync(join(s.h.home, ".local/state/muster/launches", `${id}.json`), JSON.stringify({ id, project: "probe", name: "unknown", sessionId: launched.row.sessionId, pid: spawnSync("true").pid!,
+      log: join(s.h.home, "job.log"), startedAt: new Date(s.h.now.getTime() - 60_000).toISOString(), state: "running", priorState: "planned", owner: s.h.sessionId,
+      request: { action: "launch", machine: "remote", name: "unknown", role: "worker", lane: "work", label: "remote worker", clone: true, noSkills: true } }));
+    s.setMachines({});
+    const board = await s.run(projectStatus(s.dir, { act: true }));
+    expect(JSON.stringify(board)).toContain("could not say whether pane");
+    expect((await s.run(load(s.dir))).agents.find(row => row.name === "unknown")!.state).toBe("launching");
+  });
+  it("a relaunch does not take the earlier attempt's session file as proof the new Pi started", async () => {
+    const s = setup(); await s.open();
+    const first = await s.launch("again");
+    expect(first.row.sessionFile).not.toBeNull();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === "again" ? { ...row, state: "failed" as const, pane: null } : row) }, undefined] as const)));
+    s.remote.panes.delete(first.row.pane!.paneId);
+    s.remote.startSessions = false;
+    const second = await s.launch("again");
+    expect(second.row.state).toBe("launching");
+    expect(second.notes.join("\n")).toContain("slow start: Pi still starting");
+  });
+  it("a relaunch whose baseline listing failed ignores session files for that wait", async () => {
+    const s = setup(); await s.open();
+    const first = await s.launch("blind");
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === "blind" ? { ...row, state: "failed" as const, pane: null } : row) }, undefined] as const)));
+    s.remote.panes.delete(first.row.pane!.paneId);
+    s.remote.startSessions = false;
+    let looks = 0;
+    const original = s.proc.run;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => {
+      if (command === "ssh" && args.at(-1)?.includes("muster launch log") && looks++ === 0) return Effect.succeed({ code: 255, stdout: "", stderr: "connection reset" });
+      return original(command, args, options);
+    });
+    const second = await s.launch("blind");
+    expect(looks).toBeGreaterThan(1);
+    expect(second.row.state).toBe("launching");
+  });
+  it("a queued launch that errors after its Pi started is not recorded failed", async () => {
+    const s = setup(); await s.open();
+    const first = await s.launch("jobbed");
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === "jobbed" ? { ...row, state: "launching" as const, pane: null, sessionId: "jobbed-20261020T000000" } : row) }, undefined] as const)));
+    s.remote.panes.delete(first.row.pane!.paneId);
+    const id = "0badc0de-0000-4000-8000-000000000003";
+    mkdirSync(join(s.h.home, ".local/state/muster/launches"), { recursive: true });
+    writeFileSync(join(s.h.home, ".local/state/muster/launches", `${id}.json`), JSON.stringify({ id, project: "probe", name: "jobbed", sessionId: "jobbed-20261020T000000", pid: process.pid,
+      log: join(s.h.home, "jobbed.log"), startedAt: s.h.now.toISOString(), state: "queued", priorState: "failed", owner: s.h.sessionId,
+      request: { action: "launch", machine: "remote", name: "jobbed", role: "worker", lane: "work", label: "remote worker", clone: true, noSkills: true } }));
+    const handle = s.remote.handle.bind(s.remote);
+    vi.spyOn(s.remote, "handle").mockImplementation((method, params) => {
+      if (method === "pane.rename") throw new HerdrApiError({ operation: method, code: "internal", message: "rename refused" });
+      return handle(method, params);
+    });
+    const result = await s.run(runLaunchJob(s.dir, id));
+    expect(result.kind).toBe("blocked");
+    const row = (await s.run(load(s.dir))).agents.find(row => row.name === "jobbed")!;
+    expect(row.state).not.toBe("failed");
   });
   it("relaunching a failed row reuses its earlier clone", async () => {
     const s = setup(); await s.open();

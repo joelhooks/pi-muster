@@ -304,6 +304,10 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     }
     const reusable = params.clone && params.action !== "restore" && existing?.clone && existing.lane === lane.slug && !params.cwd
       && (yield* must("test", ["-d", existing.cwd], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.as(true), Effect.catch(() => Effect.succeed(false))));
+    // Barnum and KITT, 2026-10-20: a launch recorded failed while its Pi was starting, and the retry put a second Pi in the
+    // same clone. Harm: two Pis writing one clone. While the earlier attempt's pane still hosts a Pi, adopt it instead.
+    const earlier = reusable ? yield* paneHostsPi(existing!.pane) : false;
+    if (earlier !== false) return yield* input(`row ${name}: ${earlier ? "its earlier attempt is still running" : "Herdr could not say whether its earlier attempt is still running"} in pane ${existing!.pane!.paneId} on ${nameOfMachine}, in the clone this launch would reuse; two Pis must not write one clone. Adopt it: agent_launch ${JSON.stringify({ action: "adopt", name, pane: existing!.pane!.paneId })}, or close it first`);
     if (reusable) {
       cwd = existing!.cwd;
       cloneNotes.push(`reused clone ${cwd} from ${name}'s earlier attempt`);
@@ -364,6 +368,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       if (jobId && current.agents.find(agent => agent.name === row.name)?.state === "closed") return yield* input("launch row was closed while preparing the job");
       return [withRow(current, row), row] as const;
     }));
+    let typed = false;
     const launch = Effect.gen(function* () {
       // Two launches must not create two same-label workspaces or overfill a tab: look up, allocate and record the pane
       // under the machine lock, reading lane rows from the catalog as it is now, not as it was when this launch began.
@@ -390,9 +395,24 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       const piReceiptId = env.createId();
       yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(logDir, `#!/bin/sh\nset -e\n${shellPrelude(cwd, agentEnvironment)}${piReceiptSuffix(piReceiptId)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
+      // The pane never shows Pi's start line (stderr goes to launchLog) and the session file is on the remote, so read both.
+      // A file that existed before this start (restore, a relaunch of the same row) is not evidence: only a new one is.
+      const sessions = sessionDirFor(cwd, remoteHome);
+      const look = must("sh", ["-c", 'ls "$1" 2>/dev/null; echo "--- muster launch log"; tail -n 12 "$2" 2>/dev/null', "sh", sessions, launchLog], { cwd: "/", timeoutMs: 10_000 }).pipe(
+        Effect.map(out => {
+          const [listing = "", log = ""] = out.split("--- muster launch log");
+          const hit = listing.split(/\r?\n/).filter(file => file.endsWith(`_${row.sessionId}.jsonl`)).sort().pop();
+          return { sessionFile: hit ? join(sessions, hit) : null, starting: piStarting(log) };
+        }));
+      // Without a baseline an earlier file would read as new, so a failed baseline drops session-file evidence for this wait.
+      const before = yield* look.pipe(Effect.map(seen => ({ known: true, file: seen.sessionFile })), Effect.orElseSucceed(() => ({ known: false, file: null })));
+      const probe: StartProbe = look.pipe(
+        Effect.map(seen => ({ ...seen, sessionFile: !before.known || seen.sessionFile === before.file ? null : seen.sessionFile })),
+        Effect.orElseSucceed(() => ({ sessionFile: null, starting: false })));
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
+      typed = true;
 
-      const wait = yield* waitForSession(binding.paneId, null);
+      const wait = yield* waitForSession(binding.paneId, null, () => null, undefined, probe);
       if (wait.state !== "ready") {
         const logTail = yield* must("tail", ["-n", "12", launchLog], { cwd, timeoutMs: 10_000 }).pipe(Effect.orElseSucceed(() => ""));
         // Classify before redacting: a short env value can also occur in a model error code.
@@ -404,6 +424,13 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
         const tail = redact(evidence).trim().slice(-1500) || "(launch tail unavailable)";
         const issue = modelOutputIssue(evidence);
         const modelLine = issue ? redact(issue.line) : "";
+        // Barnum and KITT, 2026-10-20: a slow start is a delay, not a failure. Keep the row launching with its pane, as a
+        // local launch does; the owner pass or an adopt binds the session once it appears.
+        if (issue?.severity !== "error" && (wait.state === "pending" || (yield* paneHostsPi(binding)) === true)) {
+          const pending = `slow start: Pi still starting in ${binding.paneId} on ${nameOfMachine} after ${Math.ceil(wait.elapsed / 1_000)} s (load ${wait.load}); row left launching, delivery: none (pending). Inspect the pane, then adopt it: agent_launch ${JSON.stringify({ action: "adopt", name, pane: binding.paneId })}`;
+          row = yield* patchRow(dir, name, row.state, [], { delivery: "none", events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: pending }] });
+          return { row, argv, readiness: "unknown" as const, proof: null, sessionIdMatched: null, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, pending] };
+        }
         const detail = `machine ${nameOfMachine}: Pi session not ready in ${binding.paneId}; inspect it before retrying (${wait.state}). Launch tail (UNTRUSTED):\n${tail}`;
         row = yield* patchRow(dir, name, row.state, [{ type: "LAUNCH_FAILED" }], {
           ...(issue?.severity === "error" ? { delivery: "unproven" as const } : {}),
@@ -434,7 +461,12 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
       return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(policyComms(project.policy)), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
-    return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
+    // A later error leaves a row whose pane already hosts a Pi launching, not failed: its Pi is starting or running.
+    return yield* launch.pipe(Effect.tapError(() => Effect.gen(function* () {
+      const latest = (yield* load(dir)).agents.find(agent => agent.name === name);
+      if (typed && (yield* paneHostsPi(latest?.pane)) === true) return;
+      yield* patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]);
+    }).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
 }), release => release);
 };
@@ -2134,8 +2166,11 @@ const piStarting = (tail: string, launchCommand?: string) => tail.replace(/\u001
   /^Warning: No project session found with id '[^'\r\n]+'; creating a new session with that id\.$/.test(line.trim()) ||
   /^pi v\d+\.\d+\.\d+(?:\s|$)/i.test(line.trim()));
 
+/** Off-pane start evidence: a remote launch keeps Pi's stderr in a log and its session file on the remote. */
+type StartProbe = Effect.Effect<{ sessionFile: string | null; starting: boolean }, never, Proc>;
+
 /** Shared launch/restart wait: budget → evidenced extension → ready, missing or pending. */
-const waitForSession = (paneId: string, previous: string | null, fallback: () => string | null = () => null, launchCommand?: string) =>
+const waitForSession = (paneId: string, previous: string | null, fallback: () => string | null = () => null, launchCommand?: string, probe?: StartProbe) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const sample = env.startupLoad?.() ?? { load: loadavg()[0] ?? 0, cpus: availableParallelism() };
@@ -2146,6 +2181,8 @@ const waitForSession = (paneId: string, previous: string | null, fallback: () =>
     let slept = 0;
     let extended = false;
     let nextTail = budget;
+    let nextProbe = 0;
+    let starting = false;
     while (true) {
       const elapsed = Math.max(slept, env.now().getTime() - started);
       const pane = yield* paneGet(paneId);
@@ -2153,8 +2190,14 @@ const waitForSession = (paneId: string, previous: string | null, fallback: () =>
       const sessionFile = value && value !== previous ? value : fallback();
       if (sessionFile) return { state: "ready" as const, sessionFile, elapsed, load, slow: extended || elapsed > 10_000 };
       if (elapsed >= nextTail) {
+        if (probe && elapsed >= nextProbe) {
+          const seen = yield* probe;
+          if (seen.sessionFile && seen.sessionFile !== previous) return { state: "ready" as const, sessionFile: seen.sessionFile, elapsed, load, slow: extended || elapsed > 10_000 };
+          starting ||= seen.starting;
+          nextProbe = elapsed + 10_000;
+        }
         const tail = yield* paneRead(paneId, 12).pipe(Effect.orElseSucceed(() => "(pane unreadable)"));
-        if (modelOutputIssue(tail)?.severity === "error" || !piStarting(tail, launchCommand)) {
+        if (modelOutputIssue(tail)?.severity === "error" || !(starting || piStarting(tail, launchCommand))) {
           return { state: "missing" as const, tail, elapsed, load };
         }
         if (elapsed >= 120_000) return { state: "pending" as const, tail, elapsed, load };
@@ -2203,6 +2246,15 @@ const findSessionFile = (cwd: string, sessionId: string, home: string) => {
     .pop();
   return hit ? join(dir, hit) : null;
 };
+
+/** Herdr sees a Pi in the pane: a launch that got this far is starting or running, never failed. */
+const hostsPi = (pane: PaneInfo | null | undefined) => Boolean(pane?.agent) || pane?.agent_session?.kind === "path";
+/** true: Herdr shows a Pi in the pane; false: it does not; null: Herdr could not be asked. Run it on the row's machine. */
+const paneHostsPi = (binding: PaneBinding | null | undefined) =>
+  binding ? locatePane(binding).pipe(Effect.map((pane): boolean | null => hostsPi(pane)), Effect.orElseSucceed(() => null)) : Effect.succeed(false as boolean | null);
+const rowHostsPi = (row: AgentRow | undefined) => !row?.pane ? Effect.succeed(false as boolean | null)
+  : row.machine === "local" ? paneHostsPi(row.pane)
+  : machineConfig(row.machine).pipe(Effect.flatMap(machine => onRemote(row.machine, machine, paneHostsPi(row.pane))), Effect.orElseSucceed(() => null));
 
 /** Pane ids can change; either identity is enough to protect another row's binding. */
 const sharesPane = (binding: PaneBinding, other: PaneBinding | null) =>
@@ -2891,8 +2943,13 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     yield* Effect.try({ try: () => appendFileSync(job.log, `\n${launchResultText(result.value)}\n`), catch: () => new InputError({ message: "log unavailable" }) }).pipe(Effect.ignore);
     body = launchOwnerText(result.value, job.log);
   }
+  // Barnum and KITT, 2026-10-20: an error after the Pi is in the pane left a running worker recorded failed.
+  // A row the launch already recorded failed (a model-proof refusal) keeps that verdict and title.
+  const current = failed ? (yield* load(dir)).agents.find(agent => agent.name === row.name) : undefined;
+  const started = failed && current?.state !== "failed" ? (yield* rowHostsPi(current)) === true : false;
+  const pending = !failed && result.value.row.state === "launching";
   const kind = failed ? "blocked" as const : "action" as const;
-  const title = `Launch ${row.name} ${failed ? "failed" : "finished"}`;
+  const title = `Launch ${row.name} ${started ? "errored after its Pi started; adopt it" : failed ? "failed" : pending ? "started slowly; not proven yet" : "finished"}`;
   // One plain Rat King mail from muster/launcher. Only a mail that did not go out falls back to the direct JSONL append.
   const ownerRatking = launchOwnerRatkingName(job.owner, registeredCatalogs(env.home, dir));
   const mail: LaunchMailResult = ownerRatking === undefined ? { sent: false }
@@ -2901,7 +2958,7 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     const latest = yield* findRow(current, row.name);
     const latestJob = yield* readJob(env.home, id);
     if (latestJob.outcome || latestJob.pid !== process.pid) return yield* input("launch job changed before report");
-    const state = failed && latest.state !== "failed" && latest.state !== "closed" ? yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" }) : latest.state;
+    const state = failed && !started && latest.state !== "failed" && latest.state !== "closed" ? yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" }) : latest.state;
     const next = { ...latest, state, updatedAt: iso(env),
       ...(failed ? { events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: body }] } : {}) };
     // The caller is local even when the worker is remote or network-backed.
@@ -3364,7 +3421,7 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
     yield* requireOwner(row, env.sessionId, params.takeover, project.slug);
     // Overthruster, 2026-10-20: a launcher stopped before allocation left its row launching, and close said only
     // "CLOSE is not allowed from launching". The owner pass marks a dead launch failed; say so.
-    if (row.state === "launching") return yield* new InputError({ message: `agent_close refused: ${row.name} is launching. If its launch job is still running, wait for its result. If the job died, run project_status as the row's owner: it marks the launch failed, and agent_close then works. Nothing was closed` });
+    if (row.state === "launching") return yield* new InputError({ message: `agent_close refused: ${row.name} is launching. If its launch job is still running, wait for its result. If the job died, run project_status as the row's owner: it marks the launch failed, and agent_close then works; if the pane hosts a Pi, it names the adopt call instead. Nothing was closed` });
     // drovr, 2026-10-12: closing Quartermaster killed its armed release watch with the pane. A live watch is duty.
     if (row.state !== "closed" && !params.dropWatches) {
       const watches = yield* liveRowWatches(row);
@@ -4208,8 +4265,21 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
           catch (error) { alive = (error as NodeJS.ErrnoException).code !== "ESRCH"; }
         }
         let state: AgentRow["state"] = row.state;
-        const action = alive ? `launch job ${job.id} running; log: ${job.log}` : `launch job ${job.id} died without an outcome; log: ${job.log}; no automatic re-spawn`;
-        if (!alive && act && row.owner === env.sessionId) state = yield* mutate(dir, current => Effect.gen(function* () {
+        // Barnum and KITT, 2026-10-20: a job can die after its Pi started. A pane that hosts a Pi is a live launch to adopt.
+        const live = alive ? false : yield* rowHostsPi(row);
+        const action = alive ? `launch job ${job.id} running; log: ${job.log}`
+          : live ? `launch job ${job.id} died, but pane ${row.pane!.paneId} hosts a Pi; adopt it: agent_launch ${JSON.stringify({ action: "adopt", name: row.name, pane: row.pane!.paneId })}`
+          : live === null ? `launch job ${job.id} died; Herdr on ${row.machine} could not say whether pane ${row.pane!.paneId} hosts a Pi; the next project_status checks again`
+          : `launch job ${job.id} died without an outcome; log: ${job.log}; no automatic re-spawn`;
+        // A live Pi closes the job as an action, so later passes reach the status row, which adopts a matching session.
+        if (!alive && live === true && act && row.owner === env.sessionId) yield* mutate(dir, current => Effect.gen(function* () {
+          const latestJob = yield* readJob(env.home, job.id);
+          if (latestJob.outcome || latestJob.pid !== job.pid) return [current, undefined] as const;
+          yield* writeLaunchJob(env.home, { ...latestJob, state: yield* stepLaunchJob(job.id, latestJob.state, { type: "FAIL" }), outcome: "action" });
+          const latest = yield* findRow(current, row.name);
+          return [withRow(current, { ...latest, events: [...(latest.events ?? []), { type: "LAUNCH_ORPHANED", at: iso(env), detail: action }], updatedAt: iso(env) }), undefined] as const;
+        }));
+        if (!alive && live === false && act && row.owner === env.sessionId) state = yield* mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findRow(current, row.name);
           const latestJob = yield* readJob(env.home, job.id);
           if (latest.sessionId !== job.sessionId || latestJob.outcome || latestJob.pid !== job.pid) return [current, latest.state] as const;
