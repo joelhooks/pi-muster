@@ -37,7 +37,7 @@ import { watchEntries } from "./desk-local.ts";
 import { ProcError } from "./errors.ts";
 import { parsePorcelainZ } from "./packet.ts";
 import { load, mutate, projectPath } from "./store.ts";
-import { failWith, forkHarness, harness, makeRepo, runWith, sh } from "./test-support.ts";
+import { failWith, forkHarness, harness, makeRepo, populateHarness, runWith, sh } from "./test-support.ts";
 import type { Harness } from "./test-support.ts";
 
 // Gate tests model admission, not the load of the machine running Vitest,
@@ -75,6 +75,22 @@ async function launchedWorker(h: Harness) {
   writeFileSync(brief, "do it\n");
   const launched = await runWith(h, agentLaunch(dir, { action: "launch", name: "probe_w", role: "worker", lane: "probe", label: "🔨 probe", clone: true, brief }));
   return { dir, launched, clone: launched.row.cwd };
+}
+
+// One launched worker, built once and copied into each case's own harness instead of repeating the launch.
+let workerTemplate: { h: Harness; dir: string };
+beforeAll(async () => {
+  vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
+  vi.stubEnv("MUSTER_PROJECT", "");
+  const h = harness();
+  workerTemplate = { ...(await launchedWorker(h)), h };
+  vi.unstubAllEnvs();
+});
+/** launchedWorker for a pristine harness: same dir, clone and launched.row, copied rather than launched again. */
+async function copiedWorker(h: Harness) {
+  const { dir } = populateHarness(h, workerTemplate.h, workerTemplate.dir);
+  const row = (await runWith(h, load(dir))).agents.find((agent) => agent.name === "probe_w")!;
+  return { dir, launched: { row }, clone: row.cwd };
 }
 
 /** Route the fake /muster install git probe to the fixture, not to real fleet code. */
@@ -223,7 +239,7 @@ describe("side desks", () => {
 describe("slow Pi startup", () => {
   it.each(["last lines", "Error: No API key found for anthropic"])("continues the owner pass after one restart fails: %s", async tail => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     restartCode(h, dir);
     const second = await runWith(h, agentLaunch(dir, {
       action: "launch", name: "second", role: "worker", lane: "probe", label: "🔨 second", cwd: dir, brief: launched.row.brief!,
@@ -350,7 +366,7 @@ describe("slow Pi startup", () => {
 
   it.each([25_000, Infinity])("shares the evidenced wait with restart (session at %s)", async appearAt => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     restartCode(h, dir);
     const file = launched.row.sessionFile!;
     const age = (min: number) => { const at = new Date(h.now.getTime() - min * 60_000); utimesSync(file, at, at); };
@@ -390,7 +406,7 @@ describe("slow Pi startup", () => {
 describe("pane close watch retirement", () => {
   it.each(["agent", "lane"] as const)("emits before %s close and records each retired watch", async kind => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     const binding = launched.row.pane!;
     if (kind === "lane") await runWith(h, agentClose(dir, { name: "probe_w" }));
     const target = kind === "agent" ? binding : (await runWith(h, load(dir))).lanes[0]!.root!;
@@ -417,7 +433,7 @@ describe("pane close watch retirement", () => {
   });
 
   it.each(["agent", "lane"] as const)("keeps candidate fallback without a listener for %s close", async kind => {
-    const h = harness(); const { dir, launched } = await launchedWorker(h);
+    const h = harness(); const { dir, launched } = await copiedWorker(h);
     if (kind === "lane") await runWith(h, agentClose(dir, { name: "probe_w" }));
     const target = kind === "agent" ? launched.row.pane! : (await runWith(h, load(dir))).lanes[0]!.root!;
     const emit = vi.fn(); h.emitPaneClose = createEmitPaneClose({ emit });
@@ -434,7 +450,7 @@ describe("pane close watch retirement", () => {
   });
 
   it("acknowledges no matches, even after a pane id changes", async () => {
-    const h = harness(); const { dir, launched } = await launchedWorker(h);
+    const h = harness(); const { dir, launched } = await copiedWorker(h);
     const binding = launched.row.pane!;
     const pane = h.herdr.panes.get(binding.paneId)!;
     h.herdr.panes.delete(binding.paneId);
@@ -449,7 +465,7 @@ describe("pane close watch retirement", () => {
   });
 
   it("still closes when retirement telemetry cannot be written", async () => {
-    const h = harness(); const { dir } = await launchedWorker(h);
+    const h = harness(); const { dir } = await copiedWorker(h);
     h.emitPaneClose = () => ["watch-a"];
     mkdirSync(join(h.home, ".local/state/muster/relay-events.jsonl"), { recursive: true });
     const result = await runWith(h, agentClose(dir, { name: "probe_w" }));
@@ -458,7 +474,7 @@ describe("pane close watch retirement", () => {
   });
 
   it.each(["agent", "lane"] as const)("does not emit for an adopted %s pane", async kind => {
-    const h = harness(); const { dir } = await launchedWorker(h);
+    const h = harness(); const { dir } = await copiedWorker(h);
     if (kind === "lane") await runWith(h, agentClose(dir, { name: "probe_w" }));
     const target = await runWith(h, mutate(dir, project => {
       if (kind === "agent") {
@@ -480,7 +496,7 @@ describe("pane close watch retirement", () => {
 
 describe("packet owner queue delivery", () => {
   it.each(["fresh", "missing", "stale", "queue-failure", "event-failure"])("queues action and preserves fallback for %s reader", async mode => {
-    const h = harness(); const { dir, clone, launched } = await launchedWorker(h);
+    const h = harness(); const { dir, clone, launched } = await copiedWorker(h);
     h.sessionId = launched.row.sessionId; // Packet reports originate from the worker's authenticated session.
     const commit = commitInClone(clone);
     if (mode !== "missing") writeReader("owner-session", h.home, mode === "stale" ? Date.now() - 121000 : Date.now());
@@ -633,7 +649,7 @@ describe("lane clone base", () => {
 
   it("verifies a packet descends from its recorded clone base, not that HEAD still equals it", async () => {
     const h = harness();
-    const { dir, clone, launched } = await launchedWorker(h);
+    const { dir, clone, launched } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     const verified = await runWith(h, packetVerify(dir, commit));
@@ -650,7 +666,7 @@ describe("lane clone base", () => {
 
   it("fails clone base verification for a packet outside the recorded base history", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     // The later source commit exists in the clone but is not in the packet's history.
     const other = commitInClone(dir, "later.txt");
@@ -953,7 +969,7 @@ describe("field-use regressions", () => {
 
   it("lands without committing unrelated staged or unstaged source edits", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     mkdirSync(join(dir, ".brain", "data", "muster"), { recursive: true });
     sh(dir, "add", ".brain/data/muster/project.json");
     sh(dir, "commit", "-q", "-m", "track catalog");
@@ -977,7 +993,7 @@ describe("field-use regressions", () => {
 
   it("refuses dirty source paths that overlap the merge", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone, "README.md");
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, packetVerify(dir, commit));
@@ -992,7 +1008,7 @@ describe("field-use regressions", () => {
 
   it("leaves an existing source merge to its owner", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, packetVerify(dir, commit));
@@ -1054,7 +1070,7 @@ describe("field-use regressions", () => {
 
   it("reports to the adopted catalog owner rather than the launch owner", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     h.sessionId = "new-owner";
     await runWith(h, projectStatus(dir, { takeover: true, act: false }));
     expect((await runWith(h, load(dir))).agents[0]?.owner).toBe("new-owner");
@@ -1066,7 +1082,7 @@ describe("field-use regressions", () => {
 
   it("does not report new work from a landed row whose agent exited", async () => {
     const h = harness();
-    const { dir, clone, launched } = await launchedWorker(h);
+    const { dir, clone, launched } = await copiedWorker(h);
     const first = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: first, summary: "s", checks: [] }));
     await runWith(h, packetLand(dir, { id: first, outcome: "no_changes" }));
@@ -1077,7 +1093,7 @@ describe("field-use regressions", () => {
 
   it("allows another packet after no_changes but keeps terminal outcomes final", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const first = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit: first, summary: "s", checks: [] }));
     await runWith(h, packetLand(dir, { id: first, outcome: "no_changes" }));
@@ -1236,7 +1252,7 @@ describe("a lane from launch to close", () => {
 
   it("shows each agent's live session id on the board for intercom addressing", async () => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     const board = (await runWith(h, projectStatus(dir, { act: false }))).board;
     expect(board).toMatch(new RegExp(`mail=\\w+@${launched.row.sessionId.slice(0, 8)}`));
   });
@@ -1259,7 +1275,7 @@ describe("a lane from launch to close", () => {
 
   it.each(["svx", "md"])("verifies and lands a %s report with literal worker text", async (extension) => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     const text = '{"a":1} <script> `inline`\n```svelte\n{value}\n```\n~~~\n<script>\n~~~ & &#123;';
     const reported = await runWith(h, packetReport({
@@ -1304,7 +1320,7 @@ describe("a lane from launch to close", () => {
 
   it("reports, verifies, lands --no-ff as the bot, closes the agent, and closes the lane", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     const reported = await runWith(
       h,
@@ -1370,7 +1386,7 @@ describe("a lane from launch to close", () => {
 
   it("lands then closes once in the same process, even when close was constructed before landing", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, packetVerify(dir, commit));
@@ -1382,7 +1398,7 @@ describe("a lane from launch to close", () => {
 
   it.each(["landed", "closed"] as const)("closes once when the row concurrently becomes %s during pane close", async (state) => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const artifact = join(h.root, "race-report.txt");
     writeFileSync(artifact, "verified bytes\n");
     const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "s", checks: [] }));
@@ -1405,7 +1421,7 @@ describe("a lane from launch to close", () => {
 
   it("does not clear a replacement pane bound during close", async () => {
     const h = harness();
-    const { dir } = await launchedWorker(h);
+    const { dir } = await copiedWorker(h);
     const replacement = h.herdr.addPane("w1", "replacement-tab", dir);
     const client = h.herdr.client();
     const error = await failWith(h, agentClose(dir, { name: "probe_w" }).pipe(Effect.provideService(Herdr, {
@@ -1429,7 +1445,7 @@ describe("a lane from launch to close", () => {
 
   it.each(["rejected", "no_changes"] as const)("names the changed-artifact recovery and permits %s without verification", async outcome => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const artifact = join(h.root, "changed-report.txt");
     writeFileSync(artifact, "old bytes\n");
     const params = { dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "s", checks: [] };
@@ -1448,7 +1464,7 @@ describe("a lane from launch to close", () => {
 
   it("records an artifact packet with evidence and no merge, which lets the lane close", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const artifact = join(h.root, "ops-report.txt");
     writeFileSync(artifact, "did remote things\n");
     const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "remote ops", checks: [] }));
@@ -1468,7 +1484,7 @@ describe("a lane from launch to close", () => {
 
   it("records an artifact packet in a pr-merge project without a landing commit", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
     const artifact = join(h.root, "perf-report.txt");
     writeFileSync(artifact, "measured\n");
@@ -1481,7 +1497,7 @@ describe("a lane from launch to close", () => {
 
   it("refuses to record an unverified artifact packet", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const artifact = join(h.root, "ops-report.txt");
     writeFileSync(artifact, "x\n");
     const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "s", checks: [] }));
@@ -1493,7 +1509,7 @@ describe("a lane from launch to close", () => {
     vi.stubEnv("MUSTER_HEAVY_SLOTS", "2");
     vi.stubEnv("MUSTER_FLEET_COMPUTE", "/missing/fleet-compute.ts");
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     // This test removes the runner from PATH, not the Node needed to copy launch files.
     vi.stubEnv("PATH", "/usr/bin:/bin");
     const commit = commitInClone(clone);
@@ -1511,7 +1527,7 @@ describe("a lane from launch to close", () => {
     let template: { h: Harness; dir: string; commit: string };
     beforeAll(async () => {
       const h = harness();
-      const { dir, clone } = await launchedWorker(h);
+      const { dir, clone } = await copiedWorker(h);
       const commit = commitInClone(clone);
       await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
       await runWith(h, packetVerify(dir, commit));
@@ -1647,7 +1663,7 @@ describe("a lane from launch to close", () => {
 
   it("fails a gate by aborting the merge and leaves the source untouched", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, packetVerify(dir, commit));
@@ -1661,7 +1677,7 @@ describe("a lane from launch to close", () => {
 
   it("still aborts cleanly when a failing gate rewrote a merged file", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, packetVerify(dir, commit));
@@ -1679,7 +1695,7 @@ describe("a lane from launch to close", () => {
 
   it("refuses closing another owner's agent; force preserves work without a packet", async () => {
     const h = harness();
-    const { dir } = await launchedWorker(h);
+    const { dir } = await copiedWorker(h);
     h.sessionId = "someone-else";
     expect((await failWith(h, agentClose(dir, { name: "probe_w" }))).message).toContain("belongs to owner session");
     h.sessionId = "owner-session";
@@ -1688,7 +1704,7 @@ describe("a lane from launch to close", () => {
 
   it.each(["committed", "no_changes"] as const)("allows force once an unverified packet is recorded %s with a landing sha (squash-merged PR, branch gone)", async (state) => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, packets: project.packets.map(packet => ({ ...packet, state, landedAs: "abc1234def" })) }, null] as const)));
@@ -1718,7 +1734,7 @@ describe("packet_land external squash landings", () => {
 
   it("verifies and records a remote-only packet squash-merged through patch-id", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
     sh(clone, "checkout", "--detach", "main");
     const commit = commitInClone(clone);
@@ -1736,7 +1752,7 @@ describe("packet_land external squash landings", () => {
 
   it("verifies and records a sibling packet squash-merged onto main", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
     sh(clone, "checkout", "-qb", "worker/next-slice", "main");
     const commit = commitInClone(clone);
@@ -1783,7 +1799,7 @@ describe("packet_land external squash landings", () => {
 
   it("compares deleted and renamed paths literally in the path fallback", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
     const filename = "literal[1].txt";
     writeFileSync(join(clone, filename), "rename me\n");
@@ -1806,7 +1822,7 @@ describe("packet_land external squash landings", () => {
 
   it("harvests the packet object from its clone when missing from the source", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
@@ -1858,7 +1874,7 @@ describe("packet_land external squash landings", () => {
 describe("packet_verify against fixtures", () => {
   it("verifies a remote-only packet, records its ref, and rift-merges it", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     sh(clone, "checkout", "--detach", "main");
     const commit = commitInClone(clone);
     sh(clone, "update-ref", "refs/remotes/origin/worker/remote-only", commit);
@@ -1875,7 +1891,7 @@ describe("packet_verify against fixtures", () => {
 
   it("prefers a local branch over a remote ref and falls back after its removal", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     sh(clone, "checkout", "-qb", "worker/local", "main");
     const commit = commitInClone(clone);
     sh(clone, "update-ref", "refs/remotes/origin/worker/remote-only", commit);
@@ -1892,7 +1908,7 @@ describe("packet_verify against fixtures", () => {
 
   it("lists checked remote refs when no ref contains the packet", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     sh(clone, "update-ref", "refs/remotes/origin/worker/old", "main");
     sh(clone, "checkout", "--detach", "main");
     const commit = commitInClone(clone);
@@ -1905,7 +1921,7 @@ describe("packet_verify against fixtures", () => {
 
   it.each(["sibling", "row", "detached"])("verifies a sibling branch with %s HEAD and records it on the row", async (head) => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     sh(clone, "checkout", "-qb", "worker/next-slice", "main");
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "sibling", checks: [] }));
@@ -1920,7 +1936,7 @@ describe("packet_verify against fixtures", () => {
 
   it("keeps the row branch when a sibling packet has dirty paths", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     sh(clone, "checkout", "-qb", "worker/next-slice", "main");
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "dirty sibling", checks: [] }));
@@ -1932,7 +1948,7 @@ describe("packet_verify against fixtures", () => {
 
   it("fails a packet on no branch and lists the refs checked", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     sh(clone, "checkout", "--detach", "main");
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "unreachable", checks: [] }));
@@ -1945,7 +1961,7 @@ describe("packet_verify against fixtures", () => {
 
   it("fails dirty paths that differ from source but allows generated ones", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     mkdirSync(join(clone, ".brain"), { recursive: true });
@@ -1961,7 +1977,7 @@ describe("packet_verify against fixtures", () => {
 
   it("fails a commit that is off the lane branch, and a missing report", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const commit = commitInClone(clone);
     await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, commit, summary: "s", checks: [] }));
     sh(clone, "reset", "-q", "--hard", "HEAD~1");
@@ -1975,7 +1991,7 @@ describe("packet_verify against fixtures", () => {
 
   it("fails a commit from an unrelated repo", async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const other = join(h.root, "other");
     mkdirSync(other);
     sh(other, "init", "-q", "-b", "main");
@@ -1999,7 +2015,7 @@ describe("packet_verify against fixtures", () => {
 describe("project_status live adoption", () => {
   async function candidate(state: "failed" | "launching" = "failed", byId = false) {
     const h = harness();
-    const { dir, launched, clone } = await launchedWorker(h);
+    const { dir, launched, clone } = await copiedWorker(h);
     const pane = h.herdr.panes.get(launched.row.pane?.paneId as string)!;
     pane.agent = "pi";
     await runWith(h, mutate(dir, (project) => {
@@ -2102,7 +2118,7 @@ describe("project_status live adoption", () => {
 describe("project_status", () => {
   it("interrupts rows whose pane is gone and reports cache cost from usage", async () => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     const file = launched.row.sessionFile as string;
     writeFileSync(file, `${JSON.stringify({ type: "message", message: { role: "assistant", usage: { input: 1, cacheRead: 1000, cacheWrite: 10, totalTokens: 1011 } } })}\n`);
     h.live = [launched.row.sessionId];
@@ -2129,7 +2145,7 @@ describe("project_status", () => {
 
   it("nudges at 30 minutes and restarts by fork at 60 once Herdr sees no turn, only for its own rows", async () => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     restartCode(h, dir);
     h.herdr.panes.get(launched.row.pane!.paneId)!.agent_status = "unknown";
     const file = launched.row.sessionFile as string;
@@ -2163,7 +2179,7 @@ describe("project_status", () => {
   // Rule hunt, 2026-10-17: a quiet working pane may be watching a long gate. Note it, alarm its owner, never kill it.
   it("nudges a quiet working pane without Escape and alarms instead of restarting it", async () => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     restartCode(h, dir);
     const file = launched.row.sessionFile as string;
     const age = (minutes: number) => {
@@ -2190,7 +2206,7 @@ describe("bridge capture and the sidebar", () => {
 
   it("types one refresh into its own stuck bridge lane and flags anyone else's", async () => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     const file = launched.row.sessionFile as string;
     writeFileSync(file, `${failed}\n`);
 
@@ -2389,7 +2405,7 @@ describe("project_status autoland", () => {
   let template: { h: Harness; dir: string; clone: string; origin: string; id: string };
   beforeAll(async () => {
     const h = harness();
-    const { dir, clone } = await launchedWorker(h);
+    const { dir, clone } = await copiedWorker(h);
     const origin = join(h.root, "upstream");
     sh(h.root, "clone", "-q", dir, origin);
     sh(dir, "remote", "add", "origin", origin);
@@ -2476,7 +2492,7 @@ describe("project_status autoland", () => {
 describe("silence spares a waiting Pi", () => {
   it.each(["idle", "done", "blocked"] as const)("never nudges or restarts a row whose pane is %s, however old its session file", async status => {
     const h = harness();
-    const { dir, launched } = await launchedWorker(h);
+    const { dir, launched } = await copiedWorker(h);
     h.herdr.panes.get(launched.row.pane!.paneId)!.agent_status = status;
     const old = new Date(h.now.getTime() - 3 * 60 * 60_000);
     utimesSync(launched.row.sessionFile!, old, old);

@@ -163,7 +163,7 @@ describe("register-and-run CLI", () => {
   it("records CPU-seconds even for a job shorter than the sampling interval", () => {
     const { home } = setup();
     // Spin on the child's own CPU time: a wall-clock spin gets less CPU on a busy gate host.
-    const result = cli(home, ["--", process.execPath, "-e", "const t=Date.now()+5000; while(process.cpuUsage().user<150000&&Date.now()<t){}"]);
+    const result = cli(home, ["--", process.execPath, "-e", "const t=Date.now()+5000; while(process.cpuUsage().user<80000&&Date.now()<t){}"]);
     expect(result.status, result.stderr).toBe(0);
     const job = readJobs(home)[0]!;
     expect(job.cpuSeconds).toBeGreaterThan(0.05);

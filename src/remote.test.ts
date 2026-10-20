@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, renameSync, utimesSync, statSync, chmodSync, unlinkSync, rmdirSync } from "node:fs";
+import type { Dirent } from "node:fs";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { sessionDirFor } from "./argv.ts";
 import { join } from "node:path";
@@ -6,12 +7,12 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { Effect, Layer } from "effect";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
 import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource, herdrSocketFor } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
 import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, runLaunchJob, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
-import { FakeHerdr, harness, makeRepo, sh } from "./test-support.ts";
+import { FakeHerdr, forkHarness, harness, makeRepo, sh, type Harness } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";
 import { agentRewind } from "./rewind.ts";
@@ -25,10 +26,12 @@ const config = (patch: Partial<MachineConfig> = {}): MachineConfig => decodeMach
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-function setup() {
-  const h = harness();
+// An already-launched remote worker is built once and copied per case, so each case skips ~40 ssh-wrapped shells.
+type Fork = { h: Harness; dir: string; remote: FakeHerdr };
+function setup(fork?: Fork) {
+  const h = fork?.h ?? harness();
   const calls: Array<{ command: string; args: readonly string[]; timeoutMs?: number }> = [];
-  const remote = new FakeHerdr(h.home);
+  const remote = fork?.remote ?? new FakeHerdr(h.home);
   let missing = false;
   const base = h.proc;
   // A test can hold a command until another launch reaches a point, to force an interleaving.
@@ -54,13 +57,45 @@ function setup() {
     createId: () => "remote-id", sleep: ms => Effect.sync(() => { h.now = new Date(h.now.getTime() + ms); }), emitPaneClose: noEmitPaneClose,
     get machines() { return machines; }, remoteHerdr: () => Effect.succeed(remote.client()) };
   const run = <A, E>(effect: Effect.Effect<A, E, Herdr | MusterEnv | Proc | Comms>) => Effect.runPromise(effect.pipe(Effect.provideService(MusterEnv, env), Effect.provideService(Proc, proc), Effect.provide(h.layer)));
-  const dir = makeRepo(join(h.root, "source"));
+  const dir = fork?.dir ?? makeRepo(join(h.root, "source"));
   const open = async () => {
     await run(projectOpen({ dir, slug: "probe", outcome: "remote lanes", reviewTrigger: "weekly", nextAction: "launch", criticalPath: [], space: "w1", sidebar: false, ephemeral: true, cadenceMinutes: 15, musterExtension: "/muster", deskExtension: null }));
     await run(laneOpen(dir, { slug: "work", label: "remote work", goal: "packet", repo: dir }));
   };
   const launch = (name = "remote-w") => run(agentLaunch(dir, { action: "launch", machine: "remote", name, role: "worker", lane: "work", label: "remote worker", clone: true, noSkills: true }));
   return { h, remote, dir, calls, env, proc, run, open, launch, setMissing: () => { missing = true; }, setBefore: (hook: typeof before) => { before = hook; }, setMachines: (value: unknown) => { machines = Object.fromEntries(Object.entries(value as Record<string, MachineConfig>).map(([name, machine]) => [name, { ...machine, env: { ...machine.env, HOME: h.home } }])); } };
+}
+
+let launchedTemplate: Promise<{ s: ReturnType<typeof setup>; remote: FakeHerdr }> | undefined;
+/** One launched remote worker, copied: files, fake panes and the remote herdr all belong to the case. */
+const buildTemplate = () => launchedTemplate ??= (async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", "");
+    const s = setup(); await s.open(); await s.launch();
+    return { s, remote: s.remote };
+  })();
+beforeAll(async () => { await buildTemplate(); vi.unstubAllEnvs(); });
+async function launchedFork() {
+  const { s: template, remote: templateRemote } = await buildTemplate();
+  const { h, dir, relocate } = forkHarness(template.h, template.dir);
+  // Every text file the launch wrote (journals, bindings, launcher records) names the template root.
+  const walk = (path: string) => {
+    for (const entry of readdirSync(path, { withFileTypes: true }) as Dirent[]) {
+      const full = join(path, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== "objects") walk(full); continue; }
+      if (!entry.isFile() || statSync(full).size > 1_000_000) continue;
+      const text = readFileSync(full, "utf8");
+      if (text.includes(template.h.root)) writeFileSync(full, relocate(text));
+    }
+  };
+  walk(h.root);
+  const remote = new FakeHerdr(h.home);
+  for (const [id, pane] of templateRemote.panes) remote.panes.set(id, { ...pane, cwd: relocate(pane.cwd), ...(pane.agent_session ? { agent_session: { ...pane.agent_session, value: relocate(pane.agent_session.value) } } : {}) });
+  for (const [id, tab] of templateRemote.tabs) remote.tabs.set(id, { ...tab });
+  for (const [id, workspace] of templateRemote.workspaces) remote.workspaces.set(id, { ...workspace });
+  (remote as unknown as { seq: number }).seq = (templateRemote as unknown as { seq: number }).seq;
+  (h.herdr as unknown as { seq: number }).seq = (template.h.herdr as unknown as { seq: number }).seq;
+  const s = setup({ h, dir, remote });
+  return { s, launched: { row: (await s.run(load(dir))).agents.find(row => row.name === "remote-w")! } };
 }
 
 describe("machine boundary", () => {
@@ -324,7 +359,7 @@ describe("remote launch hygiene", () => {
     await expect(s.run(syncRemoteBrief("remote", machine, brief, `${transfer}-missing`))).rejects.toThrow("does not exist");
   });
   it.each(["planned", "failed", "interrupted"] as const)("clearly refuses explicit cross-machine relaunch of a %s row without reusing a lock", async state => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, state, sessionFile: null })) }, undefined] as const)));
     s.calls.length = 0;
     for (const launch of [agentLaunch, queuedAgentLaunch]) await expect(s.run(launch(s.dir, { action: "launch", machine: "local", name: launched.row.name, clone: true }))).rejects.toThrow("explicit machine local differs");
@@ -334,7 +369,7 @@ describe("remote launch hygiene", () => {
 
 describe("remote owner operations", () => {
   it.each([false, true])("owner_inbox pulls before reading and tolerates an offline host (%s)", async offline => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: "work", kind: "progress", title: "Remote-only note" }, join(s.h.root, "remote-home"));
     const root = join(sidecarRoots(launched.row.cwd)[0]!, "notes"); mkdirSync(root, { recursive: true });
     writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: launched.row.name, lane: "work", owner: launched.row.owner, item }));
@@ -368,7 +403,7 @@ describe("remote owner operations", () => {
     expect(sh(cwd, "status", "--porcelain").trim()).toBe("");
   });
   it.each(["question", "blocked", "action", "progress"] as const)("pushes a remote %s note through ratking and preserves local wake semantics", async kind => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     const send = vi.fn(() => Effect.succeed({ status: "failed" as const, detail: "no reverse intercom" }));
     const fake = fakeRatking(s.h.home, () => "probe/remote-w", [], () => [decodeProject(JSON.parse(readFileSync(projectPath(s.dir), "utf8")))]);
@@ -393,7 +428,7 @@ describe("remote owner operations", () => {
     expect(feed.flush()).toBe(0); feed.dispose();
   });
   it("uses the catalog owner when the sidecar names another owner", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: launched.row.lane, kind: "question", title: "Question" }, join(s.h.root, "remote-home"));
     const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
     writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: launched.row.name, lane: launched.row.lane, owner: "another-owner", item }));
@@ -402,7 +437,7 @@ describe("remote owner operations", () => {
     expect(readOwnerQueue("another-owner", s.h.home).items).toHaveLength(0);
   });
   it.each(["project", "machine", "agent", "lane", "author"])("skips a note with mismatched %s and still pulls valid notes", async field => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: launched.row.lane, kind: "question", title: "Question" }, join(s.h.root, "remote-home"));
     const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
     const sidecar = { project: "probe", machine: "remote", agent: launched.row.name, lane: launched.row.lane, owner: launched.row.owner, item };
@@ -658,7 +693,7 @@ describe("remote owner operations", () => {
     expect(s.remote.calls).toHaveLength(0);
   });
   it("rebinds moved remote sessions before the next pass can nudge", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const pane = s.remote.panes.get(launched.row.pane!.paneId)!;
     pane.agent_status = "working"; // silent mid-turn, not waiting
     s.remote.panes.delete(pane.pane_id); pane.pane_id = "moved"; s.remote.panes.set("moved", pane);
@@ -708,7 +743,7 @@ describe("remote owner operations", () => {
 
   // codetv-workshop, 2026-10-14: a remote1 lane's repo path is absent on Flagg; attested landing ran git there locally.
   it("an attested landing of a remote packet proves landedAs on the row's machine, never with local git", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote work");
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
@@ -727,7 +762,7 @@ describe("remote owner operations", () => {
   // muster desk, 2026-10-14: clone.source is an owner path (/Users/alice/...); proving it unmapped on remote1 failed
   // check-ref-format in a missing cwd and read as "requires a base branch, not main".
   it("an attested remote landing proves in the row machine's mapping of an owner-path source", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote work");
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
@@ -746,7 +781,7 @@ describe("remote owner operations", () => {
   });
 
   it("verifies and records a remote sibling branch", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     sh(cwd, "checkout", "-qb", "worker/remote-next", "main");
     writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "sibling");
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
@@ -762,7 +797,7 @@ describe("remote owner operations", () => {
   });
 
   it("ingests sidecars idempotently, verifies and lands a remote branch into the local source", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "work");
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
@@ -807,7 +842,7 @@ describe("remote owner operations", () => {
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("openSessionTree"))).toBe(true);
   }, 30_000);
   it("rejects a sidecar from a different project that names this row, without changing the owner catalog", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
     const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
     writeFileSync(join(root, "packet.json"), JSON.stringify({ project: "wrong", machine: "remote", packet: { id, kind: "commit", artifact: null, lane: "work", agent: launched.row.name, report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: s.h.now.toISOString(), updatedAt: s.h.now.toISOString() }, reportText: "wrong" }));
@@ -818,7 +853,7 @@ describe("remote owner operations", () => {
   });
   // 🧠, 2026-10-12: hooksv141 reused hooksv14's clone; the closed row's sidecars failed identity against the new row and close refused.
   it("skips a sidecar for a packet already in the catalog, even one an earlier row left in a reused clone", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
     const packet = { id, kind: "commit", artifact: null, lane: "work", agent: launched.row.name, report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-12T00:00:00.000Z", updatedAt: "2026-10-12T00:00:00.000Z" };
     const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
@@ -848,7 +883,7 @@ describe("remote owner operations", () => {
   // rubicon-fitness, 2026-10-13: athlete-migration-sync-2 reused a closed row's worktree whose sidecar was never ingested; close refused.
   // codetv-workshop, 2026-10-13: a closed row in another lane ran in the source checkout, and every clone copied its sidecars.
   it("notes and skips never-ingested packet and note sidecars left by a closed row in any lane", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...launched.row, name: "earlier-row", lane: "elsewhere", state: "closed" as const, pane: null }] }, undefined] as const)));
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
     const packet = { id, kind: "commit", artifact: null, lane: "elsewhere", agent: "earlier-row", report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-13T00:00:00.000Z", updatedAt: "2026-10-13T00:00:00.000Z" };
@@ -869,7 +904,7 @@ describe("remote owner operations", () => {
   // aih-support-sweep, 2026-10-14: codetv-workshop rows had run in the remote1 ai-hero source checkout; every aih clone
   // copied their sidecars, ingest refused them as "invalid sidecar identity" and close refused lgseat2 and giftnow.
   it("notes and skips packet and note sidecars that belong to another project", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
     const packet = { id, kind: "commit", artifact: null, lane: "cb-security", agent: "cb-bump", report: "/report", checks: [], state: "reported", verification: null, landedAs: null, reportedAt: "2026-10-08T00:00:00.000Z", updatedAt: "2026-10-08T00:00:00.000Z" };
     const root = join(launched.row.cwd, ".pi/muster/packets", id); mkdirSync(root, { recursive: true });
@@ -886,7 +921,7 @@ describe("remote owner operations", () => {
     expect((await s.run(load(s.dir))).packets).toEqual([]);
   });
   it("keeps local status available and skips remaining machine rows after a transport failure", async () => {
-    const s = setup(); await s.open(); await s.launch(); await s.launch("remote-two");
+    const { s } = await launchedFork(); await s.launch("remote-two");
     const local = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local worker", clone: true, noSkills: true }));
     s.calls.length = 0;
     const original = s.proc.run;
@@ -900,7 +935,7 @@ describe("remote owner operations", () => {
     expect(vi.mocked(s.proc.run).mock.calls.filter(([command]) => command === "ssh")).toHaveLength(1);
   });
   it("skips malformed sidecars while ingesting a good sidecar in the same pass", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
     const root = join(launched.row.cwd, ".pi/muster/packets");
     for (const key of [id, "a".repeat(40)]) mkdirSync(join(root, key), { recursive: true });
@@ -912,7 +947,7 @@ describe("remote owner operations", () => {
     expect(readFileSync((await s.run(load(s.dir))).packets[0]!.report, "utf8")).toBe("good report");
   });
   it("verifies a local packet without SSH even when a remote machine is offline", async () => {
-    const s = setup(); await s.open(); await s.launch();
+    const { s } = await launchedFork();
     const local = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local worker", clone: true, noSkills: true }));
     const artifact = join(s.h.root, "local-artifact.txt"); writeFileSync(artifact, "local evidence");
     const report = await s.run(packetReport({ dir: s.dir, agent: local.row.name, owner: local.row.owner, cwd: local.row.cwd, artifact, summary: "Local artifact", checks: [] }));
@@ -924,7 +959,7 @@ describe("remote owner operations", () => {
     await expect(s.run(packetVerify(s.dir, "f".repeat(40)))).rejects.toThrow("machine remote: ingest skipped");
   });
   it("ingests a remote packet before closing, so retiring the clone never loses it", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     await s.run(packetReport({ dir: "/remote-project", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "No source changes", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
@@ -933,7 +968,7 @@ describe("remote owner operations", () => {
     expect((await s.run(load(s.dir))).packets.map(packet => packet.id)).toContain(commit);
   });
   it("a row whose clone is gone neither poisons the machine nor blocks its own close", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [{ ...launched.row, name: "dead", state: "failed" as const, pane: null, cwd: join(s.h.root, "gone-clone") }, ...p.agents] }, undefined] as const)));
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
@@ -946,7 +981,7 @@ describe("remote owner operations", () => {
     expect((await s.run(load(s.dir))).agents.find(row => row.name === "dead")?.state).toBe("closed");
   });
   it("refuses to close a remote row whose machine cannot be read", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const original = s.proc.run;
     vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh"
       ? Effect.fail(new ProcError({ command: "ssh remote", code: 255, stderr: "offline", message: "machine remote: offline" })) : original(command, args, options));
@@ -954,7 +989,7 @@ describe("remote owner operations", () => {
     expect((await s.run(load(s.dir))).agents.find(row => row.name === launched.row.name)?.state).not.toBe("closed");
   });
   it.each(["accepted", "unconsumed", "changed-report"])("retires accepted or freshly ingested unchanged remote sidecars: %s", async kind => {
-    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     await s.run(packetReport({ dir: "/remote-project", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "No source changes", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
@@ -973,7 +1008,7 @@ describe("remote owner operations", () => {
     if (kind === "unconsumed") expect((await s.run(load(s.dir))).packets.map(packet => packet.id)).toContain(commit);
   });
   it.each([false, true])("retire exact pi-notes scaffolds but preserve edits (%s)", async edited => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     mkdirSync(join(launched.row.cwd, ".brain"), { recursive: true });
     // Exact pi-notes 8a8c3da template owned by this fixture; the source tree has no BRAIN.md.
     const brain = [
@@ -997,14 +1032,14 @@ describe("remote owner operations", () => {
   });
   // flowing-pi, 2026-10-13: every landed remote clone was kept for pi-notes' own runtime files.
   it("removes a landed remote clone whose only dirt is pi-notes' runtime state", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const root = join(launched.row.cwd, ".pi/notes-bridge"); mkdirSync(root, { recursive: true });
     for (const file of ["events.jsonl", "session.json", "status.json"]) writeFileSync(join(root, file), `runtime ${file}`);
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect(result.cloneError).toBeNull(); expect(existsSync(launched.row.cwd)).toBe(false);
   });
   it("keeps unknown remote pi-notes bridge files rather than declaring the whole directory disposable", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const root = join(launched.row.cwd, ".pi/notes-bridge"); mkdirSync(root, { recursive: true }); writeFileSync(join(root, "edited-review.json"), "private note");
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect(result.cloneError).toContain(".pi/notes-bridge/edited-review.json"); expect(existsSync(launched.row.cwd)).toBe(true);
@@ -1165,7 +1200,7 @@ describe("remote owner operations", () => {
   });
 
   it("saves remote logs, closes the bound pane and removes the clone through SSH", async () => {
-    const s = setup(); await s.open(); const launched = await s.launch();
+    const { s, launched } = await launchedFork();
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect(result.row.state).toBe("closed"); expect(result.notes.join(" ")).toContain("pane log saved");
     expect(s.remote.panes.has(launched.row.pane!.paneId)).toBe(false); expect(existsSync(launched.row.cwd)).toBe(false);

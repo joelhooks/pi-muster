@@ -77,7 +77,8 @@ describe("gate-tmp claim and release", () => {
     const gate = (...args: string[]) => spawnSync("sh", [script, ...args], { encoding: "utf8", env });
     const called = () => existsSync(calls) ? readFileSync(calls, "utf8") : "";
     const logged = () => existsSync(join(root, "log")) ? readFileSync(join(root, "log"), "utf8") : "";
-    return { root, volume, state, gate, called, logged };
+    const tool = (name: string, body: string) => writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return { root, volume, state, gate, called, logged, tool };
   }
   it("detaches the disk when the last run releases, and logs it with its timing", () => {
     const d = disk();
@@ -116,9 +117,10 @@ describe("gate-tmp claim and release", () => {
     expect(d.gate("release", dir).status).toBe(0);
     expect(existsSync(d.state)).toBe(true);
     expect(d.logged()).toContain("detach busy dev=/dev/disk99 held by op:2350 op:6242");
-    const quiet = disk({ busy: true });
-    quiet.gate("release", quiet.gate("claim", String(process.pid)).stdout.trim());
-    expect(quiet.logged()).toContain("held by unknown");
+    // The same still-attached busy disk, now with no holder reported by lsof: no second fixture to build.
+    d.tool("lsof", "exit 1");
+    d.gate("release", d.gate("claim", String(process.pid)).stdout.trim());
+    expect(d.logged()).toContain("held by unknown");
   });
   it("takes over a lock whose holder died, and refuses a release outside the volume", () => {
     const d = disk();

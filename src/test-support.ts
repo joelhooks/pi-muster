@@ -300,6 +300,8 @@ export interface Harness {
   sleep: (ms: number) => void;
   sessionId: string;
   live: string[] | undefined;
+  /** Ids handed out so far; a copied fixture resumes after its template's so new ids never repeat copied ones. */
+  ids: { used: number };
 }
 
 export function sh(cwd: string, ...args: string[]): string {
@@ -357,7 +359,7 @@ export function harness(): Harness {
   const herdr = new FakeHerdr(home);
   const sent: Array<{ to: string; message: string }> = [];
   const workerWorktree = fakeWorkerWorktree(root);
-  let counter = 0;
+  const ids = { used: 0 };
   const h: Harness = {
     root,
     home,
@@ -372,6 +374,7 @@ export function harness(): Harness {
     sleep: () => {},
     sessionId: "owner-session",
     live: undefined,
+    ids,
     emitPaneClose: noEmitPaneClose,
     get layer() {
       return Layer.mergeAll(
@@ -384,7 +387,7 @@ export function harness(): Harness {
           paneId: undefined,
           musterRoot: "/muster",
           workerWorktree,
-          createId: () => `id${(counter += 1).toString().padStart(6, "0")}`,
+          createId: () => `id${(ids.used += 1).toString().padStart(6, "0")}`,
           sleep: (ms) => Effect.sync(() => h.sleep(ms)),
           startupLoad: () => h.startupLoad,
           emitPaneClose: h.emitPaneClose,
@@ -400,7 +403,11 @@ export function harness(): Harness {
  * Each case owns its files, Git refs, fake panes and process adapter.
  */
 export function forkHarness(template: Harness, dir: string) {
-  const h = harness();
+  return populateHarness(harness(), template, dir);
+}
+
+/** forkHarness into a harness the case already holds, for cases that configure the harness before using it. */
+export function populateHarness(h: Harness, template: Harness, dir: string) {
   const relocate = (value: string) => value.split(template.root).join(h.root);
   cpSync(template.root, h.root, { recursive: true });
   const copiedDir = relocate(dir);
@@ -420,6 +427,9 @@ export function forkHarness(template: Harness, dir: string) {
   for (const [id, workspace] of template.herdr.workspaces) h.herdr.workspaces.set(id, { ...workspace });
   h.now = new Date(template.now);
   h.sessionId = template.sessionId;
+  for (const [key, tokens] of template.herdr.tokens) h.herdr.tokens.set(key, { ...tokens });
+  h.ids.used = template.ids.used;
+  (h.herdr as unknown as { seq: number }).seq = (template.herdr as unknown as { seq: number }).seq;
   return { h, dir: copiedDir, relocate };
 }
 
