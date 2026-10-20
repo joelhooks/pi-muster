@@ -1,24 +1,33 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, expect, it, vi } from "vitest";
 import { agentClose, agentLaunchForeground, laneOpen, packetLand, packetReport, packetVerify, projectOpen, projectStatus } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { Effect } from "effect";
 import { MusterEnv, Proc, liveProc } from "./runtime.ts";
 import { decodeMachines } from "./domain.ts";
-import { harness, makeRepo, runWith, sh } from "./test-support.ts";
+import { forkHarness, harness, makeRepo, runWith, sh } from "./test-support.ts";
 
+// Build the project, lane and cloned worker once; each case copies it instead of repeating the launch.
+let template: ReturnType<typeof harness>;
+let templateDir: string;
+beforeAll(async () => {
+  vi.stubEnv("MUSTER_PROJECT", "");
+  vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
+  template = harness();
+  templateDir = makeRepo(join(template.root, "repo"));
+  await runWith(template, projectOpen({ dir: templateDir, slug: "reap", outcome: "retire clones safely", nextAction: "test", reviewTrigger: "weekly", space: "w1", ephemeral: true, cadenceMinutes: null, musterExtension: "/muster", deskExtension: null }));
+  await runWith(template, laneOpen(templateDir, { slug: "reap", label: "🧹 reap", goal: "retire clones safely" }));
+  const brief = join(template.root, "brief.md");
+  writeFileSync(brief, "retire clones\n");
+  await runWith(template, agentLaunchForeground(templateDir, { action: "launch", name: "worker", lane: "reap", role: "worker", label: "🧹 worker", clone: true, brief }));
+});
 afterEach(() => vi.unstubAllEnvs());
 async function fixture() {
   vi.stubEnv("MUSTER_PROJECT", "");
   vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
-  const h = harness();
-  const dir = makeRepo(join(h.root, "repo"));
-  await runWith(h, projectOpen({ dir, slug: "reap", outcome: "retire clones safely", nextAction: "test", reviewTrigger: "weekly", space: "w1", ephemeral: true, cadenceMinutes: null, musterExtension: "/muster", deskExtension: null }));
-  await runWith(h, laneOpen(dir, { slug: "reap", label: "🧹 reap", goal: "retire clones safely" }));
-  const brief = join(h.root, "brief.md");
-  writeFileSync(brief, "retire clones\n");
-  const { row } = await runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", lane: "reap", role: "worker", label: "🧹 worker", clone: true, brief }));
+  const { h, dir } = forkHarness(template, templateDir);
+  const row = (await runWith(h, load(dir))).agents[0]!;
   const commit = (path: string, file: string, text: string) => {
     writeFileSync(join(path, file), text);
     sh(path, "add", file); sh(path, "commit", "-q", "-m", text);
