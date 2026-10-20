@@ -1197,6 +1197,8 @@ describe("a lane from launch to close", () => {
   it("marks delivery unproven when the argv message has no assistant turn, without recovery typing", async () => {
     const h = harness();
     h.herdr.firstTurn = "missing";
+    // The 90 s discovery wait polls once per second; jump the clock instead of spawning ~90 journal readers.
+    h.sleep = () => { h.now = new Date(h.now.getTime() + 90_000); };
     const { launched } = await launchedWorker(h);
     expect(launched.row.delivery).toBe("unproven");
     expect(h.herdr.calls.filter((call) => call.method === "agent.prompt")).toHaveLength(0);
