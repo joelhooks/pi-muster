@@ -149,7 +149,10 @@
     "@ipld/dag-cbor": "10.0.2",
     "@joelhooks/pi-bellwether": "github:joelhooks/pi-bellwether#af41815ae849fab4c41bb72c0289af9bb23b7d0e",
     "tsx": "^4.23.15",
-    "effect": "4.0.1",
+    "effect": "4.0.5",
     "xstate": "5.32.5"
+  },
+  "overrides": {
+    "effect": "4.0.5"
   }
 }
