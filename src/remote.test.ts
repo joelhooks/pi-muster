@@ -818,6 +818,19 @@ describe("remote owner operations", () => {
     expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
     expect(readFileSync(projectPath(s.dir), "utf8")).toBe(before);
   });
+  // content-grill, 2026-10-20: celld-surface and celld-stateid both ran in the alchemy-celld checkout; celld-stateid's note
+  // failed celld-surface's identity check and its close refused.
+  it("leaves a live sibling's sidecar in a shared checkout to the sibling's own ingest", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch();
+    const sibling = { ...launched.row, name: "sibling", sessionId: "sibling-20261020T000000", state: "reported" as const, pane: null };
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, sibling] }, undefined] as const)));
+    const item = appendOwnerItem(sibling.owner, { author: sibling.sessionId, lane: sibling.lane, kind: "question", title: "From the sibling" }, join(s.h.root, "remote-home"));
+    const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, `${"d".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: "sibling", lane: sibling.lane, owner: sibling.owner, item }));
+    const result = await s.run(ingestRemotePackets(s.dir));
+    expect(result.notes.join("\n")).not.toContain("invalid note sidecar identity");
+    expect(readOwnerQueue(sibling.owner, s.h.home).items.map(record => record.item)).toEqual([item]);
+  });
   // rubicon-fitness, 2026-10-13: athlete-migration-sync-2 reused a closed row's worktree whose sidecar was never ingested; close refused.
   // codetv-workshop, 2026-10-13: a closed row in another lane ran in the source checkout, and every clone copied its sidecars.
   it("notes and skips never-ingested packet and note sidecars left by a closed row in any lane", async () => {

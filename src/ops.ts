@@ -847,6 +847,9 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         // A closed row's sidecars travel with its checkout: a reused worktree, or a source checkout a row ran in, which
         // every later clone copies (rubicon-fitness and codetv-workshop, 2026-10-13). Note them; never let them block close.
         const leftByClosed = (agent: string) => agent !== row.name && project.agents.some(other => other.name === agent && other.state === "closed" && other.machine === row.machine);
+        // content-grill, 2026-10-20: two live rows ran in one source checkout, so each row's pass saw the other's sidecars,
+        // failed their identity and refused close. A live row sharing this checkout ingests its own sidecars on its pass.
+        const sharedLive = (agent: string) => agent !== row.name && project.agents.some(other => other.name === agent && other.state !== "closed" && other.machine === row.machine && other.cwd === row.cwd);
         const ignoreLeft = (agent: string) => notes.push(`${entry.kind} sidecar ${entry.id.slice(0, 12)} was left by closed row ${agent} and never ingested; ignored for ${row.name} (check it landed if that work matters)`);
         // A clone copies its source's .git/muster, so a row of another project that once ran in that source leaves its
         // sidecars in every later clone; one naming another agent can't be this row's report (aih-support-sweep, 2026-10-14).
@@ -856,6 +859,7 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
           const sidecar = yield* decodeWith(decodeRemoteNote, entry.value);
           if (sidecar.project !== project.slug && sidecar.agent !== row.name) return ignoreForeign(sidecar.project);
           if (sidecar.project === project.slug && leftByClosed(sidecar.agent)) return ignoreLeft(sidecar.agent);
+          if (sidecar.project === project.slug && sharedLive(sidecar.agent)) return;
           if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane || !sessionChain(row).includes(sidecar.item.author)) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
           // drovr, 2026-10-12: sidecars stay on disk and the queue is per owner session, so an owner restart replayed old notes.
           const ownerRow = project.agents.find(agent => agent.sessionId === row.owner);
@@ -874,6 +878,7 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         const packet = sidecar.packet;
         if (sidecar.project !== project.slug && packet.agent !== row.name) return ignoreForeign(sidecar.project);
         if (sidecar.project === project.slug && leftByClosed(packet.agent)) return ignoreLeft(packet.agent);
+        if (sidecar.project === project.slug && sharedLive(packet.agent)) return;
         if (sidecar.project !== project.slug || sidecar.machine !== row.machine || packet.agent !== row.name || packet.lane !== row.lane || packet.id !== entry.id || !/^[a-f0-9]{40,64}$/.test(packet.id) || packet.state !== "reported" || packet.verification !== null || packet.landedAs !== null) return yield* input(`machine ${row.machine}: invalid packet sidecar identity`);
         const report = join(reportsDir(dir), row.lane, `${row.name}-${packet.id.slice(0,12)}.svx`);
         yield* mutate(dir, current => Effect.gen(function* () {
