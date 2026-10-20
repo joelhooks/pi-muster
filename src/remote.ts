@@ -177,6 +177,42 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
   }), () => Effect.sync(() => missing(() => rmdirSync(lock)))), () => Effect.sync(() => missing(() => unlinkSync(join(queue, ticket)))));
 });
 
+/**
+ * A launch past its maxPanes check holds a reservation until it ends, so the machine lock covers only the count, not the
+ * clone and Pi start behind it (fleet burn, 2026-10-20: 30 launches queued behind one machine's clones and timed out).
+ * The file name is the row key; the file holds the launcher's local pid, and a dead pid's reservation is dropped.
+ */
+export const launchReservationKey = (dir: string, row: string) => createHash("sha256").update(`${dir}\0${row}`).digest("hex").slice(0, 32);
+const reservationsDir = (home: string, machine: string) => join(home, ".config/muster/launch-locks", `${machine}.reservations`);
+const reservationIo = <T>(machine: string, fn: () => T) => Effect.try({ try: fn, catch: error => new InputError({ message: `machine ${machine}: launch reservations: ${String(error)}` }) });
+
+/** Live reservation keys on a machine. Call it under withMachineLaunchLock. */
+export const liveLaunchReservations = (machine: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const root = reservationsDir(env.home, yield* Effect.try({ try: () => decodeAgentName(machine), catch: error => new InputError({ message: `invalid machine name: ${String(error)}` }) }));
+  return yield* reservationIo(machine, () => {
+    if (!existsSync(root)) return new Set<string>();
+    const live = new Set<string>();
+    for (const key of readdirSync(root)) {
+      const path = join(root, key);
+      const pid = (() => { try { return Number(readFileSync(path, "utf8").trim()); } catch { return NaN; } })();
+      const gone = !Number.isSafeInteger(pid) || pid <= 0 || (() => { try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; } })();
+      if (gone) { try { unlinkSync(path); } catch {} continue; }
+      live.add(key);
+    }
+    return live;
+  });
+});
+
+/** Writes a reservation under withMachineLaunchLock; the returned effect releases it and never fails. */
+export const reserveLaunch = (machine: string, key: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const root = reservationsDir(env.home, yield* Effect.try({ try: () => decodeAgentName(machine), catch: error => new InputError({ message: `invalid machine name: ${String(error)}` }) }));
+  const path = join(root, key);
+  yield* reservationIo(machine, () => { mkdirSync(root, { recursive: true, mode: 0o700 }); writeFileSync(path, String(process.pid), { mode: 0o600 }); });
+  return Effect.sync(() => { try { unlinkSync(path); } catch {} });
+});
+
 export const machinesPath = (home: string) => join(home, ".config/muster/machines.json");
 export const mapPath = (path: string, machine: MachineConfig): string => {
   const prefix = Object.keys(machine.paths).sort((a, b) => b.length - a.length).find(p => path === p || path.startsWith(`${p}/`));

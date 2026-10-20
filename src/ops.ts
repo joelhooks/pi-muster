@@ -60,7 +60,7 @@ import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
-import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock } from "./remote.ts";
+import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
 import { DEFAULT_GATE_TIMEOUT_MIN, decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
@@ -185,16 +185,31 @@ const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
 
 const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string, jobId?: string) => {
   const lockNotes: string[] = [];
-  return withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
+  const key = launchReservationKey(project.dir, params.name);
+  // The machine lock covers only this count and, below, pane allocation. The probe, clone and Pi start run outside it;
+  // the reservation keeps this launch counted until it ends.
+  const admit = withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
+    const env = yield* MusterEnv;
+    const machine = yield* machineConfig(nameOfMachine);
+    const live = yield* liveLaunchReservations(nameOfMachine);
+    if (live.has(key)) return yield* input(`row ${params.name}: another launch of it is in progress on ${nameOfMachine}; wait for its result before retrying`);
+    if (machine.maxPanes !== undefined) {
+      const catalogs = [yield* load(dir)];
+      const registered = yield* decodeWith(() => [...readRegistry(env.home).values()], null);
+      for (const entry of registered) if (entry.dir !== project.dir && exists(entry.dir)) catalogs.push(yield* load(entry.dir));
+      // A queued job's row is launching with no pane before it reaches this count; it counts by reservation once admitted.
+      const open = new Set(catalogs.flatMap(catalog => catalog.agents
+        .filter(row => row.machine === nameOfMachine && row.state !== "closed" && (row.pane || (row.state !== "launching" && row.state !== "restoring")))
+        .map(row => launchReservationKey(catalog.dir, row.name))));
+      for (const reserved of live) open.add(reserved);
+      open.delete(key);
+      if (open.size >= machine.maxPanes) return yield* input(`machine ${nameOfMachine}: maxPanes ${machine.maxPanes} reached (${open.size} open Muster rows or launches); close one before launching`);
+    }
+    return yield* reserveLaunch(nameOfMachine, key);
+  }), text => lockNotes.push(text));
+  return Effect.acquireUseRelease(admit, () => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(nameOfMachine);
-  const catalogs = [project];
-  if (machine.maxPanes !== undefined) {
-    const registered = yield* decodeWith(() => [...readRegistry(env.home).values()], null);
-    for (const entry of registered) if (entry.dir !== project.dir && exists(entry.dir)) catalogs.push(yield* load(entry.dir));
-  }
-  const openCount = catalogs.flatMap(catalog => catalog.agents.filter(row => catalog.dir !== project.dir || row.name !== params.name)).filter(row => row.machine === nameOfMachine && row.state !== "closed").length;
-  if (machine.maxPanes !== undefined && openCount >= machine.maxPanes) return yield* input(`machine ${nameOfMachine}: maxPanes ${machine.maxPanes} reached (${openCount} open Muster rows); close one before launching`);
   const wrap = machine.wrap.map(arg => arg.replaceAll("{name}", params.name));
   if (params.action === "adopt" || params.side || params.pane) return yield* input("remote launch does not adopt supplied panes or side desks");
   const name = yield* decodeWith(decodeAgentName, params.name);
@@ -350,16 +365,21 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       return [withRow(current, row), row] as const;
     }));
     const launch = Effect.gen(function* () {
-      const spaces = yield* workspaceList();
-      const matches = spaces.filter(space => space.label === project.label);
-      if (matches.length > 1) return yield* input(`machine ${nameOfMachine}: multiple workspaces labelled ${project.label}; resolve ambiguity first`);
-      const spaceId = matches[0]?.workspace_id ?? (yield* workspaceCreate(project.label, remoteSource)).workspace.workspace_id;
-      const laneRows = project.agents.filter(other => other.machine === nameOfMachine && other.lane === lane.slug && other.state !== "closed" && other.pane);
-      const sibling = laneRows[0]?.pane ? yield* locatePane(laneRows[0].pane) : null;
-      if (sibling && laneRows.length >= MAX_WORKERS_PER_TAB) return yield* input(tabFullPrompt(lane.slug, laneRows, ` on ${nameOfMachine}`));
-      const pane = sibling ? yield* paneSplit(sibling.pane_id, "right", cwd) : (yield* tabCreate(spaceId, cwd, lane.label)).root_pane;
-      const binding: PaneBinding = { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true };
-      row = yield* patchRow(dir, name, row.state, [], { pane: binding });
+      // Two launches must not create two same-label workspaces or overfill a tab: look up, allocate and record the pane
+      // under the machine lock, reading lane rows from the catalog as it is now, not as it was when this launch began.
+      const binding = yield* withMachineLaunchLock(nameOfMachine, Effect.gen(function* () {
+        const spaces = yield* workspaceList();
+        const matches = spaces.filter(space => space.label === project.label);
+        if (matches.length > 1) return yield* input(`machine ${nameOfMachine}: multiple workspaces labelled ${project.label}; resolve ambiguity first`);
+        const spaceId = matches[0]?.workspace_id ?? (yield* workspaceCreate(project.label, remoteSource)).workspace.workspace_id;
+        const laneRows = (yield* load(dir)).agents.filter(other => other.machine === nameOfMachine && other.lane === lane.slug && other.state !== "closed" && other.pane);
+        const sibling = laneRows[0]?.pane ? yield* locatePane(laneRows[0].pane) : null;
+        if (sibling && laneRows.length >= MAX_WORKERS_PER_TAB) return yield* input(tabFullPrompt(lane.slug, laneRows, ` on ${nameOfMachine}`));
+        const pane = sibling ? yield* paneSplit(sibling.pane_id, "right", cwd) : (yield* tabCreate(spaceId, cwd, lane.label)).root_pane;
+        const binding: PaneBinding = { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true };
+        row = yield* patchRow(dir, name, row.state, [], { pane: binding });
+        return binding;
+      }), text => cloneNotes.push(text));
       agentEnvironment.MUSTER_REMOTE_ROW = JSON.stringify(row);
       // Shell execution is required for the owner's argv prefix; Herdr agent.start always executes pi directly.
       // Keep exec's normal pane lifecycle, but retain stderr independently of the terminal.
@@ -416,7 +436,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     });
     return yield* launch.pipe(Effect.tapError(() => patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void))));
   })).pipe(Effect.mapError(error => modelFailure ?? error));
-}), text => lockNotes.push(text));
+}), release => release);
 };
 
 /** Proc and Herdr are machine-scoped by onRemote for remote rows.

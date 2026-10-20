@@ -29,7 +29,13 @@ function setup() {
   const remote = new FakeHerdr(h.home);
   let missing = false;
   const base = h.proc;
+  // A test can hold a command until another launch reaches a point, to force an interleaving.
+  let before: (command: string, args: readonly string[]) => Promise<void> | undefined = () => undefined;
   const proc: ProcShape = { run: (command, args, options) => {
+    const hold = before(command, args);
+    return hold ? Effect.promise(() => hold).pipe(Effect.andThen(Effect.suspend(() => direct(command, args, options)))) : direct(command, args, options);
+  } };
+  const direct: ProcShape["run"] = (command, args, options) => {
     calls.push({ command, args, timeoutMs: options.timeoutMs });
     if (command === "ssh") {
       const script = args.at(-1)!;
@@ -40,7 +46,7 @@ function setup() {
       return base.run(command, args.map(arg => arg.startsWith("ssh://remote/") ? `file:///${arg.slice("ssh://remote/".length)}` : arg), options);
     }
     return base.run(command, args, options);
-  } };
+  };
   let machines: unknown = { remote: config({ workerWorktree: h.workerWorktree, env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: ["/wrapper", "--name", "{name}", "--"] }) };
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
     createId: () => "remote-id", sleep: ms => Effect.sync(() => { h.now = new Date(h.now.getTime() + ms); }), emitPaneClose: noEmitPaneClose,
@@ -52,7 +58,7 @@ function setup() {
     await run(laneOpen(dir, { slug: "work", label: "remote work", goal: "packet", repo: dir }));
   };
   const launch = (name = "remote-w") => run(agentLaunch(dir, { action: "launch", machine: "remote", name, role: "worker", lane: "work", label: "remote worker", clone: true, noSkills: true }));
-  return { h, remote, dir, calls, env, proc, run, open, launch, setMissing: () => { missing = true; }, setMachines: (value: unknown) => { machines = Object.fromEntries(Object.entries(value as Record<string, MachineConfig>).map(([name, machine]) => [name, { ...machine, env: { ...machine.env, HOME: h.home } }])); } };
+  return { h, remote, dir, calls, env, proc, run, open, launch, setMissing: () => { missing = true; }, setBefore: (hook: typeof before) => { before = hook; }, setMachines: (value: unknown) => { machines = Object.fromEntries(Object.entries(value as Record<string, MachineConfig>).map(([name, machine]) => [name, { ...machine, env: { ...machine.env, HOME: h.home } }])); } };
 }
 
 describe("machine boundary", () => {
@@ -552,6 +558,97 @@ describe("remote owner operations", () => {
     const count = s.remote.panes.size; const calls = s.calls.length;
     await expect(s.launch("remote-next")).rejects.toThrow("maxPanes 1 reached");
     expect(s.remote.panes.size).toBe(count); expect(s.calls).toHaveLength(calls);
+  });
+
+  // Fleet burn, 2026-10-20: the machine lock covered probe, clone and Pi start, so launches queued 30 deep and timed out.
+  describe("the machine launch lock covers only the pane count and pane allocation", () => {
+    const clone = (command: string, args: readonly string[]) => command === "ssh" && args.at(-1)!.includes("'create'") && args.at(-1)!.includes("worker-worktree");
+    /** Lock waits and Herdr calls yield a real tick, so a concurrent launch can run between them, as on a live host. */
+    const live = (s: ReturnType<typeof setup>, hold: (method: string) => Promise<void> | undefined = () => undefined) => {
+      const tick = Effect.promise(() => new Promise<void>(resolve => setImmediate(resolve)));
+      // A fake 100 ms costs a real millisecond: a 300 s lock wait outlasts any real hold below.
+      Object.assign(s.env, { sleep: (ms: number) => Effect.promise(() => new Promise<void>(resolve => setTimeout(resolve, 1))).pipe(Effect.andThen(Effect.sync(() => { s.h.now = new Date(s.h.now.getTime() + ms); }))) });
+      const client = s.remote.client();
+      Object.assign(s.env, { remoteHerdr: () => Effect.succeed({ ...client, request: (request: Parameters<typeof client.request>[0]) => {
+        const held = hold(request.method);
+        return (held ? Effect.promise(() => held) : tick).pipe(Effect.andThen(client.request(request)));
+      } }) });
+    };
+    /** The first launch to reach `point` waits there until a second one reaches it too (capped, so a full lock cannot hang the test). */
+    const meet = (s: ReturnType<typeof setup>, point: (command: string, args: readonly string[]) => boolean, onArrive: () => void = () => {}) => {
+      let arrived = 0; let release!: () => void;
+      const both = new Promise<void>(resolve => { release = resolve; });
+      s.setBefore((command, args) => {
+        if (!point(command, args)) return undefined;
+        arrived += 1; onArrive();
+        if (arrived >= 2) { release(); return undefined; }
+        return Promise.race([both, new Promise<void>(resolve => setTimeout(resolve, 3000))]);
+      });
+      return { release: () => release(), arrived: () => arrived };
+    };
+
+    it("runs a second row's clone before the first row's Pi start", async () => {
+      const s = setup(); await s.open(); live(s);
+      const events: string[] = [];
+      meet(s, clone, () => events.push("clone"));
+      const handle = s.remote.handle.bind(s.remote);
+      s.remote.handle = (method, params) => { if (method === "pane.send_input" && String(params.text).startsWith("exec sh ")) events.push("pi start"); return handle(method, params); };
+      const results = await Promise.allSettled([s.launch("remote-a"), s.launch("remote-b")]);
+      expect(results.map(result => result.status === "rejected" ? String(result.reason) : result.status)).toEqual(["fulfilled", "fulfilled"]);
+      expect(events).toEqual(["clone", "clone", "pi start", "pi start"]);
+    });
+
+    it("admits exactly one of two concurrent launches at maxPanes 1", async () => {
+      const s = setup(); s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, maxPanes: 1 }) }); await s.open(); live(s);
+      const gate = meet(s, clone);
+      const launches = [s.launch("remote-a"), s.launch("remote-b")];
+      for (const launch of launches) launch.then(gate.release, gate.release);
+      const results = await Promise.allSettled(launches);
+      expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+      expect(results.flatMap(result => result.status === "rejected" ? [String(result.reason)] : [])).toEqual([expect.stringContaining("maxPanes 1 reached (1 open Muster rows or launches)")]);
+      expect(gate.arrived()).toBe(1);
+      // The winner's reservation is released; its row now counts by its pane.
+      expect(readdirSync(join(s.h.home, ".config/muster/launch-locks/remote.reservations"))).toEqual([]);
+    });
+
+    it("counts a live reservation and ignores one whose pid is gone", async () => {
+      const s = setup(); s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, maxPanes: 1 }) }); await s.open();
+      const root = join(s.h.home, ".config/muster/launch-locks/remote.reservations"); mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, "another-owner-launch"), String(process.pid));
+      await expect(s.launch("remote-a")).rejects.toThrow("maxPanes 1 reached");
+      const dead = spawnSync("true").pid!;
+      writeFileSync(join(root, "another-owner-launch"), String(dead));
+      await expect(s.launch("remote-a")).resolves.toMatchObject({ row: { name: "remote-a", state: "running" } });
+      expect(readdirSync(root)).toEqual([]);
+    });
+
+    it("refuses a second concurrent launch of the same row", async () => {
+      const s = setup(); await s.open();
+      const root = join(s.h.home, ".config/muster/launch-locks/remote.reservations"); mkdirSync(root, { recursive: true });
+      const { launchReservationKey } = await import("./remote.ts");
+      writeFileSync(join(root, launchReservationKey(s.dir, "remote-a")), String(process.pid));
+      await expect(s.launch("remote-a")).rejects.toThrow("another launch of it is in progress on remote");
+    });
+
+    it("creates one workspace for two concurrent launches into an empty space", async () => {
+      const s = setup(); await s.open();
+      s.remote.workspaces.clear();
+      // The first launch to look for the workspace waits briefly for the second to look too. Under the lock the second
+      // cannot look until the first has created it, so the wait runs out.
+      let looked = 0; let release!: () => void; const both = new Promise<void>(resolve => { release = resolve; });
+      live(s, method => {
+        if (method !== "workspace.list") return undefined;
+        looked += 1;
+        if (looked >= 2) { release(); return undefined; }
+        return Promise.race([both, new Promise<void>(resolve => setTimeout(resolve, 500))]);
+      });
+      const results = await Promise.allSettled([s.launch("remote-a"), s.launch("remote-b")]);
+      expect(results.map(result => result.status === "rejected" ? String(result.reason) : result.status)).toEqual(["fulfilled", "fulfilled"]);
+      expect(s.remote.calls.filter(call => call.method === "workspace.create")).toHaveLength(1);
+      expect(s.remote.workspaces.size).toBe(1);
+      const panes = results.flatMap(result => result.status === "fulfilled" ? [result.value.row.pane!] : []);
+      expect(new Set(panes.map(pane => pane.tabId)).size).toBe(1);
+    });
   });
   it("reports missing remote prerequisites before allocating anything", async () => {
     const s = setup(); await s.open(); s.setMissing();
