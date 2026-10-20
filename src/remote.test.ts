@@ -674,6 +674,20 @@ describe("remote owner operations", () => {
     expect(s.remote.calls.some(call => call.method !== "pane.send_keys" && call.params.pane_id === "moved" && String(call.params.text ?? call.params.command ?? "").includes("written nothing"))).toBe(true);
     expect(s.remote.calls.some(call => call.method === "pane.send_keys" && call.params.pane_id === "moved")).toBe(false);
   });
+  // Servo, 2026-10-20 (content-grill): the lane repo existed only on pennywise, and verify ran git on the owner: spawn git ENOENT.
+  it("verifies a packet whose source repo exists only on the worker's machine", async () => {
+    const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote source");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "remote source", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs(); vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", "");
+    // The owner sees the source only under a path that does not exist locally; the machine maps it to the real checkout.
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off", HOME: s.h.home }, wrap: ["/wrapper", "--name", "{name}", "--"], paths: { "/ghost-local": join(s.dir, "..") } }) });
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === launched.row.name ? { ...row, clone: { ...row.clone!, source: "/ghost-local/source" } } : row) }, undefined] as const)));
+    const verified = await s.run(packetVerify(s.dir, commit));
+    expect(verified.checks).toContainEqual({ name: "expected repo", outcome: "pass" });
+  });
   it("verifies and lands a remote-only packet over SSH", async () => {
     const s = setup(); await s.open(); const launched = await s.launch(); const cwd = launched.row.cwd;
     sh(cwd, "checkout", "--detach", "main");

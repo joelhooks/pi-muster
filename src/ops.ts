@@ -1155,7 +1155,11 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
   checks.push(branchEvidence.check);
   if (row.clone?.base) checks.push(yield* probe("clone base", ["merge-base", "--is-ancestor", row.clone.base.sha, packet.id]));
   const roots = yield* remote.run("git", ["rev-list", "--max-parents=0", packet.id], { cwd: row.cwd, timeoutMs: 30_000 });
-  const sourceRoots = (yield* git(sourceOf(project, lane, row), "rev-list", "--max-parents=0", "HEAD")).split("\n");
+  // Servo, 2026-10-20 (content-grill): a lane whose repo exists only on the worker's machine failed with spawn git ENOENT
+  // here. Read the source's roots where the source is.
+  const source = sourceOf(project, lane, row);
+  const sourceRoots = existsSync(source) ? (yield* git(source, "rev-list", "--max-parents=0", "HEAD")).split("\n")
+    : (yield* remote.run("git", ["rev-list", "--max-parents=0", "HEAD"], { cwd: mapPath(source, machine), timeoutMs: 30_000 })).stdout.split("\n");
   checks.push({ name: "expected repo", outcome: roots.code === 0 && roots.stdout.split("\n").filter(Boolean).some(root => sourceRoots.includes(root)) ? "pass" : "fail" });
   const dirty = yield* remote.run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: row.cwd, timeoutMs: 30_000 });
   const generated = [...(lane?.generated ?? []), ...DEFAULT_GENERATED];
