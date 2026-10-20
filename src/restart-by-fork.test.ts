@@ -101,6 +101,18 @@ describe("restart by fork", () => {
     expect(restored.row.profile.extensions).toEqual(["/x/bridge.ts", "/x/ratking.ts", "/x/state.ts"]);
   });
 
+  it("a restart adds named extensions and env to the row and the new pane's launch", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === old.name ? { ...row, profile: { ...row.profile, extensions: ["/x/bridge.ts"], env: { KEEP: "1" } } } : row) }, undefined] as const)));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, extensions: ["/x/peons", "/x/bridge.ts"], env: { PEONS_ON: "1" } }));
+    expect(result.row.profile.extensions).toEqual(["/x/bridge.ts", "/x/peons"]);
+    expect(result.row.profile.env).toEqual({ KEEP: "1", PEONS_ON: "1" });
+    const script = s.host.launcherScripts.at(-1)!;
+    expect(script).toContain("/x/peons");
+    expect(script).toContain("PEONS_ON='1'");
+  });
+
   it("a session with no parent names no successor", () => {
     const root = mkdtempSync(join(tmpdir(), "succession-"));
     const lone = join(root, "lone.jsonl");

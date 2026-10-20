@@ -2510,7 +2510,7 @@ export const restartLockName = (project: string, row: string) =>
 
 /** `overrides` switch the model or thinking at the fork. Switching providers mid-session (/model) can leave an orphaned
  * tool result that Sol rejects; a restart rebuilds the context from the session file (Ernestine SOP, 2026-10-12). */
-const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
+const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
   if (!self) yield* requireOwner(old, env.sessionId, false, project.slug, false);
@@ -2527,7 +2527,11 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   const remote = old.machine !== "local";
   const machine = remote ? yield* machineConfig(old.machine) : null;
   const launchProject = machine ? { ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null } : project;
-  const selected = yield* sessionRestore(old.profile, old.sessionFile, project, old.role, (yield* loadRoster).roster, {
+  // Tin-Tin, 2026-10-20: restart took extensions and env and dropped them without a word. Both join the row's own.
+  const requested: LaunchProfile = { ...old.profile,
+    ...(overrides.extensions !== undefined ? { extensions: mergedExtensions(old.profile.extensions, overrides.extensions) } : {}),
+    ...(overrides.env !== undefined ? { env: { ...old.profile.env, ...overrides.env } } : {}) };
+  const selected = yield* sessionRestore(requested, old.sessionFile, project, old.role, (yield* loadRoster).roster, {
     ...(overrides.model !== undefined ? { model: overrides.model } : {}), ...(overrides.thinking !== undefined ? { thinking: overrides.thinking } : {}) }, remote);
   const notes = [...selected.notes];
   const modelNote = yield* checkRunnableModel(selected.profile.model, old.cwd, { tokens: selected.live.contextTokens });
@@ -2899,7 +2903,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (params.action === "restart") {
       const row = yield* findRow(project, name);
-      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking });
+      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env });
       return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
     }
     if (params.action === "adopt") {
