@@ -87,8 +87,11 @@ it("a repeated owner delivery appends and wakes once; an existing URI under a ne
   const event = { id: `owner-${s.root}`, from: "worker", did: "did:web:worker.example.invalid", verified: true, kind: "data",
     body: JSON.stringify({ type: "owner", recipient: s.session, item }) };
   try {
+    // The wake rides a real fs.watch plus a debounce; await the wake itself rather than a 1 s polling deadline.
+    const woke = new Promise<void>(resolve => s.sendMessage.mockImplementationOnce(() => resolve()));
     s.events.emit("ratking/message", event); s.events.emit("ratking/message", event);
-    await vi.waitFor(() => expect(s.sendMessage).toHaveBeenCalledOnce());
+    await woke;
+    expect(s.sendMessage).toHaveBeenCalledOnce();
     expect(readOwnerQueue(s.session, s.home).items.map(record => record.item)).toEqual([item]);
     const before = readFileSync(ownerPath(s.session, s.home), "utf8");
     s.events.emit("ratking/message", { ...event, id: `owner-new-envelope-${s.root}`,
