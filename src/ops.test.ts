@@ -326,6 +326,10 @@ describe("slow Pi startup", () => {
     expect(result.row.delivery).toBe("none");
     expect(result.proof).toBeNull();
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("launching");
+    // Overthruster, 2026-10-20: close on a launching row names the way out instead of a bare illegal transition.
+    const refused = await failWith(h, agentClose(dir, { name: result.row.name }));
+    expect(refused.message).toContain("is launching");
+    expect(refused.message).toContain("run project_status as the row's owner");
     expect(h.herdr.calls.filter(call => call.method === "agent.prompt")).toHaveLength(0);
     expect(result.notes.join("\n")).toContain(`slow start: Pi still starting after 120 s in ${result.row.pane?.paneId}`);
     expect(result.notes.join("\n")).toContain("start argv already carries any work message");

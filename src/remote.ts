@@ -135,10 +135,22 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
     writeFileSync(join(queue, ticket), String(process.pid), { flag: "wx", mode: 0o600 });
     return ticket;
   }), () => Effect.sync(() => rmdirSync(allocator)));
+  // Overthruster, 2026-10-20: a launcher killed in the queue left its ticket at the head, and every desk's launch on that
+  // machine timed out behind it for 14 minutes. Tickets hold a local pid; a head whose process is gone is skipped, and the
+  // lock it may hold goes with it, since only the head ticket's process ever holds the lock.
+  const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; } };
   return yield* Effect.acquireUseRelease(Effect.succeed(ticket), () => Effect.acquireUseRelease(Effect.gen(function* () {
     while (true) {
       const first = yield* io(() => readdirSync(queue).sort()[0]);
       if (first === ticket && (yield* attempt(lock))) return;
+      if (first !== undefined && first !== ticket) {
+        const holder = yield* io(() => { try { return Number(readFileSync(join(queue, first), "utf8").trim()); } catch { return NaN; } });
+        if (Number.isSafeInteger(holder) && holder > 0 && gone(holder)) {
+          yield* io(() => { try { rmdirSync(lock); } catch {} try { unlinkSync(join(queue, first)); } catch {} });
+          note(`machine ${name}: FIFO launch lock skipped dead ticket ${first} (pid ${holder} is gone)`);
+          continue;
+        }
+      }
       yield* pause;
     }
   }), () => Effect.gen(function* () {
@@ -312,7 +324,11 @@ export const syncRemoteBrief = (name: string, machine: MachineConfig, brief: str
     const bytes = readFileSync(brief);
     const refs = [...bytes.toString("utf8").matchAll(/(?:`(\/[^`\r\n]+)`|"(\/[^"\r\n]+)"|'(\/[^'\r\n]+)'|(\/[A-Za-z0-9_.@/+~-]+))/g)].map(match => (match[1] ?? match[2] ?? match[3] ?? match[4]!).replace(/[.,;:]+$/, ""));
     const referenced = refs.filter(path => Object.keys(machine.paths).some(root => path === root || path.startsWith(`${root}/`))).filter(path => {
-      const stat = lstatSync(path); // Missing mapped inputs refuse before allocation, rather than disappearing from the brief.
+      // Overthruster, 2026-10-20: a brief names the report its worker will write; it can't exist yet. Report paths are
+      // outputs, not inputs. Any other missing mapped input still refuses before allocation.
+      if (!existsSync(path) && /\/reports\//.test(path)) return false;
+      if (!existsSync(path)) throw new Error(`referenced input ${path} does not exist; create it, or name a report under a reports/ directory`);
+      const stat = lstatSync(path);
       if (stat.isSymbolicLink()) throw new Error(`referenced input ${path} is a symlink; name its regular-file source`);
       return stat.isFile();
     });

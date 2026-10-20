@@ -147,6 +147,20 @@ describe("remote launch hygiene", () => {
     expect(notes.join(" ")).toContain("after waiting");
     expect(readdirSync(join(s.h.home, ".config/muster/launch-locks/remote.queue"))).toEqual([]);
   });
+  it("skips a head ticket whose process is gone, with the lock it held", async () => {
+    const s = setup(); const lock = join(s.h.home, ".config/muster/launch-locks/remote");
+    const dead = spawnSync("true").pid!;
+    mkdirSync(`${lock}.queue`, { recursive: true }); mkdirSync(lock);
+    writeFileSync(join(`${lock}.queue`, "0000000000000001"), String(dead));
+    writeFileSync(`${lock}.counter`, "1");
+    const notes: string[] = [];
+    let ran = false;
+    await s.run(withMachineLaunchLock("remote", Effect.sync(() => { ran = true; }), text => notes.push(text), 2000));
+    expect(ran).toBe(true);
+    expect(notes.join(" ")).toContain(`skipped dead ticket 0000000000000001 (pid ${dead} is gone)`);
+    expect(readdirSync(`${lock}.queue`)).toEqual([]);
+    expect(existsSync(lock)).toBe(false);
+  });
   it("bounds stale-lock waits and removes only its own queue ticket", async () => {
     const s = setup(); const lock = join(s.h.home, ".config/muster/launch-locks/remote");
     mkdirSync(lock, { recursive: true });
@@ -249,6 +263,18 @@ describe("remote launch hygiene", () => {
     expect(existsSync(second.brief)).toBe(true);
     await s.run(cleanupRemoteBrief("remote", machine, secondTransfer));
     expect(existsSync(second.brief)).toBe(false);
+  });
+  // Overthruster, 2026-10-20: briefs name the report the worker will write; three launches failed with ENOENT on it.
+  it("skips a report path that does not exist yet and still refuses a missing input", async () => {
+    const s = setup(); const inputs = join(s.h.root, "private"); mkdirSync(inputs);
+    const brief = join(inputs, "brief.md"), report = join(inputs, "reports/deps/report.md");
+    writeFileSync(brief, `Write your report to ${report}.\n`);
+    const machine = config({ env: { HOME: s.h.home }, paths: { [inputs]: "/mapped/private" } });
+    const transfer = join(s.h.home, ".cache/muster-transfers/probe/reports");
+    const synced = await s.run(syncRemoteBrief("remote", machine, brief, transfer));
+    expect(readFileSync(synced.brief, "utf8")).toContain("report.md");
+    writeFileSync(brief, `Read ${join(inputs, "missing.svx")}.\n`);
+    await expect(s.run(syncRemoteBrief("remote", machine, brief, `${transfer}-missing`))).rejects.toThrow("does not exist");
   });
   it.each(["planned", "failed", "interrupted"] as const)("clearly refuses explicit cross-machine relaunch of a %s row without reusing a lock", async state => {
     const s = setup(); await s.open(); const launched = await s.launch();
