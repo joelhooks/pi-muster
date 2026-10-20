@@ -118,11 +118,17 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
   const io = <T>(fn: () => T) => Effect.try({ try: fn, catch: error => new InputError({ message: `machine ${name}: launch queue at ${lock}: ${String(error)}` }) });
   const attempt = (path: string) => io(() => { try { mkdirSync(path, { mode: 0o700 }); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "EEXIST") return false; throw error; } });
   yield* io(() => mkdirSync(queue, { recursive: true, mode: 0o700 }));
-  const started = env.now().getTime();
+  // Switchboard, 2026-10-20: the timeout counted total wait, so a launch two deep behind slow launches failed by design.
+  // It counts time since the queue last moved: a waiter gives up only when the head has been stuck for timeoutMs.
+  let moved = env.now().getTime();
+  let stuck = 0;
   let waited = 0;
+  let head: string | undefined;
+  const progress = (first: string | undefined) => { if (first !== head) { head = first; moved = env.now().getTime(); stuck = 0; } };
   const pause = Effect.gen(function* () {
-    if (Math.max(waited, env.now().getTime() - started) >= timeoutMs) return yield* new InputError({ message: `machine ${name}: FIFO launch lock timed out after ${timeoutMs} ms at ${lock}; inspect the holder and stale tickets before retrying` });
+    if (Math.max(stuck, env.now().getTime() - moved) >= timeoutMs) return yield* new InputError({ message: `machine ${name}: FIFO launch lock timed out: the queue head ${head ?? "(allocator)"} has not moved for ${timeoutMs} ms at ${lock}; inspect the holder and stale tickets before retrying` });
     yield* env.sleep(100);
+    stuck += 100;
     waited += 100;
   });
   const ticket = yield* Effect.acquireUseRelease(Effect.gen(function* () {
@@ -142,6 +148,7 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
   return yield* Effect.acquireUseRelease(Effect.succeed(ticket), () => Effect.acquireUseRelease(Effect.gen(function* () {
     while (true) {
       const first = yield* io(() => readdirSync(queue).sort()[0]);
+      progress(first);
       if (first === ticket && (yield* attempt(lock))) return;
       if (first !== undefined && first !== ticket) {
         const holder = yield* io(() => { try { return Number(readFileSync(join(queue, first), "utf8").trim()); } catch { return NaN; } });

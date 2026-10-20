@@ -147,6 +147,22 @@ describe("remote launch hygiene", () => {
     expect(notes.join(" ")).toContain("after waiting");
     expect(readdirSync(join(s.h.home, ".config/muster/launch-locks/remote.queue"))).toEqual([]);
   });
+  // Switchboard, 2026-10-20: ten desks queued behind 60 s launches; everyone past the fifth timed out on total wait.
+  it("lets ten queued launches through behind slow holders, timing out only on a stuck head", async () => {
+    const s = setup();
+    let clock = 0;
+    const env = { ...s.env, now: () => new Date(clock), sleep: (ms: number) => Effect.promise(async () => { clock += ms; await new Promise(resolve => setImmediate(resolve)); }) };
+    const run = <A, E>(effect: Effect.Effect<A, E, MusterEnv>) => Effect.runPromise(effect.pipe(Effect.provideService(MusterEnv, env)));
+    const order: number[] = [];
+    // Each holder takes 60 s of the shared clock; the waiter timeout is 90 s, so total wait reaches 540 s.
+    const holder = (i: number) => withMachineLaunchLock("remote", Effect.gen(function* () { order.push(i); yield* env.sleep(60_000); }), () => {}, 90_000);
+    await Promise.all(Array.from({ length: 10 }, (_, i) => run(holder(i))));
+    expect(order).toHaveLength(10);
+    const lock = join(s.h.home, ".config/muster/launch-locks/remote");
+    mkdirSync(lock);
+    writeFileSync(join(`${lock}.queue`, "0000000000000999"), String(process.pid));
+    await expect(run(withMachineLaunchLock("remote", Effect.void, () => {}, 2_000))).rejects.toThrow("has not moved for 2000 ms");
+  });
   it("skips a head ticket whose process is gone, with the lock it held", async () => {
     const s = setup(); const lock = join(s.h.home, ".config/muster/launch-locks/remote");
     const dead = spawnSync("true").pid!;
