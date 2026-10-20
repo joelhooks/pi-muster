@@ -63,7 +63,6 @@ describe("live delivery and WIP", () => {
     const s = await setup(1);
     await s.lane("one");
     await landed(s, "one");
-    await runWith(s.h, laneClose(s.dir, "one"));
     let p = await runWith(s.h, load(s.dir));
     expect(p.lanes.find(l => l.slug === "one")?.delivery).toBe("landed");
     expect(inFlight(p)).toHaveLength(0);
@@ -75,9 +74,26 @@ describe("live delivery and WIP", () => {
     expect(awaitingProof(p)).toHaveLength(1);
     await runWith(s.h, laneDeliver(s.dir, { slug: "one", stage: "proven", evidence: "live request returns the new response" }));
     expect(awaitingProof(await runWith(s.h, load(s.dir)))).toHaveLength(0);
+    await runWith(s.h, laneClose(s.dir, "one"));
     await s.lane("two");
     await runWith(s.h, laneClose(s.dir, "two"));
     await runWith(s.h, laneDeliver(s.dir, { slug: "two", stage: "waived", evidence: "docs only, nothing to deploy" }));
+  });
+  // Joel, 2026-10-20 ("cruft"): drovr read "⚠ not flowing · WIP 0 · landed, not live: 23", mostly closed lanes a
+  // release train shipped. A closed lane is not owed a proof, and a line with nothing to act on is hidden.
+  it("a closed landed lane is not owed a proof, and an idle project shows no flow line", async () => {
+    const s = await setup();
+    await s.lane("one");
+    await landed(s, "one");
+    await runWith(s.h, laneClose(s.dir, "one"));
+    const p = await runWith(s.h, load(s.dir));
+    expect(p.lanes.find(l => l.slug === "one")?.delivery).toBe("landed");
+    expect(awaitingProof(p)).toHaveLength(0);
+    expect(flowLine(p, s.h.now.getTime() + 600 * 60_000)).toBe("");
+    const role = { ...p.lanes.find(l => l.slug === "one")!, slug: "desk", kind: "role" as const, state: "open" as const };
+    expect(flowLine({ ...p, lanes: [...p.lanes, role] }, s.h.now.getTime() + 600 * 60_000)).toBe("");
+    await s.lane("two");
+    expect(flowLine(await runWith(s.h, load(s.dir)), s.h.now.getTime())).toContain("WIP 1/3");
   });
   it("stages move forward only, evidence is required, and history is durable", async () => {
     const s = await setup();
@@ -142,14 +158,15 @@ describe("live delivery and WIP", () => {
     expect(text).toContain("lanes: 6 open, 1 proposed, 1 closed\n  open: alpha, bravo, charlie, delta, echo, open-one\n  proposed: later\n");
     expect(text).not.toMatch(/gone|\[deploy/);
   });
-  it("reads naturally with nothing in flight and a fresh proof", async () => {
+  it("reads naturally with one lane in flight and a fresh proof", async () => {
     const s = await setup();
     await s.lane("one");
     await landed(s, "one");
     await runWith(s.h, laneDeliver(s.dir, { slug: "one", stage: "proven", evidence: "checked live" }));
     await runWith(s.h, laneClose(s.dir, "one"));
+    await s.lane("two");
     const line = flowLine(await runWith(s.h, load(s.dir)), s.h.now.getTime());
-    expect(line).toBe("WIP 0/3 · 3 open · backlog empty · landed, not live: none · last proven just now · cycle now · 1/wk");
+    expect(line).toBe("WIP 1/3 · 2 open · backlog empty · landed, not live: none · oldest in flight now · last proven just now · cycle now · 1/wk");
   });
   // drovr 22991118, 2026-10-14: a packet parked on Joel's decision by design read as a stall.
   it("a packet an open decision or approval names is waiting on Joel, not stalled", async () => {
@@ -205,10 +222,13 @@ describe("live delivery and WIP", () => {
     const owner = ownerFeed({ session: "owner", home: s.h.home, project: s.dir, appendEntry: () => {}, sendMessage: () => {} });
     mkdirSync(join(registryPath(s.h.home), ".."), { recursive: true });
     writeFileSync(registryPath(s.h.home), JSON.stringify({ slug: "flow", dir: s.dir, spaceId: "w1", ts: s.h.now.toISOString() }) + "\n");
-    expect(owner.beforeTurn()?.message.content).toContain("WIP 0/3");
+    expect(owner.beforeTurn()?.message.content ?? "").not.toContain("WIP"); // nothing to act on: no line
     await s.lane("one");
     owner.turnEnded();
     expect(owner.beforeTurn()?.message.content).toContain("WIP 1/3");
+    await s.lane("two");
+    owner.turnEnded();
+    expect(owner.beforeTurn()?.message.content).toContain("WIP 2/3");
     owner.dispose();
   });
   it("lets the Muster desk feed own the line without an owner-feed duplicate", async () => {
@@ -226,12 +246,13 @@ describe("live delivery and WIP", () => {
   });
   it("renders the flow line from feed details as one visible line", async () => {
     const s = await setup();
+    await s.lane("one");
     const owner = ownerFeed({ session: "owner", home: s.h.home, project: s.dir, appendEntry: () => {}, sendMessage: () => {} });
     const details = readOwnerTimelineData(owner.beforeTurn()?.message.details);
-    expect(details?.flow).toContain("WIP 0/3");
+    expect(details?.flow).toContain("WIP 1/3");
     const view = new OwnerTimelineView(details!, { expanded: false, noColor: true }, { fg: (_color, text) => text, bold: text => text });
     expect(view.render(200)).toHaveLength(1);
-    expect(view.render(200)[0]).toContain("WIP 0/3");
+    expect(view.render(200)[0]).toContain("WIP 1/3");
     owner.dispose();
   });
   it("keeps rejected and no_changes work out of delivery after closing", async () => {

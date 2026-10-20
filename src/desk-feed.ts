@@ -164,7 +164,7 @@ export function deskFeed(deps: FeedDeps) {
       for (const item of items) count("desk_note", item.id);
       const project = snapshot();
       // The flow line rides in details only: in the note's text it read as words Joel wrote (Joel, 2026-10-14).
-      const flow = project ? flowLine(project, now(), readSince(deps.path, 0).items) : undefined;
+      const flow = (project ? flowLine(project, now(), readSince(deps.path, 0).items) : "") || undefined;
       let pull: string | undefined;
       if (project) {
         const slots = openSlots(project);
