@@ -3342,6 +3342,9 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
     yield* guardSideDesk(project, env.sessionId, "agent_close");
     const row = yield* findRow(project, params.name);
     yield* requireOwner(row, env.sessionId, params.takeover, project.slug);
+    // Overthruster, 2026-10-20: a launcher stopped before allocation left its row launching, and close said only
+    // "CLOSE is not allowed from launching". The owner pass marks a dead launch failed; say so.
+    if (row.state === "launching") return yield* new InputError({ message: `agent_close refused: ${row.name} is launching. If its launch job is still running, wait for its result. If the job died, run project_status as the row's owner: it marks the launch failed, and agent_close then works. Nothing was closed` });
     // drovr, 2026-10-12: closing Quartermaster killed its armed release watch with the pane. A live watch is duty.
     if (row.state !== "closed" && !params.dropWatches) {
       const watches = yield* liveRowWatches(row);
