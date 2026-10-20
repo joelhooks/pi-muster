@@ -1460,6 +1460,19 @@ describe("a lane from launch to close", () => {
     expect((await runWith(h, laneClose(dir, "probe"))).closed).toBe(true);
   });
 
+  it("records an artifact packet in a pr-merge project without a landing commit", async () => {
+    const h = harness();
+    const { dir, clone } = await launchedWorker(h);
+    await runWith(h, projectOpen({ dir, mode: "pr-merge" }));
+    const artifact = join(h.root, "perf-report.txt");
+    writeFileSync(artifact, "measured\n");
+    const reported = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "o", cwd: clone, artifact, summary: "perf", checks: [] }));
+    await runWith(h, packetVerify(dir, reported.packet.id));
+    const landed = await runWith(h, packetLand(dir, { id: reported.packet.id, outcome: "committed", evidence: "read the report at perf-report.txt" }));
+    expect(landed.packet.state).toBe("committed");
+    expect(landed.packet.landedAs).toBeNull();
+  });
+
   it("refuses to record an unverified artifact packet", async () => {
     const h = harness();
     const { dir, clone } = await launchedWorker(h);

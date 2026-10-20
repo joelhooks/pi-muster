@@ -670,7 +670,7 @@ export default function muster(host: ExtensionAPI) {
       skills: Type.Optional(Type.Array(Type.String())),
       noSkills: Type.Optional(Type.Boolean()),
       slim: Type.Optional(Type.Boolean({ description: "Narrow standing role: no extension discovery, no AGENTS.md/CLAUDE.md, no Muster tools or skill; only extensions you list load (e.g. pi-ratking)" })),
-      extensions: Type.Optional(Type.Array(Type.String())),
+      extensions: Type.Optional(Type.Array(Type.String(), { description: "Extension paths. On restore and restart they join the row's list; `!<path>` removes one" })),
       env: Type.Optional(Type.Record(Type.String(), Type.String())),
       compactAt: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
       brief: Type.Optional(Type.String({ description: "Absolute brief path; the default work prompt points at it" })),

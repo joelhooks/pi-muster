@@ -2265,8 +2265,15 @@ export const resumeSuccession = (sessionFile: string | null | undefined): string
   return typeof id === "string" && id ? id : null;
 };
 
-/** Extensions named on a restore join the row's list. Replacing it dropped the bridge, ratking and until (Switchboard, 2026-10-19). */
-const mergedExtensions = (kept: readonly string[] | undefined, added: readonly string[]) => [...new Set([...(kept ?? []), ...added])];
+/**
+ * Extensions named on a restore or restart join the row's list. Replacing it dropped the bridge, ratking and until
+ * (Switchboard, 2026-10-19). `!<path>` takes a path out: Whistler, 2026-10-20, could not drop a package root whose
+ * tools clashed with its extension directory, and Pi refused to start with both.
+ */
+export const mergedExtensions = (kept: readonly string[] | undefined, named: readonly string[]) => {
+  const dropped = new Set(named.filter(path => path.startsWith("!")).map(path => path.slice(1)));
+  return [...new Set([...(kept ?? []), ...named.filter(path => !path.startsWith("!"))])].filter(path => !dropped.has(path));
+};
 
 /** A row's saved environment never claims succession: only the restart that forks the parent does, and a restore re-derives it. */
 const withoutSuccession = (environment: Record<string, string>) => {
@@ -3971,7 +3978,8 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
         else evidence = [evidence, note].filter(Boolean).join("\n");
       }
     }
-    if (outcome === "committed" && !params.attested && project.mode !== "rift-merge") {
+    // Whistler, 2026-10-20: an artifact packet in a pr-merge project has no commit to find on the base branch.
+    if (outcome === "committed" && !params.attested && !recording && project.mode !== "rift-merge") {
       if (!landedAs) return yield* input(`mode ${project.mode} requires landedAs on the lane base branch`);
       const source = sourceOf(project, lane, row);
       const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base);

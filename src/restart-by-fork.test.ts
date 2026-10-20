@@ -111,6 +111,9 @@ describe("restart by fork", () => {
     const script = s.host.launcherScripts.at(-1)!;
     expect(script).toContain("/x/peons");
     expect(script).toContain("PEONS_ON='1'");
+    const dropped = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, extensions: ["!/x/peons", "/x/peons/extensions/pi"] }));
+    expect(dropped.row.profile.extensions).toEqual(["/x/bridge.ts", "/x/peons/extensions/pi"]);
+    expect(s.host.launcherScripts.at(-1)!).not.toContain("'/x/peons'");
   });
 
   it("a session with no parent names no successor", () => {
