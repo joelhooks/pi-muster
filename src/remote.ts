@@ -144,17 +144,28 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
   // Overthruster, 2026-10-20: a launcher killed in the queue left its ticket at the head, and every desk's launch on that
   // machine timed out behind it for 14 minutes. Tickets hold a local pid; a head whose process is gone is skipped, and the
   // lock it may hold goes with it, since only the head ticket's process ever holds the lock.
+  // Switchboard, 2026-10-20: two waiters could both reap one dead head, and the slower one's rmdir took the next live
+  // head's lock. A waiter claims the dead head by renaming it to <ticket>.reap-<pid>: one rename wins, and the claimed
+  // name still sorts first, so no live ticket becomes head (and takes the lock) until the claimant has removed the dead
+  // head's lock and then its ticket. A claim whose claimant died is claimed again the same way.
   const gone = (pid: number) => { try { process.kill(pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; } };
+  const missing = (fn: () => void) => { try { fn(); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } };
   return yield* Effect.acquireUseRelease(Effect.succeed(ticket), () => Effect.acquireUseRelease(Effect.gen(function* () {
     while (true) {
       const first = yield* io(() => readdirSync(queue).sort()[0]);
       progress(first);
       if (first === ticket && (yield* attempt(lock))) return;
       if (first !== undefined && first !== ticket) {
-        const holder = yield* io(() => { try { return Number(readFileSync(join(queue, first), "utf8").trim()); } catch { return NaN; } });
+        const [base, claimant] = first.split(".reap-") as [string, string | undefined];
+        const holder = claimant !== undefined ? Number(claimant)
+          : yield* io(() => { try { return Number(readFileSync(join(queue, first), "utf8").trim()); } catch { return NaN; } });
         if (Number.isSafeInteger(holder) && holder > 0 && gone(holder)) {
-          yield* io(() => { try { rmdirSync(lock); } catch {} try { unlinkSync(join(queue, first)); } catch {} });
-          note(`machine ${name}: FIFO launch lock skipped dead ticket ${first} (pid ${holder} is gone)`);
+          const claimed = join(queue, `${base}.reap-${process.pid}`);
+          const won = yield* io(() => { try { renameSync(join(queue, first), claimed); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; } });
+          if (won) {
+            yield* io(() => { missing(() => rmdirSync(lock)); missing(() => unlinkSync(claimed)); });
+            note(`machine ${name}: FIFO launch lock skipped dead ticket ${base} (${claimant !== undefined ? "its claimant, " : ""}pid ${holder} is gone)`);
+          }
           continue;
         }
       }
@@ -163,7 +174,7 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
   }), () => Effect.gen(function* () {
     note(`machine ${name}: FIFO launch lock acquired${waited ? ` after waiting ${waited} ms` : " without waiting"}`);
     return yield* operation;
-  }), () => Effect.sync(() => rmdirSync(lock))), () => Effect.sync(() => unlinkSync(join(queue, ticket))));
+  }), () => Effect.sync(() => missing(() => rmdirSync(lock)))), () => Effect.sync(() => missing(() => unlinkSync(join(queue, ticket)))));
 });
 
 export const machinesPath = (home: string) => join(home, ".config/muster/machines.json");
