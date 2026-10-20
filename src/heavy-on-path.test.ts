@@ -83,10 +83,12 @@ describe("Muster CLI launch PATH", () => {
     expect(remote.launcherScripts.some(script => script.includes(`export PATH='${expected}'`))).toBe(true);
   });
 
-  it("prepends the owner's PATH at extension load", () => {
-    const script = `await import(${JSON.stringify(join(root, "src/extension-main.ts"))}); console.log(process.env.PATH);`;
-    const output = execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { env: { ...process.env, PATH: "/usr/bin:/bin" }, encoding: "utf8" });
-    expect(output.trim()).toBe(`${bin}${delimiter}/usr/bin:/bin`);
+  it("prepends the owner's PATH at extension load", async () => {
+    // Loading the module is the side effect under test; a fresh evaluation in this worker proves it without spawning node and tsx.
+    vi.stubEnv("PATH", "/usr/bin:/bin");
+    vi.resetModules();
+    await import("./extension-main.ts");
+    expect(process.env.PATH).toBe(`${bin}${delimiter}/usr/bin:/bin`);
   });
 
   // Fleet ships a tree, not a checkout. Local checkouts and CI still enforce Git modes.
