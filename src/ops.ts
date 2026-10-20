@@ -4485,7 +4485,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
   const out = [
     `🐑 ${project.label} [${project.state}, ${project.mode}] next: ${project.nextAction}`,
     deployPostureLine(project),
-    flowLine(project, nowMs, desk),
+    ...[flowLine(project, nowMs, desk)].filter(Boolean),
     ...landedBlock(project, nowMs),
     ...laneBlock(lanes, posture.level),
     `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,

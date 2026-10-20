@@ -65,7 +65,7 @@ export function projectFlowLine(project: string | undefined, home: string = home
   try {
     const dir = project.startsWith("/") ? project : readRegistry(home).get(project)?.dir;
     if (!dir) return undefined;
-    return flowLine(decodeProject(JSON.parse(readFileSync(join(dir, ".brain/data/muster/project.json"), "utf8"))), now);
+    return flowLine(decodeProject(JSON.parse(readFileSync(join(dir, ".brain/data/muster/project.json"), "utf8"))), now) || undefined;
   } catch { return undefined; }
 }
 

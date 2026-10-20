@@ -75,12 +75,13 @@ describe("missing delivery backfill", () => {
   });
 
   it("does not count missing post-cutoff proof in flow metrics", () => {
-    const line = flowLine(decodeProject(project), Date.parse(after));
+    const open = { ...project, lanes: [{ ...lane, state: "open" }] };
+    const line = flowLine(decodeProject(open), Date.parse(after));
     expect(line).toContain("landed, not live: work");
     expect(line).not.toContain("last proven");
     expect(line).not.toContain("cycle");
     expect(line).not.toContain("/wk");
-    const legacyLine = flowLine(decodeProject({ ...project, packets: [{ ...packet, updatedAt: before }] }), Date.parse(after));
+    const legacyLine = flowLine(decodeProject({ ...open, packets: [{ ...packet, updatedAt: before }] }), Date.parse(after));
     expect(legacyLine).toContain("last proven");
     expect(legacyLine).toContain("cycle");
     expect(legacyLine).toContain("1/wk");

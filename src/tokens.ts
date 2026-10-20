@@ -98,12 +98,16 @@ export function inFlight(project: Project): Lane[] {
   return project.lanes.filter(lane => lane.kind === "work" && (lane.state === "open" || lane.state === "draining") &&
     lane.delivery !== "landed" && lane.delivery !== "deployed");
 }
-/** Landed or deployed work still owed a live proof. The flow line shows its age, and a stale one is the alarm, not a wall. */
+/**
+ * Landed or deployed work still owed a live proof. The flow line shows its age, and a stale one is the alarm, not a wall.
+ * Joel, 2026-10-20 ("cruft"): drovr showed "⚠ not flowing · WIP 0 · landed, not live: 23", 20 of them closed lanes a
+ * release train shipped with no per-lane stage. Closing a lane is its owner's last word, so only open lanes are owed.
+ */
 export function awaitingProof(project: Project): Lane[] {
   const { level } = deployPosture(project);
   return project.lanes.filter(lane => lane.kind === "work" && (lane.delivery === "landed" || lane.delivery === "deployed") &&
     !(lane.delivery === "deployed" && laneDeployLevel(lane, level) >= 2) &&
-    (lane.state === "open" || lane.state === "draining" || lane.state === "closed"));
+    (lane.state === "open" || lane.state === "draining"));
 }
 /** Unranked work follows ranked work; creation order breaks ties. */
 export function backlog(project: Project): Lane[] {
@@ -178,6 +182,9 @@ export function flowLine(project: Project, now: number = Date.now(), desk: reado
   const next = backlog(project)[0];
   const retro = project.lanes.find(lane => lane.kind === "retro" && (lane.state === "open" || lane.state === "draining"));
   const ago = (at: number) => { const age = formatAge(Math.max(0, now - at)); return age === "now" ? "just now" : `${age} ago`; };
+  // Joel, 2026-10-20: with nothing in flight, owed, stalled or waiting to pull, the line is noise. Hide it.
+  const actionable = lanes.length > 0 || owed.length > 0 || unlanded || watching.length > 0 || retro !== undefined || (slots !== 0 && next !== undefined);
+  if (!actionable) return "";
   return [
     `${stalled || unlanded ? "⚠ not flowing · " : ""}WIP ${limit === null ? `${lanes.length}, no limit` : `${lanes.length}/${limit}`}`,
     ...(slots ? [`${slots} open`, next ? `next: ${next.slug}` : "backlog empty"] : []),

@@ -95,20 +95,23 @@ describe("pull flow", () => {
       return lane(`done-${i}`, { state: "closed", delivery: "proven", openedAt: new Date(proven - (i + 1) * 3_600_000).toISOString(),
         deliveryHistory: [{ stage: "proven", at: new Date(proven).toISOString(), evidence: "checked" }, { stage: "proven", at: new Date(proven + 1).toISOString(), evidence: "checked again" }] });
     });
-    const p = decodeProject({ ...project, lanes });
+    const active = lane("active", { state: "open", createdAt: new Date(now).toISOString() });
+    const p = decodeProject({ ...project, lanes: [...lanes, active] });
     expect(flowLine(p, now)).toContain("cycle 5h");
     expect(flowLine(p, now)).toContain("8/wk");
-    const empty = flowLine(decodeProject({ ...project, lanes: [] }), now);
+    const empty = flowLine(decodeProject({ ...project, lanes: [active] }), now);
     expect(empty).not.toContain("cycle");
     expect(empty).not.toContain("/wk");
     expect(empty).not.toContain("last proven");
-    expect(flowLine(decodeProject({ ...project, lanes: [lanes[11]] }), now)).toContain("0/wk");
+    expect(flowLine(decodeProject({ ...project, lanes: [lanes[11], active] }), now)).toContain("0/wk");
+    expect(flowLine(decodeProject({ ...project, lanes }), now)).toBe(""); // proofs alone are not actionable
   });
   it("shows free slots and the ranked backlog, breaking ties by creation time", async () => {
     const { project } = await setup();
     const p = decodeProject({ ...project, policy: { wipLimit: 3 }, lanes: [lane("unranked"), lane("later", { rank: 1, createdAt: "2026-10-02T00:00:00.000Z" }), lane("first", { rank: 1 }), lane("role", { kind: "role", rank: 0 }), lane("active", { state: "open" })] });
     expect(flowLine(p)).toContain("2 open · next: first");
-    expect(flowLine(decodeProject({ ...p, lanes: [] }))).toContain("3 open · backlog empty");
+    expect(flowLine(decodeProject({ ...p, lanes: [] }))).toBe("");
+    expect(flowLine(decodeProject({ ...p, lanes: [lane("first", { rank: 1 })] }))).toContain("3 open · next: first");
     expect(flowLine(decodeProject({ ...p, policy: { wipLimit: null } }))).not.toContain("open · next:");
     const { policy: _policy, ...uncapped } = p;
     expect(flowLine(decodeProject(uncapped))).toContain("WIP 1, no limit"); // uncapped by default (Joel, 2026-10-10)
