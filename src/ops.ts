@@ -82,7 +82,7 @@ import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
 import { readRegistry } from "./registry.ts";
 import { watchFallback } from "./desk-local.ts";
-import { pushRemoteBinding, syncRemoteBindings } from "./remote.ts";
+import { pushRemoteBinding, stderrClass, syncRemoteBindings } from "./remote.ts";
 import { TOKEN_SOURCE, TOKEN_TTL_MS, deriveTokens, lacksTurnEvidence, deployPosture, deployPostureLine, laneDeployLevel, flowLine, landedNotLive, openDeskItems, wipRefusal } from "./tokens.ts";
 import { forkSessionAt } from "./session-tree.ts";
 import { traceProjectTasks, type TaskTrace } from "./task-status.ts";
@@ -1158,9 +1158,14 @@ const verifyRemotePacket = (project: Project, lane: Lane | undefined, row: Agent
   // Servo, 2026-10-20 (content-grill): a lane whose repo exists only on the worker's machine failed with spawn git ENOENT
   // here. Read the source's roots where the source is.
   const source = sourceOf(project, lane, row);
-  const sourceRoots = existsSync(source) ? (yield* git(source, "rev-list", "--max-parents=0", "HEAD")).split("\n")
-    : (yield* remote.run("git", ["rev-list", "--max-parents=0", "HEAD"], { cwd: mapPath(source, machine), timeoutMs: 30_000 })).stdout.split("\n");
-  checks.push({ name: "expected repo", outcome: roots.code === 0 && roots.stdout.split("\n").filter(Boolean).some(root => sourceRoots.includes(root)) ? "pass" : "fail" });
+  const sourceRead = existsSync(source) ? { code: 0, stdout: yield* git(source, "rev-list", "--max-parents=0", "HEAD"), stderr: "" }
+    : yield* remote.run("git", ["rev-list", "--max-parents=0", "HEAD"], { cwd: mapPath(source, machine), timeoutMs: 30_000 });
+  const sourceRoots = sourceRead.stdout.split("\n");
+  // A failed read names its cause (Switchboard, #10 review): which side failed, its exit code and first stderr line.
+  const rootsFailure = roots.code !== 0 ? `clone roots: exit ${roots.code}: ${stderrClass(roots.stderr)}`
+    : sourceRead.code !== 0 ? `source roots on ${row.machine}: exit ${sourceRead.code}: ${stderrClass(sourceRead.stderr)}` : undefined;
+  checks.push(rootsFailure ? { name: "expected repo", outcome: "fail", detail: rootsFailure }
+    : { name: "expected repo", outcome: roots.stdout.split("\n").filter(Boolean).some(root => sourceRoots.includes(root)) ? "pass" : "fail" });
   const dirty = yield* remote.run("git", ["status", "--porcelain=v1", "-z", "--untracked-files=all"], { cwd: row.cwd, timeoutMs: 30_000 });
   const generated = [...(lane?.generated ?? []), ...DEFAULT_GENERATED];
   const paths = parsePorcelainZ(dirty.stdout).filter(path => !isGenerated(path, generated));
