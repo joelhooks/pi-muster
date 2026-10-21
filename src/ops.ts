@@ -181,6 +181,12 @@ const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
   if (pane.agent) return yield* input(`launch pane ${paneId} still hosts agent ${pane.agent}; close or adopt it before starting another Pi`);
 });
 
+/** Errors raised before the launch command was typed into the pane. No Pi of ours can be in that pane: whatever
+ * Herdr shows there is foreign, so a launch job never credits it as a started Pi. */
+const raisedBeforeTyping = new WeakSet<object>();
+const beforeTyping = (error: unknown) => { if (typeof error === "object" && error !== null) raisedBeforeTyping.add(error); };
+export const failedBeforeTyping = (error: unknown) => typeof error === "object" && error !== null && raisedBeforeTyping.has(error);
+
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
 const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string, jobId?: string) => {
@@ -462,7 +468,8 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(policyComms(project.policy)), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
     // A later error leaves a row whose pane already hosts a Pi launching, not failed: its Pi is starting or running.
-    return yield* launch.pipe(Effect.tapError(() => Effect.gen(function* () {
+    return yield* launch.pipe(Effect.tapError(error => Effect.gen(function* () {
+      if (!typed) beforeTyping(error);
       const latest = (yield* load(dir)).agents.find(agent => agent.name === name);
       if (typed && (yield* paneHostsPi(latest?.pane)) === true) return;
       yield* patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]);
@@ -2960,7 +2967,8 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
   // Barnum and KITT, 2026-10-20: an error after the Pi is in the pane left a running worker recorded failed.
   // A row the launch already recorded failed (a model-proof refusal) keeps that verdict and title.
   const current = failed ? (yield* load(dir)).agents.find(agent => agent.name === row.name) : undefined;
-  const started = failed && current?.state !== "failed" ? (yield* rowHostsPi(current)) === true : false;
+  // An error raised before the launch command was typed never started a Pi, whatever Herdr shows in the pane.
+  const started = failed && current?.state !== "failed" && !failedBeforeTyping(Cause.squash(result.cause)) ? (yield* rowHostsPi(current)) === true : false;
   const pending = !failed && result.value.row.state === "launching";
   const kind = failed ? "blocked" as const : "action" as const;
   const title = `Launch ${row.name} ${started ? "errored after its Pi started; adopt it" : failed ? "failed" : pending ? "started slowly; not proven yet" : "finished"}`;
@@ -3252,10 +3260,12 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         : stale.includes(other) ? { ...other, pane: null, updatedAt: iso(env) } : other);
       return [{ ...current, agents }, binding] as const;
     })).pipe(Effect.tapError(failLaunch));
+    let typed = false;
     const launched = yield* Effect.gen(function* () {
       yield* guardLaunchShell(binding.paneId);
       const script = yield* writeLaunchFile(join(env.home, ".pi/agent"), `#!/bin/sh\nset -e\n${shellPrelude(row.cwd, agentEnvironment, pathPrepend)}${piReceiptSuffix(piReceiptId)}\nexec ${["pi", ...argv].map(shellQuote).join(" ")}`);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
+      typed = true;
 
       const wait = yield* waitForSession(binding.paneId, null, () => findSessionFile(row.cwd, row.sessionId, env.home));
       const sessionFile = wait.state === "ready" ? wait.sessionFile : null;
@@ -3283,7 +3293,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       }
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
       return { binding, agent, sessionFile, pending: wait.state === "pending" };
-    }).pipe(Effect.tapError(failLaunch));
+    }).pipe(Effect.tapError(error => { if (!typed) beforeTyping(error); return failLaunch(); }));
 
     const actualId = launched.sessionFile ? sessionIdFromFile(launched.sessionFile) : null;
     const liveRestore = yield* sessionRestore(launchProfile, launched.sessionFile, project, row.role, roster, params.action === "restore" ? params : {});
