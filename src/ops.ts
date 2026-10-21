@@ -3435,7 +3435,13 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
     yield* requireOwner(row, env.sessionId, params.takeover, project.slug);
     // Overthruster, 2026-10-20: a launcher stopped before allocation left its row launching, and close said only
     // "CLOSE is not allowed from launching". The owner pass marks a dead launch failed; say so.
-    if (row.state === "launching") return yield* new InputError({ message: `agent_close refused: ${row.name} is launching. If its launch job is still running, wait for its result. If the job died, run project_status as the row's owner: it marks the launch failed, and agent_close then works; if the pane hosts a Pi, it names the adopt call instead. Nothing was closed` });
+    // A launch job with an outcome is over (an orphaned launch closes as `action`), and a row with no job record has none
+    // in flight: only a launch still in flight is harmed by a close.
+    if (row.state === "launching") {
+      const jobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
+      const inFlight = findLaunchJob(jobs, project.slug, row);
+      if (inFlight) return yield* new InputError({ message: `agent_close refused: ${row.name} is launching and launch job ${inFlight.id} has no outcome yet; closing would kill a launch in flight. Wait for its result. If the job died, run project_status as the row's owner: it marks the launch failed, and agent_close then works; if the pane hosts a Pi, it names the adopt call instead. Nothing was closed` });
+    }
     // drovr, 2026-10-12: closing Quartermaster killed its armed release watch with the pane. A live watch is duty.
     if (row.state !== "closed" && !params.dropWatches) {
       const watches = yield* liveRowWatches(row);
