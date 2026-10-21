@@ -77,12 +77,26 @@ describe("launch receipt mail", () => {
     expect(items(h.sessionId, h.home)).toHaveLength(0);
   });
 
-  it("an owner without a row appends JSONL without sending", async () => {
+  // Tin-Tin, P5 audit 1: desks started outside Muster own workers but have no row; their receipts bypassed mail.
+  it("an owner without a row gets mail at the name its worker row records", async () => {
     const { h, dir, receipt, sends, respond } = await setup(false);
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => row.name === "worker" ? { ...row, ownerName: "rowless-owner" } : row) }, null] as const)));
+    respond(sentOk);
+    await runWith(h, runLaunchJob(dir, receipt.jobId));
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toEqual(expect.arrayContaining(["--to", "rowless-owner"]));
+    expect(items(h.sessionId, h.home)).toHaveLength(0);
+  });
+
+  it("an owner with no row and no recorded name appends JSONL with the reason, without sending", async () => {
+    const { h, dir, receipt, sends, respond } = await setup(false);
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(({ ownerName: _, ...row }) => row) }, null] as const)));
     respond(sentOk);
     await runWith(h, runLaunchJob(dir, receipt.jobId));
     expect(sends).toHaveLength(0);
-    expect(items(h.sessionId, h.home)).toHaveLength(1);
+    const found = items(h.sessionId, h.home);
+    expect(found).toHaveLength(1);
+    expect(found[0]?.text).toContain("rat king mail not sent: owner has no Rat King name");
   });
 });
 

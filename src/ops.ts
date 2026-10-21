@@ -2978,8 +2978,11 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
   const kind = failed ? "blocked" as const : "action" as const;
   const title = `Launch ${row.name} ${started ? "errored after its Pi started; adopt it" : failed ? "failed" : pending ? "started slowly; not proven yet" : "finished"}`;
   // One plain Rat King mail from muster/launcher. Only a mail that did not go out falls back to the direct JSONL append.
-  const ownerRatking = launchOwnerRatkingName(job.owner, registeredCatalogs(env.home, dir));
-  const mail: LaunchMailResult = ownerRatking === undefined ? { sent: false }
+  // Tin-Tin, P5 audit 1 (2026-10-21): 237 of 239 local launch receipts went to owners with no row of their own (desks
+  // started outside Muster), so the lookup found nothing and the receipt fell back silently. The worker row records
+  // the owner's Rat King name at launch; use it.
+  const ownerRatking = launchOwnerRatkingName(job.owner, registeredCatalogs(env.home, dir)) ?? row.ownerName;
+  const mail: LaunchMailResult = ownerRatking === undefined ? { sent: false, reason: "owner has no Rat King name: no open row runs its session and the row records no ownerName" }
     : yield* sendLaunchMail({ cli: ratkingCliPath(process.env, env.home), cwd: dir, to: ownerRatking, kind, title, body, lane: row.lane, log: job.log });
   yield* mutate(dir, current => Effect.gen(function* () {
     const latest = yield* findRow(current, row.name);

@@ -92,7 +92,9 @@ describe("asynchronous launch admission", () => {
     const items = readOwnerItems(h.sessionId, h.home);
     expect(items).toHaveLength(1);
     expect(items[0]?.kind).toBe("action");
-    expect(items[0]?.text.endsWith(result.body)).toBe(true);
+    // No Rat King CLI runs here, so the mail to the row's ownerName fails and the receipt falls back, naming why.
+    expect(items[0]?.text).toContain(result.body);
+    expect(items[0]?.text).toContain("rat king mail not sent");
     expect(mentions(items[0]!, h.sessionId)).toBe(true);
     // rats-nest, 2026-10-13: the owner queue gets a short 🐑 receipt; argv and routine prose stay in the launch log.
     expect(result.body.split("\n")[0]).toMatch(new RegExp(`^🐑 launched ${row.name} · `));
