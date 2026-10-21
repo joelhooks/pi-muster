@@ -115,6 +115,44 @@ describe("asynchronous launch admission", () => {
     expect(readOwnerItems(h.sessionId, h.home)).toMatchObject([{ kind: "blocked", text: expect.stringContaining("slow path diagnostic") }]);
   });
 
+  it("fails the row, never crediting a Pi, when the fresh pane already hosts a foreign agent", async () => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    const addPane = h.herdr.addPane.bind(h.herdr);
+    // The row moves on (an adopt race) before the refusal can fail it, so only the typed guard keeps the Pi uncredited.
+    const path = join(dir, ".brain/data/muster/project.json");
+    h.herdr.addPane = (...args) => {
+      const pane = addPane(...args);
+      pane.agent = "claude"; pane.name = "outsider";
+      const catalog = JSON.parse(readFileSync(path, "utf8"));
+      writeFileSync(path, JSON.stringify({ ...catalog, agents: catalog.agents.map((row: object) => ({ ...row, state: "running" })) }));
+      return pane;
+    };
+    const result = await runWith(h, runLaunchJob(dir, receipt.jobId!));
+    expect(result.kind).toBe("blocked");
+    expect(result.body).toContain("still hosts agent claude");
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
+    expect(readOwnerItems(h.sessionId, h.home)[0]?.text).not.toContain("errored after its Pi started");
+    expect(readLaunchJob(h.home, receipt.jobId)).toMatchObject({ state: "failed", outcome: "blocked" });
+  });
+
+  it("still tells the owner to adopt a Pi that started before a later launch error", async () => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    const handle = h.herdr.handle.bind(h.herdr);
+    let typed = false;
+    h.herdr.handle = (method, params) => {
+      if (typed && method === "agent.get") throw new Error("herdr dropped after the Pi started");
+      const result = handle(method, params);
+      if (method === "pane.send_input") typed = true;
+      return result;
+    };
+    const result = await runWith(h, runLaunchJob(dir, receipt.jobId!));
+    expect(result.kind).toBe("blocked");
+    expect(readOwnerItems(h.sessionId, h.home)[0]?.text).toContain("errored after its Pi started; adopt it");
+    expect((await runWith(h, load(dir))).agents[0]?.state).not.toBe("failed");
+  });
+
   it("recovers a dead pid through project_status without re-spawning", async () => {
     const { h, dir, request } = await setup();
     const receipt = await runWith(h, agentLaunch(dir, request));
