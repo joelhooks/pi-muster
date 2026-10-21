@@ -134,10 +134,10 @@ describe("switchboard view", () => {
     const view = { groups: inbox(queues, NOW), fleet: { projects: 3, lanes: 15, lanesClosed: 14, running: 5, toLand: 1 }, latest: latestPost(queues), now: NOW };
     expect(view.latest).toMatchObject({ project: "drovr", kind: "done" });
     const tokens = switchboardTokens(view);
-    expect(tokens).toEqual({ progress: "☎️ switchboard", now: "🏁 now drovr: title d5", agents: "🐑 3p · 5 run · 1 to land", needs: "🙋 4 · 2 projects" });
+    expect(tokens).toEqual({ progress: "📞 switchboard", now: "🏁 now drovr: title d5", agents: "🐑 3p · 5 run · 1 to land", needs: "🙋 4 · 2 projects" });
     expect(switchboardTokens({ ...view, now: NOW + 3 * 3_600_000 }).now).toBe("🏁 3h drovr: title d5");
     expect([...(switchboardTokens({ ...view, latest: { ...view.latest!, title: "x".repeat(80) } }).now ?? "")].length).toBe(32);
-    expect(switchboardTokens({ groups: [], fleet: null, latest: null, now: NOW })).toEqual({ progress: "☎️ switchboard", now: null, agents: null, needs: null });
+    expect(switchboardTokens({ groups: [], fleet: null, latest: null, now: NOW })).toEqual({ progress: "📞 switchboard", now: null, agents: null, needs: null });
   });
 
   it("sums the fleet from live projects only", () => {
@@ -172,7 +172,7 @@ describe("desk_answer", () => {
     expect(answered.remaining).toBe(0);
     expect(answered.nudged).toHaveLength(1);
     expect(h.sent.at(-1)?.message).toContain("go with option B");
-    expect(readDesk(queuePath("probe", h.home)).at(-1)).toMatchObject({ kind: "done", resolves: "p1", from: "☎️ switchboard" });
+    expect(readDesk(queuePath("probe", h.home)).at(-1)).toMatchObject({ kind: "done", resolves: "p1", from: "📞 switchboard" });
     expect(await runWith(h, loadInbox)).toMatchObject([{ project: "probe", items: [] }]);
     expect((await failWith(h, deskAnswer({ project: "probe", id: "p1", answer: "again" })))._tag).toBe("NotFound");
   });

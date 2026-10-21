@@ -10,7 +10,7 @@ import { PROCESS_STATES } from "./machines.ts";
 import { openDeskItems } from "./tokens.ts";
 
 /**
- * Switchboard ☎️: one inbox over every project's desk queue. It reads and
+ * Switchboard 📞: one inbox over every project's desk queue. It reads and
  * routes; it never runs a project. Project desks stay the authority for their
  * own work, and the queue files stay the only shared state.
  */
@@ -184,7 +184,7 @@ export function answerPost(answer: string, item: Pick<InboxItem, "id">, kind: An
   const text = answer.trim().replace(/\s+/g, " ");
   if (!text) throw new Error("an answer needs text");
   const short = text.length <= 80 ? text : `${text.slice(0, 79)}…`;
-  return { from: "☎️ switchboard", kind, title: short, ...(text.length > 80 ? { body: answer.trim() } : {}), resolves: item.id };
+  return { from: "📞 switchboard", kind, title: short, ...(text.length > 80 ? { body: answer.trim() } : {}), resolves: item.id };
 }
 
 /** Sidebar `needs` for the Switchboard's own space. */
@@ -333,7 +333,7 @@ export function switchboardTokens(view: Pick<SystemView, "groups" | "fleet" | "l
     ? [`🐑 ${fleet.projects}p`, fleet.running > 0 ? `${fleet.running} run` : "", fleet.toLand > 0 ? `${fleet.toLand} to land` : "", fleet.lanes > 0 ? `${fleet.lanesClosed}/${fleet.lanes} lanes` : ""].filter(Boolean)
     : [];
   return {
-    progress: "☎️ switchboard",
+    progress: "📞 switchboard",
     now: latest ? clip(`${POST_GLYPH[latest.kind]} ${formatAge(Math.max(0, view.now - latest.ts))} ${latest.project}: ${latest.title}`) : null,
     agents: fit(fleetParts),
     needs: switchboardNeeds(view.groups),

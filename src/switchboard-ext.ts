@@ -36,7 +36,7 @@ export interface SwitchboardDeps {
 }
 
 /**
- * Switchboard ☎️: the inbox over every project desk. Nothing starts until a
+ * Switchboard 📞: the inbox over every project desk. Nothing starts until a
  * session opts in with `--switchboard`, `MUSTER_SWITCHBOARD=1`, `/switchboard`,
  * the shortcut, or `desk_inbox`, so every other session keeps a side-effect-free startup.
  */
@@ -82,7 +82,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   const failed = (error: unknown) => {
     if (loggedFailure) return;
     loggedFailure = true;
-    console.error(`☎️ Switchboard refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`📞 Switchboard refresh failed: ${error instanceof Error ? error.message : String(error)}`);
   };
   const provideLive = <A>(program: Effect.Effect<A, unknown, any>) => {
     if (!liveLayer) throw new Error("Switchboard is not activated");
@@ -113,7 +113,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
 
   const repaint = () => {
     const count = state.groups.reduce((total, group) => total + group.items.length, 0);
-    setSignal?.(`☎️ ${count ? `${count} open` : "inbox clear"} · ${OPEN_HINT}`);
+    setSignal?.(`📞 ${count ? `${count} open` : "inbox clear"} · ${OPEN_HINT}`);
     // Pi coalesces these requests; widget and overlay often share the same TUI.
     tui?.requestRender();
     if (overlayTui !== tui) overlayTui?.requestRender();
@@ -182,7 +182,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     stopWatch = watchSwitchboard(home, schedule);
     // An agent Muster launched (desk, hawk, boss, worker, judge) owns one project; it may browse
     // the fleet locally but never registers for every tenant's pages.
-    if (deps.env.MUSTER_ROLE) ctx.ui.notify(`☎️ ${deps.env.MUSTER_ROLE} sessions browse the Switchboard but are not paged; only a non-project session registers`, "info");
+    if (deps.env.MUSTER_ROLE) ctx.ui.notify(`📞 ${deps.env.MUSTER_ROLE} sessions browse the Switchboard but are not paged; only a non-project session registers`, "info");
     else unregister = registerSwitchboardSession(home, ctx.sessionManager.getSessionId(), deps.env.RATKING_NAME);
     const ui = ctx.ui;
     let signal: string | undefined;
@@ -235,9 +235,9 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     try {
       const result = await provide(ctx, deskAnswer({ project: item.project, id: item.id, answer: text, kind }));
       const nudged = result.nudged.length ? `; desk nudged (${result.nudged.join(", ")})` : "; no Muster desk to nudge, it reads the queue on its next turn";
-      ctx.ui.notify(`☎️ answered ${itemRef(item)}${nudged}`, "info");
+      ctx.ui.notify(`📞 answered ${itemRef(item)}${nudged}`, "info");
     } catch (error) {
-      ctx.ui.notify(`☎️ answer failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      ctx.ui.notify(`📞 answer failed: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
     await refresh();
   };
@@ -266,7 +266,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
           if (!result.live) ctx.ui.notify("no live desk; a answers from here", "info");
           else return;
         } catch (error) {
-          ctx.ui.notify(`☎️ desk focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          ctx.ui.notify(`📞 desk focus failed: ${error instanceof Error ? error.message : String(error)}`, "error");
         }
         continue;
       }
@@ -301,12 +301,12 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   });
 
   pi.registerCommand("switchboard", {
-    description: "☎️ Switchboard: `/switchboard` browses every project's open items; `on` and `off` show or hide the live inbox.",
+    description: "📞 Switchboard: `/switchboard` browses every project's open items; `on` and `off` show or hide the live inbox.",
     handler: async (args, ctx) => {
       const arg = args.trim();
       if (arg === "off") {
         deactivate(ctx);
-        ctx.ui.notify("☎️ Switchboard off", "info");
+        ctx.ui.notify("📞 Switchboard off", "info");
       } else if (arg === "on") {
         await activate(ctx);
       } else {

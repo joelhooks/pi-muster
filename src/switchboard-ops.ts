@@ -97,7 +97,7 @@ export const nudgeSwitchboards = (project: string, record: { id: string; kind: s
     const dir = switchboardSessionsDir(env.home);
     const named = process.env.MUSTER_SWITCHBOARD_SESSION?.trim();
     const targets = new Set([...(named ? [named] : []), ...(existsSync(dir) ? readdirSync(dir).map(decodeURIComponent) : [])]);
-    const text = `☎️ Desk queue changed: [${project}#${record.resolves ?? record.id}] ${record.resolves ? "resolved" : record.kind}. Read desk_inbox for the current fleet; don't answer without Joel.`;
+    const text = `📞 Desk queue changed: [${project}#${record.resolves ?? record.id}] ${record.resolves ? "resolved" : record.kind}. Read desk_inbox for the current fleet; don't answer without Joel.`;
     const mode = intercom.mode ? yield* intercom.mode().pipe(Effect.orElseSucceed(() => "intercom" as const)) : "intercom";
     if (mode === "ratking") {
       // Each subscribed Switchboard by the Rat King name it recorded. Never the literal `switchboard`: that DID is
@@ -208,7 +208,7 @@ export const deskAnswer = (params: DeskAnswerInput) =>
     const live = desks.length ? yield* intercom.sessions().pipe(Effect.catchCause(() => Effect.succeed(undefined))) : undefined;
     const nudged: string[] = [];
     for (const desk of desks) {
-      const message = `☎️ Joel answered ${itemRef({ project: params.project, id: item.id })} "${item.title}": ${params.answer.trim()}`;
+      const message = `📞 Joel answered ${itemRef({ project: params.project, id: item.id })} "${item.title}": ${params.answer.trim()}`;
       const result = yield* intercom.send({ kind: "alias", project: params.project, row: desk.name }, message).pipe(Effect.catchCause(() => Effect.succeed({ status: "unavailable" as const })));
       const status = result.status === "delivered" && live && !live.includes(desk.sessionId) ? "queued, no live session" : result.status === "delivered" ? "sent" : result.status;
       nudged.push(`${desk.name} (${desk.sessionId}): ${status}`);

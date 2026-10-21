@@ -158,8 +158,8 @@ function itemLine(item: InboxItem, width: number, theme: ViewTheme, selected = f
 
 export function headline(groups: readonly InboxGroup[], theme: ViewTheme): string {
   const total = openCount(groups);
-  if (total === 0) return `${theme.fg("accent", "☎️ Switchboard")} ${theme.fg("muted", "· inbox clear")}`;
-  return `${theme.fg("accent", "☎️ Switchboard")} ${theme.fg("muted", `· ${total} open · ${groups.length} project${groups.length === 1 ? "" : "s"}`)}`;
+  if (total === 0) return `${theme.fg("accent", "📞 Switchboard")} ${theme.fg("muted", "· inbox clear")}`;
+  return `${theme.fg("accent", "📞 Switchboard")} ${theme.fg("muted", `· ${total} open · ${groups.length} project${groups.length === 1 ? "" : "s"}`)}`;
 }
 
 const HEAT = [
@@ -210,7 +210,7 @@ export function systemLine(state: SwitchboardState, theme: ViewTheme, room = Num
           .join(" ")}`;
   const age = total === 0 ? "" : ` ${theme.fg("dim", `· oldest ${formatAge(oldest)}`)}`;
   const fleet = state.fleet ? `${theme.fg("dim", " │ ")}${theme.fg("muted", fleetLine(state.fleet))}` : "";
-  const head = `${theme.fg("accent", "☎️")} ${asks}`;
+  const head = `${theme.fg("accent", "📞")} ${asks}`;
   const fits = (line: string) => visibleWidth(line) <= room;
   return [`${head}${age}${fleet}`, `${head}${fleet}`, `${head}${age}`].find(fits) ?? head;
 }
@@ -225,7 +225,7 @@ export function renderWidget(state: SwitchboardState, width: number, theme: View
   }
   if (!activityEnabled(width, theme, env)) {
     const oldest = openCount(state.groups) ? ` · oldest ${formatAge(Math.max(0, ...state.groups.map((g) => g.oldestMs)))}` : "";
-    return [stripVTControlCharacters(truncateToWidth(`☎️ ${activitySummary(state.groups, state.activity, now)}${oldest} · ${OPEN_HINT}`, width))];
+    return [stripVTControlCharacters(truncateToWidth(`📞 ${activitySummary(state.groups, state.activity, now)}${oldest} · ${OPEN_HINT}`, width))];
   }
   return renderActivity(state.groups, state.activity, width, theme, now).map(line => fitLine(line, width));
 }
