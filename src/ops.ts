@@ -181,11 +181,15 @@ const guardLaunchShell = (paneId: string) => Effect.gen(function* () {
   if (pane.agent) return yield* input(`launch pane ${paneId} still hosts agent ${pane.agent}; close or adopt it before starting another Pi`);
 });
 
-/** Errors raised before the launch command was typed into the pane. No Pi of ours can be in that pane: whatever
- * Herdr shows there is foreign, so a launch job never credits it as a started Pi. */
-const raisedBeforeTyping = new WeakSet<object>();
-const beforeTyping = (error: unknown) => { if (typeof error === "object" && error !== null) raisedBeforeTyping.add(error); };
-export const failedBeforeTyping = (error: unknown) => typeof error === "object" && error !== null && raisedBeforeTyping.has(error);
+/** An error raised before the launch command was typed into the pane. No Pi of ours can be in that pane: whatever
+ * Herdr shows there is foreign, so a launch job never credits it as a started Pi. The mark is the error's own tag, so
+ * it survives any layer that maps the error and keeps it. */
+export class LaunchNotTyped extends Schema.TaggedError<LaunchNotTyped>()("LaunchNotTyped", {
+  message: Schema.String,
+}) {}
+export const failedBeforeTyping = (error: unknown) => typeof error === "object" && error !== null && (error as { _tag?: unknown })._tag === "LaunchNotTyped";
+/** Job launches only: the foreground tool keeps the original error and tag. */
+const markBeforeTyping = (jobId: string | undefined) => (error: { readonly message: string }) => jobId === undefined ? error : new LaunchNotTyped({ message: error.message });
 
 // ---------- remote lanes (the owner catalog always stays local) ----------
 
@@ -278,6 +282,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   if (syncedBrief) resolved.notes.push(syncedBrief.note);
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
   let modelFailure: GuardFailed | null = null;
+  let raisedBeforeTyping = false;
   return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
     if (mappedProvider) {
       // Fail closed: never let a missing model on the target silently fall back to another one.
@@ -469,12 +474,12 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     });
     // A later error leaves a row whose pane already hosts a Pi launching, not failed: its Pi is starting or running.
     return yield* launch.pipe(Effect.tapError(error => Effect.gen(function* () {
-      if (!typed) beforeTyping(error);
+      if (!typed) raisedBeforeTyping = true;
       const latest = (yield* load(dir)).agents.find(agent => agent.name === name);
       if (typed && (yield* paneHostsPi(latest?.pane)) === true) return;
       yield* patchRow(dir, name, null, [{ type: "LAUNCH_FAILED" }]);
     }).pipe(Effect.catch(() => Effect.void))));
-  })).pipe(Effect.mapError(error => modelFailure ?? error));
+  })).pipe(Effect.mapError(error => modelFailure ?? (raisedBeforeTyping ? markBeforeTyping(jobId)(error as { message: string }) : error)));
 }), release => release);
 };
 
@@ -3293,7 +3298,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       }
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
       return { binding, agent, sessionFile, pending: wait.state === "pending" };
-    }).pipe(Effect.tapError(error => { if (!typed) beforeTyping(error); return failLaunch(); }));
+    }).pipe(Effect.tapError(() => failLaunch()), Effect.mapError(error => typed ? error : markBeforeTyping(jobId)(error)));
 
     const actualId = launched.sessionFile ? sessionIdFromFile(launched.sessionFile) : null;
     const liveRestore = yield* sessionRestore(launchProfile, launched.sessionFile, project, row.role, roster, params.action === "restore" ? params : {});

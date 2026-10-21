@@ -20,6 +20,7 @@ vi.mock("node:child_process", async importOriginal => ({
 }));
 import { agentClose, agentLaunch as launch, agentLaunchForeground, laneOpen, launchResultText, projectOpen, projectStatus, readLaunchJob, runLaunchJob } from "./ops.ts";
 import { load, mutate } from "./store.ts";
+import { MusterEnv } from "./runtime.ts";
 import { readOwnerQueue, mentions } from "./owner-queue.ts";
 const readOwnerItems = (owner: string, home: string) => readOwnerQueue(owner, home).items.map(entry => entry.item);
 const agentLaunch = (...args: Parameters<typeof launch>) => launch(...args).pipe(Effect.map(result => { if (!("jobId" in result)) throw new Error("expected asynchronous admission"); return result; }));
@@ -134,6 +135,46 @@ describe("asynchronous launch admission", () => {
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
     expect(readOwnerItems(h.sessionId, h.home)[0]?.text).not.toContain("errored after its Pi started");
     expect(readLaunchJob(h.home, receipt.jobId)).toMatchObject({ state: "failed", outcome: "blocked" });
+  });
+
+  it("keeps a pre-typing refusal uncredited when the remote layer remaps the error", async () => {
+    const { h, dir, request } = await setup();
+    // onRemote rebuilds every launch error as a ProcError, so only a mark that travels with the error survives it.
+    const remote = { herdr: "remote", ssh: "remote", paths: { [dir]: dir }, musterExtension: "/muster", workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: [] };
+    const env = (): typeof MusterEnv.Service => ({
+      home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: h.workerWorktree,
+      createId: () => "remote-id", sleep: () => Effect.void, emitPaneClose: h.emitPaneClose,
+      machines: { remote },
+      remoteHerdr: () => Effect.succeed(h.herdr.client()),
+    });
+    mkdirSync(join(h.home, ".config/muster"), { recursive: true });
+    writeFileSync(join(h.home, ".config/muster/machines.json"), JSON.stringify({ remote }));
+    const proc = h.proc;
+    h.proc = { run: (command, args, options) => command === "ssh" ? (args.at(-1)!.includes("muster-prerequisites") ? Effect.succeed({ code: 0, stdout: "", stderr: "" }) : proc.run("sh", ["-c", args.at(-1)!], { ...options, cwd: h.home })) : proc.run(command, args, options) };
+    const receipt = await runWith(h, agentLaunch(dir, { ...request, machine: "remote" }));
+    const addPane = h.herdr.addPane.bind(h.herdr);
+    const handle = h.herdr.handle.bind(h.herdr);
+    const path = join(dir, ".brain/data/muster/project.json");
+    let foreign: string | undefined;
+    h.herdr.addPane = (...args) => {
+      const pane = addPane(...args);
+      pane.agent = "claude"; pane.name = "outsider";
+      foreign = pane.pane_id;
+      return pane;
+    };
+    // The row moves on (an adopt race) just before the shell guard refuses, so only the mark keeps the Pi uncredited.
+    h.herdr.handle = (method, params) => {
+      if (method === "pane.get" && params.pane_id === foreign) {
+        const catalog = JSON.parse(readFileSync(path, "utf8"));
+        writeFileSync(path, JSON.stringify({ ...catalog, agents: catalog.agents.map((row: object) => ({ ...row, state: "running" })) }));
+      }
+      return handle(method, params);
+    };
+    const result = await runWith(h, runLaunchJob(dir, receipt.jobId!).pipe(Effect.provideService(MusterEnv, env())));
+    expect(result.kind).toBe("blocked");
+    expect(result.body).toContain("still hosts agent claude");
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
+    expect(readOwnerItems(h.sessionId, h.home)[0]?.text).not.toContain("errored after its Pi started");
   });
 
   it("still tells the owner to adopt a Pi that started before a later launch error", async () => {
