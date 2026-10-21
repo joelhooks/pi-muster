@@ -3994,7 +3994,9 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const machine = row.machine === "local" ? undefined : yield* machineConfig(row.machine);
       const source = machine ? mapPath(sourceOf(project, lane, row), machine) : sourceOf(project, lane, row);
       const git = machine ? sshProc(row.machine, machine, proc, env.home) : proc;
-      const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base).pipe(Effect.provideService(Proc, git));
+      // A lane stacked on an unmerged PR head has a sha base; the landing is still proven against the default branch.
+      const laneBase = lane?.base && /^[a-f0-9]{40,64}$/.test(lane.base) ? null : lane?.base;
+      const { remote, branch: base, hasRemote } = yield* landingBase(source, laneBase).pipe(Effect.provideService(Proc, git));
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* git.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
       if (hasRemote) {
         const fetched = yield* git.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source });

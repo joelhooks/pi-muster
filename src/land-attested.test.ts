@@ -117,6 +117,20 @@ describe("owner-attested landing", () => {
     expect(packets[0]?.evidence).toContain("owner-attested: landed inside");
   });
 
+  it("proves a landing on the default branch when the lane base is a sha", async () => {
+    const s = await fixture(); const landedAs = squash(s);
+    await runWith(s.h, laneOpen(s.dir, { slug: "probe", base: sh(s.origin, "rev-parse", "HEAD~1").trim() }));
+    const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs, attested: true, evidence }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs, attested: true });
+  });
+
+  it("refuses a sha-base landing that is not on the default branch", async () => {
+    const s = await fixture(); const landedAs = squash(s);
+    sh(s.origin, "branch", "unlanded", landedAs); sh(s.origin, "checkout", "-q", "main~1"); sh(s.origin, "branch", "-f", "main", "HEAD");
+    await runWith(s.h, laneOpen(s.dir, { slug: "probe", base: sh(s.origin, "rev-parse", "HEAD").trim() }));
+    expect((await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs, attested: true, evidence }))).message).toContain("not on base origin/main");
+  });
+
   it("fails closed when origin cannot refresh the base", async () => {
     const s = await fixture(); const landedAs = squash(s); sh(s.dir, "fetch", "-q", "origin");
     s.h.proc = { run: (cmd, args, opts) => cmd === "git" && args[0] === "fetch"
