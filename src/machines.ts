@@ -80,7 +80,7 @@ export const agentMachine = setup({
   initial: "planned",
   states: {
     planned: { on: { LAUNCH: "launching", ...CLOSABLE } },
-    launching: { on: { STARTED: "running", ADOPT: "running", LAUNCH_FAILED: "failed", PANE_GONE: "interrupted" } },
+    launching: { on: { STARTED: "running", ADOPT: "running", LAUNCH_FAILED: "failed", PANE_GONE: "interrupted", ...CLOSABLE } },
     running: { on: { SILENT: "silent", ...WORKING } },
     silent: { on: { NUDGE: "nudged", ACTIVE: "running", ...WORKING } },
     nudged: { on: { RESTART: "restarted", ACTIVE: "running", ...WORKING } },

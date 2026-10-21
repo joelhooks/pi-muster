@@ -63,7 +63,7 @@ describe("agent machine", () => {
     expect(text).toContain("REPORT is not allowed from planned");
     illegal(stepAgent("w1", "running", { type: "LAND" }));
     illegal(stepAgent("w1", "closed", { type: "CLOSE" }));
-    illegal(stepAgent("w1", "launching", { type: "CLOSE" }));
+    expect(Effect.runSync(stepAgent("w1", "launching", { type: "CLOSE" }))).toBe("closed");
   });
 });
 

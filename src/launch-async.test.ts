@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Effect } from "effect";
@@ -124,6 +124,26 @@ describe("asynchronous launch admission", () => {
     expect(row.state).toBe("failed");
     expect(row.events?.at(-1)?.detail).toContain(receipt.log);
     expect(spawned.calls).toHaveLength(1);
+  });
+
+  it("refuses to close a launching row while its launch job has no outcome", async () => {
+    const { h, dir, request } = await setup();
+    await runWith(h, agentLaunch(dir, request));
+    const error = await failWith(h, agentClose(dir, { name: "worker" }));
+    expect(error.message).toContain("no outcome yet");
+    expect(error.message).toContain("project_status");
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("launching");
+  });
+
+  it.each(["orphaned job", "missing job record"])("closes a launching row whose launch is over: %s", async kind => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    const file = join(h.home, ".local/state/muster/launches", `${receipt.jobId}.json`);
+    if (kind === "orphaned job") writeFileSync(file, JSON.stringify({ ...receipt.job, outcome: "action" }));
+    else rmSync(file);
+    const closed = await runWith(h, agentClose(dir, { name: "worker" }));
+    expect(closed.row.state).toBe("closed");
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("closed");
   });
 
   it("preserves two concurrent reservations and completion patches", async () => {
