@@ -9,18 +9,22 @@ export function forEachJsonlLine(path: string, visit: (line: string) => void, ch
   const fd = openSync(path, "r");
   try {
     const chunk = Buffer.alloc(chunkBytes);
-    let rest: Buffer = Buffer.alloc(0);
+    // The pieces of the line still open at a chunk edge. Each byte is copied once, so one huge line stays linear.
+    let parts: Buffer[] = [];
+    const emit = (tail: Buffer) => {
+      const line = (parts.length ? Buffer.concat([...parts, tail]) : tail).toString("utf8");
+      parts = [];
+      if (line.trim()) visit(line);
+    };
     for (let read = readSync(fd, chunk, 0, chunkBytes, null); read > 0; read = readSync(fd, chunk, 0, chunkBytes, null)) {
-      let buffer = Buffer.concat([rest, chunk.subarray(0, read)]);
-      for (let end = buffer.indexOf(0x0a); end !== -1; end = buffer.indexOf(0x0a)) {
-        const line = buffer.subarray(0, end).toString("utf8");
-        if (line.trim()) visit(line);
-        buffer = buffer.subarray(end + 1);
+      let start = 0;
+      for (let end = chunk.indexOf(0x0a, start); end !== -1 && end < read; end = chunk.indexOf(0x0a, start)) {
+        emit(chunk.subarray(start, end));
+        start = end + 1;
       }
-      rest = Buffer.from(buffer);
+      if (start < read) parts.push(Buffer.from(chunk.subarray(start, read)));
     }
-    const last = rest.toString("utf8");
-    if (last.trim()) visit(last);
+    emit(Buffer.alloc(0));
   } finally { closeSync(fd); }
 }
 
@@ -36,7 +40,7 @@ export function untilJournalLines(path: string): string {
  * counting the parent and --fork reading it. A private, immutable fork input keeps
  * that race out of the first-turn proof; real assistant content is never ignored.
  */
-export function snapshotRestartSession(source: string, destination: string, thinking?: string): void {
+export function snapshotRestartSession(source: string, destination: string, thinking?: string, io: { closeSync: (fd: number) => void } = { closeSync }): void {
   // Ernestine, 2026-10-18: Pi applies a fork's --model x:<thinking> in memory but persists a thinking level only for a
   // session with none, so the forked file kept the parent's level. The clamp check read it as a clamp, and resuming the
   // file later went back to it. Record the launch level as the snapshot's leaf, so the fork inherits it.
@@ -45,6 +49,7 @@ export function snapshotRestartSession(source: string, destination: string, thin
   let held: { line: string; raw: { type?: string; thinkingLevel?: string; id?: unknown }; entry: ReturnType<typeof decodeFirstTurnEntry> } | undefined;
   let first = true;
   const fd = openSync(destination, "wx", 0o600);
+  let closing = false;
   const commit = (kept: NonNullable<typeof held>) => {
     if (kept.raw.type === "thinking_level_change") current = kept.raw.thinkingLevel;
     if (typeof kept.raw.id === "string") leaf = kept.raw.id;
@@ -69,10 +74,13 @@ export function snapshotRestartSession(source: string, destination: string, thin
     if (!emptyTail) commit(held!);
     // With no level recorded, Pi writes the launch level itself.
     if (thinking && current !== undefined && current !== thinking && leaf) writeSync(fd, JSON.stringify({ type: "thinking_level_change", id: randomBytes(4).toString("hex"), parentId: leaf, timestamp: new Date().toISOString(), thinkingLevel: thinking }) + "\n");
-    closeSync(fd);
+    closing = true;
+    io.closeSync(fd);
   } catch (error) {
-    // A refused source leaves no partial snapshot behind for a later fork to read.
-    closeSync(fd); unlinkSync(destination);
+    // A refused source, or a close that failed to flush, leaves no partial snapshot behind for a later fork to read.
+    // The descriptor is closed once: a second close would raise EBADF and hide the real error.
+    if (!closing) io.closeSync(fd);
+    unlinkSync(destination);
     throw error;
   }
 }

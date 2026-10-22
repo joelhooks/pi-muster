@@ -2526,9 +2526,14 @@ const readOrEmpty = (path: string) => { try { return readFileSync(path, "utf8");
 const untilJournalText = (path: string) => { try { return untilJournalLines(path); } catch { return ""; } };
 const untilFinishedLines = (text: string) => text.split("\n").filter(line => line.includes('"event":"finished"')).join("\n");
 /** Prints only pi-until session entries, then the host's pi-until finish events: a remote journal never crosses ssh whole. */
-const UNTIL_LINES_SCRIPT = "const fs=require('node:fs');const read=p=>{try{return fs.readFileSync(p,'utf8')}catch{return ''}};"
+export const UNTIL_LINES_SCRIPT = "const fs=require('node:fs');const read=p=>{try{return fs.readFileSync(p,'utf8')}catch{return ''}};"
   + "const t=(process.env.PI_UNTIL_TELEMETRY_FILE||'').trim()||require('node:path').join(require('node:os').homedir(),'.pi/agent/pi-until/events.jsonl');"
-  + "const j=read(process.argv[1]).split('\\n');process.stdout.write([j[0]||'',...j.filter(line=>line.includes('\"pi-until-')),...read(t).split('\\n').filter(line=>line.includes('\"event\":\"finished\"'))].join('\\n'))";
+  // The journal streams in chunks: a desk's journal can outgrow one string (drovr, 2026-10-22). Telemetry stays small.
+  + "const kept=[];try{const fd=fs.openSync(process.argv[1],'r'),n=Number(process.env.MUSTER_STREAM_CHUNK)||1048576,c=Buffer.alloc(n);let parts=[];"
+  + "const emit=tail=>{const l=(parts.length?Buffer.concat([...parts,tail]):tail).toString('utf8');parts=[];if(l.trim()&&(kept.length===0||l.includes('\"pi-until-')))kept.push(l)};"
+  + "for(let r=fs.readSync(fd,c,0,n,null);r>0;r=fs.readSync(fd,c,0,n,null)){let s=0;for(let e=c.indexOf(10,s);e!==-1&&e<r;e=c.indexOf(10,s)){emit(c.subarray(s,e));s=e+1}if(s<r)parts.push(Buffer.from(c.subarray(s,r)))}"
+  + "emit(Buffer.alloc(0));fs.closeSync(fd)}catch{}"
+  + "process.stdout.write([...kept,...read(t).split('\\n').filter(line=>line.includes('\"event\":\"finished\"'))].join('\\n'))";
 
 /** pi-until watches a journal started and never finished, one short line each. A cancel writes no
  * receipt, so a listed watch may already be gone: the successor checks before re-arming. */
