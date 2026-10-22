@@ -56,6 +56,7 @@ import {
   workspaceRename,
 } from "./herdr.ts";
 import type { PaneInfo, Proof } from "./herdr.ts";
+import { untilJournalLines } from "./restart-snapshot.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
@@ -2520,6 +2521,9 @@ export function claimedLabel(home: string, project: string, agent: string, role:
 /** pi-until's local telemetry, the one place a cancel is recorded (pi-until writes no session entry for it). */
 const untilTelemetryPath = (home: string, env: Readonly<Record<string, string | undefined>> = process.env) =>
   env.PI_UNTIL_TELEMETRY_FILE?.trim() || join(home, ".pi/agent/pi-until/events.jsonl");
+const readOrEmpty = (path: string) => { try { return readFileSync(path, "utf8"); } catch { return ""; } };
+/** A journal's header and pi-until lines, streamed: a desk's journal can outgrow one string (drovr, 2026-10-22). */
+const untilJournalText = (path: string) => { try { return untilJournalLines(path); } catch { return ""; } };
 const untilFinishedLines = (text: string) => text.split("\n").filter(line => line.includes('"event":"finished"')).join("\n");
 /** Prints only pi-until session entries, then the host's pi-until finish events: a remote journal never crosses ssh whole. */
 const UNTIL_LINES_SCRIPT = "const fs=require('node:fs');const read=p=>{try{return fs.readFileSync(p,'utf8')}catch{return ''}};"
@@ -2678,8 +2682,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // pi-until persists live watches only when Pi quits or reloads, so a fork cannot carry them. Name them instead.
   const watchLines = remote
     ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, snapshot], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))
-    : yield* Effect.sync(() => [snapshot, untilTelemetryPath(env.home)].map(path => { try { return readFileSync(path, "utf8"); } catch { return ""; } })
-      .map((text, index) => index ? untilFinishedLines(text) : text).join("\n"));
+    : yield* Effect.sync(() => [untilJournalText(snapshot), untilFinishedLines(readOrEmpty(untilTelemetryPath(env.home)))].join("\n"));
   const watches = openUntilWatches(watchLines);
   if (watches.length) notes.push(`pi-until watches not carried into the fork (re-arm in the successor): ${watches.join("; ")}`);
   const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.${watches.length ? ` Your parent session's pi-until watches did not carry across this fork; re-arm the ones still needed: ${watches.join("; ")}.` : ""}`;
@@ -3434,8 +3437,7 @@ const liveRowWatches = (row: AgentRow) => Effect.gen(function* () {
   if (row.machine === "local") {
     const journal = row.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home);
     if (!journal) return null;
-    return openUntilWatches([journal, untilTelemetryPath(env.home)].map(path => { try { return readFileSync(path, "utf8"); } catch { return ""; } })
-      .map((text, index) => index ? untilFinishedLines(text) : text).join("\n"));
+    return openUntilWatches([untilJournalText(journal), untilFinishedLines(readOrEmpty(untilTelemetryPath(env.home)))].join("\n"));
   }
   if (!row.sessionFile) return null;
   const machine = yield* machineConfig(row.machine);
