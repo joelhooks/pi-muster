@@ -23,7 +23,7 @@ const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 20_000;
 
 /** Bump whenever persisted fields are added, including nested structs, and teach requiredWriterSchema what needs it. Never a git SHA. */
-export const CATALOG_WRITER_SCHEMA_VERSION = 4; // 4: Lane.kind includes retro
+export const CATALOG_WRITER_SCHEMA_VERSION = 5; // 5: role policy tools, env, appendSystemPrompt (Lean Loadout)
 
 /**
  * The oldest writer that can rewrite this content without losing or misreading it.
@@ -31,6 +31,9 @@ export const CATALOG_WRITER_SCHEMA_VERSION = 4; // 4: Lane.kind includes retro
  * fenced out only where a newer field or value is actually present.
  */
 export function requiredWriterSchema(project: Project): number {
+  // An older writer drops these keys on decode and would erase a role's tool policy without a word.
+  if (Object.values(project.policy?.roles ?? {}).some(role => role && (role.tools !== undefined || role.env !== undefined || role.appendSystemPrompt !== undefined))
+    || project.agents.some(row => row.profile.policy !== undefined)) return 5;
   if (project.lanes.some(lane => lane.kind === "retro")) return 4;
   if (project.policy?.deployLevel !== undefined || project.lanes.some(lane => lane.deployLevel !== undefined || lane.deployRule !== undefined)) return 3;
   if (project.lanes.some(lane => lane.discarded === true)) return 2;

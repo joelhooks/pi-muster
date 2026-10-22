@@ -116,6 +116,28 @@ describe("restart by fork", () => {
     expect(s.host.launcherScripts.at(-1)!).not.toContain("'/x/peons'");
   });
 
+  // Lean Loadout (Joel, desk page sb-desk-20261022c): a role's tools, env and prompt files come from the project policy on
+  // every restart, so clearing the policy and restarting rolls the row back.
+  it.each([false, true])("restart applies the role policy's tools, env and prompt files, and drops them once cleared (remote %s)", async remote => {
+    const s = await setup(remote);
+    const names = join(s.dir, "skill-names.txt"); writeFileSync(names, "muster\n");
+    await s.run(projectUpdate(s.dir, { policy: { roles: { worker: { tools: ["read", "bash", "codemode", "packet_report"], env: { LEAN_LOADOUT_READONLY: "1" }, appendSystemPrompt: [names] } } } }));
+    const lean = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(lean.row.profile.policy).toMatchObject({ tools: ["read", "bash", "codemode", "packet_report"], env: { LEAN_LOADOUT_READONLY: "1" } });
+    const leanScript = s.host.launcherScripts.at(-1)!;
+    expect(leanScript).toContain("'--tools' 'read,bash,codemode,packet_report'");
+    expect(leanScript).toContain("LEAN_LOADOUT_READONLY='1'");
+    expect(leanScript).toContain(names);
+    await s.run(projectUpdate(s.dir, { policy: { roles: { worker: { tools: null, env: {}, appendSystemPrompt: [] } } } }));
+    const back = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(back.row.profile.policy).toBeUndefined();
+    // A remote row's env carries its own recorded restore command for the session it replaced; check the launch itself.
+    const backScript = s.host.launcherScripts.at(-1)!.replace(/export MUSTER_REMOTE_ROW='(?:[^']|'\\'')*'/, "");
+    expect(backScript).not.toContain("--tools");
+    expect(backScript).not.toContain("LEAN_LOADOUT_READONLY");
+    expect(backScript).not.toContain(names);
+  });
+
   it("a session with no parent names no successor", () => {
     const root = mkdtempSync(join(tmpdir(), "succession-"));
     const lone = join(root, "lone.jsonl");

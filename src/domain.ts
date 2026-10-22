@@ -175,6 +175,16 @@ export const PacketState = Schema.Literals(["reported", "verified", "committed",
 export type PacketState = typeof PacketState.Type;
 export const TERMINAL_PACKET_STATES: readonly PacketState[] = ["committed", "rejected", "no_changes"];
 
+/** What a project's role policy adds to a launch: a direct-tool list, env and system-prompt files. Lean Loadout (Joel,
+ * desk page sb-desk-20261022c: "the per-role tool setting in pi-muster"). Recomputed from the policy on every launch,
+ * restore and restart, never inherited from an older profile, so clearing the policy and restarting rolls it back. */
+export const RoleLaunch = Schema.Struct({
+  tools: Schema.optionalKey(Schema.Array(Schema.String)),
+  env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  appendSystemPrompt: Schema.optionalKey(Schema.Array(Path)),
+});
+export type RoleLaunch = typeof RoleLaunch.Type;
+
 /** Everything needed to start the same Pi process again. Fixed at launch; changing it means a restore. */
 export const LaunchProfile = Schema.Struct({
   label: Schema.String,
@@ -188,6 +198,8 @@ export const LaunchProfile = Schema.Struct({
   extensions: Schema.Array(Path),
   env: Schema.Record(Schema.String, Schema.String),
   compactAt: Schema.NullOr(Schema.Number.check(Schema.isInt())),
+  /** The project role policy in force when this Pi started. Absent: none. */
+  policy: Schema.optional(RoleLaunch),
 });
 export type LaunchProfile = typeof LaunchProfile.Type;
 
@@ -466,8 +478,38 @@ export const RolePolicy = Schema.Struct({
   compactAt: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt()))),
   noSkills: Schema.optionalKey(Schema.Boolean),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
+  /** Opt-in direct tools, emitted as Pi `--tools`; everything else stays reachable through codemode. null or absent: Pi's default registry. */
+  tools: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
+  env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  appendSystemPrompt: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type RolePolicy = typeof RolePolicy.Type;
+
+const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]*$/;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** The launch additions a project's role policy names now, checked so no value can parse as a Pi flag. */
+export function roleLaunch(policy: Policy | undefined, role: Role): RoleLaunch | undefined {
+  const value = policy?.roles?.[role];
+  if (!value) return undefined;
+  const tools = value.tools ?? undefined;
+  const bad = [...(tools ?? []).filter(tool => !TOOL_NAME.test(tool)).map(tool => `tool ${JSON.stringify(tool)}`),
+    ...Object.keys(value.env ?? {}).filter(key => !ENV_NAME.test(key)).map(key => `env ${JSON.stringify(key)}`),
+    ...(value.appendSystemPrompt ?? []).filter(path => !path.startsWith("/")).map(path => `appendSystemPrompt ${JSON.stringify(path)} (not absolute)`)];
+  if (bad.length) throw new Error(`policy.roles.${role}: ${bad.join(", ")}`);
+  const launch: RoleLaunch = {
+    ...(tools && tools.length ? { tools: [...tools] } : {}),
+    ...(value.env && Object.keys(value.env).length ? { env: { ...value.env } } : {}),
+    ...(value.appendSystemPrompt && value.appendSystemPrompt.length ? { appendSystemPrompt: [...value.appendSystemPrompt] } : {}),
+  };
+  return Object.keys(launch).length ? launch : undefined;
+}
+
+/** The profile with the role policy in force now; an older profile's policy is dropped, never carried. */
+export function withRoleLaunch<P extends { readonly policy?: RoleLaunch | undefined }>(profile: P, policy: Policy | undefined, role: Role): P {
+  const { policy: _old, ...rest } = profile;
+  const launch = roleLaunch(policy, role);
+  return (launch ? { ...rest, policy: launch } : rest) as P;
+}
 
 /**
  * A project's tuning. Muster ships defaults that fit most work; the owner

@@ -16,7 +16,7 @@ Muster is being strangled down to its Herdr hands: spawn, fork, restart, adopt, 
 - Muster owns no clock. Cadence is a pi-until repeat the owner arms from `project_open`'s result. Muster never calls joelclaw.
 - Every file read decodes through `src/domain.ts`. Every lifecycle change goes through `src/machines.ts`; rows carry one state, never a status beside it.
 - Effect owns effects and typed errors. XState owns lifecycles (versions pinned in `package.json`). Pure decisions (argv, tokens, silence, review proposals, cost) stay plain functions with tests.
-- Never emit `--tools`, `--exclude-tools`, `--no-tools`, or `--no-builtin-tools`.
+- Never emit `--exclude-tools`, `--no-tools`, or `--no-builtin-tools`. Emit `--tools` only from a project role policy's opt-in `tools` list (Joel, desk page sb-desk-20261022c, Lean Loadout: "the per-role tool setting in pi-muster"); with no policy, no tool flag.
 - Close a pane only by id plus terminal id, and only if Muster opened it. Act on a row's pane only from the session that owns it.
 - Commits Muster makes are `shitratgit[bot]`'s. Muster never pushes.
 - Running sessions load new code at their next natural restart. Add a `Restart-Needed: <why>` trailer only when a live session on older code would do harm or fail: a changed tool schema, a cross-session protocol change, or a bug that hurts while loaded. Only marked commits warn running sessions. When in doubt, mark.
