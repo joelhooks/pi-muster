@@ -202,6 +202,7 @@ export async function projectDigest(dir: string, options: DigestOptions = {}): P
 
 export function digestLine(header: string, parts: DigestResult["parts"], width: number): string {
   const cap = Math.max(1, Math.min(160, Math.floor(width) || 160));
+  // oxlint-disable-next-line no-control-regex -- flattens newlines and escapes onto one line
   const clean = (s: string) => s.replace(/[\r\n\t\u001b]/g, " ");
   const rows = Object.values(parts).filter(p => p.state !== "skipped");
   let line = [clean(header), ...rows.map(p => p.text)].join(" · ");

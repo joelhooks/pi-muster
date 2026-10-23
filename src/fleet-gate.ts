@@ -63,8 +63,8 @@ export function parseHeavyGate(args: readonly string[]): Pick<FleetGateOptions, 
     seen.add(key);
     if (key === "--wait" && Number.isFinite(Number(value)) && Number(value) >= 0) wait = Number(value);
     else if (key === "--tree" && /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(value)) tree = value;
-    else if (key === "--base" && /^[A-Za-z0-9_][A-Za-z0-9._\/-]*$/.test(value) && !value.includes("..")) base = value;
-    else if (key === "--main" && /^[A-Za-z0-9_][A-Za-z0-9._\/-]*$/.test(value) && !value.includes("..")) main = value;
+    else if (key === "--base" && /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/.test(value) && !value.includes("..")) base = value;
+    else if (key === "--main" && /^[A-Za-z0-9_][A-Za-z0-9._/-]*$/.test(value) && !value.includes("..")) main = value;
     else if (key === "--attest" && value === "required") attest = value;
     else if (key === "--host" && (value === "auto" || value === "flagg" || value === "pennywise")) host = value;
     else throw input(`invalid gate option: ${key} ${value}`);

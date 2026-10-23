@@ -30,7 +30,7 @@ import {
 import muster from "../extensions/pi-muster.ts";
 import { ownerFeed } from "./owner-feed.ts";
 import { fakeRatking } from "./ratking-fake.ts";
-import { readOwnerQueue, writeReader, ownerPath, appendOwnerItem, deliverOwnerItem, mentions } from "./owner-queue.ts";
+import { readOwnerQueue, writeReader, ownerPath, appendOwnerItem, deliverOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { Herdr, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
 import { watchEntries } from "./desk-local.ts";

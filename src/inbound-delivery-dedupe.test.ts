@@ -9,7 +9,6 @@ import { decodeAgentRow } from "./domain.ts";
 import { profileFor } from "./argv.ts";
 import { projectOpen, board } from "./ops.ts";
 import { mutate } from "./store.ts";
-import { mentions } from "./owner-queue.ts";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 async function setup(loaded: { tools?: object[]; commands?: object[] } = {}) {

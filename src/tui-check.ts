@@ -10,6 +10,7 @@ export function checkTui(lines: readonly string[], width: number, colors: readon
     if (visibleWidth(line) > width) failures.push(`${at}: width ${visibleWidth(line)} > ${width}`);
     const active = new Set<number>();
     let link = false;
+    // oxlint-disable-next-line no-control-regex -- strips terminal escapes
     for (const match of line.matchAll(/\x1b\[([\d;:]*)m|\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)/g)) {
       if (match[2] !== undefined) { link = match[2].length > 0; continue; }
       const codes = (match[1] || "0").split(/[;:]/).map(Number);

@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { agentLaunchForeground as agentLaunch, backfillOwnerNames, laneOpen, projectOpen } from "./ops.ts";
-import { load, mutate } from "./store.ts";
+import { mutate } from "./store.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";
 import { ratkingTarget } from "./comms-ratking.ts";
 import { resolveOwner } from "./owner-queue.ts";

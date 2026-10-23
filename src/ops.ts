@@ -26,9 +26,9 @@ import {
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, autolandDue, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
-import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Policy, Project, Role, Thinking } from "./domain.ts";
+import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Project, Role, Thinking } from "./domain.ts";
 import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, CACHE_WARM_CADENCE_MINUTES, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
-import { GuardFailed, HerdrFailure, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
+import { GuardFailed, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
 import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
 import {
@@ -497,7 +497,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(policyComms(project.policy)), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
     });
     // A later error leaves a row whose pane already hosts a Pi launching, not failed: its Pi is starting or running.
-    return yield* launch.pipe(Effect.tapError(error => Effect.gen(function* () {
+    return yield* launch.pipe(Effect.tapError(() => Effect.gen(function* () {
       if (!typed) raisedBeforeTyping = true;
       const latest = (yield* load(dir)).agents.find(agent => agent.name === name);
       if (typed && (yield* paneHostsPi(latest?.pane)) === true) return;
@@ -1017,9 +1017,7 @@ const adoptionSession = (row: AgentRow, pane: PaneInfo, foreign?: string) => Eff
 
 const readoptRow = (dir: string, row: AgentRow, pane: PaneInfo, session: { sessionFile: string; sessionId: string }, preserveState = false, audit?: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  let slug = "";
   const adopted = yield* mutate(dir, project => Effect.gen(function* () {
-    slug = project.slug;
     const latest = yield* findRow(project, row.name);
     // Exact identity repair records evidence, not pane control or ownership.
     if (!paneProvesSession(pane, latest)) yield* requireOwner(latest, env.sessionId, false, project.slug, false);
@@ -1090,7 +1088,7 @@ const statusEvidence = (row: AgentRow, pane: PaneInfo | null | undefined) => {
     identity: "proven (session path match)",
     capability: launched ? "launch-profile receipt (Muster launcher, bound terminal)" : "unknown (resumed outside Muster)",
     ...(!launched && ["running", "silent", "nudged", "restarted", "reported", "verified", "landed"].includes(row.state)
-      ? { recovery: `agent_launch action:\"restart\" name:${row.name}; re-check until list and herdr_watch list and re-arm still-needed watches` } : {}),
+      ? { recovery: `agent_launch action:"restart" name:${row.name}; re-check until list and herdr_watch list and re-arm still-needed watches` } : {}),
   };
 };
 const reboundNote = (row: AgentRow, pane: PaneInfo) => `rebound ${row.name} → ${pane.pane_id} (identity: session path match)`;
@@ -1137,7 +1135,6 @@ const remoteStatusRow = (dir: string, project: Project, row: AgentRow, act: bool
       const adopt = !failedModel && matches && ["launching", "failed"].includes(row.state);
       if (adopt && act && mine) current = yield* patchRow(dir, row.name, row.state, [{ type: "ADOPT" }], { sessionFile: file });
       if (act && mine && (pane.pane_id !== row.pane.paneId || (file && file !== current.sessionFile && !["launching", "failed"].includes(current.state)))) {
-        const previous = current.sessionId;
         current = yield* patchRow(dir, row.name, current.state, [], { pane: { ...row.pane, paneId: pane.pane_id, tabId: pane.tab_id }, ...(file ? { sessionFile: file, sessionId: sessionIdFromFile(file) ?? row.sessionId } : {}) });
       }
     }
@@ -1483,7 +1480,7 @@ export const projectOpen = (params: ProjectOpenInput) =>
       return yield* input(`cadenceMinutes must be 1-${MAX_CADENCE_MINUTES} (pi-until's longest fixed cadence); got ${params.cadenceMinutes}. Next: project_open with cadenceMinutes in range, or null for no cadence.`);
     }
     const now = iso(env);
-    let adopted = exists(dir);
+    const adopted = exists(dir);
     if (!adopted) {
       const slug = yield* decodeWith(decodeSlug, params.slug);
       for (const [key, value] of [
@@ -2210,6 +2207,7 @@ const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?:
   });
 
 /** Tail text is UNTRUSTED: it can buy time, never prove a session or prompt delivery. */
+// oxlint-disable-next-line no-control-regex -- strips terminal escapes
 const piStarting = (tail: string, launchCommand?: string) => tail.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line =>
   (!!launchCommand && line.includes(launchCommand)) ||
   /^(?:pi\s*[:·-]\s*)?creating a new session(?:\s|[.…]|$)/i.test(line.trim()) ||
@@ -2283,9 +2281,6 @@ const renameWhenRegistered = (paneId: string, name: string) => Effect.gen(functi
 
 const slowStartNote = (wait: { elapsed: number; load: number }) =>
   `slow start: Pi session appeared after ${Math.ceil(wait.elapsed / 1_000)}s (load ${wait.load})`;
-const pendingPromptNote = (paneId: string, text: string | undefined) =>
-  `slow start, prompt pending: Pi still starting after 120 s in ${paneId}; delivery: none (pending). ` +
-  (text ? `Run herdr_agent ${JSON.stringify({ action: "prompt", target: paneId, prompt: text })}` : "No work prompt supplied.");
 
 const findSessionFile = (cwd: string, sessionId: string, home: string) => {
   const dir = sessionDirFor(cwd, home);
@@ -2611,7 +2606,7 @@ const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(func
   const touched: string[] = [dir];
   const entries = yield* Effect.sync(() => { try { return [...readRegistry(env.home).values()].filter(entry => resolve(entry.dir) !== resolve(dir)); } catch { return []; } });
   for (const entry of entries) {
-    const moved = yield* mutate(entry.dir, current => Effect.gen(function* () {
+    const moved = yield* mutate(entry.dir, current => Effect.sync(() => {
       const owned = current.agents.filter(other => other.owner === from && other.state !== "closed");
       if (!owned.length) return [current, 0] as const;
       const next = { ...current, agents: current.agents.map(other => other.owner === from && other.state !== "closed" ? ownerSynced({ ...other, owner: to, updatedAt: iso(env) }) : other) };
@@ -2628,7 +2623,6 @@ const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(func
 
 /** Push orchestration bindings after an owner restart so remote workers resolve the current owner name. */
 const pushRemoteBindings = (dirs: readonly string[]) => Effect.gen(function* () {
-  const env = yield* MusterEnv;
   const notes: string[] = [];
   for (const dir of dirs) {
     const current = yield* load(dir).pipe(Effect.result);
@@ -3598,7 +3592,7 @@ const reportText = (text: string): string => `${reportFence(text)}\n${text}\n${r
 // Svelte compilation, and Markdown punctuation before inline parsing. <br />
 // keeps a multiline check in one source row while rendering its line breaks.
 const reportCell = (text: string): string => {
-  const cell = text.replace(/[&<>{}|`\\*_\[\]~\r]/g, (char) => `&#${char.charCodeAt(0)};`).replace(/\n/g, "<br />");
+  const cell = text.replace(/[&<>{}|`\\*_[\]~\r]/g, (char) => `&#${char.charCodeAt(0)};`).replace(/\n/g, "<br />");
   return `<code>${cell}</code>`;
 };
 
@@ -4265,8 +4259,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const handoverNotes: string[] = [];
     const project = params.takeover
-      ? yield* mutate(dir, (current) => Effect.gen(function* () {
-
+      ? yield* mutate(dir, (current) => Effect.sync(() => {
           const next = { ...current, agents: current.agents.map((row) =>
             row.state === "closed" ? row : ownerSynced({ ...withoutOwnerName(row), ...launchOwnerName(env.home, dir, env.sessionId), owner: env.sessionId, updatedAt: iso(env) })) };
           return [next, next] as const;
@@ -4460,7 +4453,6 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
       if (rebinding.kind === "none" && !reAdoption && !modelError && issue?.severity === "warning") action = `model warning: ${issue.line}`;
       const herdrFile = pane?.agent_session?.kind === "path" ? pane.agent_session.value : null;
       if (act && row.owner === env.sessionId && !adoptionCandidate && herdrFile && herdrFile !== current.sessionFile) {
-        const previous = current.sessionId;
         current = yield* patchRow(dir, row.name, current.state, [], {
           sessionFile: herdrFile,
           sessionId: sessionIdFromFile(herdrFile) ?? current.sessionId,

@@ -7,7 +7,6 @@ import * as versionSkew from "./version-skew.ts";
 import { Cause, Effect, Schema } from "effect";
 import * as ops from "./ops.ts";
 import * as ownerQueue from "./owner-queue.ts";
-import * as comms from "./comms.ts";
 import { Packet, decodeOwnerItem } from "./domain.ts";
 import { deskRecord } from "./desk.ts";
 import { POST_NSID } from "./owner-lexicon.ts";

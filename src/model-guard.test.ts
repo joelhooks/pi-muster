@@ -162,10 +162,10 @@ it.each(["running"] as const)("status flags model errors on %s without adoption 
   const handle = h.herdr.handle.bind(h.herdr);
   vi.spyOn(h.herdr, "handle").mockImplementation((method, params) => method === "pane.read"
     ? { type: "pane_read", read: { text: "Error: No API key found for anthropic" } } : handle(method, params));
-  await runWith(h, mutate(dir, (project) => Effect.gen(function* () {
+  await runWith(h, mutate(dir, (project) => Effect.sync(() => {
     const row = project.agents[0];
     if (!row) throw new Error("missing launched row");
-    let next = row.state;
+    const next = row.state;
 
     return [{ ...project, agents: [{ ...row, state: next }] }, undefined] as const;
   })));

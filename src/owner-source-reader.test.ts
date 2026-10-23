@@ -1,11 +1,10 @@
 import { appendFileSync, mkdtempSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readdir } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("node:fs/promises", { spy: true });
 afterEach(() => vi.clearAllMocks());
-import { appendOwnerItem, ownerPath, ownerSourceReader, readOwnerSources, writeReader } from "./owner-queue.ts";
+import { appendOwnerItem, ownerPath, ownerSourceReader, readOwnerSources } from "./owner-queue.ts";
 
 const fixture = () => {
   const home = mkdtempSync(join(tmpdir(), "owner-reader-"));

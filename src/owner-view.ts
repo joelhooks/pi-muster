@@ -30,6 +30,7 @@ export interface OwnerTimelineData {
 }
 const GLYPH: Record<OwnerKind, string> = { question: "❓", blocked: "⛔", action: "🐑", progress: "📈", done: "🏁", fyi: "📎" };
 const COLOR: Record<OwnerKind, "warning" | "error" | "accent" | "success" | "dim"> = { question: "warning", blocked: "error", action: "accent", progress: "dim", done: "success", fyi: "dim" };
+// oxlint-disable-next-line no-control-regex -- drops control characters from rendered text
 const clean = (s: string) => stripVTControlCharacters(s).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 const oneLine = (s: string) => clean(s).replace(/\s+/g, " ").trim();
 /** Collapse at word boundaries on phone terminals; do not cut an emoji or name. */
