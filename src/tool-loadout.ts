@@ -29,7 +29,10 @@ export const applyToolDelta = (state: { declared: boolean; tools: Set<string> },
   if (delta.added.length > 0) state.declared = true;
 };
 
-/** Streams, so a large restored journal stays in bounded memory. */
+/**
+ * Streams, so a large restored journal stays in bounded memory. Linear journals only: a fresh launch or a restart
+ * snapshot, where file order is branch order. A live journal after agent_rewind keeps abandoned branches in file order.
+ */
 export function readToolLoadout(path: string): ToolLoadout {
   const state = { declared: false, tools: new Set<string>() };
   forEachJsonlLine(path, line => { const delta = toolDelta(line); if (delta) applyToolDelta(state, delta); });
@@ -55,7 +58,7 @@ process.stdout.write(JSON.stringify({ declared: state.declared, tools: [...state
  * Pi's own additions may declare more. A session that declares no tools leaves the check unchecked, not failed.
  */
 export function toolLoadoutVerdict(requested: readonly string[], loadout: ToolLoadout): { failure: string | null; note: string | null } {
-  if (!loadout.declared) return { failure: null, note: "tool loadout unchecked: the session journal declares no tools" };
+  if (!loadout.declared) return { failure: null, note: "⚠ tool loadout unchecked: the session journal declares no tools" };
   const active = new Set(loadout.tools);
   const missing = requested.filter(name => !active.has(name));
   const listed = new Set(requested);

@@ -3369,7 +3369,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     }
     const clamp = proof ? yield* thinkingClamp(launched.sessionFile, launchProfile.thinking, false) : null;
     if (clamp) skillNotes.push(clamp);
-    const loadout = launched.pending ? { failure: null, note: null } : yield* toolLoadoutCheck(launched.sessionFile, launchProfile.policy?.tools, false);
+    // Tin-Tin, #24 review: a guard that didn't run says so.
+    const loadout = launched.pending && launchProfile.policy?.tools?.length ? { failure: null, note: "⚠ tool loadout unchecked: launch pending; check the session's tools after its first turn" } : launched.pending ? { failure: null, note: null } : yield* toolLoadoutCheck(launched.sessionFile, launchProfile.policy?.tools, false);
     if (loadout.note) skillNotes.push(loadout.note);
     if (loadout.failure) {
       running = yield* patchRow(dir, row.name, running.state, [{ type: "FAIL" }], { events: [...(running.events ?? []), { type: "TOOLS_MISSING", at: iso(env), detail: loadout.failure }] });
