@@ -12,7 +12,7 @@ import { mutate } from "./store.ts";
 import { mentions } from "./owner-queue.ts";
 
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
-async function setup() {
+async function setup(loaded: { tools?: object[]; commands?: object[] } = {}) {
   const h = harness(); const events = createEventBus();
   vi.stubEnv("HOME", h.home); vi.stubEnv("MUSTER_PROJECT", h.home); vi.stubEnv("MUSTER_MACHINE", "local");
   vi.stubEnv("MUSTER_ROLE", "boss"); vi.stubEnv("MUSTER_AGENT", ""); vi.stubEnv("RATKING_NAME", "dedupe-owner");
@@ -21,7 +21,7 @@ async function setup() {
   const hooks = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const pi = {
     registerTool() {}, registerFlag() {}, registerCommand() {}, registerShortcut() {}, registerMessageRenderer() {}, appendEntry() {},
-    getFlag: () => undefined, getThinkingLevel: () => "medium", setThinkingLevel() {}, getAllTools: () => [{ name: "ratking" }],
+    getFlag: () => undefined, getThinkingLevel: () => "medium", setThinkingLevel() {}, getAllTools: () => loaded.tools ?? [{ name: "ratking" }], getCommands: () => loaded.commands ?? [],
     sendMessage, sendUserMessage, events,
     on: (event: string, handler: (...args: unknown[]) => unknown) => hooks.set(event, [...(hooks.get(event) ?? []), handler]),
   };
@@ -99,5 +99,24 @@ it("a repeated owner delivery appends and wakes once; an existing URI under a ne
     expect(readFileSync(ownerPath(s.session, s.home), "utf8")).toBe(before);
     expect(readOwnerQueue(s.session, s.home).items).toHaveLength(1);
     expect(s.sendMessage).toHaveBeenCalledOnce(); expect(s.sendUserMessage).not.toHaveBeenCalled();
+  } finally { await s.stop(); }
+});
+
+// Nicodemus, 2026-10-23: under Pi's --tools allowlist getAllTools hides an unlisted `ratking`, so a lean row never
+// subscribed and lost herdr_agent prompt mail. pi-ratking's commands aren't filtered; a handled message is claimed so
+// pi-ratking 13a2607 doesn't surface it a second time.
+it.each([
+  ["a lean row whose tool list omits ratking", { tools: [], commands: [{ name: "ratking-retire", source: "extension", sourceInfo: { path: "/n/node_modules/@rat-king/pi-ratking/src/extension.ts", source: "npm:@rat-king/pi-ratking" } }] }, 1],
+  ["a Pi without pi-ratking", { tools: [], commands: [{ name: "other", source: "extension", sourceInfo: { path: "/n/other/index.ts", source: "other" } }] }, 0],
+  ["a Pi with only pi-ratking's skill", { tools: [], commands: [{ name: "skill:ratking-tui", source: "skill", sourceInfo: { path: "/n/node_modules/@rat-king/pi-ratking/skills/ratking-tui/SKILL.md", source: "npm:@rat-king/pi-ratking" } }] }, 0],
+] as const)("%s", async (_name, loaded, delivered) => {
+  const s = await setup(loaded as never);
+  const claim = vi.fn();
+  const event = { id: `lean-${s.root}`, from: "worker", did: "did:web:worker.example.invalid", verified: true, kind: "data", claim,
+    body: JSON.stringify({ type: "message", recipient: s.session, author: "worker", body: "Wake up." }) };
+  try {
+    s.events.emit("ratking/message", event); s.events.emit("ratking/message", event);
+    expect(s.sendUserMessage).toHaveBeenCalledTimes(delivered);
+    expect(claim).toHaveBeenCalledTimes(delivered * 2);
   } finally { await s.stop(); }
 });

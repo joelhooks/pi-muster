@@ -297,6 +297,10 @@ describe("selection", () => {
     expect(ratkingLoaded([{ name: "intercom", sourceInfo: { path: "/n/node_modules/@rat-king/pi-ratking/src/extension.ts", source: "npm:@rat-king/pi-ratking" } }])).toBe(true);
     expect(ratkingLoaded([{ name: "intercom", sourceInfo: { path: "/n/pi-intercom/index.ts", source: "pi-intercom" } }])).toBe(false);
     expect(ratkingLoaded([{ name: "rk" }], "rk")).toBe(true);
+    expect(ratkingLoaded([], "ratking", [{ name: "ratking-retire", source: "extension", sourceInfo: { source: "npm:@rat-king/pi-ratking" } }])).toBe(true);
+    expect(ratkingLoaded([], "ratking", [{ name: "ratking-retire", source: "extension", sourceInfo: { source: "other" } }])).toBe(false);
+    // Tin-Tin, #25 review: pi-ratking's own skill, loaded without the extension, is not Rat King.
+    expect(ratkingLoaded([], "ratking", [{ name: "skill:ratking-tui", source: "skill", sourceInfo: { path: "/r/rat-king/packages/pi-ratking/skills/ratking-tui/SKILL.md", source: "npm:@rat-king/pi-ratking" } }])).toBe(false);
   });
 
   it("with pi-ratking and MUSTER_COMMS=ratking every send goes through it; without pi-ratking it fails loudly, never over intercom", async () => {
