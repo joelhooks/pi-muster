@@ -9,7 +9,8 @@ export const NAME_SHIM = "globalThis.__name ??= (fn) => fn;";
 
 export type LaunchKind = "launch" | "fork" | "restore";
 
-/** Flags that shrink the tool registry. They silently drop unknown names, so Muster never emits them. */
+/** Flags that shrink the tool registry. They silently drop unknown names, so Muster emits none of them on its own.
+ * The one exception is opt-in: a project role policy's `tools` (Joel, desk page sb-desk-20261022c, Lean Loadout). */
 export const FORBIDDEN_FLAGS = ["--tools", "-t", "--exclude-tools", "-xt", "--no-tools", "-nt", "--no-builtin-tools", "-nbt"];
 
 export interface ArgvInput {
@@ -57,7 +58,7 @@ export function buildArgv(input: ArgvInput): string[] {
   }
   argv.push(...value("--name", profile.label));
   argv.push(...value("--model", profile.thinking ? `${profile.model}:${profile.thinking}` : profile.model));
-  for (const prompt of profile.appendSystemPrompt) argv.push(...value("--append-system-prompt", prompt));
+  for (const prompt of new Set([...profile.appendSystemPrompt, ...(profile.policy?.appendSystemPrompt ?? [])])) argv.push(...value("--append-system-prompt", prompt));
   // Slim: no extension discovery and no context files. Explicit -e paths still load; never a tool-registry flag.
   if (profile.slim) argv.push("-ne", "-nc");
   if (profile.noSkills) argv.push("-ns");
@@ -71,6 +72,7 @@ export function buildArgv(input: ArgvInput): string[] {
   argv.push("--approve");
   const forbidden = argv.filter((arg) => FORBIDDEN_FLAGS.includes(arg));
   if (forbidden.length > 0) throw new Error(`argv contains tool-registry flags: ${forbidden.join(", ")}`);
+  if (profile.policy?.tools?.length) argv.push(...value("--tools", profile.policy.tools.join(",")));
   if (input.prompt || input.promptFile) {
     argv.push("--");
     if (input.promptFile) argv.push(`@${input.promptFile}`);
@@ -125,6 +127,7 @@ export function profileFor(role: Role, input: ProfileInput, d: RoleDefaults = RO
 export function agentEnv(project: Project, row: AgentRow): Record<string, string> {
   const self = `${project.slug}/${row.name}`;
   return {
+    ...row.profile.policy?.env,
     ...row.profile.env,
     ...(row.role === "desk" ? { HERDR_DESK_PROJECT: project.slug } : {}),
     MUSTER_PROJECT: project.dir,

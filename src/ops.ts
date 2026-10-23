@@ -62,7 +62,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
-import { DEFAULT_GATE_TIMEOUT_MIN, decodeCallsignClaim, decodeCallsignRelease } from "./domain.ts";
+import { DEFAULT_GATE_TIMEOUT_MIN, decodeCallsignClaim, decodeCallsignRelease, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
@@ -125,6 +125,11 @@ const startPrompt = (row: AgentRow, prompt: string | undefined, dir: string) => 
   return { prompt: text, expected: text, repairPrompt: text };
 });
 
+
+/** The role policy in force now, with its prompt files mapped onto the row's machine. A bad value refuses the launch. */
+const roleLaunchProfile = <P extends LaunchProfile>(profile: P, project: Project, role: Role, map: (path: string) => string = path => path) =>
+  Effect.try({ try: () => withRoleLaunch(profile, project.policy, role), catch: error => new InputError({ message: `role policy: ${error instanceof Error ? error.message : String(error)}` }) })
+    .pipe(Effect.map(next => next.policy?.appendSystemPrompt ? { ...next, policy: { ...next.policy, appendSystemPrompt: next.policy.appendSystemPrompt.map(map) } } : next));
 
 const readSessionText = (file: string | null, remote: boolean): Effect.Effect<string, InputError | ProcError, Proc> => !file ? Effect.succeed("") : remote
   ? must("node", ["--input-type=module", "-e", SESSION_MODEL_READ_SCRIPT, file], { cwd: "/", timeoutMs: 20_000 })
@@ -272,6 +277,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   let remoteProfile: LaunchProfile = { ...profile, model: remoteModel, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: withHiddenSkills(profile.appendSystemPrompt, discovered.hidden).map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
+  remoteProfile = yield* roleLaunchProfile(remoteProfile, project, role, path => mapWorkerPath(path, machine));
   resolved.notes.push(...(yield* prerequisites(nameOfMachine, machine, remoteSource, params.hydrate === true, remoteProfile.env)));
   resolved.notes.push(...(yield* readyForRemoteLaunch(nameOfMachine, machine, remoteSource, `${remoteModel}${remoteProfile.thinking ? `:${remoteProfile.thinking}` : ""}`, 300_000, remoteProfile.env)));
   const remoteHome = machine.env.HOME ?? (yield* remoteNode(nameOfMachine, machine, "process.stdout.write(process.env.HOME ?? '')")).trim();
@@ -2642,9 +2648,10 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   const machine = remote ? yield* machineConfig(old.machine) : null;
   const launchProject = machine ? { ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null } : project;
   // Tin-Tin, 2026-10-20: restart took extensions and env and dropped them without a word. Both join the row's own.
-  const requested: LaunchProfile = { ...old.profile,
+  // The role policy is read again, so clearing it and restarting rolls a Lean Loadout back.
+  const requested: LaunchProfile = yield* roleLaunchProfile({ ...old.profile,
     ...(overrides.extensions !== undefined ? { extensions: mergedExtensions(old.profile.extensions, overrides.extensions) } : {}),
-    ...(overrides.env !== undefined ? { env: { ...old.profile.env, ...overrides.env } } : {}) };
+    ...(overrides.env !== undefined ? { env: { ...old.profile.env, ...overrides.env } } : {}) }, project, old.role, machine ? path => mapWorkerPath(path, machine) : undefined);
   const selected = yield* sessionRestore(requested, old.sessionFile, project, old.role, (yield* loadRoster).roster, {
     ...(overrides.model !== undefined ? { model: overrides.model } : {}), ...(overrides.thinking !== undefined ? { thinking: overrides.thinking } : {}) }, remote);
   const notes = [...selected.notes];
@@ -3108,7 +3115,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         ...(params.extensions !== undefined ? { extensions: mergedExtensions(existing.profile.extensions, params.extensions) } : {}),
         ...(params.env !== undefined ? { env: { ...params.env } } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}) };
-      const selected = yield* sessionRestore(profileFor(existing.role, { ...overridden, slim: overridden.slim }), sessionFile, project, existing.role, roster, params);
+      const selected = yield* sessionRestore(yield* roleLaunchProfile(profileFor(existing.role, { ...overridden, slim: overridden.slim }), project, existing.role), sessionFile, project, existing.role, roster, params);
       const restoredProfile = selected.profile;
       const slimRefusal = slimProblem(restoredProfile);
       if (slimRefusal) return yield* input(slimRefusal);
@@ -3190,7 +3197,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
           catch: (cause) => new InputError({ message: `skill discovery: ${String(cause)}` }),
         })
         : { paths: [], notes: [], hidden: [] };
-      const profile: LaunchProfile = { ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) };
+      const profile: LaunchProfile = yield* roleLaunchProfile({ ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) }, project, role);
       skillNotes.push(...resolved.notes);
       const now = iso(env);
       row = {
