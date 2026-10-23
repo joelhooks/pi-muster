@@ -106,8 +106,9 @@ it("a repeated owner delivery appends and wakes once; an existing URI under a ne
 // subscribed and lost herdr_agent prompt mail. pi-ratking's commands aren't filtered; a handled message is claimed so
 // pi-ratking 13a2607 doesn't surface it a second time.
 it.each([
-  ["a lean row whose tool list omits ratking", { tools: [], commands: [{ name: "ratking-retire", sourceInfo: { path: "/n/node_modules/@rat-king/pi-ratking/src/extension.ts", source: "npm:@rat-king/pi-ratking" } }] }, 1],
-  ["a Pi without pi-ratking", { tools: [], commands: [{ name: "other", sourceInfo: { path: "/n/other/index.ts", source: "other" } }] }, 0],
+  ["a lean row whose tool list omits ratking", { tools: [], commands: [{ name: "ratking-retire", source: "extension", sourceInfo: { path: "/n/node_modules/@rat-king/pi-ratking/src/extension.ts", source: "npm:@rat-king/pi-ratking" } }] }, 1],
+  ["a Pi without pi-ratking", { tools: [], commands: [{ name: "other", source: "extension", sourceInfo: { path: "/n/other/index.ts", source: "other" } }] }, 0],
+  ["a Pi with only pi-ratking's skill", { tools: [], commands: [{ name: "skill:ratking-tui", source: "skill", sourceInfo: { path: "/n/node_modules/@rat-king/pi-ratking/skills/ratking-tui/SKILL.md", source: "npm:@rat-king/pi-ratking" } }] }, 0],
 ] as const)("%s", async (_name, loaded, delivered) => {
   const s = await setup(loaded as never);
   const claim = vi.fn();

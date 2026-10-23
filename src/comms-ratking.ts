@@ -48,16 +48,18 @@ export const rowRatkingName = (project: Pick<Project, "slug">, row: { readonly n
 /** Rowless owners with reserved Rat King names. */
 export const OWNER_ALIASES: readonly string[] = ["switchboard", "servo", "titan"];
 
-type LoadedTool = { readonly name: string; readonly sourceInfo?: { readonly path?: string; readonly source?: string } };
+type LoadedTool = { readonly name: string; readonly source?: string; readonly sourceInfo?: { readonly path?: string; readonly source?: string } };
 const fromRatking = (tool: LoadedTool) => /pi-ratking/.test(`${tool.sourceInfo?.path ?? ""} ${tool.sourceInfo?.source ?? ""}`);
 
 /**
  * pi-ratking registers its tool as `ratking`, or as `intercom` once pi-intercom is gone; either way its source names the
  * package. Pi's `--tools` allowlist hides an unlisted tool from getAllTools, so a lean row would look Rat King-less and
  * lose its mail and its sends (Nicodemus, 2026-10-23): pi-ratking's commands, which `--tools` never filters, count too.
+ * Only extension commands: getCommands also lists prompts and `skill:*`, and pi-ratking ships the ratking-tui skill, which
+ * a Pi can load without the extension (Tin-Tin, #25 review).
  */
 export function ratkingLoaded(tools: readonly LoadedTool[], toolName = "ratking", commands: readonly LoadedTool[] = []): boolean {
-  return tools.some(tool => tool.name === toolName || fromRatking(tool)) || commands.some(fromRatking);
+  return tools.some(tool => tool.name === toolName || fromRatking(tool)) || commands.some(command => command.source === "extension" && fromRatking(command));
 }
 
 
