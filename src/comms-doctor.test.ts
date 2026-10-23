@@ -45,7 +45,7 @@ describe("pi-ratking doctor", () => {
     expect(report.verdict).toContain(verdict);
   });
   it("takes in-process status when available and flags an expected-versus-claimed name mismatch", async () => {
-    const events = createEventBus(); const h = harness();
+    const events = createEventBus();
     events.on("ratking/status", value => events.emit("ratking/status:result", { ...(value as object), name: "wrong-name", did: "did:web:wrong.example.invalid", reader: "live", leaseGeneration: 3, leaseUntil: "later" }));
     const live = await Effect.runPromise(ratkingStatus(events, "request"));
     const probe = { name: "pilot/worker", did: null, session: "worker-session", pid: process.pid, alive: true, afterSeq: 0 };

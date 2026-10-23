@@ -11,10 +11,9 @@ import { sessionDirFor } from "./argv.ts";
 import type { ProcShape } from "./runtime.ts";
 import { registeredCatalogs } from "./comms-ratking.ts";
 import { fakeRatking } from "./ratking-fake.ts";
-import { readRegistry } from "./registry.ts";
-import { load, projectPath } from "./store.ts";
+import { projectPath } from "./store.ts";
 import { decodeProject } from "./domain.ts";
-import { CommsError, Herdr, Comms, MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
+import { Herdr, Comms, MusterEnv, Proc, liveProc, noEmitPaneClose } from "./runtime.ts";
 import type { EmitPaneClose } from "./runtime.ts";
 
 export interface FakePane {

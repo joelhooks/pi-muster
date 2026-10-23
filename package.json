@@ -122,7 +122,7 @@
     "src/version-skew.ts"
   ],
   "scripts": {
-    "check": "tsc --project tsconfig.json",
+    "check": "tsc --project tsconfig.json && oxlint -c .oxlintrc.json .",
     "test": "vitest run src",
     "smoke": "bash scripts/smoke.sh",
     "pack:check": "node scripts/check-package.mjs"
@@ -138,6 +138,7 @@
     "@earendil-works/pi-coding-agent": "0.79.10",
     "@earendil-works/pi-tui": "0.84.3",
     "@types/node": "24.13.3",
+    "oxlint": "1.89.0",
     "typebox": "1.3.0",
     "typescript": "6.0.3",
     "vitest": "4.1.11"

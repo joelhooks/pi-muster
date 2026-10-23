@@ -1,5 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createEventBus, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Effect, Layer } from "effect";
@@ -13,7 +12,7 @@ const OUTBOX_REQUEST_EVENT = "intercom:outbox:request";
 import { ownerFeed } from "./owner-feed.ts";
 import { ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate, pullRemoteOwnerInbox } from "./ops.ts";
-import { dataDir, load, mutate, projectPath } from "./store.ts";
+import { load, mutate, projectPath } from "./store.ts";
 import { deskPost } from "./ops.ts";
 import { registerSwitchboardSession } from "./switchboard-ops.ts";
 import { harness, runWith } from "./test-support.ts";
@@ -97,13 +96,12 @@ describe("detection", () => {
 
 describe("no pi-intercom", { timeout: 30_000 }, () => {
   it("an intercom choice rides ratking when pi-intercom is absent, and fails loudly when pi-ratking is absent too", async () => {
-    const { h, dir } = await opened();
+    const { dir } = await opened();
     writeRaw(dir, { ...raw(dir), policy: { comms: "intercom" } });
     const fake = fakeRatking();
     const outbox: unknown[] = [];
     fake.events.on(OUTBOX_REQUEST_EVENT, request => outbox.push(request));
     const ratking = RatkingComms({ events: fake.events, createId: () => "id", sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) });
-    const options = { events: fake.events, createId: () => "id", home: h.home, projectDir: dir, adapterEnv: () => undefined, followProjectPolicy: true };
     const withRatking = createComms({ ratking: () => ratking });
     expect(await Effect.runPromise(withRatking.mode!())).toBe("ratking");
     expect(await Effect.runPromise(withRatking.send("desk-session", "hi"))).toMatchObject({ status: "delivered" });

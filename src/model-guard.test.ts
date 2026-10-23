@@ -165,7 +165,7 @@ it.each(["running"] as const)("status flags model errors on %s without adoption 
   await runWith(h, mutate(dir, (project) => Effect.gen(function* () {
     const row = project.agents[0];
     if (!row) throw new Error("missing launched row");
-    let next = row.state;
+    const next = row.state;
 
     return [{ ...project, agents: [{ ...row, state: next }] }, undefined] as const;
   })));

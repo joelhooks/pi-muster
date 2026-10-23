@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
 import { homedir, hostname, platform } from "node:os";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { finishJob, heavyReport, heavySnapshot, heavyStatus, registerJob, refreshJob, jobsPath, type HeavyOptions } from "../src/heavy-lock.ts";
@@ -97,6 +97,7 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   catch (error) { cleanup(); throw error; }
   process.once("exit", cleanup);
   let child: ReturnType<typeof spawn>;
+  // oxlint-disable-next-line prefer-const -- assigned once after cleanup is defined, so it cannot be const
   let timer: ReturnType<typeof setInterval> | undefined;
   const telemetry = (fn: () => unknown) => {
     try { fn(); } catch (error) { console.error(`muster-heavy telemetry: ${error instanceof Error ? error.message : String(error)}`); }

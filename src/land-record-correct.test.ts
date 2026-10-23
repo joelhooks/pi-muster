@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { decodePacketCorrection } from "./domain.ts";
 import { findLanding } from "./autoland.ts";
-import { agentClose, agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen, projectStatus } from "./ops.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen } from "./ops.ts";
 
 import { stepPacket } from "./machines.ts";
 import { dataDir, load, mutate, projectPath } from "./store.ts";

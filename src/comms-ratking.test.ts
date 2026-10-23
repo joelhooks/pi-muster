@@ -11,7 +11,6 @@ import { RATKING_MESSAGE, RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, owner
 import { decodePolicy, type AgentRow, type Project } from "./domain.ts";
 import muster from "./extension-main.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
-import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { ownerFeed } from "./owner-feed.ts";
 import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
 import { load } from "./store.ts";
@@ -304,11 +303,9 @@ describe("selection", () => {
   });
 
   it("with pi-ratking and MUSTER_COMMS=ratking every send goes through it; without pi-ratking it fails loudly, never over intercom", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ratking-select-"));
     const fake = fakeRatking(() => ({ status: "delivered", id: "m", seq: 1 }));
     const ratking = RatkingComms({ events: fake.events, createId, sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) });
     const intercom: Array<Record<string, unknown>> = [];
-    const events = { emit: (_event: string, payload: unknown) => { intercom.push(payload as Record<string, unknown>); }, on: () => () => {} };
     const withRatking = createComms({ ratking: () => ratking });
     expect(await Effect.runPromise(withRatking.mode!())).toBe("ratking");
     expect(await Effect.runPromise(withRatking.send("desk-session", "hi"))).toMatchObject({ status: "delivered" });
@@ -323,11 +320,9 @@ describe("selection", () => {
 
 describe("default", () => {
   it("MUSTER_COMMS=network is ignored; unset rides ratking", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ratking-optin-"));
     const fake = fakeRatking(() => ({ status: "delivered", id: "m", seq: 1 }));
     const ratking = vi.fn(() => RatkingComms({ events: fake.events, createId, sender: () => "me", target: to => ({ name: "pilot/desk", session: String(to) }) }));
     const intercom: Array<Record<string, unknown>> = [];
-    const events = { emit: (_event: string, payload: unknown) => { intercom.push(payload as Record<string, unknown>); }, on: () => () => {} };
     const network = createComms({ ratking });
     const mode = await Effect.runPromise(network.mode!().pipe(Effect.orElseSucceed(() => "network-unconfigured")));
     expect(mode).toBe("ratking");

@@ -5,12 +5,8 @@ import { describe, it, expect, vi } from "vitest";
 import { registerOwnerFeed, duplicateSessionPane } from "./owner-feed-ext.ts";
 import type { AgentRow } from "./domain.ts";
 import type { PaneInfo } from "./herdr.ts";
-import { appendOwnerItem, readerFresh, readOwnerQueue } from "./owner-queue.ts";
+import { appendOwnerItem, readerFresh } from "./owner-queue.ts";
 
-import { Effect } from "effect";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { NetworkPayload } from "./domain.ts";
-import type { CommsError } from "./runtime.ts";
 
 describe("owner feed lifecycle", () => {
   it("identifies only the unbound live session copy", () => {

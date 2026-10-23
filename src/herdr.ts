@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Effect } from "effect";
 import { decodeFirstTurnEntry, decodeSessionSlice, decodeSessionEntryCount } from "./domain.ts";

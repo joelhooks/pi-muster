@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
-import { Comms, MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
+import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
 import { appendOwnerItem, ingestOwnerItem } from "./owner-queue.ts";
 import { ownerFeed } from "./owner-feed.ts";
 import muster, { CARRIED_HEADER, registerRestartExit } from "./extension-main.ts";

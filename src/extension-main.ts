@@ -50,7 +50,6 @@ import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
 import { deskPhone, deskPhoneRecord } from "./switchboard-ops.ts";
-import { CommsError } from "./runtime.ts";
 import { findSkills, skillIndex } from "./skills.ts";
 import { createVersionSkew, loadedVersion, withVersionSkew } from "./version-skew.ts";
 import { squashed } from "./readable.ts";

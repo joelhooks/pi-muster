@@ -1,11 +1,10 @@
-import { mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { ownerFeed, ownerTimeline, OWNER_CURSOR } from "./owner-feed.ts";
 import { appendOwnerItem, ownerPath, deliverOwnerItem, readerFresh, writeReader, writeReaderAsync, mentions, readOwnerQueue, canonicalJson, resolveOwner } from "./owner-queue.ts";
-import { OwnerTimelineView, ownerInboxText, readOwnerTimelineData } from "./owner-view.ts";
 import type { OwnerItem } from "./domain.ts";
 
 const fixture = () => {
