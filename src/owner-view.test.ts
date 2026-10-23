@@ -47,6 +47,7 @@ describe("owner timeline", () => {
     const lines = new OwnerTimelineView(data, { expanded: false, now: Date.now() }, theme).render(width);
     expect(lines.every(line => visibleWidth(line) <= width)).toBe(true);
     if (width > 40) {
+      // oxlint-disable-next-line no-control-regex -- strips terminal escapes
       const plain = lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
       expect(plain.indexOf("@you")).toBeLessThan(plain.indexOf("quiet 2"));
       expect(plain).toContain("+2 more");
@@ -55,6 +56,7 @@ describe("owner timeline", () => {
       expect(plain).not.toContain("line four");
       expect(plain).not.toContain("quiet 0");
     } else if (width >= 32) {
+      // oxlint-disable-next-line no-control-regex -- strips terminal escapes
       const plain = lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
       expect(plain).toContain("question sender");
       expect(plain).toContain("blocked reader");

@@ -222,6 +222,7 @@ export const RestoreCommand = Schema.Struct({
 });
 export type RestoreCommand = typeof RestoreCommand.Type;
 
+// oxlint-disable-next-line no-control-regex -- a remote path must carry no control characters
 const RemotePath = Schema.String.check(Schema.isPattern(/^\/[^\x00-\x1f\x7f]*$/));
 export const MachineConfig = Schema.Struct({
   herdr: Schema.String,

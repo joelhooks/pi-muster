@@ -1088,7 +1088,7 @@ const statusEvidence = (row: AgentRow, pane: PaneInfo | null | undefined) => {
     identity: "proven (session path match)",
     capability: launched ? "launch-profile receipt (Muster launcher, bound terminal)" : "unknown (resumed outside Muster)",
     ...(!launched && ["running", "silent", "nudged", "restarted", "reported", "verified", "landed"].includes(row.state)
-      ? { recovery: `agent_launch action:\"restart\" name:${row.name}; re-check until list and herdr_watch list and re-arm still-needed watches` } : {}),
+      ? { recovery: `agent_launch action:"restart" name:${row.name}; re-check until list and herdr_watch list and re-arm still-needed watches` } : {}),
   };
 };
 const reboundNote = (row: AgentRow, pane: PaneInfo) => `rebound ${row.name} → ${pane.pane_id} (identity: session path match)`;
@@ -2207,6 +2207,7 @@ const cloneFor = (source: string, name: string, lane: Lane, mode: Mode, script?:
   });
 
 /** Tail text is UNTRUSTED: it can buy time, never prove a session or prompt delivery. */
+// oxlint-disable-next-line no-control-regex -- strips terminal escapes
 const piStarting = (tail: string, launchCommand?: string) => tail.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/).some(line =>
   (!!launchCommand && line.includes(launchCommand)) ||
   /^(?:pi\s*[:·-]\s*)?creating a new session(?:\s|[.…]|$)/i.test(line.trim()) ||
@@ -2605,7 +2606,7 @@ const moveOwnedRows = (dir: string, from: string, to: string) => Effect.gen(func
   const touched: string[] = [dir];
   const entries = yield* Effect.sync(() => { try { return [...readRegistry(env.home).values()].filter(entry => resolve(entry.dir) !== resolve(dir)); } catch { return []; } });
   for (const entry of entries) {
-    const moved = yield* mutate(entry.dir, current => Effect.gen(function* () {
+    const moved = yield* mutate(entry.dir, current => Effect.sync(() => {
       const owned = current.agents.filter(other => other.owner === from && other.state !== "closed");
       if (!owned.length) return [current, 0] as const;
       const next = { ...current, agents: current.agents.map(other => other.owner === from && other.state !== "closed" ? ownerSynced({ ...other, owner: to, updatedAt: iso(env) }) : other) };
@@ -3591,7 +3592,7 @@ const reportText = (text: string): string => `${reportFence(text)}\n${text}\n${r
 // Svelte compilation, and Markdown punctuation before inline parsing. <br />
 // keeps a multiline check in one source row while rendering its line breaks.
 const reportCell = (text: string): string => {
-  const cell = text.replace(/[&<>{}|`\\*_\[\]~\r]/g, (char) => `&#${char.charCodeAt(0)};`).replace(/\n/g, "<br />");
+  const cell = text.replace(/[&<>{}|`\\*_[\]~\r]/g, (char) => `&#${char.charCodeAt(0)};`).replace(/\n/g, "<br />");
   return `<code>${cell}</code>`;
 };
 
@@ -4258,8 +4259,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const handoverNotes: string[] = [];
     const project = params.takeover
-      ? yield* mutate(dir, (current) => Effect.gen(function* () {
-
+      ? yield* mutate(dir, (current) => Effect.sync(() => {
           const next = { ...current, agents: current.agents.map((row) =>
             row.state === "closed" ? row : ownerSynced({ ...withoutOwnerName(row), ...launchOwnerName(env.home, dir, env.sessionId), owner: env.sessionId, updatedAt: iso(env) })) };
           return [next, next] as const;

@@ -92,6 +92,7 @@ export const agentRewind = (dir: string, params: { name: string; to: string; not
     if (row.owner !== env.sessionId) return yield* new GuardFailed({ guard: "owner", message: `${row.name} belongs to owner session ${row.owner}; only its owner can rewind it` });
     if (!row.pane || !row.sessionFile) return yield* new InputError({ message: `${row.name} needs a live pane and session file` });
     if (row.machine === "local" && row.pane.paneId === env.paneId) return yield* new InputError({ message: "cannot rewind the calling pane" });
+    // oxlint-disable-next-line no-control-regex -- a rewind note must carry no control characters
     if (params.note?.includes("\n") || params.note?.includes("\r") || /[\x00-\x1f\x7f]/.test(params.note ?? "")) {
       return yield* new InputError({ message: "rewind note must be one line without control characters" });
     }

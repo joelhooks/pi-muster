@@ -45,6 +45,7 @@ export function resolveModel(choice: string, roster?: Roster, project?: string, 
 
 /** Pi's authenticated-model table, not the full registry. Ignore ANSI and headings. */
 export function parseRunnableModels(output: string): string[] {
+  // oxlint-disable-next-line no-control-regex -- strips terminal escapes
   const lines = output.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/);
   const header = lines.findIndex((line) => /^provider\s+model\s+context\s+max-out\s+thinking\s+images\s*$/.test(line.trim()));
   if (header < 0) return [];
