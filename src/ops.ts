@@ -4002,9 +4002,17 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const proc = yield* Proc;
-    const project = yield* load(dir);
+    let project = yield* load(dir);
     yield* guardSideDesk(project, env.sessionId, "packet_land");
-    const packet = yield* findPacket(project, params.id);
+    // drovr, 2026-10-23: a remote packet reaches the catalog only through an ingest, and project_status act:false never
+    // ingests, so packet_land answered a bare "no packet". Ingest on a miss, as packet_verify does, and name any skip.
+    let ingestNotes: string[] = [];
+    if (!project.packets.some(packet => packet.id === params.id || (params.id.length >= 7 && packet.id.startsWith(params.id)))) {
+      ingestNotes = (yield* ingestRemotePackets(dir)).notes;
+      project = yield* load(dir);
+    }
+    const packet = yield* findPacket(project, params.id).pipe(Effect.mapError(error => error._tag === "NotFound" && ingestNotes.length
+      ? new NotFound({ ...error, message: `${error.message}; ${ingestNotes.join("; ")}` }) : error));
     if (params.corrects !== undefined) {
       const reason = params.corrects.trim();
       if (!reason || /^(placeholder|tbd|todo|-|n\/a)$/i.test(reason)) return yield* input("correction requires a real reason");
