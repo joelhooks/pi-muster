@@ -1,31 +1,32 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
-import { loadSkills } from "@earendil-works/pi-coding-agent";
+import { DefaultPackageManager, SettingsManager, loadSkills } from "@earendil-works/pi-coding-agent";
 import type { Skill } from "@earendil-works/pi-coding-agent";
-import { decodeSkillSettings } from "./domain.ts";
 
 function expandHome(path: string): string {
   return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
-function settingsPaths(base: string): string[] {
-  const file = join(base, "settings.json");
-  if (!existsSync(file)) return [];
-  const settings = decodeSkillSettings(JSON.parse(readFileSync(file, "utf8")));
-  return (settings.skills ?? []).map((path) => resolve(base, expandHome(path)));
-}
-
-/** Pi owns discovery and frontmatter parsing. No second filesystem walker. */
-export function skillIndex({ cwd, agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent") }: {
+/** Pi owns discovery: settings skills, packages, defaults and frontmatter. No second filesystem walker, or package
+ * skills (pi-effect, pi-ast-grep, ...) go missing. Resolution mirrors DefaultResourceLoader.reload, except a package
+ * Pi would install ("onMissing") is skipped: a read-only lookup or a launch must never touch the network or agent dir. */
+export async function skillIndex({ cwd, agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent") }: {
   cwd: string; agentDir?: string;
-}): Skill[] {
+}): Promise<Skill[]> {
   const dir = resolve(expandHome(agentDir));
-  const { skills } = loadSkills({
-    cwd, agentDir: dir, includeDefaults: true,
-    skillPaths: [...settingsPaths(dir), ...settingsPaths(join(cwd, ".pi"))],
+  const packageManager = new DefaultPackageManager({ cwd, agentDir: dir, settingsManager: SettingsManager.create(cwd, dir) });
+  const resolved = await packageManager.resolve(async () => "skip");
+  const skillPaths = resolved.skills.filter((resource) => resource.enabled).map((resource) => {
+    // The loader maps an auto or package directory to its SKILL.md.
+    if (resource.metadata.source !== "auto" && resource.metadata.origin !== "package") return resource.path;
+    try {
+      const file = join(resource.path, "SKILL.md");
+      return statSync(resource.path).isDirectory() && existsSync(file) ? file : resource.path;
+    } catch { return resource.path; }
   });
+  const { skills } = loadSkills({ cwd, agentDir: dir, skillPaths, includeDefaults: false });
   // Every skill stays indexed: findSkills hides disable-model-invocation ones from search, but a launch may still name
   // one explicitly (para-operator, 2026-10-11).
   const seen = new Set<string>();
