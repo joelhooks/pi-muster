@@ -974,6 +974,21 @@ describe("remote owner operations", () => {
     expect(vi.mocked(s.proc.run).mock.calls.some(([command]) => command === "ssh")).toBe(false);
     await expect(s.run(packetVerify(s.dir, "f".repeat(40)))).rejects.toThrow("machine remote: ingest skipped");
   });
+  // drovr, 2026-10-23: project_status act:false never ingests, and packet_land answered a bare "no packet".
+  it("packet_land ingests a remote packet it doesn't hold yet, and names a skipped ingest", async () => {
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/remote-project", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "No source changes", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId })));
+    vi.unstubAllEnvs();
+    expect((await s.run(load(s.dir))).packets).toEqual([]);
+    const landed = await s.run(packetLand(s.dir, { id: commit.slice(0, 12), outcome: "rejected", evidence: "superseded by a later packet" }));
+    expect(landed.packet.state).toBe("rejected");
+    const original = s.proc.run;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) => command === "ssh"
+      ? Effect.fail(new ProcError({ command: "ssh remote", code: 255, stderr: "offline", message: "machine remote: offline" })) : original(command, args, options));
+    await expect(s.run(packetLand(s.dir, { id: "f".repeat(40), outcome: "rejected", evidence: "x" }))).rejects.toThrow(/no packet f+; machine remote: ingest skipped/);
+  });
   it("ingests a remote packet before closing, so retiring the clone never loses it", async () => {
     const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     const commit = sh(cwd, "rev-parse", "HEAD").trim();
