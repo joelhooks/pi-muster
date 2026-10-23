@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -26,9 +26,9 @@ function fixture() {
 }
 
 describe("skill discovery", () => {
-  it("ranks exact names before description hits, skips disabled skills, bounds results", () => {
+  it("ranks exact names before description hits, skips disabled skills, bounds results", async () => {
     const f = fixture();
-    const skills = skillIndex(f);
+    const skills = await skillIndex(f);
     const matches = findSkills({ skills, query: "testing" });
     expect(matches).toHaveLength(5);
     expect(matches[0]?.name).toBe("testing");
@@ -38,7 +38,7 @@ describe("skill discovery", () => {
     // A launch may still name a model-hidden skill, here through a symlinked skill directory (para-operator, 2026-10-11).
     const real = join(f.cwd, "elsewhere", "operator"); f.skill(join(f.cwd, "elsewhere"), "operator", "Hidden operator", true);
     symlinkSync(real, join(f.agentDir, "skills", "operator"));
-    const linked = skillIndex(f);
+    const linked = await skillIndex(f);
     const hiddenPaths = [realpathSync(join(f.agentDir, "skills", "hidden", "SKILL.md")), realpathSync(join(real, "SKILL.md"))];
     expect(resolveSkills({ skills: ["hidden", "operator", "testing"], index: linked })).toEqual({ paths: [...hiddenPaths, realpathSync(f.exact)], notes: [], hidden: hiddenPaths });
     // Pi keeps hidden skills out of the model's list even under --skill, so their SKILL.md joins the appended prompt once.
@@ -52,7 +52,7 @@ describe("skill discovery", () => {
   it.each([
     ["write tests first red green", "tdd"],
     ["write a brief for an agent", "writing-for-agents"],
-  ])("ranks task terms above common name words: %s", (query, expected) => {
+  ])("ranks task terms above common name words: %s", async (query, expected) => {
     const f = fixture();
     const base = join(f.agentDir, "skills");
     f.skill(base, "brain-first-workflow", "Use when agents write plans and tests");
@@ -61,7 +61,7 @@ describe("skill discovery", () => {
     f.skill(base, "tdd", "Test-first development with red-green-refactor");
     f.skill(base, "writing-for-agents", "Create briefs consumed by agents");
     for (let i = 0; i < 20; i++) f.skill(base, `common-${i}`, "Use when agents write plans and tests for work");
-    const skills = skillIndex(f);
+    const skills = await skillIndex(f);
     // Frozen old scorer proves these fixtures reproduce the desk's regressions.
     const words = new Set(query.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
     const old = skills.map((skill) => {
@@ -75,18 +75,18 @@ describe("skill discovery", () => {
     expect(findSkills({ skills, query })[0]?.name).toBe(expected);
   });
 
-  it("normalizes light suffixes, ignores stopwords and keeps stable ties", () => {
+  it("normalizes light suffixes, ignores stopwords and keeps stable ties", async () => {
     const f = fixture();
     const base = join(f.agentDir, "skills");
     f.skill(base, "alpha", "write test");
     f.skill(base, "beta", "writing tested");
-    const skills = skillIndex(f);
+    const skills = await skillIndex(f);
     expect(findSkills({ skills, query: "tested writing" }).slice(0, 2).map((s) => s.name)).toEqual(["alpha", "beta"]);
     expect(findSkills({ skills, query: "writing tests" }).slice(0, 2).map((s) => s.name)).toEqual(["alpha", "beta"]);
     expect(findSkills({ skills, query: "a an the for to of and with use when" })).toEqual([]);
   });
 
-  it("reads both settings paths relative to their settings dirs and follows agentDir env", () => {
+  it("reads both settings paths relative to their settings dirs and follows agentDir env", async () => {
     const f = fixture();
     f.skill(join(f.agentDir, "custom"), "global-extra", "global");
     f.skill(join(f.cwd, ".pi", "custom"), "local-extra", "local");
@@ -95,12 +95,35 @@ describe("skill discovery", () => {
     writeFileSync(join(f.cwd, ".pi", "settings.json"), JSON.stringify({ skills: ["custom"] }));
     symlinkSync(join(f.agentDir, "skills", "testing"), join(f.agentDir, "custom", "alias"));
     vi.stubEnv("PI_CODING_AGENT_DIR", f.agentDir);
-    const skills = skillIndex({ cwd: f.cwd });
+    const skills = await skillIndex({ cwd: f.cwd });
     expect(skills.map((s) => s.name)).toEqual(expect.arrayContaining(["global-extra", "local-extra"]));
     expect(skills.filter((s) => s.name === "testing")).toHaveLength(1);
   });
 
-  it("merges roster, alternate, policy, launch in order and deduplicates real paths", () => {
+  it("indexes skills shipped by settings packages and resolves a launch naming one", async () => {
+    const f = fixture();
+    const pkg = join(f.cwd, "pkg");
+    f.skill(join(pkg, "skills"), "pkg-effect", "Effect source search");
+    writeFileSync(join(pkg, "package.json"), JSON.stringify({ name: "pkg", pi: { skills: ["skills"] } }));
+    writeFileSync(join(f.agentDir, "settings.json"), JSON.stringify({ packages: [pkg] }));
+    const skills = await skillIndex(f);
+    expect(skills.map((s) => s.name)).toContain("pkg-effect");
+    expect(findSkills({ skills, query: "effect source" })[0]?.name).toBe("pkg-effect");
+    const resolved = resolveSkills({ skills: ["pkg-effect"], index: skills });
+    expect(resolved.notes).toEqual([]);
+    expect(resolved.paths).toHaveLength(1);
+  });
+
+  it("never installs a missing package and still indexes the rest", async () => {
+    const f = fixture();
+    writeFileSync(join(f.agentDir, "settings.json"), JSON.stringify({ packages: ["npm:muster-test-not-installed@1.0.0", "git:github.com/none/not-installed"] }));
+    const before = readdirSync(f.agentDir).sort();
+    const skills = await skillIndex(f);
+    expect(skills.map((s) => s.name)).toContain("testing");
+    expect(readdirSync(f.agentDir).sort()).toEqual(before);
+  });
+
+  it("merges roster, alternate, policy, launch in order and deduplicates real paths", async () => {
     const f = fixture();
     const alt = f.skill(join(f.agentDir, "skills"), "alternate", "alternate");
     const policy = f.skill(join(f.agentDir, "skills"), "policy", "policy");
@@ -112,7 +135,7 @@ describe("skill discovery", () => {
     } } });
     const defaults = roleDefaults(roster, { roles: { worker: { skills: ["policy"] } } }, "worker", "test/other");
     const profile = profileFor("worker", { label: "w", skills: ["launch", alias, "missing"] }, defaults);
-    const result = resolveSkills({ skills: profile.skills, index: skillIndex(f) });
+    const result = resolveSkills({ skills: profile.skills, index: await skillIndex(f) });
     expect(result.paths).toEqual([f.exact, alt, policy, launch].map((p) => realpathSync(p)));
     expect(result.notes).toEqual(['skill "missing" not found; skipped']);
     const argv = buildArgv({ kind: "launch", sessionId: "w", sessionFile: null, parentSessionFile: null,

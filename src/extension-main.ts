@@ -478,7 +478,7 @@ export default function muster(host: ExtensionAPI) {
       limit: Type.Optional(Type.Integer({ default: 5, minimum: 1, maximum: 10 })),
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
-      const matches = findSkills({ skills: skillIndex({ cwd: ctx.cwd }), ...params });
+      const matches = findSkills({ skills: await skillIndex({ cwd: ctx.cwd }), ...params });
       return text(matches.length ? matches.map((skill) => `${skill.name}: ${skill.description}\n${skill.path}`).join("\n\n") : "No matching skills.", { matches });
     },
   });

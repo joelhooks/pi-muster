@@ -266,7 +266,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   // Restore resolves too: a row or param may carry an alias (sol, opus) that a remote probe cannot read.
   const selected = yield* decodeWith(() => resolveModel(profile.model, roster, project.slug, role), null);
   const inheritedSkills = params.skills === undefined && (parent !== null || (params.action === "restore" && existing !== undefined));
-  const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[], hidden: [] as string[] } : yield* decodeWith(() => resolveSkills({ skills: profile.skills, index: skillIndex({ cwd: source }) }), null);
+  const discovered = inheritedSkills ? { paths: [...profile.skills], notes: [] as string[], hidden: [] as string[] } : yield* Effect.tryPromise({ try: async () => resolveSkills({ skills: profile.skills, index: await skillIndex({ cwd: source }) }), catch: (error) => input(String(error instanceof Error ? error.message : error)) });
   // Absolute remote paths cannot be discovered on the owner filesystem. Validate them over SSH below.
   const remoteOnly = inheritedSkills ? [] : profile.skills.filter(path => isAbsolute(path) && !existsSync(path));
   const resolved = { paths: [...new Set([...discovered.paths, ...remoteOnly])], notes: [...custodyNotes, ...workerChoice.notes, ...(retroChoice?.notes ?? []), ...discovered.notes.filter(note => !remoteOnly.some(path => note.includes(JSON.stringify(path))))] };
@@ -3121,8 +3121,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       if (slimRefusal) return yield* input(slimRefusal);
       skillNotes.push(...selected.notes);
       restoreTokens = selected.live.contextTokens;
-      const restoredSkills = yield* Effect.try({
-        try: () => resolveSkills({ skills: restoredProfile.skills, index: restoredProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
+      const restoredSkills = yield* Effect.tryPromise({
+        try: async () => resolveSkills({ skills: restoredProfile.skills, index: restoredProfile.skills.some(skill => !isAbsolute(skill)) ? await skillIndex({ cwd }) : [] }),
         catch: error => input(`restore skills: ${String(error)}`),
       });
       skillNotes.push(...restoredSkills.notes);
@@ -3192,8 +3192,8 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       const slimRefusal = slimProblem(requestedProfile);
       if (slimRefusal) return yield* input(slimRefusal);
       const resolved = requestedProfile.skills.length > 0
-        ? yield* Effect.try({
-          try: () => resolveSkills({ skills: requestedProfile.skills, index: requestedProfile.skills.some(skill => !isAbsolute(skill)) ? skillIndex({ cwd }) : [] }),
+        ? yield* Effect.tryPromise({
+          try: async () => resolveSkills({ skills: requestedProfile.skills, index: requestedProfile.skills.some(skill => !isAbsolute(skill)) ? await skillIndex({ cwd }) : [] }),
           catch: (cause) => new InputError({ message: `skill discovery: ${String(cause)}` }),
         })
         : { paths: [], notes: [], hidden: [] };
