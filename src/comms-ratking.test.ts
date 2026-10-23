@@ -297,6 +297,8 @@ describe("selection", () => {
     expect(ratkingLoaded([{ name: "intercom", sourceInfo: { path: "/n/node_modules/@rat-king/pi-ratking/src/extension.ts", source: "npm:@rat-king/pi-ratking" } }])).toBe(true);
     expect(ratkingLoaded([{ name: "intercom", sourceInfo: { path: "/n/pi-intercom/index.ts", source: "pi-intercom" } }])).toBe(false);
     expect(ratkingLoaded([{ name: "rk" }], "rk")).toBe(true);
+    expect(ratkingLoaded([], "ratking", [{ name: "ratking-retire", sourceInfo: { source: "npm:@rat-king/pi-ratking" } }])).toBe(true);
+    expect(ratkingLoaded([], "ratking", [{ name: "ratking-retire", sourceInfo: { source: "other" } }])).toBe(false);
   });
 
   it("with pi-ratking and MUSTER_COMMS=ratking every send goes through it; without pi-ratking it fails loudly, never over intercom", async () => {

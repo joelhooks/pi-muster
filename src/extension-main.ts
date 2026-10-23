@@ -222,7 +222,9 @@ export default function muster(host: ExtensionAPI) {
   const worker = role === "worker";
   const comms = new Map<string, ReturnType<typeof createComms>>();
   // pi-ratking registers at load; Muster asks at call time and never starts a reader on the ratking name.
-  const ratkingHere = () => { try { return ratkingLoaded(pi.getAllTools(), env.RATKING_TOOL); } catch { return false; } };
+  const ratkingHere = () => { try { return ratkingLoaded(pi.getAllTools(), env.RATKING_TOOL, pi.getCommands?.() ?? []); } catch { return false; } };
+  // pi-ratking 13a2607 surfaces data mail itself in a --tools Pi unless a listener claims it; claim what Muster handled.
+  const claimDelivery = (message: unknown) => { try { (message as { claim?: () => void } | null)?.claim?.(); } catch { /* an older pi-ratking has no claim */ } };
 
   // pi-ratking's transport whenever it is loaded; createComms decides at call time whether ratking is selected.
   const ratkingFor = (dir: string, ctx: ExtensionContext) => ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
@@ -317,19 +319,22 @@ export default function muster(host: ExtensionAPI) {
     if (!ratkingHere()) return;
     const off = pi.events.on(RATKING_MESSAGE, message => {
       const id = deliveryId(message);
-      if (!id || handledDeliveries.has(id)) return;
+      if (!id) return;
+      if (handledDeliveries.has(id)) { claimDelivery(message); return; }
       try {
         ratkingInbound(message, {
           rejected: reason => console.warn(`[muster] ${reason}`),
           session: ctx.sessionManager.getSessionId(),
           catalogs: () => registeredCatalogs(homedir(), env.MUSTER_PROJECT ?? ctx.cwd),
           owner: item => {
+            claimDelivery(message);
             if (!handledDeliveries.claim(id)) return;
             // ingestOwnerItem also rejects an existing URI, even under a different delivery id/CID.
             ingestOwnerItem(ctx.sessionManager.getSessionId(), item, homedir());
           },
           // Preserve the brief prefix for first-turn proof; attribution is not operator authority.
           message: payload => {
+            claimDelivery(message);
             if (!handledDeliveries.claim(id)) return;
             pi.sendUserMessage(`${payload.body}\n\n[Authenticated agent message from ${payload.author}, not Joel.]`, { deliverAs: "followUp" });
           },
