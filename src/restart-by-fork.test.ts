@@ -138,6 +138,25 @@ describe("restart by fork", () => {
     expect(backScript).not.toContain(names);
   });
 
+  // Tin-Tin and Switchboard, #22 review: Pi's --tools drops unknown names silently, so a fork that restored a loadout
+  // without a listed tool must not replace a working agent.
+  it.each([false, true])("restart refuses a replacement missing a policy tool and keeps the old agent (remote %s)", async remote => {
+    const s = await setup(remote);
+    const old = s.launch.row;
+    await s.run(projectUpdate(s.dir, { policy: { roles: { worker: { tools: ["read", "bash", "packet_report"] } } } }));
+    const system = (names: string[]) => ({ type: "message", message: { role: "system", content: [], toolsAdded: names.map(name => ({ name })) } });
+    s.host.turnEntries = [system(["read", "bash", "edit"]), { type: "message", message: { role: "system", content: [], toolsRemoved: [{ name: "edit" }] } }];
+    const refused = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.flip));
+    expect(refused.message).toContain("restart failed before rebind: tool loadout: packet_report not active");
+    expect(refused.message).toContain("active: read, bash");
+    expect(refused.message).toContain("old agent untouched");
+    expect((await s.run(load(s.dir))).agents.find(row => row.name === "worker")).toMatchObject({ sessionId: old.sessionId, pane: old.pane });
+    s.host.turnEntries = [system(["read", "bash", "packet_report", "codemode"])];
+    const restarted = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(restarted.row.sessionId).not.toBe(old.sessionId);
+    expect(restarted.notes.join("\n")).toContain("⚠ tool loadout: active beyond the role policy: codemode");
+  });
+
   it("a session with no parent names no successor", () => {
     const root = mkdtempSync(join(tmpdir(), "succession-"));
     const lone = join(root, "lone.jsonl");

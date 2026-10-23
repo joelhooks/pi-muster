@@ -930,6 +930,8 @@ export type DeskPhoneState = Awaited<ReturnType<typeof decodeDeskPhoneState>>;
 export type DeskPhoneEntry = DeskPhoneState["entries"][string];
 export const decodeAgentName = Schema.decodeUnknownSync(AgentName);
 export const decodeSlug = Schema.decodeUnknownSync(Slug);
+/** The remote tool-loadout reader's output (tool-loadout.ts). */
+export const decodeToolLoadout = Schema.decodeUnknownSync(Schema.Struct({ declared: Schema.Boolean, tools: Schema.Array(Schema.String) }));
 
 const TEMP_ROOTS = ["/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/", "/Volumes/gate-tmp/"];
 

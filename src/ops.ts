@@ -62,7 +62,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
-import { DEFAULT_GATE_TIMEOUT_MIN, decodeCallsignClaim, decodeCallsignRelease, withRoleLaunch } from "./domain.ts";
+import { DEFAULT_GATE_TIMEOUT_MIN, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
@@ -78,6 +78,7 @@ import { launchDefaults } from "./fleet-steer.ts";
 import { retroJudgeModel } from "./retro-cadence.ts";
 import { checkRunnableModel, checkRestoreContext, resolveModel, modelOutputIssue } from "./models.ts";
 import { parseSessionModel, restoreProfile, SESSION_MODEL_READ_SCRIPT } from "./session-model.ts";
+import { readToolLoadout, TOOL_LOADOUT_READ_SCRIPT, toolLoadoutVerdict } from "./tool-loadout.ts";
 import { resolveSkills, skillIndex, withHiddenSkills } from "./skills.ts";
 import { registerProject } from "./switchboard-ops.ts";
 import { dataDir, projectPath, closedDir, create, exists, load, mutate, reportsDir } from "./store.ts";
@@ -149,6 +150,16 @@ const thinkingClamp = (file: string | null, requested: Thinking | null | undefin
   !file || !requested ? Effect.succeed(null) : readSessionText(file, remote).pipe(
     Effect.map(text => thinkingClampNote(requested, parseSessionModel(text).thinking)),
     Effect.catch(error => Effect.succeed(`thinking level unchecked: ${error.message}`)));
+
+/** A role policy's listed tool that the session never activated fails the launch or restart; see tool-loadout.ts. */
+const toolLoadoutCheck = (file: string | null, requested: readonly string[] | undefined, remote: boolean): Effect.Effect<{ failure: string | null; note: string | null }, never, Proc> =>
+  !file || !requested?.length ? Effect.succeed({ failure: null, note: null }) : (remote
+    ? must("node", ["--input-type=module", "-e", TOOL_LOADOUT_READ_SCRIPT, file], { cwd: "/", timeoutMs: 20_000 }).pipe(Effect.flatMap(text => decodeJsonWith(decodeToolLoadout, text)))
+    : Effect.try({ try: () => readToolLoadout(file), catch: error => new InputError({ message: String(error) }) })).pipe(
+    Effect.map(loadout => toolLoadoutVerdict(requested, loadout)),
+    Effect.catch(error => Effect.succeed({ failure: null, note: `tool loadout unchecked: ${error.message}` })));
+
+const toolLoadoutNext = (row: AgentRow) => `fix policy.roles.${row.role}.tools (or the extension that registers the tool) with project_update, then close this row with agent_close ${JSON.stringify(row.name)} and launch again`;
 
 const sessionRestore = (profile: LaunchProfile, file: string | null, project: Project, role: Role, roster?: import("./domain.ts").Roster, params: Pick<AgentLaunchInput, "model" | "thinking"> = {}, remote = false) => Effect.gen(function* () {
   const notes: string[] = [];
@@ -475,6 +486,12 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       if (proof) row = yield* patchRow(dir, name, row.state, [], { delivery: proof.state === "proven" ? "proven" : "unproven", ...(proof.state === "unproven" ? { events: [...(row.events ?? []), { type: "FIRST_TURN", at: iso(env), detail: proof.detail }] } : {}) });
       const clamp = proof ? yield* thinkingClamp(wait.sessionFile, launchProfile.thinking, true) : null;
       if (clamp) cloneNotes.push(`machine ${nameOfMachine}: ${clamp}`);
+      const loadout = yield* toolLoadoutCheck(wait.sessionFile, launchProfile.policy?.tools, true);
+      if (loadout.note) cloneNotes.push(`machine ${nameOfMachine}: ${loadout.note}`);
+      if (loadout.failure) {
+        row = yield* patchRow(dir, name, row.state, [{ type: "FAIL" }], { events: [...(row.events ?? []), { type: "TOOLS_MISSING", at: iso(env), detail: loadout.failure }] });
+        return yield* new GuardFailed({ guard: "tool-loadout", message: `machine ${nameOfMachine}: pane ${binding.paneId}: ${loadout.failure}. Its Pi is still running; ${toolLoadoutNext(row)}` });
+      }
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
       return { row, argv, readiness: "proven", proof, ...(repair ? { repair } : {}), sessionIdMatched: actual === requestedId, notes: [...resolved.notes, ...cloneNotes, ...restoreNotes, piReceipt, ...remotePullReceipt(policyComms(project.policy)), ...(repair ? [`delivery: unproven: ${proof?.state === "unproven" ? proof.detail : ""}; inspect before repair: ${JSON.stringify(repair)}`] : [])] };
@@ -2734,6 +2751,9 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (proof.state !== "proven") return yield* input(`restart failed before rebind: ${proof.detail}; old agent untouched`);
       const clamp = yield* thinkingClamp(wait.sessionFile, profile.thinking, Boolean(machine));
       if (clamp) notes.push(clamp);
+      const loadout = yield* toolLoadoutCheck(wait.sessionFile, profile.policy?.tools, Boolean(machine));
+      if (loadout.note) notes.push(loadout.note);
+      if (loadout.failure) return yield* input(`restart failed before rebind: ${loadout.failure}; old agent untouched. Fix policy.roles.${old.role}.tools with project_update, then restart again`);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
         events: [...(old.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
         restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: withoutSuccession(environment) } };
@@ -3349,6 +3369,12 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     }
     const clamp = proof ? yield* thinkingClamp(launched.sessionFile, launchProfile.thinking, false) : null;
     if (clamp) skillNotes.push(clamp);
+    const loadout = launched.pending ? { failure: null, note: null } : yield* toolLoadoutCheck(launched.sessionFile, launchProfile.policy?.tools, false);
+    if (loadout.note) skillNotes.push(loadout.note);
+    if (loadout.failure) {
+      running = yield* patchRow(dir, row.name, running.state, [{ type: "FAIL" }], { events: [...(running.events ?? []), { type: "TOOLS_MISSING", at: iso(env), detail: loadout.failure }] });
+      return yield* new GuardFailed({ guard: "tool-loadout", message: `pane ${launched.binding.paneId}: ${loadout.failure}. Its Pi is still running; ${toolLoadoutNext(running)}` });
+    }
     skillNotes.push(yield* readPiReceipt(agentEnvironment.HOME ?? env.home, piReceiptId));
     const tokens = yield* publishTokens(yield* load(dir));
     return {
