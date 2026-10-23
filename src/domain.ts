@@ -487,6 +487,9 @@ export type RolePolicy = typeof RolePolicy.Type;
 
 const TOOL_NAME = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Muster's own wiring. Some of these are set only conditionally (MUSTER_OWNER_NAME, MUSTER_COMMS, HERDR_DESK_PROJECT),
+ * so a policy value would fill the gap and send reports or turn records elsewhere (Tin-Tin, #22 review). */
+const RESERVED_ENV = /^(MUSTER|RATKING|HERDR|PI)_/;
 /** The launch additions a project's role policy names now, checked so no value can parse as a Pi flag. */
 export function roleLaunch(policy: Policy | undefined, role: Role): RoleLaunch | undefined {
   const value = policy?.roles?.[role];
@@ -494,6 +497,7 @@ export function roleLaunch(policy: Policy | undefined, role: Role): RoleLaunch |
   const tools = value.tools ?? undefined;
   const bad = [...(tools ?? []).filter(tool => !TOOL_NAME.test(tool)).map(tool => `tool ${JSON.stringify(tool)}`),
     ...Object.keys(value.env ?? {}).filter(key => !ENV_NAME.test(key)).map(key => `env ${JSON.stringify(key)}`),
+    ...Object.keys(value.env ?? {}).filter(key => ENV_NAME.test(key) && RESERVED_ENV.test(key)).map(key => `env ${JSON.stringify(key)} (reserved: Muster, Rat King, Herdr and Pi wiring)`),
     ...(value.appendSystemPrompt ?? []).filter(path => !path.startsWith("/")).map(path => `appendSystemPrompt ${JSON.stringify(path)} (not absolute)`)];
   if (bad.length) throw new Error(`policy.roles.${role}: ${bad.join(", ")}`);
   const launch: RoleLaunch = {

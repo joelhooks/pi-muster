@@ -24,6 +24,9 @@ describe("role launch policy", () => {
   });
 
   it("refuses a tool, env key or prompt path that could parse as a flag or is not absolute", () => {
+    // Tin-Tin, #22 review: MUSTER_OWNER_NAME is set only for some rows, so a policy value would redirect reports.
+    for (const key of ["MUSTER_OWNER_NAME", "MUSTER_COMMS", "RATKING_NAME", "HERDR_DESK_PROJECT", "PI_OFFLINE"])
+      expect(() => roleLaunch(decodePolicy({ roles: { judge: { env: { [key]: "x" } } } }), "judge")).toThrow(`env "${key}" (reserved`);
     for (const roles of [{ judge: { tools: ["-x"] } }, { judge: { tools: ["read,bash"] } }, { judge: { env: { "A-B": "1" } } }, { judge: { appendSystemPrompt: ["names.txt"] } }])
       expect(() => roleLaunch(decodePolicy({ roles }), "judge")).toThrow("policy.roles.judge");
   });
@@ -45,6 +48,8 @@ describe("role launch policy", () => {
     const project = { lanes: [], agents: [], policy: undefined } as unknown as Project;
     expect(requiredWriterSchema(project)).toBe(1);
     expect(requiredWriterSchema({ ...project, policy: lean })).toBe(5);
-    expect(requiredWriterSchema({ ...project, agents: [{ profile: withRoleLaunch(base, lean, "judge") }] } as unknown as Project)).toBe(5);
+    expect(requiredWriterSchema({ ...project, agents: [{ state: "running", profile: withRoleLaunch(base, lean, "judge") }] } as unknown as Project)).toBe(5);
+    // Tin-Tin, #22 review: once the lean rows close and the policy clears, older writers are let back in.
+    expect(requiredWriterSchema({ ...project, agents: [{ state: "closed", profile: withRoleLaunch(base, lean, "judge") }] } as unknown as Project)).toBe(1);
   });
 });
