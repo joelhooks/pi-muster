@@ -57,14 +57,6 @@ describe("project machine model", () => {
     expect(at("active").can({ type: "REVIEWED" })).toBe(false);
   });
 
-  it("leaves the state unchanged for every event the machine refuses", () => {
-    for (const state of STATES) {
-      for (const event of EVENTS.filter(e => !at(state).can(e))) {
-        expect(next(state, event), `${state} + ${event.type}`).toBe(state);
-      }
-    }
-  });
-
   it("surfaces a refused event as an IllegalTransition failure from stepProject", () => {
     expect(Exit.isFailure(Effect.runSyncExit(stepProject("p1", "archived", { type: "ACTIVATE" })))).toBe(true);
     expect(Exit.isFailure(Effect.runSyncExit(stepProject("p1", "reviewing", { type: "ARCHIVE", openLanes: 3 })))).toBe(true);

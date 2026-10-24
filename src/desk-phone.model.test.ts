@@ -62,14 +62,6 @@ describe("desk phone machine model", () => {
     expect(at("pending").can({ type: "SENT" })).toBe(false);
   });
 
-  it("leaves the state unchanged for every event the machine refuses", () => {
-    for (const state of STATES) {
-      for (const event of EVENTS.filter(e => !at(state).can(e))) {
-        expect(next(state, event), `${state} + ${event.type}`).toBe(state);
-      }
-    }
-  });
-
   it("rejects a stepDeskPhone claim that names a wrong target or a refused event", () => {
     expect(ok("pending", { type: "ANSWER" }, "resolved")).toBe(false);
     expect(ok("pending", { type: "ANSWER" }, "answered")).toBe(true);

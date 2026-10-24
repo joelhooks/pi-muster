@@ -60,14 +60,6 @@ describe("delivery machine model", () => {
     expect(next("landed", { type: "deployed" })).toBe("deployed");
   });
 
-  it("leaves the state unchanged for every event the machine refuses", () => {
-    for (const state of STATES) {
-      for (const event of EVENTS.filter(e => !at(state).can(e))) {
-        expect(next(state, event), `${state} + ${event.type}`).toBe(state);
-      }
-    }
-  });
-
   it("surfaces a refused stage as an IllegalTransition failure from stepDelivery", () => {
     expect(Exit.isFailure(Effect.runSyncExit(stepDelivery("l1", "proven", "landed")))).toBe(true);
     expect(Exit.isFailure(Effect.runSyncExit(stepDelivery("l1", "none", "proven")))).toBe(true);

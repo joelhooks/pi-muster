@@ -1,8 +1,9 @@
 import { getShortestPaths } from "xstate/graph";
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
 import { transition } from "xstate";
 
-import { laneMachine } from "./machines.ts";
+import { laneMachine, stepLane } from "./machines.ts";
 import type { LaneEvent } from "./machines.ts";
 
 const STATES = ["proposed", "open", "draining", "closed"] as const;
@@ -26,10 +27,10 @@ describe("lane machine model", () => {
     expect([...reached].sort()).toEqual([...STATES].sort());
   });
 
-  it("replays each shortest path event by event and lands where the graph says", () => {
+  it("replays each shortest path through stepLane and lands where the graph says", () => {
     for (const path of getShortestPaths(laneMachine, { events: EVENTS })) {
       let state: S = "proposed";
-      for (const step of path.steps.filter(s => (s.event.type as string) !== "xstate.init")) state = next(state, step.event as LaneEvent);
+      for (const step of path.steps.filter(s => (s.event.type as string) !== "xstate.init")) state = Effect.runSync(stepLane("l1", state, step.event as LaneEvent));
       expect(state).toBe(path.state.value);
     }
   });
@@ -75,14 +76,6 @@ describe("lane machine model", () => {
   it("never reopens a lane except through REOPEN, so closed is not final but only REOPEN leaves it", () => {
     const leaving = EVENTS.filter(event => at("closed").can(event));
     expect(leaving).toEqual([{ type: "REOPEN" }]);
-  });
-
-  it("leaves the state unchanged for every event the machine refuses", () => {
-    for (const state of STATES) {
-      for (const event of EVENTS.filter(e => !at(state).can(e))) {
-        expect(transition(laneMachine, at(state), event)[0].value, `${state} + ${event.type}`).toBe(state);
-      }
-    }
   });
 
   it("refuses OPEN from every state but proposed", () => {

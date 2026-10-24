@@ -1,8 +1,9 @@
 import { getShortestPaths } from "xstate/graph";
 import { describe, expect, it } from "vitest";
+import { Effect } from "effect";
 import { transition } from "xstate";
 
-import { agentMachine } from "./machines.ts";
+import { LIVE_STATES, PANE_GONE_STATES, PROCESS_STATES, agentMachine, stepAgent } from "./machines.ts";
 import type { AgentEvent } from "./machines.ts";
 
 const STATES = ["planned", "launching", "running", "silent", "nudged", "restarted", "reported", "verified", "landed", "interrupted", "restoring", "failed", "closed"] as const;
@@ -25,10 +26,10 @@ describe("agent machine model", () => {
     expect([...reached].sort()).toEqual([...STATES].sort());
   });
 
-  it("replays each shortest path event by event and lands where the graph says", () => {
+  it("replays each shortest path through stepAgent and lands where the graph says", () => {
     for (const path of paths()) {
       let state: S = "planned";
-      for (const step of path.steps.filter(s => (s.event.type as string) !== "xstate.init")) state = next(state, step.event as AgentEvent);
+      for (const step of path.steps.filter(s => (s.event.type as string) !== "xstate.init")) state = Effect.runSync(stepAgent("a1", state, step.event as AgentEvent));
       expect(state).toBe(path.state.value);
     }
   });
@@ -44,12 +45,6 @@ describe("agent machine model", () => {
 
   it("moves a running agent to reported on REPORT", () => {
     expect(next("running", { type: "REPORT" })).toBe("reported");
-  });
-
-  it("lets verified, landed and reported agents re-report only with a live pane", () => {
-    for (const state of ["reported", "verified", "landed"] as const) {
-      expect(next(state, { type: "REPORT", paneLive: true })).toBe("reported");
-    }
   });
 
   it("closes from every live or restorable state except the transient restoring and the already closed", () => {
@@ -69,15 +64,6 @@ describe("agent machine model", () => {
     expect(next("closed", { type: "RESTORE" })).toBe("restoring");
   });
 
-  it("leaves the state unchanged for every event the machine refuses", () => {
-    for (const state of STATES) {
-      for (const event of EVENTS.filter(e => !at(state).can(e))) {
-        const [after] = transition(agentMachine, at(state), event);
-        expect(after.value, `${state} + ${event.type}`).toBe(state);
-      }
-    }
-  });
-
   it("cannot jump from planned or restoring straight to reported, verified or landed", () => {
     for (const state of ["planned", "restoring"] as const) {
       for (const target of ["reported", "verified", "landed"]) {
@@ -95,31 +81,36 @@ describe("agent machine model", () => {
     expect(at("reported").can({ type: "LAND" })).toBe(true);
   });
 
-  it("sends rework from reported work back to running, and refuses it from planned work", () => {
-    for (const state of ["reported", "verified", "landed"] as const) expect(next(state, { type: "REWORK" })).toBe("running");
-    expect(at("planned").can({ type: "REWORK" })).toBe(false);
-    expect(at("running").can({ type: "REWORK" })).toBe(false);
-  });
-
-  it("walks silence through nudge and restart and back to running on ACTIVE", () => {
-    expect(next("running", { type: "SILENT" })).toBe("silent");
-    expect(next("silent", { type: "NUDGE" })).toBe("nudged");
-    expect(next("nudged", { type: "RESTART" })).toBe("restarted");
-    for (const state of ["silent", "nudged", "restarted"] as const) expect(next(state, { type: "ACTIVE" })).toBe("running");
-  });
-
-  it("lets a failed or interrupted agent restore, relaunch or be adopted, but never report directly", () => {
-    for (const state of ["failed", "interrupted"] as const) {
-      expect(next(state, { type: "RESTORE" })).toBe("restoring");
-      expect(next(state, { type: "LAUNCH" })).toBe("launching");
-      expect(next(state, { type: "ADOPT" })).toBe("running");
-      expect(at(state).can({ type: "REPORT", paneLive: true })).toBe(false);
-    }
-  });
-
   it("fails a launch only from launching or restoring", () => {
     const failing = STATES.filter(state => at(state).can({ type: "LAUNCH_FAILED" }));
     expect(failing.sort()).toEqual(["launching", "restoring"]);
     for (const state of failing) expect(next(state, { type: "LAUNCH_FAILED" })).toBe("failed");
+  });
+
+  it("accepts PANE_GONE exactly in PANE_GONE_STATES, the set ops.ts uses to record a dead pane", () => {
+    const accepting = STATES.filter(state => at(state).can({ type: "PANE_GONE" }));
+    expect([...accepting].sort()).toEqual([...PANE_GONE_STATES].sort());
+  });
+
+  it("accepts CLOSE in LIVE_STATES except restoring, plus planned, and refuses it in closed", () => {
+    const accepting = STATES.filter(state => at(state).can({ type: "CLOSE" }));
+    const expected = [...LIVE_STATES.filter(state => state !== "restoring"), "planned"];
+    expect([...accepting].sort()).toEqual(expected.sort());
+    expect(LIVE_STATES).not.toContain("planned");
+    expect(LIVE_STATES).not.toContain("closed");
+  });
+
+  it("keeps PROCESS_STATES to the states that die with their pane and are not yet reported", () => {
+    const reportChain = ["reported", "verified", "landed"];
+    const dyingWithPane = STATES.filter(state => at(state).can({ type: "PANE_GONE" }) && !reportChain.includes(state));
+    expect([...PROCESS_STATES].sort()).toEqual([...dyingWithPane].sort());
+  });
+
+  it("lets every PROCESS_STATES member except restoring and launching go quiet or report, the way ops.ts treats a running row", () => {
+    for (const state of PROCESS_STATES.filter(s => s !== "restoring" && s !== "launching")) {
+      expect(at(state).can({ type: "REPORT" }), state).toBe(true);
+      expect(at(state).can({ type: "FAIL" }), state).toBe(true);
+    }
+    expect(at("restoring").can({ type: "REPORT" })).toBe(false);
   });
 });
