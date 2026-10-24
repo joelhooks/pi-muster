@@ -68,3 +68,20 @@ export function toolLoadoutVerdict(requested: readonly string[], loadout: ToolLo
     note: extra.length ? `⚠ tool loadout: active beyond the role policy: ${extra.join(", ")}` : null,
   };
 }
+
+type OwnTool = { readonly name: string; readonly exposure?: string; readonly sourceInfo?: { readonly path?: string } };
+
+/**
+ * calendar-app lime, 2026-10-24: a Pi resumed by hand without MUSTER_ROLE skipped the worker tools, the journal recorded
+ * them as removed, and Pi restores a fork's active set from its journal, so `agent_launch restart` registered owner_note,
+ * packet_report and context_mark but left them inactive. Muster's own tools that register active are reactivated at
+ * session start. The extension's path comes from an always-registered tool; a `--tools` allowlist already hides unlisted
+ * tools from getAllTools, so a lean row's choice stands.
+ */
+export function inactiveOwnTools(all: readonly OwnTool[], active: readonly string[], anchor = "owner_inbox"): string[] {
+  const path = all.find(tool => tool.name === anchor)?.sourceInfo?.path;
+  if (!path) return [];
+  const on = new Set(active);
+  return all.filter(tool => tool.sourceInfo?.path === path && (tool.exposure === "direct" || tool.exposure === "model-only") && !on.has(tool.name))
+    .map(tool => tool.name);
+}
