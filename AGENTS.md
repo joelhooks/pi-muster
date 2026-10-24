@@ -27,6 +27,7 @@ Muster is being strangled down to its Herdr hands: spawn, fork, restart, adopt, 
 ```bash
 npm ci --ignore-scripts --prefer-offline   # never npm install: it rewrites package-lock.json
 npm run check
+npm run typecheck:fast  # tsrs, for the edit loop only; check keeps tsc
 npm test
 npm run smoke
 npm run pack:check
