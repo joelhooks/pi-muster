@@ -17,6 +17,7 @@ import { Type } from "typebox";
 import { registerCompaction } from "./compact.ts";
 import { agentPromptOnce, paneRename } from "./herdr.ts";
 import { agentRewind, registerWorkerNavigation } from "./rewind.ts";
+import { inactiveOwnTools } from "./tool-loadout.ts";
 import { MAX_CADENCE_MINUTES, decodeProject, decodeTurnRecord } from "./domain.ts";
 import { createComms, catalogCommsSender } from "./comms.ts";
 import { commsDoctor, commsDoctorText } from "./comms-doctor.ts";
@@ -315,6 +316,10 @@ export default function muster(host: ExtensionAPI) {
     offRecord?.(); offRecord = undefined;
     offPrompt?.();
     offPrompt = registerPiPrompt(pi.events, { project: env.MUSTER_PROJECT, session: ctx.sessionManager.getSessionId(), turns }) || undefined;
+    try {
+      const missing = inactiveOwnTools(pi.getAllTools(), pi.getActiveTools());
+      if (missing.length > 0) pi.setActiveTools([...pi.getActiveTools(), ...missing]);
+    } catch { /* an older Pi without the active-tool API keeps its set */ }
     if (!ratkingHere()) return;
     const off = pi.events.on(RATKING_MESSAGE, message => {
       const id = deliveryId(message);
