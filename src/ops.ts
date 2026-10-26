@@ -62,7 +62,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
-import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, codemodeNote, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
+import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, codemodeNote, laneLaunchPolicy, badToolNames, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
@@ -128,8 +128,8 @@ const startPrompt = (row: AgentRow, prompt: string | undefined, dir: string) => 
 
 
 /** The role policy in force now, with its prompt files mapped onto the row's machine. A bad value refuses the launch. */
-const roleLaunchProfile = <P extends LaunchProfile>(profile: P, project: Project, role: Role, map: (path: string) => string = path => path) =>
-  Effect.try({ try: () => withRoleLaunch(profile, project.policy, role), catch: error => new InputError({ message: `role policy: ${error instanceof Error ? error.message : String(error)}` }) })
+const roleLaunchProfile = <P extends LaunchProfile>(profile: P, project: Project, role: Role, lane: string | undefined, map: (path: string) => string = path => path) =>
+  Effect.try({ try: () => withRoleLaunch(profile, laneLaunchPolicy(project.policy, project.lanes.find(candidate => candidate.slug === lane), role), role), catch: error => new InputError({ message: `role policy: ${error instanceof Error ? error.message : String(error)}` }) })
     .pipe(Effect.map(next => next.policy?.appendSystemPrompt ? { ...next, policy: { ...next.policy, appendSystemPrompt: next.policy.appendSystemPrompt.map(map) } } : next));
 
 const readSessionText = (file: string | null, remote: boolean): Effect.Effect<string, InputError | ProcError, Proc> => !file ? Effect.succeed("") : remote
@@ -288,7 +288,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   let remoteProfile: LaunchProfile = { ...profile, model: remoteModel, thinking: params.thinking ?? selected.thinking ?? profile.thinking,
     skills: [...new Set(resolved.paths.map(path => mapWorkerPath(path, machine)))], extensions: profile.extensions.map(path => mapWorkerPath(path, machine)),
     appendSystemPrompt: withHiddenSkills(profile.appendSystemPrompt, discovered.hidden).map(path => mapWorkerPath(path, machine)), env: { ...profile.env, ...machine.env } };
-  remoteProfile = yield* roleLaunchProfile(remoteProfile, project, role, path => mapWorkerPath(path, machine));
+  remoteProfile = yield* roleLaunchProfile(remoteProfile, project, role, lane.slug, path => mapWorkerPath(path, machine));
   resolved.notes.push(...(yield* prerequisites(nameOfMachine, machine, remoteSource, params.hydrate === true, remoteProfile.env)));
   resolved.notes.push(...(yield* readyForRemoteLaunch(nameOfMachine, machine, remoteSource, `${remoteModel}${remoteProfile.thinking ? `:${remoteProfile.thinking}` : ""}`, 300_000, remoteProfile.env)));
   const remoteHome = machine.env.HOME ?? (yield* remoteNode(nameOfMachine, machine, "process.stdout.write(process.env.HOME ?? '')")).trim();
@@ -861,7 +861,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
   const notes: string[] = [];
   const roster = (yield* loadRoster).roster;
   const restore = yield* onRemote(row.machine, machine, Effect.gen(function* () {
-    const profile = yield* roleLaunchProfile(extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row), project, row.role, path => mapWorkerPath(path, machine));
+    const profile = yield* roleLaunchProfile(extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row), project, row.role, row.lane, path => mapWorkerPath(path, machine));
     const selected = yield* sessionRestore(profile, row.sessionFile, project, row.role, roster, {}, true);
     notes.push(...selected.notes);
     const restore = { cwd: row.cwd, argv: [...machine.wrap.map(arg => arg.replaceAll("{name}", row.name)), "pi", ...buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile: row.sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: machine.musterExtension })], env: withRatkingName(project, row, row.restore?.env ?? agentEnv(project, row)) };
@@ -1848,7 +1848,16 @@ export interface LaneOpenInput {
   readonly override?: string | undefined;
   readonly deployLevel?: number | undefined;
   readonly deployRule?: string | undefined;
+  /** Tools for this lane's workers instead of the worker role list; null or [] clears. */
+  readonly workerTools?: readonly string[] | null | undefined;
 }
+
+/** A lane with workerTools set, or cleared when the value is null or empty; undefined leaves the lane alone. */
+const withWorkerTools = (lane: Lane, tools: readonly string[] | null | undefined): Lane => {
+  if (tools === undefined) return lane;
+  const { workerTools: _old, ...rest } = lane;
+  return tools === null || tools.length === 0 ? rest : { ...rest, workerTools: [...tools] };
+};
 
 const guardLaneRepo = (project: Project, slug: string, repo: string | undefined) => {
   const lane = project.lanes.find(lane => lane.slug === slug);
@@ -1864,6 +1873,7 @@ const laneFieldChanges = (latest: Lane, next: Lane) => {
   if (next.base !== latest.base) changes.push("base updated");
   if (next.deployLevel !== latest.deployLevel) changes.push("deployLevel updated");
   if (next.deployRule !== latest.deployRule) changes.push("deployRule updated");
+  if ((next.workerTools ?? []).join(",") !== (latest.workerTools ?? []).join(",")) changes.push(next.workerTools?.length ? `workerTools ${next.workerTools.join(",")}` : "workerTools cleared");
   return changes;
 };
 
@@ -1910,8 +1920,11 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     const deployPatch = requestedLevel !== undefined ? { deployLevel: requestedLevel, deployRule: requestedRule } : {};
     const rank = params.rank;
     if (rank !== undefined && !Number.isSafeInteger(rank)) return yield* input("rank must be a safe integer");
+    const badTools = badToolNames(params.workerTools ?? []);
+    if (badTools.length) return yield* input(`workerTools: ${badTools.map(tool => JSON.stringify(tool)).join(", ")} ${badTools.length === 1 ? "is not a tool name" : "are not tool names"}`);
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
+    if (params.workerTools?.length && (existing?.kind ?? params.kind ?? "work") !== "work") return yield* input("workerTools applies to work lanes, whose workers it narrows");
     if (params.kind === "retro" && existing && existing.kind !== "retro") return yield* input(`lane ${slug} is kind ${existing.kind}, not retro; choose a fresh slug for the retro lane`);
     const wantOpen = params.open !== false;
     const label = params.label ?? existing?.label;
@@ -1924,11 +1937,11 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       if (live && live.pane_id === existing.root.paneId && live.tab_id === existing.tabId) {
         const requestedBase = params.base;
         // An open lane is never archived; this also repairs a lane reopened before reopening cleared the flag.
-        const { lane, note } = requestedBase === undefined && params.repo === undefined && params.deployLevel === undefined && !existing.archived
+        const { lane, note } = requestedBase === undefined && params.repo === undefined && params.deployLevel === undefined && params.workerTools === undefined && !existing.archived
           ? { lane: existing, note: null } : yield* mutate(dir, current => Effect.gen(function* () {
             yield* guardLaneRepo(current, slug, params.repo);
             const latest = current.lanes.find((candidate) => candidate.slug === slug) ?? existing;
-            const next = { ...latest, ...deployPatch, repo: params.repo ?? latest.repo, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) };
+            const next = withWorkerTools({ ...latest, ...deployPatch, repo: params.repo ?? latest.repo, base: requestedBase ?? latest.base, archived: false, updatedAt: iso(env) }, params.workerTools);
             return [withLane(current, next), { lane: next, note: `changed: ${laneFieldChanges(latest, next).join(", ") || "none"}` }] as const;
           }));
         return { lane, created: false, note, outcome: project.outcome };
@@ -1962,7 +1975,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
         yield* guardLaneRepo(current, slug, params.repo);
         const stored = current.lanes.find((candidate) => candidate.slug === slug);
         const latest = stored ?? base;
-        const next = {
+        const next = withWorkerTools({
           ...latest,
           ...deployPatch,
           ...(rank !== undefined ? { rank } : {}),
@@ -1970,7 +1983,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
           base: params.base ?? latest.base,
           goal: latest.state === "proposed" ? params.goal ?? latest.goal : latest.goal,
           label: latest.state === "proposed" ? params.label ?? latest.label : latest.label,
-        };
+        }, params.workerTools);
         const changes: string[] = [];
         if (next.rank !== latest.rank) changes.push(`rank ${latest.rank ?? "unset"}→${next.rank}`);
         if (next.goal !== latest.goal) changes.push("goal updated");
@@ -1994,8 +2007,8 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
       if (params.kind === "retro" && latest.kind !== "retro") return yield* input(`lane ${slug} is kind ${latest.kind}, not retro; choose a fresh slug for the retro lane`);
       const refusal = wipRefusal(current, slug, latest.kind, env.now().getTime());
       if (refusal && (latest.kind === "retro" || !params.override?.trim())) return yield* input(refusal);
-      const next: Lane = { ...latest, ...deployPatch, repo: params.repo ?? latest.repo, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
-        ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) };
+      const next: Lane = withWorkerTools({ ...latest, ...deployPatch, repo: params.repo ?? latest.repo, state: event ? yield* stepLane(slug, latest.state, event) : latest.state,
+        ...(params.override ? { override: params.override.trim() } : {}), archived: false, updatedAt: iso(env) }, params.workerTools);
       return [withLane(current, next), next] as const;
     }));
     let tabId = base.tabId;
@@ -2742,7 +2755,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
     ...(overrides.extensions !== undefined ? { extensions: mergedExtensions(old.profile.extensions, overrides.extensions) } : {}),
     ...(overrides.env !== undefined ? { env: { ...old.profile.env, ...overrides.env } } : {}),
     // Switchboard, 2026-10-26: the AIH desk restarted with compactAt 400000 and kept 120000. Fork-restart dropped it.
-    ...(overrides.compactAt !== undefined ? { compactAt: overrides.compactAt } : {}) }, project, old.role, machine ? path => mapWorkerPath(path, machine) : undefined);
+    ...(overrides.compactAt !== undefined ? { compactAt: overrides.compactAt } : {}) }, project, old.role, old.lane, machine ? path => mapWorkerPath(path, machine) : undefined);
   const selected = yield* sessionRestore(requested, old.sessionFile, project, old.role, (yield* loadRoster).roster, {
     ...(overrides.model !== undefined ? { model: overrides.model } : {}), ...(overrides.thinking !== undefined ? { thinking: overrides.thinking } : {}) }, remote);
   const notes = [...selected.notes];
@@ -3216,7 +3229,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         ...(params.extensions !== undefined ? { extensions: mergedExtensions(existing.profile.extensions, params.extensions) } : {}),
         ...(params.env !== undefined ? { env: { ...params.env } } : {}),
         ...(params.compactAt !== undefined ? { compactAt: params.compactAt } : {}) };
-      const selected = yield* sessionRestore(yield* roleLaunchProfile(profileFor(existing.role, { ...overridden, slim: overridden.slim }), project, existing.role), sessionFile, project, existing.role, roster, params);
+      const selected = yield* sessionRestore(yield* roleLaunchProfile(profileFor(existing.role, { ...overridden, slim: overridden.slim }), project, existing.role, existing.lane), sessionFile, project, existing.role, roster, params);
       const restoredProfile = selected.profile;
       const slimRefusal = slimProblem(restoredProfile);
       if (slimRefusal) return yield* input(slimRefusal);
@@ -3298,7 +3311,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
           catch: (cause) => new InputError({ message: `skill discovery: ${String(cause)}` }),
         })
         : { paths: [], notes: [], hidden: [] };
-      const profile: LaunchProfile = yield* roleLaunchProfile({ ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) }, project, role);
+      const profile: LaunchProfile = yield* roleLaunchProfile({ ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) }, project, role, lane.slug);
       skillNotes.push(...resolved.notes);
       const now = iso(env);
       row = {

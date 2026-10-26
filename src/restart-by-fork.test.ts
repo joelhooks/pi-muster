@@ -152,6 +152,23 @@ describe("restart by fork", () => {
     expect(backScript).not.toContain(names);
   });
 
+  // Joel, desk page sb-desk-live 2026-10-26, card 013d9e0c "lanetools": yes. Servo's pennywise retro: a credential lane
+  // ran with the full toolset because tools were only project-wide.
+  it.each([false, true])("a lane's workerTools replace the worker role's tools at restart, keep its env, and clear back (remote %s)", async remote => {
+    const s = await setup(remote);
+    await s.run(projectUpdate(s.dir, { policy: { roles: { worker: { tools: ["read", "bash", "codemode", "packet_report", "edit"], env: { LEAN_LOADOUT_READONLY: "1" } } } } }));
+    const set = await s.run(laneOpen(s.dir, { slug: "work", workerTools: ["read", "bash", "codemode", "packet_report"] }));
+    expect(set.lane.workerTools).toEqual(["read", "bash", "codemode", "packet_report"]);
+    expect(set.note).toContain("workerTools read,bash,codemode,packet_report");
+    const narrow = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(narrow.row.profile.policy).toMatchObject({ tools: ["read", "bash", "codemode", "packet_report"], env: { LEAN_LOADOUT_READONLY: "1" } });
+    expect(s.host.launcherScripts.at(-1)!).toContain("'--tools' 'read,bash,codemode,packet_report'");
+    const cleared = await s.run(laneOpen(s.dir, { slug: "work", workerTools: null }));
+    expect(cleared.lane).not.toHaveProperty("workerTools");
+    await expect(s.run(laneOpen(s.dir, { slug: "work", workerTools: ["read", "--no-tools"] }))).rejects.toThrow('workerTools: "--no-tools" is not a tool name');
+    expect((await s.run(load(s.dir))).lanes.find(lane => lane.slug === "work")).not.toHaveProperty("workerTools");
+  });
+
   // Tin-Tin and Switchboard, #22 review: Pi's --tools drops unknown names silently, so a fork that restored a loadout
   // without a listed tool must not replace a working agent.
   it.each([false, true])("restart refuses a replacement missing a policy tool and keeps the old agent (remote %s)", async remote => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { agentEnv, buildArgv, profileFor } from "./argv.ts";
-import { codemodeNote, decodePolicy, roleLaunch, withRoleLaunch, type AgentRow, type Project } from "./domain.ts";
+import { codemodeNote, decodePolicy, laneLaunchPolicy, roleLaunch, withRoleLaunch, type AgentRow, type Project } from "./domain.ts";
 import { requiredWriterSchema } from "./store.ts";
 
 // Lean Loadout (Joel, desk page sb-desk-20261022c: "the per-role tool setting in pi-muster").
@@ -47,6 +47,23 @@ describe("role launch policy", () => {
       expect(roleLaunch(decodePolicy({ roles: { desk: { env: { [key]: "1" } } } }), "desk")?.env).toEqual({ [key]: "1" });
     for (const key of ["PI_CODEMODE", "PI_CODEMODE_MODES", "PI_SKIP_VERSION_CHECK"])
       expect(() => roleLaunch(decodePolicy({ roles: { desk: { env: { [key]: "on" } } } }), "desk")).toThrow(`env "${key}" (reserved`);
+  });
+
+  // Joel, desk page sb-desk-live 2026-10-26, card 013d9e0c "lanetools": yes.
+  it("a lane's workerTools replace only the worker role's tools", () => {
+    const narrow = { workerTools: ["read", "bash"] };
+    expect(laneLaunchPolicy(lean, narrow, "worker")?.roles?.worker?.tools).toEqual(["read", "bash"]);
+    expect(laneLaunchPolicy(lean, narrow, "worker")?.roles?.judge).toEqual(lean.roles?.judge);
+    expect(laneLaunchPolicy(lean, narrow, "judge")).toBe(lean);
+    expect(laneLaunchPolicy(lean, {}, "worker")).toBe(lean);
+    expect(laneLaunchPolicy(undefined, narrow, "worker")).toEqual({ roles: { worker: { tools: ["read", "bash"] } } });
+    expect(withRoleLaunch(base, laneLaunchPolicy(undefined, narrow, "worker"), "worker").policy).toEqual({ tools: ["read", "bash"] });
+  });
+
+  it("stamps writer schema 7 for a lane with workerTools, and lets older writers back once it clears", () => {
+    const project = { lanes: [], agents: [], policy: undefined } as unknown as Project;
+    expect(requiredWriterSchema({ ...project, lanes: [{ workerTools: ["read"] }] } as unknown as Project)).toBe(7);
+    expect(requiredWriterSchema({ ...project, lanes: [{ workerTools: [] }] } as unknown as Project)).toBe(1);
   });
 
   it("a cleared or empty policy drops what an older profile carried", () => {
