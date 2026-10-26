@@ -163,6 +163,13 @@ describe("restart by fork", () => {
     const narrow = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
     expect(narrow.row.profile.policy).toMatchObject({ tools: ["read", "bash", "codemode", "packet_report"], env: { LEAN_LOADOUT_READONLY: "1" } });
     expect(s.host.launcherScripts.at(-1)!).toContain("'--tools' 'read,bash,codemode,packet_report'");
+    // Tin-Tin, #50 review: a loadout refusal names the lane list it came from, not the role policy.
+    const system = (names: string[]) => ({ type: "message", message: { role: "system", content: [], toolsAdded: names.map(name => ({ name })) } });
+    s.host.turnEntries = [system(["read", "bash", "codemode"])];
+    const refused = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.flip));
+    expect(refused.message).toContain("tool loadout: packet_report not active");
+    expect(refused.message).toContain("Fix lane work workerTools with lane_open, then restart again");
+    s.host.turnEntries = [];
     const cleared = await s.run(laneOpen(s.dir, { slug: "work", workerTools: null }));
     expect(cleared.lane).not.toHaveProperty("workerTools");
     await expect(s.run(laneOpen(s.dir, { slug: "work", workerTools: ["read", "--no-tools"] }))).rejects.toThrow('workerTools: "--no-tools" is not a tool name');

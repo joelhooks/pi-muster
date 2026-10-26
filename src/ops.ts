@@ -159,7 +159,11 @@ const toolLoadoutCheck = (file: string | null, requested: readonly string[] | un
     Effect.map(loadout => toolLoadoutVerdict(requested, loadout)),
     Effect.catch(error => Effect.succeed({ failure: null, note: `tool loadout unchecked: ${error.message}` })));
 
-const toolLoadoutNext = (row: AgentRow) => `fix policy.roles.${row.role}.tools (or the extension that registers the tool) with project_update, then close this row with agent_close ${JSON.stringify(row.name)} and launch again`;
+/** Where a row's tool list came from, so a loadout refusal names the setting to fix (Tin-Tin, #50 review). */
+const toolListSource = (project: Project, row: Pick<AgentRow, "role" | "lane">) =>
+  row.role === "worker" && project.lanes.find(lane => lane.slug === row.lane)?.workerTools?.length
+    ? `lane ${row.lane} workerTools with lane_open` : `policy.roles.${row.role}.tools with project_update`;
+const toolLoadoutNext = (project: Project, row: AgentRow) => `fix ${toolListSource(project, row)} (or the extension that registers the tool), then close this row with agent_close ${JSON.stringify(row.name)} and launch again`;
 
 const sessionRestore = (profile: LaunchProfile, file: string | null, project: Project, role: Role, roster?: import("./domain.ts").Roster, params: Pick<AgentLaunchInput, "model" | "thinking"> = {}, remote = false) => Effect.gen(function* () {
   const notes: string[] = [];
@@ -490,7 +494,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       if (loadout.note) cloneNotes.push(`machine ${nameOfMachine}: ${loadout.note}`);
       if (loadout.failure) {
         row = yield* patchRow(dir, name, row.state, [{ type: "FAIL" }], { events: [...(row.events ?? []), { type: "TOOLS_MISSING", at: iso(env), detail: loadout.failure }] });
-        return yield* new GuardFailed({ guard: "tool-loadout", message: `machine ${nameOfMachine}: pane ${binding.paneId}: ${loadout.failure}. Its Pi is still running; ${toolLoadoutNext(row)}` });
+        return yield* new GuardFailed({ guard: "tool-loadout", message: `machine ${nameOfMachine}: pane ${binding.paneId}: ${loadout.failure}. Its Pi is still running; ${toolLoadoutNext(project, row)}` });
       }
       const repair = proof?.state === "unproven" ? { tool: "herdr_agent", args: { action: "prompt", target: binding.paneId, prompt: proof.repairPrompt ?? prompt } } : null;
       const piReceipt = yield* readPiReceipt(wait.sessionFile.split("/.pi/agent/sessions/")[0]!, piReceiptId);
@@ -1924,7 +1928,7 @@ export const laneOpen = (dir: string, params: LaneOpenInput & { readonly rank?: 
     if (badTools.length) return yield* input(`workerTools: ${badTools.map(tool => JSON.stringify(tool)).join(", ")} ${badTools.length === 1 ? "is not a tool name" : "are not tool names"}`);
     if (params.repo) yield* requireAbsolute("repo", params.repo);
     const existing = project.lanes.find((lane) => lane.slug === slug);
-    if (params.workerTools?.length && (existing?.kind ?? params.kind ?? "work") !== "work") return yield* input("workerTools applies to work lanes, whose workers it narrows");
+    if (params.workerTools?.length && (existing?.kind ?? params.kind ?? "work") !== "work") return yield* input("workerTools applies only to work lanes: it replaces the worker role's tools for that lane's workers");
     if (params.kind === "retro" && existing && existing.kind !== "retro") return yield* input(`lane ${slug} is kind ${existing.kind}, not retro; choose a fresh slug for the retro lane`);
     const wantOpen = params.open !== false;
     const label = params.label ?? existing?.label;
@@ -2840,7 +2844,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (clamp) notes.push(clamp);
       const loadout = yield* toolLoadoutCheck(wait.sessionFile, profile.policy?.tools, Boolean(machine));
       if (loadout.note) notes.push(loadout.note);
-      if (loadout.failure) return yield* input(`restart failed before rebind: ${loadout.failure}; old agent untouched. Fix policy.roles.${old.role}.tools with project_update, then restart again`);
+      if (loadout.failure) return yield* input(`restart failed before rebind: ${loadout.failure}; old agent untouched. Fix ${toolListSource(project, old)}, then restart again`);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
         events: [...(old.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
         restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: withoutSuccession(environment) } };
@@ -3468,7 +3472,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     if (loadout.note) skillNotes.push(loadout.note);
     if (loadout.failure) {
       running = yield* patchRow(dir, row.name, running.state, [{ type: "FAIL" }], { events: [...(running.events ?? []), { type: "TOOLS_MISSING", at: iso(env), detail: loadout.failure }] });
-      return yield* new GuardFailed({ guard: "tool-loadout", message: `pane ${launched.binding.paneId}: ${loadout.failure}. Its Pi is still running; ${toolLoadoutNext(running)}` });
+      return yield* new GuardFailed({ guard: "tool-loadout", message: `pane ${launched.binding.paneId}: ${loadout.failure}. Its Pi is still running; ${toolLoadoutNext(project, running)}` });
     }
     skillNotes.push(yield* readPiReceipt(agentEnvironment.HOME ?? env.home, piReceiptId));
     const tokens = yield* publishTokens(yield* load(dir));
