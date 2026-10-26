@@ -130,9 +130,15 @@ describe("project_move", () => {
     expect(existsSync(projectPath(old))).toBe(true);
   });
   it("refuses temp destinations for durable projects", async () => {
-    const { h, old, to } = await fixture();
+    const { h, old } = await fixture();
     await runWith(h, mutate(old, (project) => Effect.succeed([{ ...project, ephemeral: false }, undefined] as const)));
-    expect((await failWith(h, projectMove(old, to))).message).toContain("temp dir");
+    // TMPDIR may point at durable storage; this case needs a known volatile root.
+    const root = mkdtempSync("/tmp/muster-move-fixture-");
+    try {
+      expect((await failWith(h, projectMove(old, join(root, "target")))).message).toContain("temp dir");
+    } finally {
+      rmSync(root, { recursive: true });
+    }
   });
   it("refuses symlinked target parents", async () => {
     const { h, old, to } = await fixture();
