@@ -931,7 +931,9 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
           }
           const reportingAgain = ["reported", "verified", "landed"].includes(latest.state);
           const live = reportingAgain && latest.pane ? yield* onRemote(row.machine, machine, locatePane(latest.pane)) : null;
-          const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!live?.agent });
+          // rubicon-fitness, 2026-10-26: a worker whose row was marked failed still reported, and "REPORT is not allowed
+          // from failed" left its packet unread and the row unclosable. The packet stands on its own; the row keeps its state.
+          const state = yield* stepAgent(latest.name, latest.state, { type: "REPORT", paneLive: !!live?.agent }).pipe(Effect.orElseSucceed(() => latest.state));
           yield* Effect.try({ try: () => { mkdirSync(dirname(report), { recursive: true }); writeFileSync(report, sidecar.reportText); }, catch: error => new StoreError({ path: report, message: String(error) }) });
           const ingested: Packet = { ...packet, report, verification: null, gate: null, landedAs: null, supersedes: earlier?.id ?? null };
           return [withPacket(withRow(current, { ...latest, state, updatedAt: iso(env) }), ingested), true] as const;

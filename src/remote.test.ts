@@ -831,6 +831,24 @@ describe("remote owner operations", () => {
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("for-each-ref"))).toBe(true);
   });
 
+  // rubicon-fitness, 2026-10-26: coldread's row was failed when its sidecar arrived; "REPORT is not allowed from failed"
+  // skipped the ingest, and agent_close refused on that skip.
+  it("ingests a sidecar for a failed row and keeps the row's state", async () => {
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "work");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "late work", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs();
+    const project = JSON.parse(readFileSync(projectPath(s.dir), "utf8"));
+    project.agents[0].state = "failed";
+    writeFileSync(projectPath(s.dir), JSON.stringify(project));
+    expect((await s.run(ingestRemotePackets(s.dir))).notes.filter(note => note.includes("ingest skipped"))).toEqual([]);
+    const after = await s.run(load(s.dir));
+    expect(after.packets.map(packet => [packet.id, packet.state])).toEqual([[commit, "reported"]]);
+    expect(after.agents[0]?.state).toBe("failed");
+  });
+
   it("ingests sidecars idempotently, verifies and lands a remote branch into the local source", async () => {
     const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "work");
