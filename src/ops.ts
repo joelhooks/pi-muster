@@ -4028,6 +4028,13 @@ const proveOnBase = (run: ProcShape["run"], source: string, landedAs: string, ba
   return { ok: false, note: null, refusal: null };
 });
 
+/**
+ * A lane stacked on an unmerged PR head has a sha base; the landing is still proven against the default branch.
+ * rubicon-fitness and memory-steward, 2026-10-26: lane_open takes short shas ("33f86832"), which read as a branch
+ * and failed as "fetch origin/33f86832 failed".
+ */
+const branchBase = (laneBase: string | null | undefined) => laneBase && /^[a-f0-9]{7,64}$/.test(laneBase) ? null : laneBase;
+
 const notOnBase = (landedAs: string, base: LandingBase) =>
   !base.hasRemote ? `${landedAs} is not on base ${base.branch}`
     : `${landedAs} is not on base ${base.remote}/${base.branch}, nor on local ${base.branch}; ` +
@@ -4093,11 +4100,13 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       // codetv-workshop, 2026-10-14: a remote1 lane's source path exists only on remote1, so local git spawned in
       // a missing cwd (spawn git ENOENT). A remote row's landing is proven on its own machine, in the source mapped there:
       // clone.source is recorded in owner paths (/Users/alice/... for a Flagg owner, muster desk 2026-10-14).
-      const machine = row.machine === "local" ? undefined : yield* machineConfig(row.machine);
+      // imp, 2026-10-26: a refs/heads/ base names the owner's own branch, so it is proven in the owner's checkout
+      // when that exists here; the remote machine's copy of the repo can sit far behind it.
+      const ownBranch = lane?.base?.startsWith("refs/heads/") === true && (yield* proc.run("git", ["rev-parse", "--git-dir"], { cwd: sourceOf(project, lane, row) }).pipe(Effect.map(result => result.code === 0), Effect.orElseSucceed(() => false)));
+      const machine = row.machine === "local" || ownBranch ? undefined : yield* machineConfig(row.machine);
       const source = machine ? mapPath(sourceOf(project, lane, row), machine) : sourceOf(project, lane, row);
       const git = machine ? sshProc(row.machine, machine, proc, env.home) : proc;
-      // A lane stacked on an unmerged PR head has a sha base; the landing is still proven against the default branch.
-      const laneBase = lane?.base && /^[a-f0-9]{40,64}$/.test(lane.base) ? null : lane?.base;
+      const laneBase = branchBase(lane?.base);
       const landing = yield* landingBase(source, laneBase).pipe(Effect.provideService(Proc, git));
       const { remote, branch: base, hasRemote } = landing;
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* git.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
@@ -4136,7 +4145,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
         if (!contains) {
           const resolve = () => proc.run("git", ["rev-parse", "--verify", "--end-of-options", `${params.landedAs}^{commit}`], { cwd: source });
           let target = yield* resolve();
-          const { remote, branch, hasRemote } = yield* landingBase(source, lane?.base);
+          const { remote, branch, hasRemote } = yield* landingBase(source, branchBase(lane?.base));
           if (target.code !== 0 && hasRemote) {
             yield* proc.run("git", ["fetch", "-q", "--", remote, params.landedAs], { cwd: source });
             target = yield* resolve();
@@ -4180,7 +4189,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (outcome === "committed" && !params.attested && !recording && project.mode !== "rift-merge") {
       if (!landedAs) return yield* input(`mode ${project.mode} requires landedAs on the lane base branch`);
       const source = sourceOf(project, lane, row);
-      const landing = yield* landingBase(source, lane?.base);
+      const landing = yield* landingBase(source, branchBase(lane?.base));
       const { remote, branch: base, hasRemote } = landing;
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`landing requires a base branch, not ${base}`);
       const fetched = hasRemote && (yield* proc.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source })).code === 0;

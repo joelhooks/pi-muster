@@ -147,6 +147,14 @@ describe("owner-attested landing", () => {
     expect(landed.packet).toMatchObject({ state: "committed", landedAs, attested: true });
   });
 
+  // rubicon-fitness and memory-steward, 2026-10-26: a short sha base read as a branch, "fetch origin/33f86832 failed".
+  it("proves a landing on the default branch when the lane base is a short sha", async () => {
+    const s = await fixture(); const landedAs = squash(s);
+    await runWith(s.h, laneOpen(s.dir, { slug: "probe", base: sh(s.origin, "rev-parse", "--short=8", "HEAD~1").trim() }));
+    const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs, attested: true, evidence }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs, attested: true });
+  });
+
   it("refuses a sha-base landing that is not on the default branch", async () => {
     const s = await fixture(); const landedAs = squash(s);
     sh(s.origin, "branch", "unlanded", landedAs); sh(s.origin, "checkout", "-q", "main~1"); sh(s.origin, "branch", "-f", "main", "HEAD");
