@@ -25,7 +25,8 @@ function harness(settings: PiCompaction | undefined, contextWindow = 1_000_000) 
   registerCompaction(pi as never, { PI_COMPACT_AT: "400000" }, (_cwd, model) => { seen.push(model); return settings; });
   handlers.get("session_start")?.({}, ctx);
   const turn = (at: number) => { tokens = at; handlers.get("agent_end")?.({}, ctx); };
-  return { turn, compacted, notes, seen, fail: (message: string) => { failure = message; } };
+  const landed = () => handlers.get("session_compact")?.({}, ctx);
+  return { turn, landed, compacted, notes, seen, fail: (message: string) => { failure = message; } };
 }
 
 describe("compact-at and Pi's own auto-compaction", () => {
@@ -51,6 +52,15 @@ describe("compact-at and Pi's own auto-compaction", () => {
       h.turn(450_000);
       expect(h.compacted).toEqual([450_000]);
     }
+  });
+  // MacLeod, 2026-10-26: flowing-pi ccanary compacted once, then its next run grew past the threshold before any
+  // agent_end saw it below, and it never compacted again.
+  it("re-arms when a compaction lands, so a long run past the threshold compacts again", () => {
+    const h = harness({ enabled: true, reserveTokens: 16_384 });
+    h.turn(450_000);
+    h.landed();
+    h.turn(480_000);
+    expect(h.compacted).toEqual([450_000, 480_000]);
   });
   // MacLeod, 2026-10-17: Pi 1.3.0-p4 refuses a manual compaction while its own is running.
   it("treats Pi's own compaction in progress as handled: no retry, no error; other failures retry", () => {

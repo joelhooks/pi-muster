@@ -72,6 +72,10 @@ export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string
   };
 
   pi.on("session_start", (_event, ctx) => restore(ctx));
+  // MacLeod, 2026-10-26: a run that grew from the kept tail past the threshold before its first agent_end never saw
+  // tokens at or below it, so a landed compaction left compact-at disarmed for good (flowing-pi ccanary: 238K, 276K,
+  // 284K, no compaction). Any landed compaction, ours or Pi's, starts a new crossing.
+  pi.on("session_compact", () => { armed = true; });
 
   pi.on("agent_end", (_event, ctx) => {
     if (threshold === null) return;
