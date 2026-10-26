@@ -59,6 +59,23 @@ describe("landing record fence and correction", () => {
     expect((await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, evidence: "release branch checked" }))).packet.landedAs).toBe(s.id);
   });
 
+  // Tin-Tin, #32: peons reset local main onto a republished origin; a pr-merge landing is the merged PR, never local main.
+  it.each([false, true])("refuses a pr-merge commit that is only on local main, attested %s", async attested => {
+    const s = await fixture("pr-merge"); sh(s.dir, "merge", "-q", "--ff-only", s.id);
+    const error = await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested, evidence: "merged locally" }));
+    expect(error.message).toContain(`${s.id} is on local main but not on origin/main; a pr-merge landing is the merged PR. Fix:`);
+    expect(error.message).toContain(`branch -r --contains ${s.id}`);
+    expect((await runWith(s.h, load(s.dir))).packets[0]?.state).toBe("verified");
+  });
+
+  // imp, 2026-10-26: a pr-merge project whose repo never pushes names its own branch as the lane base.
+  it("lands a pr-merge commit on local main when the lane base is refs/heads/main", async () => {
+    const s = await fixture("pr-merge"); sh(s.dir, "merge", "-q", "--ff-only", s.id);
+    await runWith(s.h, laneOpen(s.dir, { slug: "probe", base: "refs/heads/main" }));
+    const result = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, evidence: "merged locally; repo never pushes" }));
+    expect(result.packet).toMatchObject({ state: "committed", landedAs: s.id });
+  });
+
   it("fails closed on stale base refs", async () => {
     const s = await fixture(); merge(s); sh(s.dir, "fetch", "-q", "origin");
     s.h.proc = { run: (cmd, args, opts) => cmd === "git" && args[0] === "fetch"
