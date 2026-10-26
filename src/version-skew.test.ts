@@ -147,6 +147,21 @@ describe("version skew", () => {
     expect(await registered[1]?.execute()).toEqual({ content: [{ type: "text", text: "Board header · ⚠ Muster tools stale\nrow" }], details: null });
   });
 
+  // Tin-Tin, #48 review: an unreadable-marks warning first must not hide the firm restart warning that follows.
+  it("prints a firm warning once even after a soft one, and neither grade twice", async () => {
+    const registered: Array<{ execute: (...args: unknown[]) => Promise<unknown> }> = [];
+    let warning = "⚠ Muster tools may be stale: loaded a, on disk b, and its restart marks could not be read.";
+    const pi = withVersionSkew({ registerTool: (tool: typeof registered[number]) => registered.push(tool) } as never, { check: async () => warning });
+    pi.registerTool({ name: "probe", parameters: {} as never, label: "test", description: "test", execute: async () => ({ content: [{ type: "text", text: "ok" }], details: null }) });
+    expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: `ok\n${warning}` }], details: null });
+    warning = "⚠ Muster tools need a restart: loaded a, on disk c (2 commits). c: why.";
+    expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: `ok\n${warning}` }], details: null });
+    warning = "⚠ Muster tools need a restart: loaded a, on disk d (3 commits). d: why.";
+    expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: "ok" }], details: null });
+    warning = "⚠ Muster tools may be stale: loaded a, on disk e, and its restart marks could not be read.";
+    expect(await registered[0]?.execute()).toEqual({ content: [{ type: "text", text: "ok" }], details: null });
+  });
+
   it("a failed check never fails the registered tool", async () => {
     const registered: Array<{ execute: (...args: unknown[]) => Promise<unknown> }> = [];
     const pi = withVersionSkew({ registerTool: (tool: typeof registered[number]) => registered.push(tool) } as never, { check: async () => { throw new Error("unreadable"); } });
