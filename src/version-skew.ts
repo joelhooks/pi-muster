@@ -126,9 +126,10 @@ export function createVersionSkew({ root, now = Date.now, loaded: evaluated = lo
 
 /** Keep the host API intact; every nested registrar receives this same facade. */
 export function withVersionSkew(pi: ExtensionAPI, skew: VersionSkew): ExtensionAPI {
-  // rats-nest, 2026-10-13: the same full warning on every tool result was noise. Show it once per distinct warning
-  // (a new disk commit changes it); project_status still marks its header every time.
-  let shown: string | undefined;
+  // rats-nest, 2026-10-13: the same full warning on every tool result was noise. Servo, 2026-10-26: once per distinct
+  // text still repeated the whole changelog on every Restart-Needed commit (twice in one evening). The loaded code never
+  // changes in a session, so show the full warning once per session; project_status still marks its header every time.
+  let shown = false;
   const registerTool: ExtensionAPI["registerTool"] = (tool) => {
     pi.registerTool({
       ...tool,
@@ -137,8 +138,8 @@ export function withVersionSkew(pi: ExtensionAPI, skew: VersionSkew): ExtensionA
         let warning: string | undefined;
         try { warning = await skew.check(); } catch { /* never fail a tool for telemetry */ }
         if (!warning) return result;
-        const repeat = warning === shown;
-        shown = warning;
+        const repeat = shown;
+        shown = true;
         const marked = tool.name === "project_status" && !("isError" in result && result.isError);
         if (repeat && !marked) return result;
         let first = true;
