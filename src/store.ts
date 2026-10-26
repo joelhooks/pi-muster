@@ -23,7 +23,7 @@ const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 20_000;
 
 /** Bump whenever persisted fields are added, including nested structs, and teach requiredWriterSchema what needs it. Never a git SHA. */
-export const CATALOG_WRITER_SCHEMA_VERSION = 6; // 6: policy machines.deny; 5: role policy tools, env, appendSystemPrompt (Lean Loadout)
+export const CATALOG_WRITER_SCHEMA_VERSION = 7; // 7: lane workerTools; 6: policy machines.deny; 5: role policy tools, env, appendSystemPrompt (Lean Loadout)
 
 /**
  * The oldest writer that can rewrite this content without losing or misreading it.
@@ -31,6 +31,8 @@ export const CATALOG_WRITER_SCHEMA_VERSION = 6; // 6: policy machines.deny; 5: r
  * fenced out only where a newer field or value is actually present.
  */
 export function requiredWriterSchema(project: Project): number {
+  // An older writer drops workerTools on decode, and the lane's workers would launch with the wider role list.
+  if (project.lanes.some(lane => (lane.workerTools?.length ?? 0) > 0)) return 7;
   // An older writer drops machines on decode and would lift a data guard without a word. An empty list guards
   // nothing, so clearing it lets older writers back in.
   if ((project.policy?.machines?.deny?.length ?? 0) > 0) return 6;

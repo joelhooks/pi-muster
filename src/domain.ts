@@ -448,6 +448,8 @@ export const Lane = Schema.Struct({
   discarded: Schema.optionalKey(Schema.Boolean),
   deployLevel: Schema.optionalKey(DeployLevel),
   deployRule: Schema.optionalKey(DeployRule),
+  /** Tools for this lane's workers, in place of the project's worker role list. Absent uses the role list. */
+  workerTools: Schema.optionalKey(Schema.Array(Schema.String)),
   delivery: Schema.optionalKey(LaneDelivery),
   deliveryAt: Schema.optionalKey(Iso),
   deliveryEvidence: Schema.optionalKey(Schema.String),
@@ -527,6 +529,21 @@ export function roleLaunch(policy: Policy | undefined, role: Role): RoleLaunch |
 }
 
 /** The profile with the role policy in force now; an older profile's policy is dropped, never carried. */
+/** Tool names a policy or lane may list; a bad one could parse as a Pi flag. */
+export function badToolNames(tools: readonly string[]): string[] {
+  return tools.filter(tool => !TOOL_NAME.test(tool));
+}
+
+/**
+ * The policy a lane's worker launches under: the lane's workerTools replace the worker role's tools, with the role's
+ * env and prompt files kept (Joel, desk page sb-desk-live 2026-10-26, card 013d9e0c "lanetools": yes; Servo's
+ * pennywise retro: a credential lane ran with the full toolset).
+ */
+export function laneLaunchPolicy(policy: Policy | undefined, lane: Pick<Lane, "workerTools"> | undefined, role: Role): Policy | undefined {
+  if (role !== "worker" || !lane?.workerTools?.length) return policy;
+  return { ...policy, roles: { ...policy?.roles, worker: { ...policy?.roles?.worker, tools: [...lane.workerTools] } } };
+}
+
 export function withRoleLaunch<P extends { readonly policy?: RoleLaunch | undefined }>(profile: P, policy: Policy | undefined, role: Role): P {
   const { policy: _old, ...rest } = profile;
   const launch = roleLaunch(policy, role);
