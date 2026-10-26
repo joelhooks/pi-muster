@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { Effect } from "effect";
@@ -685,10 +685,16 @@ describe("lane clone base", () => {
 describe("project_open", () => {
   it("refuses temp-dir state unless the project says it is throwaway", async () => {
     const h = harness();
-    const dir = makeRepo(join(h.root, "repo"));
-    const error = await failWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n" }));
-    expect(error._tag).toBe("GuardFailed");
-    expect(error.message).toContain("dies on reboot");
+    // TMPDIR may point at durable storage; this case needs a known volatile root.
+    const root = mkdtempSync("/tmp/muster-open-fixture-");
+    try {
+      const dir = makeRepo(join(root, "repo"));
+      const error = await failWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n" }));
+      expect(error._tag).toBe("GuardFailed");
+      expect(error.message).toContain("dies on reboot");
+    } finally {
+      rmSync(root, { recursive: true });
+    }
   });
 
   it("creates the project, activates on a space, and returns the pi-until cadence call", async () => {
