@@ -116,6 +116,20 @@ describe("restart by fork", () => {
     expect(s.host.launcherScripts.at(-1)!).not.toContain("'/x/peons'");
   });
 
+  // Switchboard, 2026-10-26: the AIH desk restarted with compactAt 400000, and the row and the new Pi kept 120000.
+  it("a restart applies a named compactAt to the row and the new pane, and keeps it on a later plain restart", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, compactAt: 400_000 }));
+    expect(result.row.profile.compactAt).toBe(400_000);
+    expect(s.host.launcherScripts.at(-1)!).toMatch(/--compact-at'? '?400000/);
+    const again = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    expect(again.row.profile.compactAt).toBe(400_000);
+    const off = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, compactAt: null }));
+    expect(off.row.profile.compactAt).toBeNull();
+    expect(s.host.launcherScripts.at(-1)!).toMatch(/--compact-at'? '?off/);
+  });
+
   // Lean Loadout (Joel, desk page sb-desk-20261022c): a role's tools, env and prompt files come from the project policy on
   // every restart, so clearing the policy and restarting rolls the row back.
   it.each([false, true])("restart applies the role policy's tools, env and prompt files, and drops them once cleared (remote %s)", async remote => {
