@@ -102,7 +102,7 @@ async function launchedFork() {
 
 // Execute the cleanup probe through the SSH fake, with private proc/cgroup and command fixtures.
 // Never let these tests invoke the host's systemctl or sudo.
-async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean; slice?: string; description?: string; cleanEnv?: boolean } = {}) {
+async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean; slice?: string; description?: string; cleanEnv?: boolean; orphanInClone?: boolean } = {}) {
   const { s, launched } = await launchedFork();
   const row = launched.row;
   const root = join(s.h.root, "scope-fixture"), bin = join(root, "bin");
@@ -135,6 +135,11 @@ else process.exit(2);
   writeFileSync(join(bin, "sudo"), '#!/bin/sh\n[ "$1" = -n ] || exit 2\nshift\nexec "$@"\n', { mode: 0o755 });
   const original = s.proc.run;
   vi.spyOn(s.proc, "run").mockImplementation((command, args, opts) => {
+    // worker-worktree refuses to remove a clone while a process still runs inside it, as it did for the live probe.
+    if (options.orphanInClone && command === "ssh" && args.at(-1)?.includes("'remove'") && !existsSync(stopped)) {
+      s.calls.push({ command, args });
+      return Effect.succeed({ code: 1, stdout: "", stderr: "worker-worktree: refusing: process 4242 (/bin/sleep 7200 ) still runs inside the clone; close its session first" });
+    }
     if (command !== "ssh" || !args.at(-1)?.includes("const {row,project}=")) return original(command, args, opts);
     // Preserve the actual probe and SSH boundary; only relocate kernel files and command lookup.
     const script = args.at(-1)!.replaceAll("/sys/fs/cgroup", join(root, "cgroup")).replaceAll("/proc/", join(root, "proc") + "/");
@@ -145,7 +150,7 @@ else process.exit(2);
 }
 
 describe("remote close scope cleanup", () => {
-  it("stops exactly the closed row's orphan scope after retirement, leaving another row untouched", async () => {
+  it("stops exactly the closed row's orphan scope before retirement, leaving another row untouched", async () => {
     const f = await scopeFixture();
     const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
     expect(result.row.state).toBe("closed");
@@ -155,7 +160,16 @@ describe("remote close scope cleanup", () => {
     expect(f.s.calls.filter(call => call.command === "ssh" && call.args.at(-1)?.includes("const {row,project}="))).toHaveLength(1);
     const retire = f.s.calls.findIndex(call => call.command === "ssh" && call.args.at(-1)?.includes("'remove'"));
     const cleanup = f.s.calls.findIndex(call => call.command === "ssh" && call.args.at(-1)?.includes("const {row,project}="));
-    expect(retire).toBeGreaterThan(-1); expect(cleanup).toBeGreaterThan(retire);
+    expect(retire).toBeGreaterThan(-1); expect(cleanup).toBeGreaterThan(-1); expect(cleanup).toBeLessThan(retire);
+  });
+  // #37 live proof, 2026-10-26: the scopeprobe's cleaned-env sleep ran inside the clone, and the first close kept the
+  // clone because retirement ran before the scope stop.
+  it("stops an orphan's scope before retiring, so the first close removes the clone", async () => {
+    const f = await scopeFixture({ cleanEnv: true, orphanInClone: true });
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(f.stops()).toEqual([f.unit]);
+    expect(result.cloneError).toBeNull();
+    expect(result.notes.join(" ")).not.toContain("still runs inside");
   });
   it.each([
     ["a live Pi in a nested cgroup", { live: true }],

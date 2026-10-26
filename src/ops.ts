@@ -894,8 +894,10 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     const next = { ...latest, restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
     return [withRow(current, next), next] as const;
   }));
-  const retirement = yield* retireClone(dir, closed, params.force === true, params.takeover);
+  // #37 live proof, 2026-10-26: an orphan left in the scope also runs inside the clone, so worker-worktree refused to
+  // remove the clone until a second close. Stop the scope first; its guards still keep a live Pi or another row's.
   notes.push(yield* stopRemoteScope(project, row));
+  const retirement = yield* retireClone(dir, closed, params.force === true, params.takeover);
   return { row: (yield* load(dir)).agents.find(agent => agent.name === row.name)!, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...notes, ...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
 });
 
@@ -3573,9 +3575,10 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
       if (watches?.length) return yield* new InputError({ message: `agent_close refused: ${row.name} has ${watches.length} pi-until watch(es) armed: ${watches.join("; ")}. A watch dies with its pane. Let them finish, have the row cancel them, or close with dropWatches: true; nothing was closed` });
     }
     if (row.state === "closed") {
+      const scope = row.machine !== "local" ? [yield* stopRemoteScope(project, row)] : [];
       const retirement = yield* retireClone(dir, row, params.force === true, params.takeover);
       const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;
-      return { row: latest, restore: latest.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : []), ...(row.machine !== "local" ? [yield* stopRemoteScope(project, row)] : [])] };
+      return { row: latest, restore: latest.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...scope, ...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
     }
     if (row.machine !== "local") {
       // Packet and note sidecars live in the clone's git dir, which a harvested clone's removal deletes: ingest first.
