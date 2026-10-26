@@ -775,6 +775,25 @@ describe("remote owner operations", () => {
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("merge-base"))).toBe(true);
   });
 
+  // imp, 2026-10-26: a refs/heads/ base names the owner's branch; the remote machine's copy of the repo sat far behind.
+  it("an attested remote landing with a refs/heads/ base proves in the owner's checkout", async () => {
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote work");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "remote work", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs();
+    expect((await s.run(packetVerify(s.dir, commit))).packet.state).toBe("verified");
+    sh(s.dir, "fetch", "-q", cwd, commit); sh(s.dir, "merge", "--squash", "-q", commit); sh(s.dir, "commit", "-qm", "squash-merged on the owner's main");
+    const landedAs = sh(s.dir, "rev-parse", "HEAD").trim();
+    await s.run(laneOpen(s.dir, { slug: launched.row.lane, base: "refs/heads/main" }));
+    s.calls.length = 0;
+    const landed = await s.run(packetLand(s.dir, { id: commit, outcome: "committed", landedAs, attested: true, evidence: "merged on local main" }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs, attested: true });
+    expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("merge-base"))).toBe(false);
+    expect(s.calls.some(call => call.command === "git" && call.args.includes("merge-base"))).toBe(true);
+  });
+
   // muster desk, 2026-10-14: clone.source is an owner path (/Users/alice/...); proving it unmapped on remote1 failed
   // check-ref-format in a missing cwd and read as "requires a base branch, not main".
   it("an attested remote landing proves in the row machine's mapping of an owner-path source", async () => {
@@ -810,6 +829,24 @@ describe("remote owner operations", () => {
     expect(verified.checks).toContainEqual({ name: "clone branch", outcome: "pass", detail: `updated to worker/remote-next (was ${launched.row.clone!.branch})` });
     expect((await s.run(load(s.dir))).agents[0]?.clone?.branch).toBe("worker/remote-next");
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("for-each-ref"))).toBe(true);
+  });
+
+  // rubicon-fitness, 2026-10-26: coldread's row was failed when its sidecar arrived; "REPORT is not allowed from failed"
+  // skipped the ingest, and agent_close refused on that skip.
+  it("ingests a sidecar for a failed row and keeps the row's state", async () => {
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "work");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "late work", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs();
+    const project = JSON.parse(readFileSync(projectPath(s.dir), "utf8"));
+    project.agents[0].state = "failed";
+    writeFileSync(projectPath(s.dir), JSON.stringify(project));
+    expect((await s.run(ingestRemotePackets(s.dir))).notes.filter(note => note.includes("ingest skipped"))).toEqual([]);
+    const after = await s.run(load(s.dir));
+    expect(after.packets.map(packet => [packet.id, packet.state])).toEqual([[commit, "reported"]]);
+    expect(after.agents[0]?.state).toBe("failed");
   });
 
   it("ingests sidecars idempotently, verifies and lands a remote branch into the local source", async () => {
