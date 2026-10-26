@@ -647,7 +647,11 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
   let refreshed = sources?.get(key);
   if (!refreshed) {
     const origin = (yield* run(source, "remote", "get-url", "origin")).code === 0;
-    const fetched = !origin || (yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")).code === 0;
+    // rats-nest, 2026-10-26: an explicit refspec overrode the repo's own remote.origin.fetch, negative entries included,
+    // and re-imported a branch rat-king excludes, which tripped its pre-push fence on every close. Honour the configured
+    // refspecs; use the default one only when none is configured.
+    const configured = origin && (yield* run(source, "config", "--get-all", "remote.origin.fetch")).stdout.trim() !== "";
+    const fetched = !origin || (yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", ...(configured ? [] : ["+refs/heads/*:refs/remotes/origin/*"]))).code === 0;
     refreshed = { origin, fetched };
     sources?.set(key, refreshed);
   }

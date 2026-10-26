@@ -239,6 +239,20 @@ it.each(["unharvested", "harvested", "offline"])("refreshes each source once per
   }
 });
 
+// rats-nest, 2026-10-26: the close's origin refresh used an explicit refspec, so rat-king's negative fetch refspec
+// (^refs/heads/alchemy-nest-dist/*) was ignored and the excluded branch came back on every close.
+it("refreshes origin with the repo's configured fetch refspecs, negative entries included", async () => {
+  const f = await fixture();
+  const origin = makeRepo(join(f.h.root, "origin"));
+  sh(origin, "branch", "dist/pin");
+  sh(f.dir, "remote", "add", "origin", origin);
+  sh(f.dir, "config", "--add", "remote.origin.fetch", "^refs/heads/dist/*");
+  f.commit(f.row.cwd, "work.txt", "unlanded");
+  expect((await f.close()).cloneError).toContain("unreachable");
+  expect(sh(f.dir, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/").trim().split("\n")).not.toContain("refs/remotes/origin/dist/pin");
+  expect(sh(f.dir, "rev-parse", "--verify", "refs/remotes/origin/main").trim()).toBe(sh(origin, "rev-parse", "main").trim());
+});
+
 it("records SSH removal failures and retries an already-closed remote row through the same path", async () => {
   const f = await fixture();
   for (const root of [f.dir, f.row.cwd]) {
