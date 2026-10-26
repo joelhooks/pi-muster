@@ -61,7 +61,7 @@ import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
-import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
+import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
 import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
@@ -4971,6 +4971,13 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
       try: () => effectivePolicy(roster, patch ? clearModels(mergePolicy(before.policy, patch), cleared) : before.policy, before.slug),
       catch: (error) => input(String(error instanceof Error ? error.message : error)),
     });
+    // Tin-Tin, #44 review: a typo in a deny list guards nothing, so only saved machine names are accepted.
+    const deny = patch?.machines?.deny ?? [];
+    if (deny.length) {
+      const saved = yield* savedMachines;
+      const unknown = deny.filter(name => !saved.names.includes(name));
+      if (unknown.length) return yield* input(`machines.deny: ${unknown.join(", ")} ${unknown.length === 1 ? "is not a saved machine" : "are not saved machines"}; saved: ${saved.names.join(", ") || "none"} (${saved.path})`);
+    }
     const label = params.label?.trim();
     const project = yield* mutate(dir, (current) =>
       Effect.sync(() => {
@@ -4993,5 +5000,10 @@ export const projectUpdate = (dir: string, params: UpdateInput) =>
     notes.push(`roster: ${path ?? "built-in defaults"}`);
 
     notes.push(...unknownCommsNote(project.policy));
+    if (deny.length) {
+      // The deny list stops new placements only; work already on the machine stays until its owner moves it.
+      const stranded = project.agents.filter(row => row.state !== "closed" && deny.includes(row.machine));
+      notes.push(`machines.deny ${deny.join(", ")}: ${stranded.length ? `rows still there: ${stranded.map(row => `${row.name} (${row.machine}, ${row.state})`).join(", ")}` : "no open rows there"}; existing rows, clones and checkouts on a denied machine are not touched, so harvest and retire them`);
+    }
     return { project, policy: effectivePolicy(roster, project.policy, project.slug), notes };
   });

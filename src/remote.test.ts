@@ -11,7 +11,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
 import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource, herdrSocketFor } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
-import { agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, runLaunchJob, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
+import { projectUpdate, agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, runLaunchJob, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
 import { FakeHerdr, forkHarness, harness, makeRepo, sh, type Harness } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";
@@ -717,6 +717,15 @@ describe("remote owner operations", () => {
       s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }) });
       const launched = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local", clone: true, noSkills: true }));
       expect(launched.row.machine).toBe("local");
+    }, 30_000);
+    it("project_update accepts only saved machine names and lists open rows already there", async () => {
+      const s = setup(); await s.open();
+      await expect(s.run(projectUpdate(s.dir, { policy: { machines: { deny: ["remtoe"] } } }))).rejects.toThrow(/machines\.deny: remtoe is not a saved machine; saved: remote/);
+      await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "there-w", role: "worker", lane: "work", label: "there", cwd: s.dir, noSkills: true }));
+      const updated = await s.run(projectUpdate(s.dir, { policy: { machines: { deny: ["remote"] } } }));
+      expect(updated.policy.machines).toEqual({ deny: ["remote"] });
+      expect(updated.notes.join("\n")).toMatch(/machines\.deny remote: rows still there: there-w \(remote, \w+\); existing rows, clones and checkouts on a denied machine are not touched/);
+      expect((await s.run(projectUpdate(s.dir, { policy: { machines: { deny: [] } } }))).policy.machines).toEqual({ deny: [] });
     }, 30_000);
     it("refuses to restore a row that lives on a denied machine", async () => {
       const s = setup(); await s.open();
