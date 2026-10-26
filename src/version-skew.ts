@@ -129,7 +129,9 @@ export function withVersionSkew(pi: ExtensionAPI, skew: VersionSkew): ExtensionA
   // rats-nest, 2026-10-13: the same full warning on every tool result was noise. Servo, 2026-10-26: once per distinct
   // text still repeated the whole changelog on every Restart-Needed commit (twice in one evening). The loaded code never
   // changes in a session, so show the full warning once per session; project_status still marks its header every time.
-  let shown = false;
+  // Tin-Tin, #48 review: a soft "may be stale" (marks unreadable) must not use up the one print a firm "need a
+  // restart" gets, so each grade prints once: at most two per session.
+  const shown = new Set<"soft" | "firm">();
   const registerTool: ExtensionAPI["registerTool"] = (tool) => {
     pi.registerTool({
       ...tool,
@@ -138,8 +140,9 @@ export function withVersionSkew(pi: ExtensionAPI, skew: VersionSkew): ExtensionA
         let warning: string | undefined;
         try { warning = await skew.check(); } catch { /* never fail a tool for telemetry */ }
         if (!warning) return result;
-        const repeat = shown;
-        shown = true;
+        const grade = warning.includes("may be stale") ? "soft" : "firm";
+        const repeat = shown.has(grade);
+        shown.add(grade);
         const marked = tool.name === "project_status" && !("isError" in result && result.isError);
         if (repeat && !marked) return result;
         let first = true;
