@@ -855,6 +855,9 @@ export default function muster(host: ExtensionAPI) {
           gateTimeoutMin: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "Minutes a packet_land gate may run; default 45" })),
           nudgeAfterMin: Type.Optional(Type.Number()),
           restartAfterMin: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
+          machines: Type.Optional(Type.Object({
+            deny: Type.Array(Type.String(), { description: "Saved machines this project's agents never launch, clone or restore on; [] clears. A denied clone default falls back to local" }),
+          })),
           roles: Type.Optional(
             Type.Object({ desk: RolePolicyParam, hawk: RolePolicyParam, boss: RolePolicyParam, worker: RolePolicyParam, judge: RolePolicyParam }),
           ),

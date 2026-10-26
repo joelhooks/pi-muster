@@ -244,6 +244,17 @@ export const machineConfig = (name: string) => Effect.gen(function* () {
   return config;
 });
 
+/** Saved machine names, for checking a policy that names one. */
+export const savedMachines = Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const path = machinesPath(env.home);
+  const configs = yield* Effect.try({
+    try: () => decodeMachines(env.machines ?? (existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {})),
+    catch: error => new InputError({ message: `invalid ${path}: ${String(error)}` }),
+  });
+  return { names: Object.keys(configs).sort(), path };
+});
+
 /** The configured clone machine, if any. More than one is a config error, never a guess. */
 export const defaultCloneMachine = Effect.gen(function* () {
   const env = yield* MusterEnv;
