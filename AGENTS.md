@@ -8,16 +8,17 @@ Muster 🐑 (`@joelhooks/pi-muster`) is the Pi package that runs Herdr project s
 
 ## Freeze (2026-10-13)
 
-Muster is being strangled down to its Herdr hands: spawn, fork, restart, adopt, locate, prompt, interrupt, readPane, clone create/assess/remove, closePane and layout. Joel approved a freeze: no new features outside those hands. Bug fixes to existing behaviour still land. New coordination features (queues, lanes, landing, cleanup, routing) go to their new owners, not here.
+Muster is being strangled down to its Herdr hands: spawn, fork, restart, adopt, locate, prompt, interrupt, readPane, clone create/assess/remove, closePane and layout. Joel approved the strangler plan, freeze included (2026-10-13: "yes full long horizon plan"): no new features outside those hands. Bug fixes to existing behaviour still land. New coordination features (queues, lanes, landing, cleanup, routing) go to their new owners, not here.
 
 ## Rules
 
+- Talk to the owning desk directly over Rat King, share what you find, and ask for review; nobody holds another desk's work. Refuse harm, keep everything else moving: limits alarm rather than block, and every guard names its harm.
 - Extension startup is side-effect free: it registers tools, a flag, and a command, and opens no socket, file, or bus channel. Tools resolve everything at call time.
 - Muster owns no clock. Cadence is a pi-until repeat the owner arms from `project_open`'s result. Muster never calls joelclaw.
 - Every file read decodes through `src/domain.ts`. Every lifecycle change goes through `src/machines.ts`; rows carry one state, never a status beside it.
 - Effect owns effects and typed errors. XState owns lifecycles (versions pinned in `package.json`). Pure decisions (argv, tokens, silence, review proposals, cost) stay plain functions with tests.
 - Never emit `--exclude-tools`, `--no-tools`, or `--no-builtin-tools`. Emit `--tools` only from a project role policy's opt-in `tools` list (Joel, desk page sb-desk-20261022c, Lean Loadout: "the per-role tool setting in pi-muster"); with no policy, no tool flag.
-- Close a pane only by id plus terminal id, and only if Muster opened it. Act on a row's pane only from the session that owns it.
+- Close a pane only by id plus terminal id, and only if Muster opened it. Act on a row's pane only from the session that owns it, because input from a second session collides with the owner's.
 - Commits Muster makes are `shitratgit[bot]`'s. Muster never pushes.
 - Running sessions load new code at their next natural restart. Add a `Restart-Needed: <why>` trailer only when a live session on older code would do harm or fail: a changed tool schema, a cross-session protocol change, or a bug that hurts while loaded. Only marked commits warn running sessions. When in doubt, mark.
 - Durable state never lives under a temp dir unless the project is `ephemeral`.
