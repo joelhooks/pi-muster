@@ -786,6 +786,67 @@ const retireClone = (dir: string, row: AgentRow, force: boolean, takeover = fals
   return { cloneError: result.removed ? null : result.detail, notes: [...notes, ...(result.removed ? [result.detail] : [])] };
 });
 
+/** The worker wrapper uses systemd-run --scope --unit=worker-<name>-<pid> (system manager).
+ * Servo, 2026-10-26: children survived closed panes and retained gigabytes in orphan scopes.
+ * Names alone are not ownership: another project or a replacement can reuse a row name.
+ * pw-worker-scope stamps Description=muster:<project>/<row>:<sessionId> (Servo, pennywise 29c4445); require it exactly.
+ * A member's launch binding can't prove ownership, because test runners start children with a cleaned environment
+ * (Tin-Tin, #37), but a member bound to another row, or a live Pi, still keeps the scope. */
+const STOP_REMOTE_SCOPE_SCRIPT = `
+import fs from 'node:fs';
+import {join,basename} from 'node:path';
+import {execFileSync} from 'node:child_process';
+const {row,project}=JSON.parse(fs.readFileSync(0,'utf8'));
+const run=(cmd,args)=>execFileSync(cmd,args,{encoding:'utf8',timeout:5000,stdio:['ignore','pipe','pipe']}).trim();
+const note=text=>process.stdout.write(text);
+try {
+  const prefix='worker-'+row.name+'-';
+  const units=JSON.parse(run('systemctl',['list-units','--all','--type=scope','--output=json','--no-pager']))
+    .map(entry=>entry.unit).filter(unit=>unit.startsWith(prefix) && /^[1-9][0-9]*\\.scope$/.test(unit.slice(prefix.length)));
+  if (!units.length) note('scope cleanup: no matching worker scope for '+row.name);
+  else if (units.length!==1) note('scope kept: ambiguous worker scopes for '+row.name);
+  else {
+    const unit=units[0];
+    const properties=Object.fromEntries(run('systemctl',['show','--property=Slice,ActiveState,ControlGroup,Description',unit]).split('\\n').map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];}));
+    if (properties.Slice!=='fleet-workers.slice') throw Error('not in fleet-workers.slice');
+    if (properties.Description!=='muster:'+project+'/'+row.name+':'+row.sessionId) throw Error('no matching owner description');
+    const group=properties.ControlGroup;
+    if (!group.startsWith('/') || group.split('/').includes('..') || basename(group)!==unit) throw Error('invalid scope cgroup');
+    const members=path=>[
+      ...fs.readFileSync(join(path,'cgroup.procs'),'utf8').trim().split(/\\s+/).filter(Boolean),
+      ...fs.readdirSync(path,{withFileTypes:true}).filter(entry=>entry.isDirectory()).flatMap(entry=>members(join(path,entry.name)))
+    ];
+    for (const pid of new Set(members('/sys/fs/cgroup'+group))) {
+      if (!/^[1-9][0-9]*$/.test(pid)) throw Error('invalid scope pid');
+      try {
+        const root='/proc/'+pid;
+        const comm=fs.readFileSync(join(root,'comm'),'utf8').trim();
+        const argv=fs.readFileSync(join(root,'cmdline'),'utf8').split('\\0').filter(Boolean);
+        if (comm==='pi' || argv.slice(0,2).some(arg=>basename(arg)==='pi' || arg.includes('/pi-coding-agent/') || arg.includes('/pi/dist/'))) throw Error('live Pi in scope');
+        const env=Object.fromEntries(fs.readFileSync(join(root,'environ'),'utf8').split('\\0').filter(Boolean).map(entry=>{const i=entry.indexOf('=');return [entry.slice(0,i),entry.slice(i+1)];}));
+        if (env.MUSTER_REMOTE_ROW) {
+          const binding=JSON.parse(env.MUSTER_REMOTE_ROW);
+          if (binding.name!==row.name || binding.sessionId!==row.sessionId || binding.cwd!==row.cwd || binding.machine!==row.machine || env.MUSTER_PROJECT_SLUG!==project) throw Error('different row in scope');
+        }
+      } catch (error) {
+        // A process may exit during inspection. Any other unreadable member is unsafe to kill.
+        if ((error.code!=='ENOENT' && error.code!=='ESRCH') || fs.existsSync('/proc/'+pid)) throw error;
+      }
+    }
+    run('sudo',['-n','systemctl','stop',unit]);
+    note('scope stopped: '+unit);
+  }
+} catch (error) { if (error.message==='not in fleet-workers.slice') note('scope kept: not in fleet-workers.slice'); else if (error.message==='no matching owner description') note('scope kept: no Muster owner description on the scope (launched before pw-worker-scope stamped it)'); else note('scope cleanup incomplete for '+row.name+': '+(error.message.includes('live Pi') ? 'live Pi in scope; left running' : error.message.includes('different row') ? 'different row in scope; left running' : 'inspection or stop failed; inspect the row scope before stopping it manually')); }
+`;
+
+const stopRemoteScope = (project: Project, row: AgentRow) => Effect.gen(function* () {
+  const machine = yield* machineConfig(row.machine);
+  const runner = yield* Proc;
+  const env = yield* MusterEnv;
+  const result = yield* sshProc(row.machine, machine, runner, env.home).run("node", ["--input-type=module", "-e", STOP_REMOTE_SCOPE_SCRIPT], { cwd: "/", timeoutMs: 30_000, input: JSON.stringify({ row, project: project.slug }) });
+  return result.code === 0 && result.stdout.trim() ? result.stdout.trim() : `scope cleanup incomplete for ${row.name}: remote inspection or stop failed; inspect its scope manually`;
+}).pipe(Effect.catch(() => Effect.succeed(`scope cleanup incomplete for ${row.name}: remote inspection or stop failed; inspect its scope manually`)));
+
 const remoteClose = (dir: string, project: Project, row: AgentRow, params: AgentCloseInput) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const machine = yield* machineConfig(row.machine);
@@ -833,6 +894,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     return [withRow(current, next), next] as const;
   }));
   const retirement = yield* retireClone(dir, closed, params.force === true, params.takeover);
+  notes.push(yield* stopRemoteScope(project, row));
   return { row: (yield* load(dir)).agents.find(agent => agent.name === row.name)!, restore: closed.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...notes, ...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
 });
 
@@ -3512,7 +3574,7 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
     if (row.state === "closed") {
       const retirement = yield* retireClone(dir, row, params.force === true, params.takeover);
       const latest = (yield* load(dir)).agents.find(agent => agent.name === row.name)!;
-      return { row: latest, restore: latest.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : [])] };
+      return { row: latest, restore: latest.restore ?? { cwd: row.cwd, argv: [], env: {} }, cloneError: retirement.cloneError, notes: [...retirement.notes, ...(retirement.cloneError ? [retirement.cloneError] : []), ...(row.machine !== "local" ? [yield* stopRemoteScope(project, row)] : [])] };
     }
     if (row.machine !== "local") {
       // Packet and note sidecars live in the clone's git dir, which a harvested clone's removal deletes: ingest first.
