@@ -100,6 +100,98 @@ async function launchedFork() {
   return { s, launched: { row: (await s.run(load(dir))).agents.find(row => row.name === "remote-w")! } };
 }
 
+// Execute the cleanup probe through the SSH fake, with private proc/cgroup and command fixtures.
+// Never let these tests invoke the host's systemctl or sudo.
+async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean } = {}) {
+  const { s, launched } = await launchedFork();
+  const row = launched.row;
+  const root = join(s.h.root, "scope-fixture"), bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const unit = `worker-${row.name}-123.scope`, other = "worker-second-row-456.scope";
+  const units = [unit, other, ...(options.ambiguous ? [`worker-${row.name}-789.scope`] : [])];
+  const stopped = join(root, "stopped");
+  const group = `/fleet-workers.slice/${unit}`;
+  const cgroup = join(root, "cgroup", group);
+  mkdirSync(join(cgroup, "child"), { recursive: true });
+  writeFileSync(join(cgroup, "cgroup.procs"), "101\n");
+  writeFileSync(join(cgroup, "child/cgroup.procs"), options.live ? "102\n" : "");
+  const member = (pid: string, live: boolean) => {
+    const proc = join(root, "proc", pid); mkdirSync(proc, { recursive: true });
+    writeFileSync(join(proc, "comm"), live ? "node\n" : "mysqld\n");
+    writeFileSync(join(proc, "cmdline"), live ? "node\0/package/pi-coding-agent/dist/cli.js\0" : "mysqld\0");
+    if (!options.unreadable) writeFileSync(join(proc, "environ"), `MUSTER_PROJECT_SLUG=probe\0MUSTER_REMOTE_ROW=${JSON.stringify({ ...row, ...(options.foreign ? { sessionId: "replacement-session" } : {}) })}\0`);
+  };
+  member("101", false); if (options.live) member("102", true);
+  writeFileSync(join(bin, "systemctl"), `#!/usr/bin/env node
+const fs=require('node:fs'); const args=process.argv.slice(2);
+if(args[0]==='list-units') console.log(JSON.stringify(${JSON.stringify(units.map(unit => ({ unit })))}));
+else if(args[0]==='show') console.log(${JSON.stringify(group)});
+else if(args[0]==='stop') { fs.appendFileSync(${JSON.stringify(stopped)},args[1]+'\\n'); process.exit(${options.failStop ? 1 : 0}); }
+else process.exit(2);
+`, { mode: 0o755 });
+  writeFileSync(join(bin, "sudo"), '#!/bin/sh\n[ "$1" = -n ] || exit 2\nshift\nexec "$@"\n', { mode: 0o755 });
+  const original = s.proc.run;
+  vi.spyOn(s.proc, "run").mockImplementation((command, args, opts) => {
+    if (command !== "ssh" || !args.at(-1)?.includes("const {row,project}=")) return original(command, args, opts);
+    // Preserve the actual probe and SSH boundary; only relocate kernel files and command lookup.
+    const script = args.at(-1)!.replaceAll("/sys/fs/cgroup", join(root, "cgroup")).replaceAll("/proc/", join(root, "proc") + "/");
+    s.calls.push({ command, args });
+    return liveProc.run("sh", ["-c", script], { ...opts, cwd: s.h.home, env: { PATH: `${bin}:${process.env.PATH}` } });
+  });
+  return { s, row, unit, other, stops: () => existsSync(stopped) ? readFileSync(stopped, "utf8").trim().split("\n") : [] };
+}
+
+describe("remote close scope cleanup", () => {
+  it("stops exactly the closed row's orphan scope after retirement, leaving another row untouched", async () => {
+    const f = await scopeFixture();
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(result.row.state).toBe("closed");
+    expect(f.stops()).toEqual([f.unit]);
+    expect(f.stops()).not.toContain(f.other);
+    expect(result.notes).toContain(`scope stopped: ${f.unit}`);
+    expect(f.s.calls.filter(call => call.command === "ssh" && call.args.at(-1)?.includes("const {row,project}="))).toHaveLength(1);
+    const retire = f.s.calls.findIndex(call => call.command === "ssh" && call.args.at(-1)?.includes("'remove'"));
+    const cleanup = f.s.calls.findIndex(call => call.command === "ssh" && call.args.at(-1)?.includes("const {row,project}="));
+    expect(retire).toBeGreaterThan(-1); expect(cleanup).toBeGreaterThan(retire);
+  });
+  it.each([
+    ["a live Pi in a nested cgroup", { live: true }],
+    ["a replacement session", { foreign: true }],
+    ["ambiguous same-name scopes", { ambiguous: true }],
+    ["an unreadable member", { unreadable: true }],
+  ])("keeps scopes with %s and still closes the row", async (_label, options) => {
+    const f = await scopeFixture(options);
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(result.row.state).toBe("closed"); expect(f.stops()).toEqual([]);
+    expect(result.notes.join(" ")).toMatch(/scope kept|scope cleanup incomplete/);
+  });
+  it("can clean up an already-closed remote row without closing another pane", async () => {
+    const f = await scopeFixture();
+    await f.s.run(mutate(f.s.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => row.name === f.row.name ? { ...row, state: "closed" as const, pane: null } : row) }, undefined] as const)));
+    const closes = f.s.remote.calls.filter(call => call.method === "pane.close").length;
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(result.row.state).toBe("closed"); expect(f.stops()).toEqual([f.unit]);
+    expect(f.s.remote.calls.filter(call => call.method === "pane.close")).toHaveLength(closes);
+  });
+  it("turns SSH inspection failure into a note after closing", async () => {
+    const { s, launched } = await launchedFork();
+    const original = s.proc.run;
+    vi.spyOn(s.proc, "run").mockImplementation((command, args, options) =>
+      command === "ssh" && args.at(-1)?.includes("const {row,project}=")
+        ? Effect.fail(new ProcError({ command: "ssh", code: 255, stderr: "offline", message: "offline" }))
+        : original(command, args, options));
+    const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(result.row.state).toBe("closed");
+    expect(result.notes.join(" ")).toContain("scope cleanup incomplete");
+  });
+  it("notes a failed stop without refusing close", async () => {
+    const f = await scopeFixture({ failStop: true });
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(result.row.state).toBe("closed"); expect(f.stops()).toEqual([f.unit]);
+    expect(result.notes.join(" ")).toContain("scope cleanup incomplete");
+  });
+});
+
 describe("machine boundary", () => {
   it("maps only path prefixes, longest first, and decodes defaults", () => {
     const machine = config({ paths: { "/local": "/remote", "/local/specific": "/special" } });
