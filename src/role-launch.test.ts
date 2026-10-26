@@ -42,6 +42,9 @@ describe("role launch policy", () => {
     expect(roleLaunch(decodePolicy({ roles: { desk: { env: { PI_CODEMODE_MODE: "on" } } } }), "desk")?.env).toEqual({ PI_CODEMODE_MODE: "on" });
     for (const [key, value] of <[string, string][]>[["PI_CODEMODE_MODE", "off"], ["PI_CODEMODE_MODE", "--tools"], ["PI_CODEMODE_DECLARE", ""], ["PI_CODEMODE_DECLARE", "read, bash"], ["PI_CODEMODE_DECLARE", "-x"], ["PI_CODEMODE_DECLARE", "read,,bash"]])
       expect(() => roleLaunch(decodePolicy({ roles: { desk: { env: { [key]: value } } } }), "desk")).toThrow(`env ${key} ${JSON.stringify(value)}`);
+    // Tin-Tin, #45 review: an inherited object member must not read as a codemode key.
+    for (const key of ["hasOwnProperty", "toString", "constructor"])
+      expect(roleLaunch(decodePolicy({ roles: { desk: { env: { [key]: "1" } } } }), "desk")?.env).toEqual({ [key]: "1" });
     for (const key of ["PI_CODEMODE", "PI_CODEMODE_MODES", "PI_SKIP_VERSION_CHECK"])
       expect(() => roleLaunch(decodePolicy({ roles: { desk: { env: { [key]: "on" } } } }), "desk")).toThrow(`env "${key}" (reserved`);
   });
