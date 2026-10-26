@@ -381,6 +381,7 @@ describe("remote launch hygiene", () => {
     const proc: ProcShape = { run: (command, args, options) => { if (command === "pi") return Effect.succeed({ code: 0, stdout: "1.0.3\n", stderr: "" }); calls.push(args.at(-1)!); return liveProc.run("sh", ["-c", args.at(-1)!], options); } };
     const notes = await s.run(prerequisites("remote", machine, s.dir, true).pipe(Effect.provideService(Proc, proc)));
     expect(calls).toHaveLength(1); expect(notes.join(" ")).toContain("remote Pi 0.99.2; owner Pi 1.0.3; warning: Pi version skew");
+    await expect(s.run(prerequisites("remote", machine, join(s.dir, "missing-source"), true).pipe(Effect.provideService(Proc, proc)))).rejects.toThrow("or pass machine: local");
     unlinkSync(join(bin, "muster-heavy"));
     await expect(s.run(prerequisites("remote", machine, s.dir, true).pipe(Effect.provideService(Proc, proc)))).rejects.toThrow("install muster-heavy on the remote non-interactive PATH");
   });
@@ -631,6 +632,18 @@ describe("remote owner operations", () => {
     const restored = await s.run(agentLaunch(s.dir, { action: "restore", name: "w2-fold" }));
     expect(restored.row.state).toBe("running");
     expect(readFileSync(restored.row.brief!, "utf8")).toBe("fold the second wave\n");
+  });
+  it("saves the mapped role policy in a remote pre-Pi failure's restore command", async () => {
+    const { s, launched: { row } } = await launchedFork();
+    const prompt = join(s.dir, "worker-policy.txt"), mappedPrompt = join(s.dir, "remote-worker-policy.txt");
+    s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, paths: { [prompt]: mappedPrompt } }) });
+    // A launch that failed before Pi started has no journal or policy-bearing live profile.
+    await s.run(mutate(s.dir, project => Effect.succeed([decodeProject({ ...project,
+      policy: { ...project.policy, roles: { worker: { tools: ["read", "bash"], appendSystemPrompt: [prompt] } } },
+      agents: project.agents.map(agent => agent.name === row.name ? { ...agent, state: "failed", pane: null, sessionFile: null, restore: null, profile: { ...agent.profile, policy: undefined } } : agent),
+    }), undefined] as const)));
+    const closed = await s.run(agentClose(s.dir, { name: row.name }));
+    expect(closed.restore.argv).toEqual(expect.arrayContaining(["--tools", "read,bash", "--append-system-prompt", mappedPrompt]));
   });
   it("maps a transferred brief copy back to its owner-side source", () => {
     const machine = config({ paths: { "/Users/alice": "/home/alice" } });

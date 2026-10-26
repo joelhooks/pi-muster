@@ -325,7 +325,7 @@ fail() { printf '%s\\n' "$*" >&2; exit 69; }
 for cmd in pi node git rift muster-heavy; do command -v "$cmd" >/dev/null || fail "install $cmd on the remote non-interactive PATH"; done
 test -r "$1/extensions/pi-muster.ts" && test -d "$1/node_modules" || fail "install Muster with dependencies at $1"
 test -x "$2" || fail "install executable dark-wizard worker helper at $2"
-test -d "$3" || fail "provide the mapped source checkout $3"
+test -d "$3" || fail "provide the mapped source checkout $3 or pass machine: local"
 { test -z "$4" || command -v "$4" >/dev/null; } || fail "install launch wrapper $4"
 if test "$5" = hydrate; then grep -q -- --hydrate "$2" || fail "update dark-wizard worker-worktree.sh for --hydrate"; fi
 if test "\${MUSTER_FLEET_COMPUTE:-}" != off; then command -v fleet-compute >/dev/null || fail "install fleet-compute or set machine.env.MUSTER_FLEET_COMPUTE=off"; fi

@@ -853,7 +853,8 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
   const notes: string[] = [];
   const roster = (yield* loadRoster).roster;
   const restore = yield* onRemote(row.machine, machine, Effect.gen(function* () {
-    const selected = yield* sessionRestore(extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row), row.sessionFile, project, row.role, roster, {}, true);
+    const profile = yield* roleLaunchProfile(extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row), project, row.role, path => mapWorkerPath(path, machine));
+    const selected = yield* sessionRestore(profile, row.sessionFile, project, row.role, roster, {}, true);
     notes.push(...selected.notes);
     const restore = { cwd: row.cwd, argv: [...machine.wrap.map(arg => arg.replaceAll("{name}", row.name)), "pi", ...buildArgv({ kind: "restore", sessionId: row.sessionId, sessionFile: row.sessionFile, parentSessionFile: null, profile: selected.profile, musterExtension: machine.musterExtension })], env: withRatkingName(project, row, row.restore?.env ?? agentEnv(project, row)) };
     if (row.state !== "closed") {
