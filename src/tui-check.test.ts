@@ -95,7 +95,7 @@ describe.each(["dark", "light"])("Muster TUI %s theme", themeName => {
         digest: [digestLine("demo 12:00", parts, width)],
       };
       for (const [name, lines] of Object.entries(surfaces)) expect(checkTui(lines, width, palette), name).toEqual([]);
-      if (width === 36 && themeName === "dark" && process.env.MUSTER_TUI_PROOF) writeFileSync(process.env.MUSTER_TUI_PROOF, Object.entries(surfaces).map(([name, lines]) => `### ${name}\n\n\`\`\`text\n${lines.map(stripVTControlCharacters).join("\n")}\n\`\`\``).join("\n\n"));
+      if (width === 36 && themeName === "dark" && process.env.PI_MUSTER_TUI_PROOF) writeFileSync(process.env.PI_MUSTER_TUI_PROOF, Object.entries(surfaces).map(([name, lines]) => `### ${name}\n\n\`\`\`text\n${lines.map(stripVTControlCharacters).join("\n")}\n\`\`\``).join("\n\n"));
     } finally { vi.unstubAllEnvs(); }
   });
   it.each([32, 36, 40])("mobile rows retain facts, selection and letter hints at %i columns", width => {
