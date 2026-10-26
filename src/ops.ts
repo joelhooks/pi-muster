@@ -62,7 +62,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
-import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
+import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, codemodeNote, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
@@ -3035,7 +3035,7 @@ export const launchResultText = (result: { row: AgentRow; argv: readonly string[
   ...(result.row.restore?.env.RATKING_NAME ? [`Rat King name: ${result.row.restore.env.RATKING_NAME} (send to this name; a row launched under another name has its own mailbox)`] : []),
   result.proof ? `delivery: ${result.proof.state}${result.proof.state === "unproven" ? ` — ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent",
   ...(result.row.clone ? [`clone base: ${result.row.clone.base ? `${result.row.clone.base.ref} ${result.row.clone.base.sha}` : "unproven (old catalog)"}`] : []),
-  ...[compactAlarm(result.row.profile.model, result.row.profile.compactAt)].filter((note): note is string => note !== null),
+  ...[compactAlarm(result.row.profile.model, result.row.profile.compactAt), codemodeNote(result.row.profile.policy)].filter((note): note is string => note !== null),
   `argv: pi ${result.argv.join(" ")}`, ...result.notes,
 ].join("\n");
 
@@ -3051,7 +3051,7 @@ export const launchOwnerText = (result: { row: AgentRow; argv: readonly string[]
     ["🐑 launched", row.name, "·", [row.pane?.paneId ?? "no pane", row.machine !== "local" ? row.machine : null, model, base].filter(Boolean).join(" · ")].join(" "),
     `session ${row.sessionId}${result.sessionIdMatched === false ? " (Herdr's id, not the minted one)" : ""} · readiness ${result.readiness} · ${result.proof ? `delivery ${result.proof.state}${result.proof.state === "unproven" ? `: ${result.proof.detail}` : ` via ${result.proof.via}`}` : "no work prompt sent"}`,
     ...(row.restore?.env.RATKING_NAME ? [`mail: ${row.restore.env.RATKING_NAME}`] : []),
-    ...[compactAlarm(row.profile.model, row.profile.compactAt)].filter((note): note is string => note !== null),
+    ...[compactAlarm(row.profile.model, row.profile.compactAt), codemodeNote(row.profile.policy)].filter((note): note is string => note !== null),
     ...notes,
     `full launch receipt: ${log}`,
   ].join("\n");
