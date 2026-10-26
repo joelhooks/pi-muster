@@ -491,6 +491,21 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 /** Muster's own wiring. Some of these are set only conditionally (MUSTER_OWNER_NAME, MUSTER_COMMS, HERDR_DESK_PROJECT),
  * so a policy value would fill the gap and send reports or turn records elsewhere (Tin-Tin, #22 review). */
 const RESERVED_ENV = /^(MUSTER|RATKING|HERDR|PI)_/;
+/**
+ * Pi's codemode switches, read at startup, are the only Pi keys a role may set: they launch a desk lean
+ * (Joel, desk page sb-desk-live 2026-10-26, card cffe0ce0 "Let desks launch lean on p8": yes). Values are checked so
+ * no other Pi wiring rides in.
+ */
+const CODEMODE_ENV: Record<string, (value: string) => boolean> = {
+  PI_CODEMODE_MODE: value => value === "on" || value === "only",
+  PI_CODEMODE_DECLARE: value => value.split(",").every(name => TOOL_NAME.test(name)),
+};
+/** The codemode switches a profile's role policy sets, for the launch receipt; null when it sets none. */
+export function codemodeNote(policy: RoleLaunch | undefined): string | null {
+  const mode = policy?.env?.PI_CODEMODE_MODE;
+  const declare = policy?.env?.PI_CODEMODE_DECLARE;
+  return mode || declare ? `codemode (role policy): mode ${mode ?? "unset"}, declare ${declare ? declare.split(",").join(", ") : "none"}` : null;
+}
 /** The launch additions a project's role policy names now, checked so no value can parse as a Pi flag. */
 export function roleLaunch(policy: Policy | undefined, role: Role): RoleLaunch | undefined {
   const value = policy?.roles?.[role];
@@ -498,7 +513,8 @@ export function roleLaunch(policy: Policy | undefined, role: Role): RoleLaunch |
   const tools = value.tools ?? undefined;
   const bad = [...(tools ?? []).filter(tool => !TOOL_NAME.test(tool)).map(tool => `tool ${JSON.stringify(tool)}`),
     ...Object.keys(value.env ?? {}).filter(key => !ENV_NAME.test(key)).map(key => `env ${JSON.stringify(key)}`),
-    ...Object.keys(value.env ?? {}).filter(key => ENV_NAME.test(key) && RESERVED_ENV.test(key)).map(key => `env ${JSON.stringify(key)} (reserved: Muster, Rat King, Herdr and Pi wiring)`),
+    ...Object.keys(value.env ?? {}).filter(key => ENV_NAME.test(key) && RESERVED_ENV.test(key) && !CODEMODE_ENV[key]).map(key => `env ${JSON.stringify(key)} (reserved: Muster, Rat King, Herdr and Pi wiring)`),
+    ...Object.entries(value.env ?? {}).filter(([key, v]) => CODEMODE_ENV[key] && !CODEMODE_ENV[key](v)).map(([key, v]) => `env ${key} ${JSON.stringify(v)} (${key === "PI_CODEMODE_MODE" ? "on or only" : "a comma list of tool names"})`),
     ...(value.appendSystemPrompt ?? []).filter(path => !path.startsWith("/")).map(path => `appendSystemPrompt ${JSON.stringify(path)} (not absolute)`)];
   if (bad.length) throw new Error(`policy.roles.${role}: ${bad.join(", ")}`);
   const launch: RoleLaunch = {
