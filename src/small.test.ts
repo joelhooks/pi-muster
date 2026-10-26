@@ -94,6 +94,18 @@ const lane = (slug: string, state: "open" | "closed", kind: "work" | "role" = "w
 const item = (id: string, kind: DeskItem["kind"], resolves?: string): DeskItem => ({ id, ts: "t", from: "h", kind, title: id, ...(resolves ? { resolves } : {}) });
 
 describe("token derivation", () => {
+  it.each([
+    ["launching", "run"], ["running", "run"], ["restarted", "run"], ["restoring", "run"],
+    ["silent", "silent"], ["nudged", "silent"],
+  ] as const)("counts a %s process in exactly one sidebar bucket", (state, bucket) => {
+    const agents = [{ state, name: "worker" }] as unknown as Project["agents"];
+    expect(deriveTokens({ ...base, agents }, []).agents).toBe(`1 ${bucket}`);
+  });
+
+  it("keeps quiet processes visible without counting them twice", () => {
+    const agents = (["running", "silent", "nudged"] as const).map((state, index) => ({ state, name: `a${index}` })) as unknown as Project["agents"];
+    expect(deriveTokens({ ...base, agents }, []).agents).toBe("1 run · 2 silent");
+  });
   it("derives progress, agents, and needs from state", () => {
     const project = {
       ...base,

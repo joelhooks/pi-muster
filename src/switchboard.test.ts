@@ -140,6 +140,13 @@ describe("switchboard view", () => {
     expect(switchboardTokens({ groups: [], fleet: null, latest: null, now: NOW })).toEqual({ progress: "📞 switchboard", now: null, agents: null, needs: null });
   });
 
+  it.each(["launching", "running", "silent", "nudged", "restarted", "restoring"] as const)("counts a %s process in the fleet and switchboard sidebar", (state) => {
+    const project = { state: "active", lanes: [], agents: [{ state }], packets: [] } as unknown as Project;
+    const fleet = fleetStats([project]);
+    expect(fleet.running).toBe(1);
+    expect(switchboardTokens({ groups: [], fleet, latest: null, now: NOW }).agents).toBe("🐑 1p · 1 run");
+  });
+
   it("sums the fleet from live projects only", () => {
     const lane = (state: string, extra = {}) => ({ kind: "work", state, archived: false, ...extra });
     const project = (state: string, lanes: object[], agents: string[], packets: string[]) =>
@@ -148,7 +155,7 @@ describe("switchboard view", () => {
       project("active", [lane("open"), lane("closed"), lane("open", { archived: true })], ["running", "closed", "silent"], ["reported", "committed"]),
       project("archived", [lane("open")], ["running"], ["reported"]),
     ]);
-    expect(stats).toEqual({ projects: 1, lanes: 2, lanesClosed: 1, running: 1, toLand: 1 });
+    expect(stats).toEqual({ projects: 1, lanes: 2, lanesClosed: 1, running: 2, toLand: 1 });
   });
 });
 
