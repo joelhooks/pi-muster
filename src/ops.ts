@@ -685,7 +685,9 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
     }
   }
   const dirt = dirty.length ? `; harness-only paths ${dirty.map(path => JSON.stringify(path)).sort().join(", ")}` : "";
-  return { safe: proof !== null, force: proof !== null, detail: `${proof ? `harvested: ${proof}` : "unreachable"}: ${row.cwd}; HEAD ${head}${dirt}` };
+  // aih-support-sweep, 2026-10-26: a bare "unreachable" read as a dead host. It means no landing holds this HEAD.
+  const next = proof ? "" : `; HEAD is unreachable from base ${base.slice(0, 12)} (no landed packet, branch or equivalent squash holds it); record its landing, or agent_close force: true to keep HEAD in a rescue ref and retire the clone`;
+  return { safe: proof !== null, force: proof !== null, detail: `${proof ? `harvested: ${proof}` : "unreachable"}: ${row.cwd}; HEAD ${head}${dirt}${next}` };
 });
 
 /** A lane base `<remote>/<branch>` whose remote the desk's source has; null for any other base. Runs on the desk. */
