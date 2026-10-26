@@ -243,6 +243,21 @@ describe("asynchronous launch admission", () => {
     expect(spawned.calls).toHaveLength(1);
   });
 
+  // Tin-Tin, #41: runLaunchJob records SUCCEED for a slow start ("started slowly; not proven yet"), so a restore can
+  // hold a finished job while its Pi is still booting; settling it then could start a second Pi on the session.
+  it("leaves a restoring row with a succeeded job alone within the launch timeout, even when no agent shows yet", async () => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "restoring" as const, pane: null, updatedAt: h.now.toISOString() })) }, undefined] as const)));
+    writeFileSync(join(h.home, ".local/state/muster/launches", `${receipt.jobId}.json`), JSON.stringify({ ...receipt.job, pid: 2147483647, state: "succeeded", outcome: "action" }));
+    h.now = new Date(h.now.getTime() + 60_000);
+    await runWith(h, projectStatus(dir));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("restoring");
+    h.now = new Date(h.now.getTime() + 60_000);
+    await runWith(h, projectStatus(dir));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
+  });
+
   it("times a missing restore job from the restoring row, not the original launch", async () => {
     const { h, dir, request } = await setup();
     const receipt = await runWith(h, agentLaunch(dir, request));

@@ -4394,8 +4394,10 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         const finished = recorded && (recorded.outcome || recorded.state === "succeeded" || recorded.state === "failed");
         if (!recorded || finished) {
           const expired = now - Date.parse(row.updatedAt) >= 120_000; // waitForSession's launch timeout
-          const reason = finished ? `launch job ${recorded.id} finished (${recorded.state}) without settling the restore; log: ${recorded.log}`
-            : expired ? "launch timeout (120s): no launch job record or live pane" : null;
+          // Tin-Tin (#41): a slow start records SUCCEED before its Pi proves, so a finished job alone is not a stuck row.
+          // Both cases wait out the launch timeout; the live-Pi probe stays the final veto.
+          const reason = !expired ? null : finished ? `launch job ${recorded.id} finished (${recorded.state}) without settling the restore after 120s; log: ${recorded.log}`
+            : "launch timeout (120s): no launch job record or live pane";
           const live = reason ? yield* rowHostsPi(row) : null;
           let state: AgentRow["state"] = row.state;
           const action = `restore ${row.name}: ${reason && live === false ? reason : live === true ? "pane hosts a live agent; restore left alone" : "waiting for launch evidence"}`;
