@@ -13,6 +13,13 @@ import type { Role } from "./domain.ts";
  */
 const ENTRY_TYPE = "compact-at";
 
+/**
+ * agent_ends that stay over the threshold after a landed compaction before compact-at tries again. A kept tail that is
+ * itself over the threshold would otherwise compact on every turn, a summary and a full cache rebuild each time
+ * (Tin-Tin, #35); a run that grew past the threshold still compacts on its third over-threshold end.
+ */
+export const COOLDOWN_ENDS = 2;
+
 export function parseThreshold(raw: unknown): number | null | undefined {
   if (raw === undefined || raw === null || raw === "" || raw === true || raw === false) return undefined;
   const text = String(raw).trim().toLowerCase();
@@ -54,6 +61,7 @@ export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string
 
   let threshold: number | null = null;
   let armed = true;
+  let cooldown = 0;
 
   const restore = (ctx: ExtensionContext) => {
     let value = parseThreshold(env.PI_COMPACT_AT);
@@ -72,6 +80,10 @@ export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string
   };
 
   pi.on("session_start", (_event, ctx) => restore(ctx));
+  // MacLeod, 2026-10-26: a run that grew from the kept tail past the threshold before its first agent_end never saw
+  // tokens at or below it, so a landed compaction left compact-at disarmed for good (flowing-pi ccanary: 238K, 276K,
+  // 284K, no compaction). Any landed compaction, ours or Pi's, starts a new crossing.
+  pi.on("session_compact", () => { armed = true; cooldown = COOLDOWN_ENDS; });
 
   pi.on("agent_end", (_event, ctx) => {
     if (threshold === null) return;
@@ -80,9 +92,16 @@ export function registerCompaction(pi: ExtensionAPI, env: Readonly<Record<string
     if (tokens === null || tokens === undefined) return;
     if (tokens <= threshold) {
       armed = true;
+      cooldown = 0;
       return;
     }
     if (!armed) return;
+    if (cooldown > 0) {
+      // Limits alarm; they don't loop. Say it once per landed compaction, with the numbers.
+      if (cooldown === COOLDOWN_ENDS && ctx.hasUI) ctx.ui.notify(`compact-at: still ${tokens} > ${threshold} tokens after a compaction; trying again in ${COOLDOWN_ENDS} turns. If it repeats, the kept tail exceeds the threshold: raise /compact-at`, "warning");
+      cooldown -= 1;
+      return;
+    }
     armed = false;
     const auto = piCompactsFirst(threshold, usage?.contextWindow ?? 0, piCompaction(ctx.cwd, ctx.model));
     if (auto !== null) {

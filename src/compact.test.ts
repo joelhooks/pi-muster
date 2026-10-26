@@ -25,7 +25,8 @@ function harness(settings: PiCompaction | undefined, contextWindow = 1_000_000) 
   registerCompaction(pi as never, { PI_COMPACT_AT: "400000" }, (_cwd, model) => { seen.push(model); return settings; });
   handlers.get("session_start")?.({}, ctx);
   const turn = (at: number) => { tokens = at; handlers.get("agent_end")?.({}, ctx); };
-  return { turn, compacted, notes, seen, fail: (message: string) => { failure = message; } };
+  const landed = () => handlers.get("session_compact")?.({}, ctx);
+  return { turn, landed, compacted, notes, seen, fail: (message: string) => { failure = message; } };
 }
 
 describe("compact-at and Pi's own auto-compaction", () => {
@@ -51,6 +52,32 @@ describe("compact-at and Pi's own auto-compaction", () => {
       h.turn(450_000);
       expect(h.compacted).toEqual([450_000]);
     }
+  });
+  // MacLeod, 2026-10-26: flowing-pi ccanary compacted once, then its next run grew past the threshold before any
+  // agent_end saw it below, and it never compacted again.
+  it("re-arms when a compaction lands, so a long run past the threshold compacts again", () => {
+    const h = harness({ enabled: true, reserveTokens: 16_384 });
+    h.turn(450_000);
+    h.landed();
+    h.turn(420_000);
+    h.turn(440_000);
+    h.turn(480_000);
+    expect(h.compacted).toEqual([450_000, 480_000]);
+  });
+  // Tin-Tin, #35: a kept tail over the threshold would compact on every turn once each landing re-arms.
+  it("never compacts on consecutive turns when the kept tail stays over the threshold, and says so once", () => {
+    const h = harness({ enabled: true, reserveTokens: 16_384 });
+    for (let turn = 0; turn < 7; turn += 1) { h.turn(410_000 + turn); if (h.compacted.length && h.compacted.at(-1) === 410_000 + turn) h.landed(); }
+    expect(h.compacted).toEqual([410_000, 410_003, 410_006]);
+    expect(h.notes.filter(note => note.includes("still"))).toEqual([
+      "compact-at: still 410001 > 400000 tokens after a compaction; trying again in 2 turns. If it repeats, the kept tail exceeds the threshold: raise /compact-at",
+      "compact-at: still 410004 > 400000 tokens after a compaction; trying again in 2 turns. If it repeats, the kept tail exceeds the threshold: raise /compact-at",
+    ]);
+  });
+  it("re-arms fully when a turn ends at or below the threshold", () => {
+    const h = harness({ enabled: true, reserveTokens: 16_384 });
+    h.turn(450_000); h.landed(); h.turn(300_000); h.turn(450_000);
+    expect(h.compacted).toEqual([450_000, 450_000]);
   });
   // MacLeod, 2026-10-17: Pi 1.3.0-p4 refuses a manual compaction while its own is running.
   it("treats Pi's own compaction in progress as handled: no retry, no error; other failures retry", () => {
