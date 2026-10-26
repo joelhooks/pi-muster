@@ -114,6 +114,13 @@ it("keeps real unharvested commits, records one refusal, surfaces it and retries
   expect((await f.status()).board).not.toContain("clone kept:");
 });
 
+it.each([false, true])("names the exact landing call for kept work (reported: %s)", async reported => {
+  const f = await fixture();
+  const id = f.commit(f.row.cwd, "work.txt", "unlanded");
+  if (reported) await runWith(f.h, packetReport({ dir: f.dir, agent: f.row.name, owner: f.row.owner, cwd: f.row.cwd, commit: id, summary: "work", checks: [] }));
+  expect((await f.close()).cloneError).toContain(`packet_land id:${reported ? id : "<packet>"} outcome:committed landedAs:<sha>`);
+});
+
 it.each(["cherry", "squash", "landedAs"])("removes harvested %s work", async kind => {
   const f = await fixture();
   const id = f.commit(f.row.cwd, "work.txt", "first");
