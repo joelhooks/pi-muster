@@ -102,7 +102,7 @@ async function launchedFork() {
 
 // Execute the cleanup probe through the SSH fake, with private proc/cgroup and command fixtures.
 // Never let these tests invoke the host's systemctl or sudo.
-async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean } = {}) {
+async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean; slice?: string } = {}) {
   const { s, launched } = await launchedFork();
   const row = launched.row;
   const root = join(s.h.root, "scope-fixture"), bin = join(root, "bin");
@@ -125,7 +125,10 @@ async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambigu
   writeFileSync(join(bin, "systemctl"), `#!/usr/bin/env node
 const fs=require('node:fs'); const args=process.argv.slice(2);
 if(args[0]==='list-units') console.log(JSON.stringify(${JSON.stringify(units.map(unit => ({ unit })))}));
-else if(args[0]==='show') console.log(${JSON.stringify(group)});
+else if(args[0]==='show') {
+  if(args[1]!=='--property=Slice,ActiveState,ControlGroup' || args[2]!==${JSON.stringify(unit)}) process.exit(2);
+  console.log(${JSON.stringify(`Slice=${options.slice ?? "fleet-workers.slice"}\nActiveState=active\nControlGroup=${group}`)});
+}
 else if(args[0]==='stop') { fs.appendFileSync(${JSON.stringify(stopped)},args[1]+'\\n'); process.exit(${options.failStop ? 1 : 0}); }
 else process.exit(2);
 `, { mode: 0o755 });
@@ -183,6 +186,13 @@ describe("remote close scope cleanup", () => {
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect(result.row.state).toBe("closed");
     expect(result.notes.join(" ")).toContain("scope cleanup incomplete");
+  });
+  it("keeps an exact-name scope outside fleet-workers.slice without refusing close", async () => {
+    const f = await scopeFixture({ slice: "other-workers.slice" });
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(result.row.state).toBe("closed");
+    expect(f.stops()).toEqual([]);
+    expect(result.notes).toContain("scope kept: not in fleet-workers.slice");
   });
   it("notes a failed stop without refusing close", async () => {
     const f = await scopeFixture({ failStop: true });

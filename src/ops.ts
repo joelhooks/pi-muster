@@ -804,7 +804,9 @@ try {
   else if (units.length!==1) note('scope kept: ambiguous worker scopes for '+row.name);
   else {
     const unit=units[0];
-    const group=run('systemctl',['show','--property=ControlGroup','--value',unit]);
+    const properties=Object.fromEntries(run('systemctl',['show','--property=Slice,ActiveState,ControlGroup',unit]).split('\\n').map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];}));
+    if (properties.Slice!=='fleet-workers.slice') throw Error('not in fleet-workers.slice');
+    const group=properties.ControlGroup;
     if (!group.startsWith('/') || group.split('/').includes('..') || basename(group)!==unit) throw Error('invalid scope cgroup');
     const members=path=>[
       ...fs.readFileSync(join(path,'cgroup.procs'),'utf8').trim().split(/\\s+/).filter(Boolean),
@@ -835,7 +837,7 @@ try {
       note('scope stopped: '+unit);
     }
   }
-} catch (error) { note('scope cleanup incomplete for '+row.name+': '+(error.message.includes('live Pi') ? 'live Pi in scope; left running' : error.message.includes('different row') ? 'different row in scope; left running' : 'inspection or stop failed; inspect the row scope before stopping it manually')); }
+} catch (error) { if (error.message==='not in fleet-workers.slice') note('scope kept: not in fleet-workers.slice'); else note('scope cleanup incomplete for '+row.name+': '+(error.message.includes('live Pi') ? 'live Pi in scope; left running' : error.message.includes('different row') ? 'different row in scope; left running' : 'inspection or stop failed; inspect the row scope before stopping it manually')); }
 `;
 
 const stopRemoteScope = (project: Project, row: AgentRow) => Effect.gen(function* () {
