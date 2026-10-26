@@ -229,8 +229,6 @@ export interface FleetStats {
   readonly toLand: number;
 }
 
-const RUNNING = new Set(["launching", "running", "restarted", "restoring"]);
-
 /** The Muster side of the system: live projects, their work lanes, running agents, packets not yet landed. */
 export function fleetStats(projects: readonly Project[]): FleetStats {
   const live = projects.filter((project) => project.state !== "archived");
@@ -239,7 +237,7 @@ export function fleetStats(projects: readonly Project[]): FleetStats {
     projects: live.length,
     lanes: lanes.length,
     lanesClosed: lanes.filter((lane) => lane.state === "closed").length,
-    running: live.reduce((sum, project) => sum + project.agents.filter((agent) => RUNNING.has(agent.state)).length, 0),
+    running: live.reduce((sum, project) => sum + project.agents.filter((agent) => PROCESS_STATES.includes(agent.state)).length, 0),
     toLand: live.reduce((sum, project) => sum + project.packets.filter((packet) => !TERMINAL_PACKET_STATES.includes(packet.state)).length, 0),
   };
 }

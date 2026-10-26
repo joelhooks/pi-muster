@@ -5,6 +5,7 @@ import { formatAge } from "./switchboard.ts";
 import type { AgentState, DeskItem, Lane, Project, TurnRecord } from "./domain.ts";
 import { sessionChain } from "./ops.ts";
 import { TERMINAL_PACKET_STATES } from "./domain.ts";
+import { PROCESS_STATES } from "./machines.ts";
 
 /**
  * Sidebar tokens are a projection of machine state and the desk queue. They
@@ -39,9 +40,11 @@ function fit(parts: readonly string[]): string | null {
   return out || (parts[0] ? clip(parts[0]) : null);
 }
 
+const SILENT_STATES: readonly AgentState[] = ["silent", "nudged"];
 const AGENT_BUCKETS: ReadonlyArray<readonly [string, readonly AgentState[]]> = [
-  ["run", ["launching", "running", "restarted", "restoring"]],
-  ["silent", ["silent", "nudged"]],
+  // Quiet processes still count, but the sidebar gives them their own bucket.
+  ["run", PROCESS_STATES.filter(state => !SILENT_STATES.includes(state))],
+  ["silent", SILENT_STATES],
   ["rpt", ["reported", "verified"]],
   ["intr", ["interrupted"]],
   ["fail", ["failed"]],
