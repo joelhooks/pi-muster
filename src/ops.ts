@@ -4455,6 +4455,35 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         continue;
       }
       const job = findLaunchJob(launchJobs, project.slug, row);
+      // Tin-Tin (#30): a completed or lost sidecar cannot deliver LAUNCH_FAILED after its restore dies.
+      if (row.state === "restoring") {
+        const recorded = launchJobs.filter(job => job.project === project.slug && job.name === row.name && job.sessionId === row.sessionId)
+          .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+        const finished = recorded && (recorded.outcome || recorded.state === "succeeded" || recorded.state === "failed");
+        if (!recorded || finished) {
+          const expired = now - Date.parse(row.updatedAt) >= 120_000; // waitForSession's launch timeout
+          // Tin-Tin (#41): a slow start records SUCCEED before its Pi proves, so a finished job alone is not a stuck row.
+          // Both cases wait out the launch timeout; the live-Pi probe stays the final veto.
+          const reason = !expired ? null : finished ? `launch job ${recorded.id} finished (${recorded.state}) without settling the restore after 120s; log: ${recorded.log}`
+            : "launch timeout (120s): no launch job record or live pane";
+          const live = reason ? yield* rowHostsPi(row) : null;
+          let state: AgentRow["state"] = row.state;
+          const action = `restore ${row.name}: ${reason && live === false ? reason : live === true ? "pane hosts a live agent; restore left alone" : "waiting for launch evidence"}`;
+          if (reason && live === false && act && row.owner === env.sessionId) state = yield* mutate(dir, current => Effect.gen(function* () {
+            const latest = yield* findRow(current, row.name);
+            if (latest.state !== "restoring" || latest.sessionId !== row.sessionId || latest.updatedAt !== row.updatedAt) return [current, latest.state] as const;
+            // A concurrent launch may have advanced its sidecar while Herdr was being probed.
+            const jobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
+            const latestJob = jobs.filter(job => job.project === current.slug && job.name === latest.name && job.sessionId === latest.sessionId)
+              .sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+            if (latestJob?.id !== recorded?.id || latestJob?.state !== recorded?.state || latestJob?.outcome !== recorded?.outcome) return [current, latest.state] as const;
+            const state = yield* stepAgent(row.name, latest.state, { type: "LAUNCH_FAILED" });
+            return [withRow(current, { ...latest, state, events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: action }], updatedAt: iso(env) }), state] as const;
+          }));
+          lines.push({ name: row.name, role: row.role, lane: row.lane, state, pane: row.pane?.paneId ?? null, silentMin: null, cache: null, cost: null, intercom: "unknown", action });
+          continue;
+        }
+      }
       if (job) {
         let alive = job.pid === null && env.now().getTime() - Date.parse(job.startedAt) < 30_000;
         if (job.pid !== null) {

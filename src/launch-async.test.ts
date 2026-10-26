@@ -207,6 +207,71 @@ describe("asynchronous launch admission", () => {
     expect(spawned.calls).toHaveLength(1);
   });
 
+  it.each(["dead pid", "finished job", "terminal job without outcome", "missing job", "missing job with shell"])("restoring with a dead job settles to failed, then closes: %s", async kind => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    const pane = kind === "missing job with shell" ? h.herdr.addPane("w1", receipt.tab!, dir) : undefined;
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "restoring" as const,
+      pane: pane ? { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true } : null })) }, undefined] as const)));
+    const file = join(h.home, ".local/state/muster/launches", `${receipt.jobId}.json`);
+    if (kind.startsWith("missing job")) rmSync(file);
+    else writeFileSync(file, JSON.stringify({ ...receipt.job, pid: 2147483647,
+      ...(kind === "finished job" ? { state: "failed", outcome: "blocked" } : kind === "terminal job without outcome" ? { state: "succeeded" } : {}) }));
+    h.now = new Date(h.now.getTime() + 120_000);
+    const status = await runWith(h, projectStatus(dir));
+    const row = (await runWith(h, load(dir))).agents[0]!;
+    expect(row.state).toBe("failed");
+    expect(row.events?.at(-1)?.type).toBe("LAUNCH_FAILED");
+    expect(status.agents[0]?.action).toMatch(/worker|launch job/);
+    expect(status.agents[0]?.action).toMatch(/died|finished|timeout/);
+    expect((await runWith(h, agentClose(dir, { name: "worker" }))).row.state).toBe("closed");
+    expect(spawned.calls).toHaveLength(1);
+  });
+
+  it.each(["live job", "within timeout", "live pane", "preview", "other owner"])("leaves a restoring row alone: %s", async kind => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    const pane = kind === "live pane" ? h.herdr.addPane("w1", receipt.tab!, dir) : undefined;
+    if (pane) pane.agent = "pi";
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "restoring" as const,
+      owner: kind === "other owner" ? "another-owner" : row.owner,
+      pane: pane ? { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: true } : null })) }, undefined] as const)));
+    if (kind !== "live job") rmSync(join(h.home, ".local/state/muster/launches", `${receipt.jobId}.json`));
+    if (kind !== "within timeout") h.now = new Date(h.now.getTime() + 120_000);
+    await runWith(h, projectStatus(dir, { act: kind !== "preview" }));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("restoring");
+    expect(spawned.calls).toHaveLength(1);
+  });
+
+  // Tin-Tin, #41: runLaunchJob records SUCCEED for a slow start ("started slowly; not proven yet"), so a restore can
+  // hold a finished job while its Pi is still booting; settling it then could start a second Pi on the session.
+  it("leaves a restoring row with a succeeded job alone within the launch timeout, even when no agent shows yet", async () => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "restoring" as const, pane: null, updatedAt: h.now.toISOString() })) }, undefined] as const)));
+    writeFileSync(join(h.home, ".local/state/muster/launches", `${receipt.jobId}.json`), JSON.stringify({ ...receipt.job, pid: 2147483647, state: "succeeded", outcome: "action" }));
+    h.now = new Date(h.now.getTime() + 60_000);
+    await runWith(h, projectStatus(dir));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("restoring");
+    h.now = new Date(h.now.getTime() + 60_000);
+    await runWith(h, projectStatus(dir));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
+  });
+
+  it("times a missing restore job from the restoring row, not the original launch", async () => {
+    const { h, dir, request } = await setup();
+    const receipt = await runWith(h, agentLaunch(dir, request));
+    rmSync(join(h.home, ".local/state/muster/launches", `${receipt.jobId}.json`));
+    h.now = new Date(h.now.getTime() + 300_000);
+    await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => ({ ...row, state: "restoring" as const, updatedAt: h.now.toISOString() })) }, undefined] as const)));
+    h.now = new Date(h.now.getTime() + 119_999);
+    await runWith(h, projectStatus(dir));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("restoring");
+    h.now = new Date(h.now.getTime() + 1);
+    await runWith(h, projectStatus(dir));
+    expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
+  });
+
   it("refuses to close a launching row while its launch job has no outcome", async () => {
     const { h, dir, request } = await setup();
     await runWith(h, agentLaunch(dir, request));
