@@ -798,6 +798,24 @@ describe("pane binding safety", () => {
     expect(closed.notes).toContain(`Rat King name ${slug}/first retired: sends to it now fail Retired, naming probe/desk`);
   });
 
+  it.each(["catalog", "session"])("retires to the owner's current %s name after a rename", async source => {
+    const { h, dir, row } = await rootWorker();
+    const shim = join(h.home, ".config/muster/fleet-mailbox.sh");
+    mkdirSync(join(shim, ".."), { recursive: true });
+    writeFileSync(shim, `printf '%s\\n' "$*" >> "${h.root}/mailbox-args"; exit 0\n`);
+    await runWith(h, mutate(dir, current => Effect.succeed([{
+      ...current,
+      agents: [
+        { ...row, ownerName: "probe/old-desk" },
+        ...(source === "catalog" ? [{ ...row, name: "renamed-desk", role: "desk" as const, sessionId: row.owner, pane: null }] : []),
+      ],
+    }, undefined] as const)));
+    if (source === "session") vi.stubEnv("RATKING_NAME", "probe/renamed-desk");
+    await runWith(h, agentClose(dir, { name: "first" }));
+    const slug = (await runWith(h, load(dir))).slug;
+    expect(readFileSync(join(h.root, "mailbox-args"), "utf8").trim()).toBe(`retire --name ${slug}/first --successor probe/renamed-desk`);
+  });
+
   it("still retires without a successor when the mailbox refuses it", async () => {
     const { h, dir } = await rootWorker();
     const shim = join(h.home, ".config/muster/fleet-mailbox.sh");

@@ -70,7 +70,7 @@ describe("owner-attested landing", () => {
     const s = await fixture(); await runWith(s.h, packetVerify(s.dir, s.id));
     sh(s.dir, "fetch", "-q", s.row.cwd, s.id);
     const err = await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
-    expect(err.message).toContain(`${s.id} is not on base origin/main, nor on local main; merge it into main in the source checkout`);
+    expect(err.message).toContain(`${s.id} is not on base origin/main, nor on local main in ${s.dir}; merge it into main in the source checkout`);
     sh(s.dir, "merge", "-q", "--ff-only", s.id);
     const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
     expect(landed.packet).toMatchObject({ state: "committed", landedAs: s.id, attested: true });

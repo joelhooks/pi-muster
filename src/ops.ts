@@ -686,7 +686,8 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
   }
   const dirt = dirty.length ? `; harness-only paths ${dirty.map(path => JSON.stringify(path)).sort().join(", ")}` : "";
   // aih-support-sweep, 2026-10-26: a bare "unreachable" read as a dead host. It means no landing holds this HEAD.
-  const next = proof ? "" : `; HEAD is unreachable from base ${base.slice(0, 12)} (no landed packet, branch or equivalent squash holds it); record its landing, or agent_close force: true to keep HEAD in a rescue ref and retire the clone`;
+  const packet = project.packets.find(packet => packet.agent === row.name && packet.id === head);
+  const next = proof ? "" : `; HEAD is unreachable from base ${base.slice(0, 12)} (no landed packet, branch or equivalent squash holds it); record its landing with packet_land id:${packet?.id ?? "<packet>"} outcome:committed landedAs:<sha>, or agent_close force: true to keep HEAD in a rescue ref and retire the clone`;
   return { safe: proof !== null, force: proof !== null, detail: `${proof ? `harvested: ${proof}` : "unreachable"}: ${row.cwd}; HEAD ${head}${dirt}${next}` };
 });
 
@@ -3416,7 +3417,11 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   if (project.policy?.comms && project.policy.comms !== "ratking") return null;
   const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
   // Nicodemus, 2026-10-19: a plain Retired left senders guessing; name the owner desk so they are redirected to it.
-  const successor = verb === "retire" && row.ownerName && row.ownerName !== name ? row.ownerName : null;
+  const owner = verb === "retire" ? ownerName(row.owner, {
+    catalogs: [project, ...registeredCatalogs(env.home)], recorded: row.ownerName,
+    self: { session: env.sessionId, name: ownerSelfName(process.env) },
+  }) : undefined;
+  const successor = owner && owner !== name ? owner : null;
   const done = verb === "retire" ? `retired: sends to it now fail Retired${successor ? `, naming ${successor}` : ""}` : "unretired: it takes mail again";
   const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
   if (!existsSync(shim)) return `Rat King name ${name} not ${verb}d: no ${shim}`;
@@ -4037,9 +4042,9 @@ const proveOnBase = (run: ProcShape["run"], source: string, landedAs: string, ba
  */
 const branchBase = (laneBase: string | null | undefined) => laneBase && /^[a-f0-9]{7,64}$/.test(laneBase) ? null : laneBase;
 
-const notOnBase = (landedAs: string, base: LandingBase) =>
-  !base.hasRemote ? `${landedAs} is not on base ${base.branch}`
-    : `${landedAs} is not on base ${base.remote}/${base.branch}, nor on local ${base.branch}; ` +
+const notOnBase = (landedAs: string, base: LandingBase, source: string) =>
+  !base.hasRemote ? `${landedAs} is not on base ${base.branch} in ${source}`
+    : `${landedAs} is not on base ${base.remote}/${base.branch}, nor on local ${base.branch} in ${source}; ` +
       `merge it into ${base.branch} in the source checkout, or name the remote it lands on in the lane base (lane_open base: "<remote>/${base.branch}", or "refs/heads/${base.branch}" for a repo that never pushes)`;
 
 export const packetLand = (dir: string, params: PacketLandInput) =>
@@ -4124,7 +4129,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const proof = yield* proveOnBase(git.run, source, landedAs, landing, fetched, project.mode);
       if (proof.refusal) return yield* new GuardFailed({ guard: "landed-as", message: proof.refusal });
       if (!proof.ok && hasRemote && !fetched) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot attest against stale base refs` });
-      if (!proof.ok) return yield* new GuardFailed({ guard: "landed-as", message: notOnBase(landedAs, landing) });
+      if (!proof.ok) return yield* new GuardFailed({ guard: "landed-as", message: notOnBase(landedAs, landing, source) });
       evidence = `owner-attested: landed inside ${landedAs}; ${evidence}`;
       note = ["recorded an owner-attested landing", proof.note].filter(Boolean).join("; ");
     } else if (outcome === "committed") {
@@ -4198,7 +4203,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const proof = yield* proveOnBase(proc.run, source, landedAs, landing, fetched, project.mode);
       if (proof.refusal) return yield* new GuardFailed({ guard: "landed-as", message: proof.refusal });
       if (!proof.ok && hasRemote && !fetched) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot prove ${landedAs} on base ${remote}/${base}` });
-      if (!proof.ok) return yield* new GuardFailed({ guard: "landed-as", message: notOnBase(landedAs, landing) });
+      if (!proof.ok) return yield* new GuardFailed({ guard: "landed-as", message: notOnBase(landedAs, landing, source) });
       if (proof.note) note = [note, proof.note].filter(Boolean).join("; ");
       landedAs = (yield* git(source, "rev-parse", "--verify", "--end-of-options", `${landedAs}^{commit}`)).trim();
     }
