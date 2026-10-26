@@ -647,7 +647,15 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
   let refreshed = sources?.get(key);
   if (!refreshed) {
     const origin = (yield* run(source, "remote", "get-url", "origin")).code === 0;
-    const fetched = !origin || (yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*")).code === 0;
+    // rats-nest, 2026-10-26: an explicit refspec overrode the repo's own remote.origin.fetch, negative entries included,
+    // and re-imported a branch rat-king excludes, which tripped its pre-push fence on every close. Honour the configured
+    // refspecs only when every positive one writes under refs/remotes/origin/, because --prune with a mirror-style
+    // destination would delete local branches (Tin-Tin, #43). Otherwise fetch the default refspec plus the negatives.
+    const specs = origin ? (yield* run(source, "config", "--get-all", "remote.origin.fetch")).stdout.split("\n").map(spec => spec.trim()).filter(Boolean) : [];
+    const positives = specs.filter(spec => !spec.startsWith("^"));
+    const tracking = positives.length > 0 && positives.every(spec => spec.split(":")[1]?.startsWith("refs/remotes/origin/") === true);
+    const refspecs = tracking ? [] : ["+refs/heads/*:refs/remotes/origin/*", ...specs.filter(spec => spec.startsWith("^"))];
+    const fetched = !origin || (yield* run(source, "fetch", "--no-write-fetch-head", "-q", "--prune", "origin", ...refspecs)).code === 0;
     refreshed = { origin, fetched };
     sources?.set(key, refreshed);
   }
