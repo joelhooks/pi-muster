@@ -102,7 +102,7 @@ async function launchedFork() {
 
 // Execute the cleanup probe through the SSH fake, with private proc/cgroup and command fixtures.
 // Never let these tests invoke the host's systemctl or sudo.
-async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean; slice?: string } = {}) {
+async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean; slice?: string; description?: string; cleanEnv?: boolean } = {}) {
   const { s, launched } = await launchedFork();
   const row = launched.row;
   const root = join(s.h.root, "scope-fixture"), bin = join(root, "bin");
@@ -119,15 +119,15 @@ async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambigu
     const proc = join(root, "proc", pid); mkdirSync(proc, { recursive: true });
     writeFileSync(join(proc, "comm"), live ? "node\n" : "mysqld\n");
     writeFileSync(join(proc, "cmdline"), live ? "node\0/package/pi-coding-agent/dist/cli.js\0" : "mysqld\0");
-    if (!options.unreadable) writeFileSync(join(proc, "environ"), `MUSTER_PROJECT_SLUG=probe\0MUSTER_REMOTE_ROW=${JSON.stringify({ ...row, ...(options.foreign ? { sessionId: "replacement-session" } : {}) })}\0`);
+    if (!options.unreadable) writeFileSync(join(proc, "environ"), options.cleanEnv ? "PATH=/usr/bin\0" : `MUSTER_PROJECT_SLUG=probe\0MUSTER_REMOTE_ROW=${JSON.stringify({ ...row, ...(options.foreign ? { sessionId: "replacement-session" } : {}) })}\0`);
   };
   member("101", false); if (options.live) member("102", true);
   writeFileSync(join(bin, "systemctl"), `#!/usr/bin/env node
 const fs=require('node:fs'); const args=process.argv.slice(2);
 if(args[0]==='list-units') console.log(JSON.stringify(${JSON.stringify(units.map(unit => ({ unit })))}));
 else if(args[0]==='show') {
-  if(args[1]!=='--property=Slice,ActiveState,ControlGroup' || args[2]!==${JSON.stringify(unit)}) process.exit(2);
-  console.log(${JSON.stringify(`Slice=${options.slice ?? "fleet-workers.slice"}\nActiveState=active\nControlGroup=${group}`)});
+  if(args[1]!=='--property=Slice,ActiveState,ControlGroup,Description' || args[2]!==${JSON.stringify(unit)}) process.exit(2);
+  console.log(${JSON.stringify(`Slice=${options.slice ?? "fleet-workers.slice"}\nActiveState=active\nControlGroup=${group}\nDescription=${options.description ?? `muster:probe/${row.name}:${row.sessionId}`}`)});
 }
 else if(args[0]==='stop') { fs.appendFileSync(${JSON.stringify(stopped)},args[1]+'\\n'); process.exit(${options.failStop ? 1 : 0}); }
 else process.exit(2);
@@ -186,6 +186,22 @@ describe("remote close scope cleanup", () => {
     const result = await s.run(agentClose(s.dir, { name: launched.row.name }));
     expect(result.row.state).toBe("closed");
     expect(result.notes.join(" ")).toContain("scope cleanup incomplete");
+  });
+  // Tin-Tin, #37: Servo's orphans (mysqld, workerd, node runners) were started by test runners with a cleaned
+  // environment, so after the Pi exits nothing in the scope carries the launch binding.
+  it("stops a described scope whose only survivor has a cleaned environment", async () => {
+    const f = await scopeFixture({ cleanEnv: true });
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(result.row.state).toBe("closed"); expect(f.stops()).toEqual([f.unit]);
+  });
+  it.each([
+    ["an old wrapper's description", "pw-worker-scope closescope"],
+    ["another row's description", "muster:probe/other:other-session"],
+  ])("keeps a scope with %s without refusing close", async (_label, description) => {
+    const f = await scopeFixture({ description });
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(result.row.state).toBe("closed"); expect(f.stops()).toEqual([]);
+    expect(result.notes.join(" ")).toContain("scope kept: no Muster owner description");
   });
   it("keeps an exact-name scope outside fleet-workers.slice without refusing close", async () => {
     const f = await scopeFixture({ slice: "other-workers.slice" });
