@@ -65,6 +65,29 @@ describe("owner-attested landing", () => {
     expect(sh(s.dir, "rev-parse", "refs/remotes/walgit/central/landing").trim()).toBe(s.id);
   });
 
+  // imp, 2026-10-26: a local-only repo keeps an origin it never pushes, so a landing on its own main was refused.
+  it("proves a landing on the source checkout's own base branch when origin never got it, and says so", async () => {
+    const s = await fixture(); await runWith(s.h, packetVerify(s.dir, s.id));
+    sh(s.dir, "fetch", "-q", s.row.cwd, s.id);
+    const err = await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
+    expect(err.message).toContain(`${s.id} is not on base origin/main, nor on local main; merge it into main in the source checkout`);
+    sh(s.dir, "merge", "-q", "--ff-only", s.id);
+    const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs: s.id, attested: true });
+    expect(landed.note).toContain(`${s.id.slice(0, 12)} is on local main, not on origin/main`);
+  });
+
+  // memory-steward, 2026-10-26: a walgit-only repo has no origin, so a landing on walgit/main was checked against local main.
+  it("proves a landing on the only remote when the repo has no origin", async () => {
+    const s = await fixture(); await runWith(s.h, packetVerify(s.dir, s.id));
+    sh(s.dir, "remote", "rename", "origin", "walgit");
+    sh(s.origin, "fetch", "-q", s.row.cwd, s.id); sh(s.origin, "merge", "-q", "--ff-only", s.id);
+    const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs: s.id, attested: true });
+    expect(landed.note).not.toContain("on local main");
+    expect(sh(s.dir, "rev-parse", "refs/remotes/walgit/main").trim()).toBe(s.id);
+  });
+
   it("lands a reported packet after dirty-clone verification fails, without changing dirty bytes", async () => {
     const s = await fixture(); const landedAs = squash(s);
     writeFileSync(join(s.row.cwd, "work"), "dirty\n");

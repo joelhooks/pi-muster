@@ -67,7 +67,7 @@ import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLau
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
 import { type LaunchMailResult, launchOwnerRatkingName, ratkingCliPath, sendLaunchMail } from "./launch-mail.ts";
-import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must } from "./runtime.ts";
+import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must, type ProcShape } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
@@ -3991,12 +3991,36 @@ const landingBase = (source: string, laneBase: string | null | undefined) => Eff
   const named = stripped?.match(/^([^/]+)\/(.+)$/);
   if (named && named[1] !== "origin" && (yield* proc.run("git", ["remote", "get-url", "--", named[1]!], { cwd: source })).code === 0)
     return { remote: named[1]!, branch: named[2]!, hasRemote: true };
-  const hasRemote = (yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source })).code === 0;
+  const hasOrigin = (yield* proc.run("git", ["remote", "get-url", "origin"], { cwd: source })).code === 0;
   const symbolic = yield* proc.run("git", ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], { cwd: source });
   const branch = laneBase?.replace(/^(?:(?:refs\/remotes\/)?origin\/|refs\/heads\/)/, "") ??
     (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
-  return { remote: "origin", branch, hasRemote };
+  if (hasOrigin) return { remote: "origin", branch, hasRemote: true };
+  // memory-steward, 2026-10-26: a walgit-only repo has no origin, so its landings were checked against a local branch
+  // that never had them. Use the base branch's upstream remote, or the repo's only remote.
+  const upstream = yield* proc.run("git", ["config", "--get", `branch.${branch}.remote`], { cwd: source });
+  const remotes = (yield* proc.run("git", ["remote"], { cwd: source })).stdout.split("\n").map(name => name.trim()).filter(Boolean);
+  const named2 = upstream.code === 0 && upstream.stdout.trim() !== "." ? upstream.stdout.trim() : remotes.length === 1 ? remotes[0] : undefined;
+  return named2 ? { remote: named2, branch, hasRemote: true } : { remote: "origin", branch, hasRemote: false };
 });
+
+/**
+ * imp, 2026-10-26: a local-only repo keeps an origin it never pushes, so a landing on its own main was "not on base
+ * origin/main" and five lanes stuck draining. A landing is proven on the freshly fetched remote base or, failing that,
+ * on the source checkout's own base branch; the note says when only the local branch has it.
+ */
+const proveOnBase = (run: ProcShape["run"], source: string, landedAs: string, base: { remote: string; branch: string; hasRemote: boolean }, fetched: boolean) => Effect.gen(function* () {
+  const on = (ref: string) => run("git", ["merge-base", "--is-ancestor", landedAs, ref], { cwd: source }).pipe(Effect.map(result => result.code === 0));
+  const remoteRef = `${base.remote}/${base.branch}`;
+  if (base.hasRemote && fetched && (yield* on(`refs/remotes/${remoteRef}`))) return { ok: true, note: null };
+  if (yield* on(`refs/heads/${base.branch}`)) return { ok: true, note: base.hasRemote ? `${landedAs.slice(0, 12)} is on local ${base.branch}, not on ${remoteRef}` : null };
+  return { ok: false, note: null };
+});
+
+const notOnBase = (landedAs: string, base: { remote: string; branch: string; hasRemote: boolean }) =>
+  !base.hasRemote ? `${landedAs} is not on base ${base.branch}`
+    : `${landedAs} is not on base ${base.remote}/${base.branch}, nor on local ${base.branch}; ` +
+      `merge it into ${base.branch} in the source checkout, or name the remote it lands on in the lane base (lane_open base: "<remote>/${base.branch}")`;
 
 export const packetLand = (dir: string, params: PacketLandInput) =>
   Effect.gen(function* () {
@@ -4063,12 +4087,10 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const git = machine ? sshProc(row.machine, machine, proc, env.home) : proc;
       // A lane stacked on an unmerged PR head has a sha base; the landing is still proven against the default branch.
       const laneBase = lane?.base && /^[a-f0-9]{40,64}$/.test(lane.base) ? null : lane?.base;
-      const { remote, branch: base, hasRemote } = yield* landingBase(source, laneBase).pipe(Effect.provideService(Proc, git));
+      const landing = yield* landingBase(source, laneBase).pipe(Effect.provideService(Proc, git));
+      const { remote, branch: base, hasRemote } = landing;
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* git.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
-      if (hasRemote) {
-        const fetched = yield* git.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source });
-        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot attest against stale base refs` });
-      }
+      const fetched = hasRemote && (yield* git.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source })).code === 0;
       const resolve = () => git.run("git", ["rev-parse", "--verify", "--end-of-options", `${targetRef}^{commit}`], { cwd: source });
       let target = yield* resolve();
       if (target.code !== 0 && hasRemote) {
@@ -4077,10 +4099,11 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       }
       if (target.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `unknown landedAs commit ${params.landedAs} in ${source} (fetch from ${remote} did not resolve it)` });
       landedAs = target.stdout.trim();
-      const baseRef = hasRemote ? `refs/remotes/${remote}/${base}` : `refs/heads/${base}`;
-      if ((yield* git.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasRemote ? `${remote}/` : ""}${base}` });
+      const proof = yield* proveOnBase(git.run, source, landedAs, landing, fetched);
+      if (!proof.ok && hasRemote && !fetched) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot attest against stale base refs` });
+      if (!proof.ok) return yield* new GuardFailed({ guard: "landed-as", message: notOnBase(landedAs, landing) });
       evidence = `owner-attested: landed inside ${landedAs}; ${evidence}`;
-      note = "recorded an owner-attested landing";
+      note = ["recorded an owner-attested landing", proof.note].filter(Boolean).join("; ");
     } else if (outcome === "committed") {
       if (packet.kind === "commit" && !params.landedAs) {
         const cloneExists = row.machine === "local" ? existsSync(row.cwd) && statSync(row.cwd).isDirectory() : yield* Effect.gen(function* () {
@@ -4145,14 +4168,14 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (outcome === "committed" && !params.attested && !recording && project.mode !== "rift-merge") {
       if (!landedAs) return yield* input(`mode ${project.mode} requires landedAs on the lane base branch`);
       const source = sourceOf(project, lane, row);
-      const { remote, branch: base, hasRemote } = yield* landingBase(source, lane?.base);
+      const landing = yield* landingBase(source, lane?.base);
+      const { remote, branch: base, hasRemote } = landing;
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`landing requires a base branch, not ${base}`);
-      if (hasRemote) {
-        const fetched = yield* proc.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source });
-        if (fetched.code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot prove ${landedAs} on base ${remote}/${base}` });
-      }
-      const baseRef = hasRemote ? `refs/remotes/${remote}/${base}` : `refs/heads/${base}`;
-      if ((yield* proc.run("git", ["merge-base", "--is-ancestor", landedAs, baseRef], { cwd: source })).code !== 0) return yield* new GuardFailed({ guard: "landed-as", message: `${landedAs} is not on base ${hasRemote ? `${remote}/` : ""}${base}` });
+      const fetched = hasRemote && (yield* proc.run("git", ["fetch", "--no-tags", "--", remote, `+refs/heads/${base}:refs/remotes/${remote}/${base}`], { cwd: source })).code === 0;
+      const proof = yield* proveOnBase(proc.run, source, landedAs, landing, fetched);
+      if (!proof.ok && hasRemote && !fetched) return yield* new GuardFailed({ guard: "landed-as", message: `fetch ${remote}/${base} failed; cannot prove ${landedAs} on base ${remote}/${base}` });
+      if (!proof.ok) return yield* new GuardFailed({ guard: "landed-as", message: notOnBase(landedAs, landing) });
+      if (proof.note) note = [note, proof.note].filter(Boolean).join("; ");
       landedAs = (yield* git(source, "rev-parse", "--verify", "--end-of-options", `${landedAs}^{commit}`)).trim();
     }
     const event: AgentEvent | null = outcome === "rejected" ? { type: "REWORK" } : { type: "LAND" };
