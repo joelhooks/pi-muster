@@ -101,6 +101,8 @@ it("keeps real unharvested commits, records one refusal, surfaces it and retries
   f.commit(f.row.cwd, "work.txt", "unlanded");
   const first = await f.close();
   expect(first.cloneError).toContain("unreachable");
+  // aih-support-sweep, 2026-10-26: "unreachable" read as a dead host; the note names what it means and the next call.
+  expect(first.cloneError).toMatch(/HEAD is unreachable from base [0-9a-f]{12} .*agent_close force: true/);
   expect(first.row.state).toBe("closed");
   expect(existsSync(f.row.cwd)).toBe(true);
   expect((await f.status()).board).toContain("retry: agent_close name:worker");
