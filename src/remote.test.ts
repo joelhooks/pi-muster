@@ -703,6 +703,30 @@ describe("remote owner operations", () => {
     s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }), other: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }) });
     await expect(s.run(agentLaunch(s.dir, { action: "launch", name: "two-w", role: "worker", lane: "work", label: "two", clone: true, noSkills: true }))).rejects.toThrow(/cloneDefault is set on remote, other/);
   }, 30_000);
+  // Switchboard, 2026-10-26: rubicon's committed fixtures hold real athlete data, so its policy denies pennywise.
+  describe("policy machines.deny", () => {
+    const deny = (s: ReturnType<typeof setup>) => s.run(mutate(s.dir, project => Effect.succeed([{ ...project, policy: { ...project.policy, machines: { deny: ["remote"] } } }, null] as const)));
+    it("refuses an explicit denied machine, naming the policy and the way out", async () => {
+      const s = setup(); await s.open(); await deny(s);
+      await expect(s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "denied-w", role: "worker", lane: "work", label: "denied", cwd: s.dir, noSkills: true })))
+        .rejects.toThrow(/project \S+ policy machines\.deny refuses remote; use machine: local/);
+      expect((await s.run(load(s.dir))).agents.some(row => row.name === "denied-w")).toBe(false);
+    });
+    it("launches a clone on local when the clone default is denied", async () => {
+      const s = setup(); await s.open(); await deny(s);
+      s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, cloneDefault: true }) });
+      const launched = await s.run(agentLaunch(s.dir, { action: "launch", name: "local-w", role: "worker", lane: "work", label: "local", clone: true, noSkills: true }));
+      expect(launched.row.machine).toBe("local");
+    }, 30_000);
+    it("refuses to restore a row that lives on a denied machine", async () => {
+      const s = setup(); await s.open();
+      await s.run(agentLaunch(s.dir, { action: "launch", machine: "remote", name: "old-w", role: "worker", lane: "work", label: "old", cwd: s.dir, noSkills: true }));
+      await s.run(agentClose(s.dir, { name: "old-w" }));
+      await deny(s);
+      await expect(s.run(agentLaunch(s.dir, { action: "restore", name: "old-w" })))
+        .rejects.toThrow(/machines\.deny refuses remote; this row lives there and cannot move machines, so close it and launch again with machine: local/);
+    }, 30_000);
+  });
   it("maps a model's provider for the machine, and refuses a mapped model the machine does not serve", async () => {
     const s = setup(); await s.open();
     s.setMachines({ remote: config({ workerWorktree: s.h.workerWorktree, providerMap: { "openai-codex": "cliproxy-codex" } }) });

@@ -62,7 +62,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
-import { DEFAULT_GATE_TIMEOUT_MIN, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
+import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
 import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
@@ -2931,7 +2931,11 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const parent = params.action === "fork" ? yield* forkParent(project, params) : null;
     const previous = parent ?? existing;
     if (params.action === "launch" && params.machine !== undefined && existing && params.machine !== existing.machine) return yield* input(`explicit machine ${params.machine} differs from row ${existing.name}'s ${existing.machine}; cross-machine relaunch cannot reuse its cwd, clone or session. Choose a new row name on ${params.machine}; the old row is unchanged`);
-    const machine = params.machine ?? previous?.machine ?? (params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined) ?? "local";
+    const placed = params.action === "adopt" ? { machine: params.machine ?? previous?.machine ?? "local" }
+      : placeAgent(project.slug, project.policy, params.action, params.machine, previous?.machine, params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined);
+    if ("refusal" in placed) return yield* input(placed.refusal);
+    if (placed.note) modelNotes.push(placed.note);
+    const machine = placed.machine;
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (machine !== "local") {
       yield* machineConfig(machine);
@@ -3120,7 +3124,10 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
     if (params.action === "launch" && params.machine !== undefined && previous && params.machine !== previous.machine) return yield* input(`explicit machine ${params.machine} differs from row ${previous.name}'s ${previous.machine}; cross-machine relaunch cannot reuse its cwd, clone or session. Choose a new row name on ${params.machine}; the old row is unchanged`);
-    const machine = params.machine ?? previous?.machine ?? (params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined) ?? "local";
+    const placed = params.action === "adopt" ? { machine: params.machine ?? previous?.machine ?? "local" }
+      : placeAgent(project.slug, project.policy, params.action, params.machine, previous?.machine, params.clone && params.action === "launch" ? yield* defaultCloneMachine : undefined);
+    if ("refusal" in placed) return yield* input(placed.refusal);
+    const machine = placed.machine;
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (params.action === "restart") {
       const row = yield* findRow(project, name);

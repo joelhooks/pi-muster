@@ -67,6 +67,8 @@ describe("catalog writer schema fence", () => {
     [3, { policy: { deployLevel: 2 } }],
     [3, { lanes: [{ ...lane("one"), deployLevel: 1 }, lane("two")] }],
     [4, { lanes: [{ ...lane("one"), kind: "retro" }, lane("two")] }],
+    [6, { policy: { machines: { deny: ["pennywise"] } } }],
+    [1, { policy: { machines: { deny: [] } } }],
   ])("stamps schema %i for content that needs it, even over a higher current stamp", async (want, extra) => {
     const s = setup({ writerSchemaVersion: CURRENT_WRITER, ...extra });
     await runWith(s.h, mutate(s.dir, unrelatedPatch));

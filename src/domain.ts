@@ -537,6 +537,8 @@ export const Policy = Schema.Struct({
   nudgeAfterMin: Schema.optionalKey(Minutes),
   /** Quiet minutes before `/new` plus a re-prompt; null never restarts on its own. */
   restartAfterMin: Schema.optionalKey(Schema.NullOr(Minutes)),
+  /** Saved machines this project's agents must never run on, e.g. a repo whose fixtures hold real customer data. */
+  machines: Schema.optionalKey(Schema.Struct({ deny: Schema.optionalKey(Schema.Array(Schema.String)) })),
   roles: Schema.optionalKey(
     Schema.Struct({
       desk: Schema.optionalKey(RolePolicy),
@@ -823,8 +825,31 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
     ...(patch.gateTimeoutMin !== undefined ? { gateTimeoutMin: patch.gateTimeoutMin } : {}),
     ...(patch.nudgeAfterMin !== undefined ? { nudgeAfterMin: patch.nudgeAfterMin } : {}),
     ...(patch.restartAfterMin !== undefined ? { restartAfterMin: patch.restartAfterMin } : {}),
+    // A deny list replaces the old one whole, so an owner can also clear it with deny: [].
+    ...(patch.machines !== undefined ? { machines: patch.machines } : {}),
     ...(Object.keys(roles).length > 0 ? { roles } : {}),
   };
+}
+
+/**
+ * Where an agent runs: the explicit machine, else the row's, else the clone default, else local. Switchboard,
+ * 2026-10-26: rubicon's committed fixtures hold real athlete data, so its policy denies pennywise. A denied explicit or
+ * row machine refuses; a denied clone default falls back to local with a note, because nobody asked for it.
+ */
+export function placeAgent(slug: string, policy: Policy | undefined, action: string, explicit: string | undefined, rowMachine: string | undefined, cloneDefault: string | undefined):
+  { machine: string; note?: string } | { refusal: string } {
+  const deny = policy?.machines?.deny ?? [];
+  const chosen = explicit ?? rowMachine;
+  if (chosen !== undefined && deny.includes(chosen)) {
+    const rule = `project ${slug} policy machines.deny refuses ${chosen}`;
+    return { refusal: explicit === undefined && action !== "launch"
+      ? `${rule}; this row lives there and cannot move machines, so close it and launch again with machine: local`
+      : `${rule}; use machine: local` };
+  }
+  if (chosen !== undefined) return { machine: chosen };
+  if (cloneDefault !== undefined && deny.includes(cloneDefault))
+    return { machine: "local", note: `clone default ${cloneDefault} is denied by project ${slug} policy machines.deny; launching on local` };
+  return { machine: cloneDefault ?? "local" };
 }
 
 /** The policy in force, every default spelled out, so an owner sees what it is tuning. */
@@ -836,7 +861,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { deployLevel: policy?.deployLevel ?? 1, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, gateTimeoutMin: policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { deployLevel: policy?.deployLevel ?? 1, machines: { deny: policy?.machines?.deny ?? [] }, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, gateTimeoutMin: policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 /** Legacy comms hints decode tolerantly; mergePolicy never writes them. */
