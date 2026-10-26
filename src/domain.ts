@@ -496,10 +496,11 @@ const RESERVED_ENV = /^(MUSTER|RATKING|HERDR|PI)_/;
  * (Joel, desk page sb-desk-live 2026-10-26, card cffe0ce0 "Let desks launch lean on p8": yes). Values are checked so
  * no other Pi wiring rides in.
  */
-const CODEMODE_ENV: Record<string, (value: string) => boolean> = {
-  PI_CODEMODE_MODE: value => value === "on" || value === "only",
-  PI_CODEMODE_DECLARE: value => value.split(",").every(name => TOOL_NAME.test(name)),
-};
+// A Map, so an env key such as "hasOwnProperty" never resolves to an inherited object member (Tin-Tin, #45 review).
+const CODEMODE_ENV = new Map<string, (value: string) => boolean>([
+  ["PI_CODEMODE_MODE", value => value === "on" || value === "only"],
+  ["PI_CODEMODE_DECLARE", value => value.split(",").every(name => TOOL_NAME.test(name))],
+]);
 /** The codemode switches a profile's role policy sets, for the launch receipt; null when it sets none. */
 export function codemodeNote(policy: RoleLaunch | undefined): string | null {
   const mode = policy?.env?.PI_CODEMODE_MODE;
@@ -513,8 +514,8 @@ export function roleLaunch(policy: Policy | undefined, role: Role): RoleLaunch |
   const tools = value.tools ?? undefined;
   const bad = [...(tools ?? []).filter(tool => !TOOL_NAME.test(tool)).map(tool => `tool ${JSON.stringify(tool)}`),
     ...Object.keys(value.env ?? {}).filter(key => !ENV_NAME.test(key)).map(key => `env ${JSON.stringify(key)}`),
-    ...Object.keys(value.env ?? {}).filter(key => ENV_NAME.test(key) && RESERVED_ENV.test(key) && !CODEMODE_ENV[key]).map(key => `env ${JSON.stringify(key)} (reserved: Muster, Rat King, Herdr and Pi wiring)`),
-    ...Object.entries(value.env ?? {}).filter(([key, v]) => CODEMODE_ENV[key] && !CODEMODE_ENV[key](v)).map(([key, v]) => `env ${key} ${JSON.stringify(v)} (${key === "PI_CODEMODE_MODE" ? "on or only" : "a comma list of tool names"})`),
+    ...Object.keys(value.env ?? {}).filter(key => ENV_NAME.test(key) && RESERVED_ENV.test(key) && !CODEMODE_ENV.has(key)).map(key => `env ${JSON.stringify(key)} (reserved: Muster, Rat King, Herdr and Pi wiring)`),
+    ...Object.entries(value.env ?? {}).filter(([key, v]) => CODEMODE_ENV.get(key)?.(v) === false).map(([key, v]) => `env ${key} ${JSON.stringify(v)} (${key === "PI_CODEMODE_MODE" ? "on or only" : "a comma list of tool names"})`),
     ...(value.appendSystemPrompt ?? []).filter(path => !path.startsWith("/")).map(path => `appendSystemPrompt ${JSON.stringify(path)} (not absolute)`)];
   if (bad.length) throw new Error(`policy.roles.${role}: ${bad.join(", ")}`);
   const launch: RoleLaunch = {
