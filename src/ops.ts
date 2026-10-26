@@ -2719,7 +2719,7 @@ export const restartLockName = (project: string, row: string) =>
 
 /** `overrides` switch the model or thinking at the fork. Switching providers mid-session (/model) can leave an orphaned
  * tool result that Sol rejects; a restart rebuilds the context from the session file (Ernestine SOP, 2026-10-12). */
-const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
+const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env" | "compactAt"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
   if (!self) yield* requireOwner(old, env.sessionId, false, project.slug, false);
@@ -2740,7 +2740,9 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // The role policy is read again, so clearing it and restarting rolls a Lean Loadout back.
   const requested: LaunchProfile = yield* roleLaunchProfile({ ...old.profile,
     ...(overrides.extensions !== undefined ? { extensions: mergedExtensions(old.profile.extensions, overrides.extensions) } : {}),
-    ...(overrides.env !== undefined ? { env: { ...old.profile.env, ...overrides.env } } : {}) }, project, old.role, machine ? path => mapWorkerPath(path, machine) : undefined);
+    ...(overrides.env !== undefined ? { env: { ...old.profile.env, ...overrides.env } } : {}),
+    // Switchboard, 2026-10-26: the AIH desk restarted with compactAt 400000 and kept 120000. Fork-restart dropped it.
+    ...(overrides.compactAt !== undefined ? { compactAt: overrides.compactAt } : {}) }, project, old.role, machine ? path => mapWorkerPath(path, machine) : undefined);
   const selected = yield* sessionRestore(requested, old.sessionFile, project, old.role, (yield* loadRoster).roster, {
     ...(overrides.model !== undefined ? { model: overrides.model } : {}), ...(overrides.thinking !== undefined ? { thinking: overrides.thinking } : {}) }, remote);
   const notes = [...selected.notes];
@@ -3131,7 +3133,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (params.action === "restart") {
       const row = yield* findRow(project, name);
-      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env });
+      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt });
       return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
     }
     if (params.action === "adopt") {
