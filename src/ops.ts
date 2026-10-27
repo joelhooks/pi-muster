@@ -815,11 +815,15 @@ try {
   const prefix='worker-'+row.name+'-';
   const units=JSON.parse(run('systemctl',['list-units','--all','--type=scope','--output=json','--no-pager']))
     .map(entry=>entry.unit).filter(unit=>unit.startsWith(prefix) && /^[1-9][0-9]*\\.scope$/.test(unit.slice(prefix.length)));
+  const show=unit=>Object.fromEntries(run('systemctl',['show','--property=Slice,ActiveState,ControlGroup,Description',unit]).split('\\n').map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];}));
+  // Tin-Tin, #37 review: an older scope of the same row name (an earlier session) is not ambiguity; the Description names
+  // the session, so pick the one unit that names this row's session.
+  const described=units.length>1 ? units.filter(unit=>show(unit).Description==='muster:'+project+'/'+row.name+':'+row.sessionId) : units;
   if (!units.length) note('scope cleanup: no matching worker scope for '+row.name);
-  else if (units.length!==1) note('scope kept: ambiguous worker scopes for '+row.name);
+  else if (described.length!==1) note('scope kept: ambiguous worker scopes for '+row.name);
   else {
-    const unit=units[0];
-    const properties=Object.fromEntries(run('systemctl',['show','--property=Slice,ActiveState,ControlGroup,Description',unit]).split('\\n').map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];}));
+    const unit=described[0];
+    const properties=show(unit);
     if (properties.Slice!=='fleet-workers.slice') throw Error('not in fleet-workers.slice');
     if (properties.Description!=='muster:'+project+'/'+row.name+':'+row.sessionId) throw Error('no matching owner description');
     const group=properties.ControlGroup;

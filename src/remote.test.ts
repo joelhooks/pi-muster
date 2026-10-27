@@ -102,13 +102,14 @@ async function launchedFork() {
 
 // Execute the cleanup probe through the SSH fake, with private proc/cgroup and command fixtures.
 // Never let these tests invoke the host's systemctl or sudo.
-async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; failStop?: boolean; unreadable?: boolean; slice?: string; description?: string; cleanEnv?: boolean; orphanInClone?: boolean } = {}) {
+async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambiguous?: boolean; staleTwin?: boolean; failStop?: boolean; unreadable?: boolean; slice?: string; description?: string; cleanEnv?: boolean; orphanInClone?: boolean } = {}) {
   const { s, launched } = await launchedFork();
   const row = launched.row;
   const root = join(s.h.root, "scope-fixture"), bin = join(root, "bin");
   mkdirSync(bin, { recursive: true });
   const unit = `worker-${row.name}-123.scope`, other = "worker-second-row-456.scope";
-  const units = [unit, other, ...(options.ambiguous ? [`worker-${row.name}-789.scope`] : [])];
+  const twin = `worker-${row.name}-789.scope`;
+  const units = [unit, other, ...(options.ambiguous || options.staleTwin ? [twin] : [])];
   const stopped = join(root, "stopped");
   const group = `/fleet-workers.slice/${unit}`;
   const cgroup = join(root, "cgroup", group);
@@ -126,7 +127,12 @@ async function scopeFixture(options: { live?: boolean; foreign?: boolean; ambigu
 const fs=require('node:fs'); const args=process.argv.slice(2);
 if(args[0]==='list-units') console.log(JSON.stringify(${JSON.stringify(units.map(unit => ({ unit })))}));
 else if(args[0]==='show') {
-  if(args[1]!=='--property=Slice,ActiveState,ControlGroup,Description' || args[2]!==${JSON.stringify(unit)}) process.exit(2);
+  if(args[1]!=='--property=Slice,ActiveState,ControlGroup,Description') process.exit(2);
+  if(args[2]===${JSON.stringify(twin)}) { console.log(${JSON.stringify(`Slice=fleet-workers.slice
+ActiveState=active
+ControlGroup=/fleet-workers.slice/${twin}
+Description=muster:probe/${row.name}:${options.staleTwin ? "an-earlier-session" : row.sessionId}`)}); process.exit(0); }
+  if(args[2]!==${JSON.stringify(unit)}) process.exit(2);
   console.log(${JSON.stringify(`Slice=${options.slice ?? "fleet-workers.slice"}\nActiveState=active\nControlGroup=${group}\nDescription=${options.description ?? `muster:probe/${row.name}:${row.sessionId}`}`)});
 }
 else if(args[0]==='stop') { fs.appendFileSync(${JSON.stringify(stopped)},args[1]+'\\n'); process.exit(${options.failStop ? 1 : 0}); }
@@ -181,6 +187,13 @@ describe("remote close scope cleanup", () => {
     const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
     expect(result.row.state).toBe("closed"); expect(f.stops()).toEqual([]);
     expect(result.notes.join(" ")).toMatch(/scope kept|scope cleanup incomplete/);
+  });
+  // Tin-Tin, #37 review: a scope left by an earlier session of the same row name is told apart by its Description.
+  it("picks the scope whose Description names this session when an older same-name scope exists", async () => {
+    const f = await scopeFixture({ staleTwin: true });
+    const result = await f.s.run(agentClose(f.s.dir, { name: f.row.name }));
+    expect(f.stops()).toEqual([f.unit]);
+    expect(result.notes.join(" ")).toContain(`scope stopped: ${f.unit}`);
   });
   it("can clean up an already-closed remote row without closing another pane", async () => {
     const f = await scopeFixture();
