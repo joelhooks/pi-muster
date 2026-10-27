@@ -2,7 +2,7 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
-import { FIRST_TURN_MS, firstTurnDetail, proveStartedPrompt } from "./herdr.ts";
+import { FIRST_TURN_MS, FIRST_TURN_WORKING_MAX_MS, firstTurnDetail, proveStartedPrompt } from "./herdr.ts";
 import { Proc } from "./runtime.ts";
 import { harness, runWith } from "./test-support.ts";
 
@@ -62,6 +62,34 @@ describe("restart's own first message", () => {
     const { h, file } = fixture("");
     const proc = { run: () => Effect.succeed({ code: 2, stdout: "", stderr: "private sentinel" }) };
     expect(await runWith(h, proveStartedPrompt(file, prompt, 1).pipe(Effect.provideService(Proc, proc)))).toMatchObject({ state: "unproven", failureKind: "discovery_timeout", detail: "no session journal entries within 90 s" });
+  });
+  // rats-nest, 2026-10-27: a slow model's fork was torn down at 90 s while still answering, and lost its reader's mail.
+  describe("a delivered prompt still being answered", () => {
+    const slow = (h: ReturnType<typeof harness>, answerAtMs: number | null) => {
+      const start = h.now.getTime();
+      let calls = 0;
+      return { run: () => Effect.sync(() => {
+        if (calls++ === 0) return { code: 0, stdout: JSON.stringify({ size: 19, text: "" }), stderr: "" };
+        const text = user(prompt) + (answerAtMs !== null && h.now.getTime() - start >= answerAtMs ? assistant() : "");
+        return { code: 0, stdout: JSON.stringify({ size: 19 + Buffer.byteLength(text), text }), stderr: "" };
+      }) };
+    };
+    it("keeps waiting past 90 s while the pane is working, and proves the late reply", async () => {
+      const { h, file } = fixture("");
+      expect(await runWith(h, proveStartedPrompt(file, prompt, 1, prompt, false, true, Effect.succeed(true)).pipe(Effect.provideService(Proc, slow(h, 200_000))))).toMatchObject({ state: "proven" });
+    });
+    it("stops at 90 s when the pane is not working", async () => {
+      const { h, file } = fixture("");
+      const start = h.now.getTime();
+      expect(await runWith(h, proveStartedPrompt(file, prompt, 1, prompt, false, true, Effect.succeed(false)).pipe(Effect.provideService(Proc, slow(h, 200_000))))).toMatchObject({ state: "unproven", failureKind: "assistant_timeout", detail: "no first turn within 90 s" });
+      expect(h.now.getTime() - start).toBeLessThan(FIRST_TURN_MS + 2_000);
+    });
+    it("gives up at the cap even while the pane stays working", async () => {
+      const { h, file } = fixture("");
+      const start = h.now.getTime();
+      expect(await runWith(h, proveStartedPrompt(file, prompt, 1, prompt, false, true, Effect.succeed(true)).pipe(Effect.provideService(Proc, slow(h, null))))).toMatchObject({ state: "unproven", failureKind: "assistant_timeout", detail: expect.stringContaining("no first turn within 900 s") });
+      expect(h.now.getTime() - start).toBeLessThan(FIRST_TURN_WORKING_MAX_MS + 2_000);
+    });
   });
   it("proves only the complete intended prompt and its clean first assistant", async () => {
     const { h, file } = fixture(user(prompt) + assistant());

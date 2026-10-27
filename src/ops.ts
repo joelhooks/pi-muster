@@ -36,6 +36,7 @@ import {
   agentGet,
   inheritedStartEntries,
   proveStartedPrompt,
+  paneWorking,
   writeLaunchFile,
   paneClose,
   paneGet,
@@ -2832,7 +2833,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (wait.state !== "ready") return yield* input(`restart failed before rebind: discovery timeout: replacement session ${wait.state}; old agent untouched; inspect the replacement launch before retrying`);
       const id = sessionIdFromFile(wait.sessionFile);
       if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed before rebind: wrong boundary: replacement did not prove a new session; old agent untouched");
-      let proof: Proof = yield* proveStartedPrompt(wait.sessionFile, prompt, inherited, prompt, false, true);
+      let proof: Proof = yield* proveStartedPrompt(wait.sessionFile, prompt, inherited, prompt, false, true, paneWorking(binding.paneId));
       if (proof.state === "unproven" && proof.failureKind === "missing_prompt") {
         // Pi catches and drops an argv prompt if a session_start hook already
         // opened a turn. Retry only a genuinely absent user, then recheck the
@@ -2841,7 +2842,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
         // while it is still alive; this provisional name belongs only to the fork.
         yield* agentRename(binding.paneId, `restart-${randomUUID().slice(0, 8)}`);
         const submitted = yield* promptWithProof(binding.paneId, prompt);
-        proof = submitted.state === "proven" ? yield* proveStartedPrompt(wait.sessionFile, prompt, inherited, prompt, false, true) : submitted;
+        proof = submitted.state === "proven" ? yield* proveStartedPrompt(wait.sessionFile, prompt, inherited, prompt, false, true, paneWorking(binding.paneId)) : submitted;
         if (proof.state === "proven" && submitted.state === "proven") proof = { ...proof, via: submitted.via };
         notes.push("startup omitted the argv continuation; submitted it once after readiness and rechecked the original fork boundary");
       }
