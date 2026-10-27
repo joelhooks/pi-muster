@@ -12,7 +12,7 @@ Muster is being strangled down to its Herdr hands: spawn, fork, restart, adopt, 
 
 ## Rules
 
-- Talk to the owning desk directly over Rat King, share what you find, and ask for review; nobody holds another desk's work. Refuse harm, keep everything else moving: limits alarm rather than block, and every guard names its harm.
+- Talk to the owning desk directly over Rat King, share what you find, and ask for review; nobody holds another desk's work.
 - Extension startup is side-effect free: it registers tools, a flag, and a command, and opens no socket, file, or bus channel. Tools resolve everything at call time.
 - Muster owns no clock. Cadence is a pi-until repeat the owner arms from `project_open`'s result. Muster never calls joelclaw.
 - Every file read decodes through `src/domain.ts`. Every lifecycle change goes through `src/machines.ts`; rows carry one state, never a status beside it.
