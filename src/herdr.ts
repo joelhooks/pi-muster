@@ -118,6 +118,12 @@ export type Proof = { readonly state: "proven"; readonly via: "argv" | "network"
 export { snapshotRestartSession } from "./restart-snapshot.ts";
 
 export const FIRST_TURN_MS = 90_000;
+/**
+ * rats-nest, 2026-10-27: a GLM restart fork at 169k context was still working on its first reply at 90 s and was torn
+ * down, losing the mail its reader had already taken. While Herdr reports the pane working on a delivered prompt, the
+ * proof keeps waiting, up to this cap.
+ */
+export const FIRST_TURN_WORKING_MAX_MS = 15 * 60_000;
 
 /** Short shell probe runs in the pane's actual PATH; it never changes launch argv. */
 export const piReceiptSuffix = (id: string) => ` && { (umask 077; { command -v pi; pi --version; } >~/.pi/agent/m-${id}.pi) & }`;
@@ -179,25 +185,37 @@ export function firstTurnDetail(journal: string, prompt: string, exactPrompt = f
   return { state: "waiting", failureKind: matched ? "assistant_timeout" : "missing_prompt", detail: matched ? "no first turn within 90 s" : "no matching user entry within 90 s" };
 }
 
-const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false, network = false, restart = false) => Effect.gen(function* () {
+const proveFirstTurn = (path: string, offset: number, prompt: string, proof: Proof, exactPrompt = false, network = false, restart = false, working?: Effect.Effect<boolean, never, Herdr>) => Effect.gen(function* () {
   if (proof.state !== "proven") return proof;
   const env = yield* MusterEnv;
   const started = env.now().getTime();
   let slept = 0;
+  let limit = FIRST_TURN_MS;
   while (true) {
-    const read = yield* sessionSlice(path, offset, 0, Math.max(1, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started))).pipe(Effect.result);
+    const read = yield* sessionSlice(path, offset, 0, Math.max(1, limit - Math.max(slept, env.now().getTime() - started))).pipe(Effect.result);
     if (read._tag === "Failure") return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: read.failure.code === "wrong_boundary" ? "wrong_boundary" : "unreadable_slice", detail: read.failure.message } satisfies Proof;
     const slice = read.success;
     if (slice.size < offset) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: "wrong_boundary", detail: "wrong boundary: session journal truncated" } satisfies Proof;
     const result = firstTurnDetail(slice.text, prompt, exactPrompt, network, restart);
     if (result.state === "proven") return proof;
-    if (result.state === "unproven" || Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: result.detail } satisfies Proof;
-    const delay = Math.min(1000, FIRST_TURN_MS - Math.max(slept, env.now().getTime() - started));
+    if (result.state === "unproven") return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: result.detail } satisfies Proof;
+    const elapsed = () => Math.max(slept, env.now().getTime() - started);
+    const expired = function* () {
+      // Only a delivered prompt still being answered earns more time; a missing prompt or an idle pane does not.
+      if (elapsed() >= limit && working && result.failureKind === "assistant_timeout" && limit < FIRST_TURN_WORKING_MAX_MS && (yield* working)) limit = Math.min(FIRST_TURN_WORKING_MAX_MS, elapsed() + FIRST_TURN_MS);
+      return elapsed() >= limit;
+    };
+    const timedOut = () => ({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: limit > FIRST_TURN_MS ? `no first turn within ${Math.round(limit / 1000)} s (the pane stopped working or reached the cap)` : result.detail }) satisfies Proof;
+    if (yield* expired()) return timedOut();
+    const delay = Math.min(1000, limit - elapsed());
     yield* env.sleep(delay);
     slept += delay;
-    if (Math.max(slept, env.now().getTime() - started) >= FIRST_TURN_MS) return { state: "unproven", submission: "submitted", firstTurn: true, failureKind: result.failureKind, detail: result.detail } satisfies Proof;
+    if (yield* expired()) return timedOut();
   }
 });
+
+/** Herdr says the pane's agent is working now. A failed read is not proof of life. */
+export const paneWorking = (paneId: string) => waitWorking(paneId, 1_000).pipe(Effect.catch(() => Effect.succeed(false)));
 
 /** Fork and restore copy/retain the old journal. Count it before starting, never after. */
 export const inheritedStartEntries = (path: string | null) => path ? Effect.gen(function* () {
@@ -226,10 +244,10 @@ const startBoundary = (path: string, inheritedEntries: number) => Effect.gen(fun
 });
 
 /** The start argv is already submitted. Only new journal entries can prove it. */
-export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt, network = false, restart = false) =>
+export const proveStartedPrompt = (path: string, prompt: string, inheritedEntries: number, repairPrompt = prompt, network = false, restart = false, working?: Effect.Effect<boolean, never, Herdr>) =>
   startBoundary(path, inheritedEntries).pipe(
     Effect.flatMap(slice => slice
-      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, network ? { state: "proven", via: "network" } : { state: "proven", via: "argv" }, true, network, restart)
+      ? proveFirstTurn(path, slice.size - Buffer.byteLength(slice.text), prompt, network ? { state: "proven", via: "network" } : { state: "proven", via: "argv" }, true, network, restart, working)
       : Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: "discovery_timeout", detail: "discovery timeout: no session journal entries within 90 s" })),
     Effect.catch(error => Effect.succeed<Proof>({ state: "unproven", submission: "submitted", firstTurn: true, failureKind: error.code === "wrong_boundary" ? "wrong_boundary" : error.code === "journal_missing" ? "discovery_timeout" : "unreadable_slice", detail: error.message })),
     Effect.map(proof => proof.state === "unproven" ? { ...proof, repairPrompt } : proof),
