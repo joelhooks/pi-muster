@@ -344,6 +344,21 @@ it("retires the closed row's Rat King name through the fleet mailbox shim, and o
   expect((await f.close()).notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 1: ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (Forbidden))`);
 });
 
+// Tin-Tin, #36 review: a rowless Switchboard owner with no recorded name is found through its subscription, as owner mail does.
+it("names a subscribed Switchboard owner as the retired name's successor", async () => {
+  const f = await fixture();
+  expect(f.row.ownerName).toBeUndefined();
+  const shim = join(f.h.home, ".config/muster/fleet-mailbox.sh");
+  mkdirSync(join(shim, ".."), { recursive: true });
+  writeFileSync(shim, `printf '%s ' "$@" > "${f.h.root}/retire-args"; exit 0\n`);
+  const switchboards = join(f.h.home, ".local/state/muster/switchboards");
+  mkdirSync(switchboards, { recursive: true });
+  writeFileSync(join(switchboards, encodeURIComponent(f.row.owner)), "switchboard\n");
+  const closed = await f.close();
+  expect(readFileSync(join(f.h.root, "retire-args"), "utf8").trim()).toBe(`retire --name reap/${f.row.name} --successor switchboard`);
+  expect(closed.notes).toContain(`Rat King name reap/${f.row.name} retired: sends to it now fail Retired, naming switchboard`);
+});
+
 // Ernestine, 2026-10-11: worker-worktree.sh remove refuses while a process has its cwd in the clone (dark-wizard 22c7f59).
 it("retries removal while a just-closed session is still exiting, and keeps the clone with a plain note if it never does", async () => {
   const f = await fixture();
