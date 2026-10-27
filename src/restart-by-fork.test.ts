@@ -130,6 +130,23 @@ describe("restart by fork", () => {
     expect(s.host.launcherScripts.at(-1)!).toMatch(/--compact-at'? '?off/);
   });
 
+  // Poppins, 2026-10-27: restart took noSkills and dropped it, so the lean desk kept its full skills section.
+  it("a restart applies a named noSkills, keeps it on a later plain restart, and refuses profile arguments it cannot apply", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    expect(old.profile.noSkills).toBe(true);
+    const on = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, noSkills: false }));
+    expect(on.row.profile.noSkills).toBe(false);
+    expect(s.host.launcherScripts.at(-1)!).not.toMatch(/'?-ns'?/);
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, noSkills: true }));
+    expect(result.row.profile.noSkills).toBe(true);
+    expect(s.host.launcherScripts.at(-1)!).toMatch(/'?-ns'?/);
+    const again = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name }));
+    expect(again.row.profile.noSkills).toBe(true);
+    const refused = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, skills: ["x"], appendSystemPrompt: ["/x/p.md"] }).pipe(Effect.flip));
+    expect(refused.message).toContain("restart does not apply skills, appendSystemPrompt");
+  });
+
   // Lean Loadout (Joel, desk page sb-desk-20261022c): a role's tools, env and prompt files come from the project policy on
   // every restart, so clearing the policy and restarting rolls the row back.
   it.each([false, true])("restart applies the role policy's tools, env and prompt files, and drops them once cleared (remote %s)", async remote => {

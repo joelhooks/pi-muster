@@ -2740,7 +2740,7 @@ export const restartLockName = (project: string, row: string) =>
 
 /** `overrides` switch the model or thinking at the fork. Switching providers mid-session (/model) can leave an orphaned
  * tool result that Sol rejects; a restart rebuilds the context from the session file (Ernestine SOP, 2026-10-12). */
-const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env" | "compactAt"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
+const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env" | "compactAt" | "noSkills"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
   if (!self) yield* requireOwner(old, env.sessionId, false, project.slug, false);
@@ -2763,7 +2763,9 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
     ...(overrides.extensions !== undefined ? { extensions: mergedExtensions(old.profile.extensions, overrides.extensions) } : {}),
     ...(overrides.env !== undefined ? { env: { ...old.profile.env, ...overrides.env } } : {}),
     // Switchboard, 2026-10-26: the AIH desk restarted with compactAt 400000 and kept 120000. Fork-restart dropped it.
-    ...(overrides.compactAt !== undefined ? { compactAt: overrides.compactAt } : {}) }, project, old.role, old.lane, machine ? path => mapWorkerPath(path, machine) : undefined);
+    ...(overrides.compactAt !== undefined ? { compactAt: overrides.compactAt } : {}),
+    // Poppins, 2026-10-27: the lean desk restarted with noSkills true and kept its full skills section.
+    ...(overrides.noSkills !== undefined ? { noSkills: overrides.noSkills } : {}) }, project, old.role, old.lane, machine ? path => mapWorkerPath(path, machine) : undefined);
   const selected = yield* sessionRestore(requested, old.sessionFile, project, old.role, (yield* loadRoster).roster, {
     ...(overrides.model !== undefined ? { model: overrides.model } : {}), ...(overrides.thinking !== undefined ? { thinking: overrides.thinking } : {}) }, remote);
   const notes = [...selected.notes];
@@ -3153,8 +3155,11 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     const machine = placed.machine;
     if (previous && params.action !== "launch" && machine !== previous.machine) return yield* input("fork and restore reuse the row's machine; cross-machine session transfer is not supported");
     if (params.action === "restart") {
+      // Harm: a profile argument restart cannot apply was dropped without a word, and the row ran on unchanged.
+      const unsupported = (["skills", "slim", "appendSystemPrompt"] as const).filter(key => params[key] !== undefined);
+      if (unsupported.length) return yield* input(`restart does not apply ${unsupported.join(", ")}; restart takes model, thinking, extensions, env, compactAt and noSkills. For prompt files, set policy.roles.<role>.appendSystemPrompt with project_update; restart re-reads it. For skills or slim, close the row and launch again`);
       const row = yield* findRow(project, name);
-      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt });
+      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt, noSkills: params.noSkills });
       return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
     }
     if (params.action === "adopt") {
