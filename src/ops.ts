@@ -3157,7 +3157,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     if (params.action === "restart") {
       // Harm: a profile argument restart cannot apply was dropped without a word, and the row ran on unchanged.
       const unsupported = (["skills", "slim", "appendSystemPrompt"] as const).filter(key => params[key] !== undefined);
-      if (unsupported.length) return yield* input(`restart does not apply ${unsupported.join(", ")}; restart takes model, thinking, extensions, env, compactAt and noSkills. Set prompt files with project_update policy.roles.<role>.appendSystemPrompt, or close the row and launch again`);
+      if (unsupported.length) return yield* input(`restart does not apply ${unsupported.join(", ")}; restart takes model, thinking, extensions, env, compactAt and noSkills. For prompt files, set policy.roles.<role>.appendSystemPrompt with project_update; restart re-reads it. For skills or slim, close the row and launch again`);
       const row = yield* findRow(project, name);
       const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt, noSkills: params.noSkills });
       return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
