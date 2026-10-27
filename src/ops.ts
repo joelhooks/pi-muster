@@ -65,7 +65,7 @@ import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cle
 import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, codemodeNote, laneLaunchPolicy, badToolNames, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
-import { ownerName, ownerSelfName, registeredCatalogs } from "./comms-ratking.ts";
+import { ownerName, ownerSelfName, registeredCatalogs, subscribedSwitchboards } from "./comms-ratking.ts";
 import { type LaunchMailResult, launchOwnerRatkingName, ratkingCliPath, sendLaunchMail } from "./launch-mail.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must, type ProcShape } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
@@ -3519,6 +3519,9 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   const owner = verb === "retire" ? ownerName(row.owner, {
     catalogs: [project, ...registeredCatalogs(env.home)], recorded: row.ownerName,
     self: { session: env.sessionId, name: ownerSelfName(process.env) },
+    // Tin-Tin, #36 review: owner mail reads subscribed Switchboards; without them a rowless Switchboard owner with no
+    // recorded name got no successor.
+    switchboards: subscribedSwitchboards(env.home),
   }) : undefined;
   const successor = owner && owner !== name ? owner : null;
   const done = verb === "retire" ? `retired: sends to it now fail Retired${successor ? `, naming ${successor}` : ""}` : "unretired: it takes mail again";
