@@ -823,7 +823,7 @@ try {
   else if (described.length!==1) note('scope kept: ambiguous worker scopes for '+row.name);
   else {
     const unit=described[0];
-    const properties=show(unit);;
+    const properties=show(unit);
     if (properties.Slice!=='fleet-workers.slice') throw Error('not in fleet-workers.slice');
     if (properties.Description!=='muster:'+project+'/'+row.name+':'+row.sessionId) throw Error('no matching owner description');
     const group=properties.ControlGroup;
