@@ -3,12 +3,12 @@ import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { agentLaunchForeground as agentLaunch, backfillOwnerNames, laneOpen, projectOpen } from "./ops.ts";
-import { mutate } from "./store.ts";
+import { load, mutate } from "./store.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";
 import { ratkingTarget } from "./comms-ratking.ts";
 import { resolveOwner } from "./owner-queue.ts";
 import { remoteBindingPath } from "./remote.ts";
-import { MusterEnv } from "./runtime.ts";
+import { Comms, MusterEnv } from "./runtime.ts";
 import type { AgentRow, Project } from "./domain.ts";
 
 const pushed = vi.hoisted(() => [] as Array<AgentRow>);
@@ -53,4 +53,20 @@ it("backfills an ownerName set after a remote launch and pushes it; the worker r
   expect(resolveOwner({ owner: "stale-session", agent: launch.name, project: "/missing", home: h.home })).toMatchObject({ owner: launch.owner, resolution: "pushed binding" });
   expect(await runWith(h, backfillOwnerNames(dir))).toBe(0);
   expect(pushed).toHaveLength(1);
+});
+
+// Tin-Tin's slice 5 re-audit, 2026-10-28: owner Pis started without RATKING_NAME still hold a reader name, but rows they
+// launched recorded no ownerName, so every worker post failed "no Rat King name for session" and was parked.
+it.each([["live", "pi-owner-live"], ["send-only", undefined]] as const)("a rowless owner without RATKING_NAME records its %s reader's name", async (reader, expected) => {
+  const { h, dir, old } = await setup();
+  vi.stubEnv("RATKING_NAME", "");
+  const { ownerName: _name, ...worker } = { ...old, name: "worker", role: "worker" as const, machine: "local", state: "running" as const, sessionId: "worker-session", owner: h.sessionId };
+  await runWith(h, mutate(dir, p => Effect.succeed([{ ...p, agents: [...p.agents.map(row => { const { ownerName: _n, ...rest } = row; return rest; }), worker] }, undefined] as const)));
+  const withStatus = <A, E, R>(program: Effect.Effect<A, E, R>) => Effect.gen(function* () {
+    const comms = yield* Comms;
+    return yield* program.pipe(Effect.provideService(Comms, { ...comms, status: () => Effect.succeed({ requestId: "r", name: "pi-owner-live", did: null, reader }) }));
+  });
+  expect(await runWith(h, withStatus(backfillOwnerNames(dir)))).toBe(expected ? 2 : 0);
+  const rows = (await runWith(h, load(dir))).agents;
+  expect(rows.find(row => row.name === "worker")?.ownerName).toBe(expected);
 });

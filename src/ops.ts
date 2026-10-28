@@ -306,6 +306,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
   // onRemote labels transport errors; retain the launch's typed model-proof refusal.
   let modelFailure: GuardFailed | null = null;
   let raisedBeforeTyping = false;
+  const liveOwner = yield* liveSelfName;
   return yield* onRemote(nameOfMachine, machine, Effect.gen(function* () {
     if (mappedProvider) {
       // Fail closed: never let a missing model on the target silently fall back to another one.
@@ -383,7 +384,7 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
     const now = iso(env);
     let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
       profile: remoteProfile, owner: params.action === "restore" && existing ? existing.owner : env.sessionId,
-      ...(params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId)), sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
+      ...(params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId, liveOwner)), sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
       brief: syncedBrief?.brief ?? existing?.brief ?? null,
       state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
       restore: null, ...(existing?.events ? { events: existing.events } : {}), createdAt: existing?.createdAt ?? now, updatedAt: now };
@@ -1336,10 +1337,23 @@ export function findPacket(project: Project, id: string): Effect.Effect<Packet, 
 }
 
 /** The launching owner's Rat King name. Recorded on the row, so a rowless owner stays addressable by name. */
-const launchOwnerName = (home: string, dir: string, owner: string): { ownerName?: string } => {
-  const name = ownerName(owner, { catalogs: registeredCatalogs(home, dir), recorded: ownerSelfName(process.env), self: { session: owner, name: process.env.RATKING_NAME } });
+const launchOwnerName = (home: string, dir: string, owner: string, live?: string): { ownerName?: string } => {
+  const name = ownerName(owner, { catalogs: registeredCatalogs(home, dir), recorded: ownerSelfName(process.env) ?? live, self: { session: owner, name: process.env.RATKING_NAME } });
   return name ? { ownerName: name } : {};
 };
+
+/**
+ * This Pi's own Rat King name: RATKING_NAME, else the name its live pi-ratking reader holds (a Pi started without
+ * RATKING_NAME still reads mail under a session or pane name). Tin-Tin's slice 5 re-audit, 2026-10-28: 867 owner posts
+ * since 10-14 failed "no Rat King name for session" and were parked in the JSONL queue, because rowless owners started
+ * without RATKING_NAME recorded no ownerName on their rows.
+ */
+const liveSelfName = Effect.gen(function* () {
+  if (process.env.RATKING_NAME) return process.env.RATKING_NAME;
+  const comms = yield* Comms;
+  const status = comms.status ? yield* comms.status() : undefined;
+  return status?.reader === "live" && status.name ? status.name : undefined;
+});
 
 /**
  * Rows launched before ownerName existed, or by a rowless owner with no alias, name no owner, so a worker's post to
@@ -1348,7 +1362,7 @@ const launchOwnerName = (home: string, dir: string, owner: string): { ownerName?
  */
 export const backfillOwnerNames = (dir: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  const name = process.env.RATKING_NAME;
+  const name = yield* liveSelfName;
   if (!name) return 0;
   const stale = (row: AgentRow) => row.state !== "closed" && row.owner === env.sessionId && row.ownerName !== name;
   if (!(yield* load(dir)).agents.some(stale)) return 0;
@@ -3340,6 +3354,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       const profile: LaunchProfile = yield* roleLaunchProfile({ ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) }, project, role, lane.slug);
       skillNotes.push(...resolved.notes);
       const now = iso(env);
+      const liveOwner = yield* liveSelfName;
       row = {
         machine: "local",
         name,
@@ -3354,7 +3369,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
         parentSessionFile,
         pane: existing?.pane ?? null,
         owner: env.sessionId,
-        ...launchOwnerName(env.home, dir, env.sessionId),
+        ...launchOwnerName(env.home, dir, env.sessionId, liveOwner),
         brief: params.brief ?? existing?.brief ?? null,
         state: yield* stepAgent(name, existing?.state ?? "planned", { type: "LAUNCH" }),
         delivery: "none",
@@ -4445,10 +4460,11 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     const ingestion = act ? yield* ingestRemotePackets(dir) : { notes: [] as string[], failedMachines: new Set<string>() };
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const handoverNotes: string[] = [];
+    const liveOwner = params.takeover ? yield* liveSelfName : undefined;
     const project = params.takeover
       ? yield* mutate(dir, (current) => Effect.sync(() => {
           const next = { ...current, agents: current.agents.map((row) =>
-            row.state === "closed" ? row : ownerSynced({ ...withoutOwnerName(row), ...launchOwnerName(env.home, dir, env.sessionId), owner: env.sessionId, updatedAt: iso(env) })) };
+            row.state === "closed" ? row : ownerSynced({ ...withoutOwnerName(row), ...launchOwnerName(env.home, dir, env.sessionId, liveOwner), owner: env.sessionId, updatedAt: iso(env) })) };
           return [next, next] as const;
         }))
       : yield* load(dir);

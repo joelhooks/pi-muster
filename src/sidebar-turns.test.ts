@@ -63,6 +63,8 @@ async function live(turnEnabled = false) {
   vi.stubEnv("MUSTER_ROLE", "boss"); vi.stubEnv("MUSTER_AGENT", "");
   vi.mocked(createHerdrClient).mockReturnValue(s.herdr.client());
   const events = createEventBus();
+  // A live pi-ratking answers status; with fake timers an unanswered request would never time out.
+  events.on("ratking/status", request => events.emit("ratking/status:result", { requestId: (request as { requestId: string }).requestId, name: null, did: null, reader: "off" }));
   const hooks = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const tools = new Map<string, { execute: (...args: any[]) => Promise<any> }>();
   const pi = { registerTool: (tool: any) => tools.set(tool.name, tool), registerFlag() {}, registerCommand() {}, registerShortcut() {},
