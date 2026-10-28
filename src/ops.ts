@@ -3035,7 +3035,9 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const launchJob: LaunchJob = { id, project: project.slug, name: params.name, sessionId: existing?.sessionId ?? mintSessionId(params.name, env.now()), pid: null, log, startedAt: iso(env), state: "queued", priorState, owner: env.sessionId,
       // A stand-in parent is pinned to its session file, so the launch job forks the same journal.
       request: parent && !project.agents.includes(parent) && parent.sessionFile ? { ...params, from: parent.sessionFile } : params };
-    const reserved: AgentRow = { ...existing, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
+    // Switchboard, 2026-10-28: the reservation carried no ownerName, so a rowless owner's launch receipt had no name to mail.
+    const reservedOwnerName = params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId, yield* liveSelfName);
+    const reserved: AgentRow = { ...existing, ...reservedOwnerName, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
       cwd: machine === "local" ? cwd : mapPath(cwd, yield* machineConfig(machine)), clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: launchJob.sessionId,
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
       owner: params.action === "restore" && existing ? existing.owner : env.sessionId, brief, state, delivery: "none",
@@ -3141,7 +3143,9 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
   // Tin-Tin, P5 audit 1 (2026-10-21): 237 of 239 local launch receipts went to owners with no row of their own (desks
   // started outside Muster), so the lookup found nothing and the receipt fell back silently. The worker row records
   // the owner's Rat King name at launch; use it.
-  const ownerRatking = launchOwnerRatkingName(job.owner, registeredCatalogs(env.home, dir)) ?? row.ownerName;
+  // The launch records ownerName on the row; read it from the catalog, not the reservation read before the launch ran.
+  const ownerRatking = launchOwnerRatkingName(job.owner, registeredCatalogs(env.home, dir))
+    ?? (yield* load(dir)).agents.find(agent => agent.name === row.name && agent.sessionId === row.sessionId)?.ownerName ?? row.ownerName;
   const mail: LaunchMailResult = ownerRatking === undefined ? { sent: false, reason: "owner has no Rat King name: no open row runs its session and the row records no ownerName" }
     : yield* sendLaunchMail({ cli: ratkingCliPath(process.env, env.home), cwd: dir, to: ownerRatking, kind, title, body, lane: row.lane, log: job.log });
   yield* mutate(dir, current => Effect.gen(function* () {

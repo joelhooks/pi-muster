@@ -88,6 +88,19 @@ describe("launch receipt mail", () => {
     expect(items(h.sessionId, h.home)).toHaveLength(0);
   });
 
+  // Switchboard, 2026-10-28: a rowless owner with RATKING_NAME had every launch receipt parked, because the receipt read
+  // the reservation, which carried no ownerName, instead of the row the launch had written.
+  it("a rowless owner with RATKING_NAME gets its launch receipt by mail", async () => {
+    vi.stubEnv("RATKING_NAME", "rowless-owner");
+    const { h, dir, receipt, sends, respond } = await setup(false);
+    respond(sentOk);
+    await runWith(h, runLaunchJob(dir, receipt.jobId));
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toEqual(expect.arrayContaining(["--to", "rowless-owner"]));
+    expect(items(h.sessionId, h.home)).toHaveLength(0);
+    vi.unstubAllEnvs();
+  });
+
   it("an owner with no row and no recorded name appends JSONL with the reason, without sending", async () => {
     const { h, dir, receipt, sends, respond } = await setup(false);
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(({ ownerName: _, ...row }) => row) }, null] as const)));
