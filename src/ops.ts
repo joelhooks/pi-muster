@@ -3144,6 +3144,7 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
   // started outside Muster), so the lookup found nothing and the receipt fell back silently. The worker row records
   // the owner's Rat King name at launch; use it.
   // The launch records ownerName on the row; read it from the catalog, not the reservation read before the launch ran.
+  // Keep the reservation fallback: if the launch rebinds the session id, the catalog lookup misses (Tin-Tin, #59).
   const ownerRatking = launchOwnerRatkingName(job.owner, registeredCatalogs(env.home, dir))
     ?? (yield* load(dir)).agents.find(agent => agent.name === row.name && agent.sessionId === row.sessionId)?.ownerName ?? row.ownerName;
   const mail: LaunchMailResult = ownerRatking === undefined ? { sent: false, reason: "owner has no Rat King name: no open row runs its session and the row records no ownerName" }
