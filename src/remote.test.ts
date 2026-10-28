@@ -698,6 +698,17 @@ describe("remote owner operations", () => {
     expect(restored.row.profile.skills).toEqual(["/only-remote/SKILL.md"]);
     expect(restored.argv).toContain("/only-remote/SKILL.md");
   });
+  // Tin-Tin, #56 review: a remote restore refuses while a Pi in a pane Muster did not open still runs the session.
+  it("refuses a remote restore while another pane still runs the session", async () => {
+    const s = setup(); await s.open();
+    const launched = await s.launch();
+    await s.run(mutate(s.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(agent => agent.name === launched.row.name && agent.pane ? { ...agent, pane: { ...agent.pane, openedByMuster: false } } : agent) }, undefined] as const)));
+    const closed = await s.run(agentClose(s.dir, { name: launched.row.name }));
+    expect(closed.notes.join("\n")).toContain(`⚠ Pi still runs session ${launched.row.sessionId} in pane ${launched.row.pane!.paneId}`);
+    await expect(s.run(agentLaunch(s.dir, { action: "restore", name: launched.row.name }))).rejects.toThrow(`session still runs in pane ${launched.row.pane!.paneId} on remote`);
+    s.remote.panes.delete(launched.row.pane!.paneId);
+    expect((await s.run(agentLaunch(s.dir, { action: "restore", name: launched.row.name }))).row.state).toBe("running");
+  });
   it("drops a skill that is unreadable on the remote machine with a note, instead of failing the launch", async () => {
     // Live 2026-10-07: /Users/alice/.agents/skills paths are not mapped to remote1, and every launch failed.
     const s = setup(); await s.open();
