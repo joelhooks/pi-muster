@@ -5,7 +5,7 @@ import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, type AgentLaunchInput } from "./ops.ts";
 import { promptWithProof } from "./herdr.ts";
-import { mutate } from "./store.ts";
+import { load, mutate } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
 
@@ -128,13 +128,19 @@ describe("remote launch argv delivery", () => {
     expect(fork.row.delivery).toBe("proven");
     expect(fork.argv).toContain("--fork");
     expect(fork.argv.slice(-2)).toEqual(["--", "New child work."]);
-    await runWith(s.h, mutate(s.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => row.name === "child" ? { ...row, state: "failed" as const } : row) }, null] as const)));
+    // The failed attempt's Pi is gone; a pane still running the session would refuse the restore.
+    const failed = async () => {
+      const child = (await runWith(s.h, load(s.dir))).agents.find(row => row.name === "child")!;
+      s.remote.panes.delete(child.pane!.paneId);
+      await runWith(s.h, mutate(s.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => row.name === "child" ? { ...row, state: "failed" as const } : row) }, null] as const)));
+    };
+    await failed();
     const restore = await s.launch({ action: "restore", name: "child", prompt: undefined });
     expect(restore.argv).not.toContain("--");
     expect(restore.proof).toBeNull();
     expect(restore.row.delivery).toBe("none");
     expect(s.remote.typedPrompts).toEqual([]);
-    await runWith(s.h, mutate(s.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => row.name === "child" ? { ...row, state: "failed" as const } : row) }, null] as const)));
+    await failed();
     const explicit = await s.launch({ action: "restore", name: "child", prompt: "Explicit new work." });
     expect(explicit.argv.slice(-2)).toEqual(["--", "Explicit new work."]);
     expect(explicit.row.restore?.argv).not.toContain("--");
