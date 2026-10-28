@@ -327,6 +327,11 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       yield* must("test", ["-r", path], { cwd: "/", timeoutMs: 10_000 }).pipe(Effect.mapError(error => new ProcError({ ...error,
         message: `${path} is not readable on ${nameOfMachine}` })));
     }
+    // Tin-Tin, #56 review: the same two-Pis-on-one-session guard as a local restore, read from this machine's Herdr.
+    if (params.action === "restore" && existing?.sessionFile) {
+      const holder = (yield* paneList()).find(pane => paneProvesSession(pane, existing));
+      if (holder) return yield* new GuardFailed({ guard: "session", message: `row ${name}'s session still runs in pane ${holder.pane_id} on ${nameOfMachine}; restoring would put two Pis on one session file. Quit that Pi (/quit in the pane), then restore without pane` });
+    }
     let cwd = params.cwd ? mapPath(yield* requireAbsolute("cwd", params.cwd), machine) : existing?.cwd ?? parent?.cwd ?? remoteSource;
     let clone = existing?.clone ?? null;
     const cloneNotes: string[] = [...skillNotes];
@@ -889,7 +894,10 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
           notes.push(`pane log saved to ${saved}`);
           // Do not broadcast a remote pane id onto the local Bellwether bus.
           if (row.pane.openedByMuster) yield* paneClose(pane.pane_id);
-          else notes.push("left adopted pane open");
+          else {
+            notes.push("left adopted pane open");
+            if (paneProvesSession(pane, row)) notes.push(`⚠ Pi still runs session ${row.sessionId} in pane ${pane.pane_id} on ${row.machine}, which Muster did not open, so it stays. Its Rat King name is retired, so it gets no mail. Quit it (/quit in that pane) before any restore; restore then without pane`);
+          }
         }
       }
     }
