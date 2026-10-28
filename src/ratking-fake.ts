@@ -13,6 +13,8 @@ export function fakeRatking(home: string, sender: () => string, sent: Array<{ to
     on(event: string, listener: (value: unknown) => void) { const group = listeners.get(event) ?? new Set(); group.add(listener); listeners.set(event, group); return () => { group.delete(listener); }; },
     emit(event: string, value: unknown) {
       for (const listener of listeners.get(event) ?? []) listener(value);
+      // No reader in tests: answer at once, as a live pi-ratking does, rather than leave callers to their two-second wait.
+      if (event === "ratking/status") { events.emit("ratking/status:result", { requestId: (value as { requestId: string }).requestId, name: null, did: null, reader: "off" }); return; }
       if (event !== RATKING_SEND) return;
       const request = value as { requestId: string; to?: string; replyTo?: string; body: string; kind?: string; summary?: string };
       requests.push(request);
