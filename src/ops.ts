@@ -2423,7 +2423,8 @@ const pickPane = (project: Project, lane: Lane, row: AgentRow, params: AgentLaun
     }
     if (params.pane) {
       const pane = yield* paneGet(params.pane);
-      if (!pane) return yield* input(`no pane ${params.pane}`);
+      // Bastion, 2026-10-28: Herdr closes a pane when its Pi quits, so a restore naming the old pane found nothing.
+      if (!pane) return yield* input(`no pane ${params.pane}: it is gone (Herdr closes a pane when its Pi quits). Call again without pane and Muster opens a fresh one`);
       const binding = { paneId: pane.pane_id, terminalId: pane.terminal_id, tabId: pane.tab_id, openedByMuster: false } satisfies PaneBinding;
       yield* guardPaneBinding(project, row, binding);
       return binding;
@@ -3233,6 +3234,9 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
       }
       const sessionFile = existing.sessionFile ?? findSessionFile(existing.cwd, existing.sessionId, env.home);
       if (!sessionFile) return yield* new GuardFailed({ guard: "session", message: `row ${name} has no session file to restore; use launch` });
+      // Harm: two Pis appending to one session file. Bastion, 2026-10-28: close left a Pi Muster did not open running on it.
+      const holder = (yield* paneList()).find(pane => paneProvesSession(pane, { ...existing, sessionFile }));
+      if (holder) return yield* new GuardFailed({ guard: "session", message: `row ${name}'s session still runs in pane ${holder.pane_id}; restoring would put two Pis on one session file. Quit that Pi (/quit in the pane), then restore without pane` });
       for (const prompt of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", prompt);
       // Overrides apply and persist on every local restore, as on the remote path. Slim drops stored skills unless new ones are named.
       const overridden: LaunchProfile = { ...existing.profile,
@@ -3663,6 +3667,8 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
           writeFileSync(saved, tail);
           notes.push(`last ${CLOSE_READ_LINES} lines saved to ${saved}`);
           notes.push(yield* closeOwnedPane(row.pane, dir, `agent_close ${row.name}`));
+          // Bastion, 2026-10-28: the row closed and its name retired, but the Pi in a pane Muster did not open kept running.
+          if (!row.pane.openedByMuster && paneProvesSession(located, row)) notes.push(`⚠ Pi still runs session ${row.sessionId} in pane ${located.pane_id}, which Muster did not open, so it stays. Its Rat King name is retired, so it gets no mail. Quit it (/quit in that pane) before any restore; restore then without pane`);
         } else {
           notes.push(`pane ${row.pane.paneId} already gone`);
         }

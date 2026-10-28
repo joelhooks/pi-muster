@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { Effect } from "effect";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { agentLaunch, agentLaunchForeground, laneOpen, projectOpen, projectStatus } from "./ops.ts";
+import { agentClose, agentLaunch, agentLaunchForeground, laneOpen, projectOpen, projectStatus } from "./ops.ts";
 import { liveProc } from "./runtime.ts";
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
@@ -57,7 +57,7 @@ it("another live pane proving the session vetoes interruption and duplicate rest
   h.sessionId = "other-owner";
   // Restore must refuse before launching a duplicate, even without status reconciliation.
   const boundary = h.herdr.calls.length;
-  expect((await failWith(h, agentLaunchForeground(dir, { action: "restore", name: "worker" }))).message).toContain("RESTORE");
+  expect((await failWith(h, agentLaunchForeground(dir, { action: "restore", name: "worker" }))).message).toContain(`session still runs in pane ${replacement.pane_id}`);
   expect(h.herdr.calls.slice(boundary).some(call => call.method === "pane.send_input")).toBe(false);
   await runWith(h, projectStatus(dir, { act: true }));
   const current = (await runWith(h, load(dir))).agents[0]!;
@@ -149,4 +149,18 @@ it.each(["reported", "verified", "landed"] as const)("restore of a %s row whose 
   const result = await runWith(h, agentLaunchForeground(dir, { action: "restore", name: "worker" }));
   expect(result.row.state).toBe("running"); expect(result.row.owner).toBe(row.owner);
   expect(result.notes.join("\n")).toContain("gone; interrupted before restore");
+});
+
+// Bastion, 2026-10-28: close left a Pi in a pane Muster did not open running on the session, a restore would have put
+// a second Pi on it, and a restore naming the old pane failed with a bare "no pane" after that Pi quit.
+it("close names a Pi it may not stop, restore refuses while it runs, and a gone pane gets a plain next step", async () => {
+  const { h, dir, row } = await setup();
+  await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(agent => ({ ...agent, pane: agent.pane ? { ...agent.pane, openedByMuster: false } : null })) }, undefined] as const)));
+  const closed = await runWith(h, agentClose(dir, { name: "worker" }));
+  expect(closed.notes.join("\n")).toContain(`⚠ Pi still runs session ${row.sessionId} in pane ${row.pane!.paneId}, which Muster did not open`);
+  expect(h.herdr.panes.has(row.pane!.paneId)).toBe(true);
+  expect((await failWith(h, agentLaunchForeground(dir, { action: "restore", name: "worker" }))).message).toContain(`session still runs in pane ${row.pane!.paneId}; restoring would put two Pis on one session file`);
+  h.herdr.panes.delete(row.pane!.paneId);
+  expect((await failWith(h, agentLaunchForeground(dir, { action: "restore", name: "worker", pane: row.pane!.paneId }))).message).toContain("it is gone (Herdr closes a pane when its Pi quits). Call again without pane");
+  expect((await runWith(h, agentLaunchForeground(dir, { action: "restore", name: "worker" }))).row.state).toBe("running");
 });
