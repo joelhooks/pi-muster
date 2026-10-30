@@ -73,7 +73,7 @@ Restore is not an ownership handover. To take the catalog's open rows explicitly
 
 - Takeover forwarding is project-scoped; restart every desk after this update before lifting the takeover ban, and leave legacy posts without a project in their original session's inbox.
 
-- Owner mail is Rat King mail, separate from Joel's desk queue; pi-ratking shows it. `owner_inbox` and `owner_reply` are retired refusals: use `ratking pending` and `ratking reply`, and drop them from recurring passes at their next re-arm. A failed send is lost and says so; nothing is parked.
+- Owner mail is Rat King mail, separate from Joel's desk queue; pi-ratking shows it. `owner_inbox` and `owner_reply` are retired refusals: use `ratking pending` and `ratking reply`, and drop them from recurring passes at their next re-arm. A failed send is retried for up to about 3 minutes, then returns NOT DELIVERED; send it again. Nothing is parked, so a long wait is the retry, not a hang.
 
 - `IllegalTransition … expected verified` from `agent_close` can mean the desk still has the pre-`3332978` CLOSE caller loaded; restart the desk before judging the landed fix, and do not treat a retry on old code as live proof.
 - `agent_close` removes a worker's clone. Its restore command still names that cwd, so restore into a fresh clone (`cwd`) or fork from the row.

@@ -136,7 +136,7 @@ The status JSON keeps fleet-compute's placement fields. `holders` has one held e
 
 Owner mail is Rat King mail. Workers and bosses use `owner_note({kind, title, body?, refs?, replyTo?})`. FYI, progress and done arrive quietly. Questions, blocked notices and packet actions mention and wake the owner resolved at send time. `owner_note` reads the `MUSTER_PROJECT` catalog row named by `MUSTER_AGENT`; if the catalog is unreadable or the row is absent, its receipt names the `MUSTER_OWNER` fallback. `replyTo` threads a post onto the Rat King message that carried its parent.
 
-pi-ratking shows and wakes owner mail; Muster only claims the payloads it understands. Read open asks with `ratking({ action: "pending" })` and answer with `ratking({ action: "reply", replyTo })`. A send retries transient failures, then fails loudly: there is no local queue, sidecar or fallback. A launch result whose mail did not go out shows on the owner's next `project_status` for a day, with its log path.
+pi-ratking shows and wakes owner mail; Muster only claims the payloads it understands. Read open asks with `ratking({ action: "pending" })` and answer with `ratking({ action: "reply", replyTo })`. A send retries transient failures for up to about 3 minutes, then returns NOT DELIVERED; send it again. There is no local queue, sidecar or fallback. A launch result whose mail did not go out shows on the owner's next `project_status` for a day, with its log path.
 
 Slice 5 removed the JSONL owner queue under `~/.local/state/muster/owner-queue/`. Its files stay on disk, unread. `owner_inbox` and `owner_reply` refuse with `OwnerInboxRetired` and `OwnerReplyRetired` for one release, so recurring passes that still name them can drop them at their next re-arm.
 
