@@ -198,8 +198,12 @@ export function ratkingSend(events: EventBus, createId: () => string, request: S
   });
 }
 
-/** Rat King failures worth one more try: the transport or the lease hiccupped. Refusals and interrupts are final. */
-export const TRANSIENT_SEND = /\b(Timeout|MailboxUnavailable|MailboxClientError|LeaseMismatch|LeaseExpired|LeaseRenewalFailed)\b/;
+/**
+ * Rat King failures worth one more try, by pi-ratking's not-delivered code (rats-nest, 3mz4f6q46qkyj): NotAttempted sent
+ * nothing; Uncertain is the client giving up after ten same-envelope tries; Timeout is Muster's own wait for a result.
+ * Rejected (the client already retries LeaseMismatch), Retired, UnknownName, Self and interrupts are final.
+ */
+export const TRANSIENT_SEND = /^NOT DELIVERED: (NotAttempted|Uncertain|Timeout)\b/;
 /** Waits between the five attempts a live Pi makes. */
 export const SEND_RETRY_DELAYS_MS: readonly number[] = [2000, 4000, 8000, 16000];
 

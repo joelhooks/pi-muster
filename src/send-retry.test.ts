@@ -22,12 +22,14 @@ describe("send retry", () => {
   });
 
   it("retries a transient failure until it is delivered", async () => {
-    const s = sequence([timeout, { status: "failed", detail: "NOT DELIVERED: MailboxUnavailable (ratking; no fallback)" }, { status: "delivered", detail: "ratking → pilot/desk" }]);
+    const s = sequence([timeout, { status: "failed", detail: "NOT DELIVERED: Uncertain: connect ECONNREFUSED (ratking; no fallback)" }, { status: "failed", detail: "NOT DELIVERED: NotAttempted (ratking; no fallback)" }, { status: "delivered", detail: "ratking → pilot/desk" }]);
     expect((await Effect.runPromise(withSendRetry(s.attempt, fast))).status).toBe("delivered");
-    expect(s.calls()).toBe(3);
+    expect(s.calls()).toBe(4);
   });
 
-  it.each(["NOT DELIVERED: UnknownName: ghost (ratking; no fallback)", "NOT DELIVERED: Retired (ratking; no fallback)", "interrupted"])("never resends %s", async detail => {
+  // The words in a reason are not a code: a Rejected 503 or LeaseMismatch reason must not be retried by Muster.
+  it.each(["NOT DELIVERED: UnknownName: ghost (ratking; no fallback)", "NOT DELIVERED: Retired (ratking; no fallback)", "NOT DELIVERED: Self (ratking; no fallback)",
+    "NOT DELIVERED: Rejected: LeaseMismatch (409): lease held (ratking; no fallback)", "NOT DELIVERED: Rejected: MailboxUnavailable (503) (ratking; no fallback)", "interrupted"])("never resends %s", async detail => {
     const s = sequence([{ status: "failed", detail }]);
     expect((await Effect.runPromise(withSendRetry(s.attempt, fast))).detail).toBe(detail);
     expect(s.calls()).toBe(1);

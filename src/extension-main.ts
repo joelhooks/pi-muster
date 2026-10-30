@@ -385,7 +385,7 @@ export default function muster(host: ExtensionAPI) {
   if ((worker || role === "boss") && env.MUSTER_OWNER) {
     pi.registerTool({
       name: "owner_note", label: "Muster owner note",
-      description: "Mail your owner over Rat King: FYI, progress or done arrive quietly; question and blocked wake the owner. A failed send is lost and says so. Use replyTo to thread a post. packet_report stays the single finish report.",
+      description: "Mail your owner over Rat King: FYI, progress or done arrive quietly; question and blocked wake the owner. A failed send is retried for up to about 3 minutes, then returns NOT DELIVERED; send it again. Use replyTo to thread a post. packet_report stays the single finish report.",
       renderCall: (args, theme) => ownerLine(`🐦 owner note · ${args.kind} "${args.title}"`, theme),
       renderResult(result, options, theme) {
         if (options.isPartial) return ownerLine("🐦 posting owner note…", theme);
