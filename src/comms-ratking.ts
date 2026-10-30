@@ -198,6 +198,27 @@ export function ratkingSend(events: EventBus, createId: () => string, request: S
   });
 }
 
+/** Rat King failures worth one more try: the transport or the lease hiccupped. Refusals and interrupts are final. */
+export const TRANSIENT_SEND = /\b(Timeout|MailboxUnavailable|MailboxClientError|LeaseMismatch|LeaseExpired|LeaseRenewalFailed)\b/;
+/** Waits between the five attempts a live Pi makes. */
+export const SEND_RETRY_DELAYS_MS: readonly number[] = [2000, 4000, 8000, 16000];
+
+/**
+ * Switchboard, 2026-10-30 (3mz4dicaynv6b), with Tin-Tin: once the JSONL owner queue is gone, a timed-out report must not
+ * be lost. Retry a transient failure with the same bytes held in memory, then fail loudly naming the resend.
+ * pi-ratking's send carries no idempotency key, so a slow first attempt can arrive twice; a duplicate beats a loss.
+ */
+export const withSendRetry = (attempt: () => Effect.Effect<CommsDelivery>, delaysMs: readonly number[]) => Effect.gen(function* () {
+  let delivery = yield* attempt();
+  for (const delay of delaysMs) {
+    if (delivery.status === "delivered" || !TRANSIENT_SEND.test(delivery.detail ?? "")) return delivery;
+    yield* Effect.sleep(delay);
+    delivery = yield* attempt();
+  }
+  if (delivery.status === "delivered" || !delaysMs.length || !TRANSIENT_SEND.test(delivery.detail ?? "")) return delivery;
+  return { ...delivery, detail: `${delivery.detail}; tried ${delaysMs.length + 1} times, so send it again with the same call` };
+});
+
 /** Ratking message ids by the owner post they carried: owner_reply answers the message, not a guessed name. */
 const repliesByUri = new Map<string, string>();
 export const rememberRatkingMessage = (uri: string, id: string) => {
@@ -212,8 +233,10 @@ export function RatkingComms(options: {
   readonly sender: () => string | undefined;
   readonly target: (to: CommsTarget) => RatkingTarget;
   readonly timeoutMs?: number;
+  /** Waits between retries of a transient failure; none by default, the live extension passes SEND_RETRY_DELAYS_MS. */
+  readonly retryDelaysMs?: readonly number[];
 }): CommsShape {
-  const send = (request: SendRequest) => ratkingSend(options.events, options.createId, request, options.timeoutMs);
+  const send = (request: SendRequest) => withSendRetry(() => ratkingSend(options.events, options.createId, request, options.timeoutMs), options.retryDelaysMs ?? []);
   const target = (to: CommsTarget) => Effect.try({ try: () => options.target(to), catch: error => error instanceof CommsError ? error : new CommsError(String(error)) });
   const failed = (error: CommsError): CommsDelivery => ({ status: "failed", detail: `NOT DELIVERED: ${error.message} (ratking; no fallback)` });
   return {
