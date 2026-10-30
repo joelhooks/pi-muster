@@ -28,9 +28,8 @@ import {
   workPrompt,
 } from "./ops.ts";
 import muster from "../extensions/pi-muster.ts";
-import { ownerFeed } from "./owner-feed.ts";
 import { fakeRatking } from "./ratking-fake.ts";
-import { readOwnerQueue, writeReader, ownerPath, appendOwnerItem, deliverOwnerItem } from "./owner-queue.ts";
+import { deliverOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK } from "./silence.ts";
 import { Herdr, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
 import { watchEntries } from "./desk-local.ts";
@@ -494,28 +493,15 @@ describe("pane close watch retirement", () => {
 });
 
 describe("packet owner queue delivery", () => {
-  it.each(["fresh", "missing", "stale", "queue-failure", "event-failure"])("queues action and preserves fallback for %s reader", async mode => {
+  it("sends one Rat King action and writes no local owner queue", async () => {
     const h = harness(); const { dir, clone, launched } = await copiedWorker(h);
     h.sessionId = launched.row.sessionId; // Packet reports originate from the worker's authenticated session.
     const commit = commitInClone(clone);
-    if (mode !== "missing") writeReader("owner-session", h.home, mode === "stale" ? Date.now() - 121000 : Date.now());
-    if (mode === "queue-failure") mkdirSync(ownerPath("owner-session", h.home));
-    if (mode === "event-failure") mkdirSync(join(h.home, ".local/state/muster/relay-events.jsonl"));
     const result = await runWith(h, packetReport({ dir, agent: "probe_w", owner: "owner-session", cwd: clone, commit, summary: "queues result", checks: [] }));
     expect(result.notice.path).toBe("ratking");
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0]!.message).toContain(`lane probe · refs ${result.packet.report}`);
-    if (mode !== "queue-failure") {
-      const items = readOwnerQueue("owner-session", h.home).items;
-      expect(items).toHaveLength(1);
-      expect(items[0]?.item).toMatchObject({ kind: "action", author: launched.row.sessionId, refs: [result.packet.report], renderedBy: "ratking", uri: result.notice.delivery.id });
-      const wake = vi.fn();
-      const feed = ownerFeed({ session: "owner-session", home: h.home, appendEntry() {}, sendMessage: wake });
-      expect(feed.flush()).toBe(0);
-      expect(feed.beforeTurn()).toBeUndefined();
-      expect(wake).not.toHaveBeenCalled();
-      feed.dispose();
-    }
+    expect(existsSync(join(h.home, ".local/state/muster/owner-queue"))).toBe(false);
   });
 });
 
@@ -1042,7 +1028,7 @@ describe("field-use regressions", () => {
     expect(readFileSync(mergeHead, "utf8")).toBe(previous);
   });
 
-  it("owner_note resolves a stale launch owner after takeover, and shadow mail bypasses the feed", async () => {
+  it("owner_note resolves a stale launch owner after takeover", async () => {
     const h = harness();
     const dir = join(h.root, "project"); mkdirSync(dir);
     await open(h, dir);
@@ -1051,7 +1037,6 @@ describe("field-use regressions", () => {
       pane: null, owner: "owner-session", brief: null, state: "planned", delivery: "none", restarts: 0, restore: null,
       createdAt: h.now.toISOString(), updatedAt: h.now.toISOString() };
     await runWith(h, mutate(dir, current => Effect.succeed([{ ...current, agents: [row] }, undefined] as const)));
-    const old = appendOwnerItem("owner-session", { author: "probe", project: "probe", kind: "question", title: "unread" }, h.home);
     h.sessionId = "new-owner";
     await runWith(h, projectStatus(dir, { takeover: true, act: false }));
     vi.stubEnv("HOME", h.home);
@@ -1065,24 +1050,13 @@ describe("field-use regressions", () => {
       on: () => {}, registerFlag: () => {}, registerCommand: () => {}, registerShortcut: () => {}, getAllTools: () => [{ name: "intercom", sourceInfo: { source: "npm:@rat-king/pi-ratking" } }],
       getFlag: () => undefined, registerMessageRenderer: () => {}, events: fake.events };
     await muster(host as never);
-    writeReader("new-owner", h.home);
-    writeReader("owner-session", h.home); // A is still alive; routing must choose B, not merely a live reader.
     const ctx = { cwd: dir, sessionManager: { getSessionId: () => "probe", getBranch: () => [] } };
     const result = await tools.get("owner_note")!.execute("note", { kind: "question", title: "new note" }, undefined, undefined, ctx);
     expect(result).toMatchObject({ details: { owner: "new-owner", resolution: "catalog row", queued: true, woke: true, path: "ratking" } });
-    expect(readOwnerQueue("new-owner", h.home).items).toHaveLength(1);
-    const shadow = readOwnerQueue("new-owner", h.home).items[0]!.item;
-    expect(shadow).toMatchObject({ uri: "fake-1", author: "probe", renderedBy: "ratking", kind: "question" });
+    expect(fake.received).toHaveLength(1);
+    expect(fake.received[0]).toMatchObject({ to: "new-owner", item: { uri: "fake-1", author: "probe", renderedBy: "ratking", kind: "question" } });
     expect(fake.requests).toHaveLength(1);
     expect(fake.requests[0]).toMatchObject({ to: "new-owner", kind: "message", summary: "question probe/probe_w · new note" });
-    const wake = vi.fn();
-    const feed = ownerFeed({ session: "new-owner", home: h.home, appendEntry: () => {}, sendMessage: wake });
-    expect(feed.inbox().via[old.uri]).toBeUndefined();
-    expect(feed.inbox().items).toContainEqual(shadow);
-    expect(feed.flush()).toBe(0); expect(feed.flush()).toBe(0);
-    expect(feed.beforeTurn()).toBeUndefined();
-    expect(wake).not.toHaveBeenCalled();
-    feed.dispose();
     const sent: string[] = [];
     const delivery = await Effect.runPromise(deliverOwnerItem({ owner: "owner-session", agent: "probe_w", home: h.home, session: "probe", project: dir,
       item: { author: "probe", kind: "blocked", title: "blocked" }, send: to => { sent.push(to); return Effect.succeed({ status: "delivered" as const }); } }));

@@ -120,7 +120,7 @@ Feature WIP includes open and draining work lanes, plus closed lanes still at `l
 
 The board header and turn feeds show one flow line: `WIP 2/3 · landed, not live: lexicon-pin 40m · oldest in flight 2h · last proven 35m ago`. `⚠ not flowing` marks WIP with no recent proof or stage movement for `policy.flowStallMin` (default 120), or a reported packet waiting longer than `policy.landWaitMin` (default 30). These limits are minutes and can be changed with `project_update`. No extra sounds or toasts.
 
-Worker side, when `MUSTER_AGENT` is set: `owner_note`, `owner_reply`, `owner_inbox`, `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets its own queue tools but no project-management or operator tools.
+Worker side, when `MUSTER_AGENT` is set: `owner_note`, `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets no project-management or operator tools. `owner_inbox` and `owner_reply` remain for one release as refusals that name their Rat King replacements.
 
 `muster-heavy -- <command>` registers a job and runs it immediately. It never queues, grants capacity, checks memory for admission, or holds an exclusive window. Local `packet_land` gates run through the same CLI. Old admission flags and environment settings are accepted and ignored, with one stderr line naming them. Old `grant` management commands are inert.
 
@@ -132,19 +132,13 @@ The status JSON keeps fleet-compute's placement fields. `holders` has one held e
 
 `muster-heavy gate --wait 1200 -- <command>` is unchanged: fleet-compute owns placement and queueing. `--wait` still applies to fleet routing, not local execution. `MUSTER_FLEET_COMPUTE` selects an absolute runner script; `off` or a missing runner falls back to immediate local execution. Installed `packet_land` uses fleet receipts to decide success and prove the committed tree. Keep `pack:check` and `smoke` local.
 
-## Owner queues
+## Owner mail
 
-Owner messages and inbox results share a styled timeline: mention cards first, quiet posts grouped by agent, with expandable threads and refs and a plain `NO_COLOR` view.
+Owner mail is Rat King mail. Workers and bosses use `owner_note({kind, title, body?, refs?, replyTo?})`. FYI, progress and done arrive quietly. Questions, blocked notices and packet actions mention and wake the owner resolved at send time. `owner_note` reads the `MUSTER_PROJECT` catalog row named by `MUSTER_AGENT`; if the catalog is unreadable or the row is absent, its receipt names the `MUSTER_OWNER` fallback. `replyTo` threads a post onto the Rat King message that carried its parent.
 
-Workers and bosses use `owner_note({kind, title, body?, refs?, replyTo?})`. FYI, progress and done accumulate silently. Questions, blocked notices and packet actions automatically mention the owner resolved at send time. `owner_note` reads the `MUSTER_PROJECT` catalog row named by `MUSTER_AGENT`; if the catalog is unreadable or the row is absent, its receipt names the `MUSTER_OWNER` fallback. Takeover and restored or relaunched rows leave an owner-queue forward. Each new forward repoints earlier forwards to the new owner, so routes stay one hop deep across repeated restarts. New senders follow up to 16 hops and rewrite owner mentions; cycles and longer routes fail closed. The new owner's feed also tails old queues, so workers still on old code need no restart. Forwarded records appear in `owner_inbox` with `via <old owner short id>`. Each source keeps a branch cursor across reloads. History at takeover is included only after the old reader's last heartbeat, or entirely when no reader file exists. `owner_reply` still targets the parent's author.
+pi-ratking shows and wakes owner mail; Muster only claims the payloads it understands. Read open asks with `ratking({ action: "pending" })` and answer with `ratking({ action: "reply", replyTo })`. A send retries transient failures, then fails loudly: there is no local queue, sidecar or fallback. A launch result whose mail did not go out shows on the owner's next `project_status` for a day, with its log path.
 
-Only a mention wakes a reader, and only when idle; busy arrivals ride on the next turn. One digest groups unread posts by author, keeps the latest progress, and includes all FYI/done titles.
-
-`owner_inbox({since?, kinds?, limit?, ack?})` reads this session's queue. Without `since`, it returns undelivered posts; `since` includes recent delivered posts. `ack` consumes only returned items. `owner_reply({uri, text})` replies to a post in this session's queue, threads its root and parent, and mentions the author in their queue. Workers run the reader too.
-
-Storage is private local JSONL at `~/.local/state/muster/owner-queue/<session>.jsonl`, separate from Joel's desk queue. Lines use `dev.muster.note.post` records with local `muster://` URIs, time-sortable keys, truncated canonical-JSON SHA-256 cids, session authors and UTF-8 mention facets. Titles cap at 200 characters, bodies at 4096 bytes. NSIDs and the local lexicon live in `src/owner-lexicon.ts` and `.json`. This is not a PDS: follows, a public timeline and real atproto transport are deferred.
-
-A watch plus a 30-second poll delivers mentions. Session custom entries persist the cursor and delivered URIs across reload. A reader presence heartbeat expires after two minutes; under the legacy intercom policy, a missing, stale or dead reader, queue failure or telemetry failure sends waking posts directly, while retaining the queued copy when possible. Under ratking, the default, every post rides Rat King. Tool results identify the path. Relay counters record metadata only, never titles or bodies.
+Slice 5 removed the JSONL owner queue under `~/.local/state/muster/owner-queue/`. Its files stay on disk, unread. `owner_inbox` and `owner_reply` refuse with `OwnerInboxRetired` and `OwnerReplyRetired` for one release, so recurring passes that still name them can drop them at their next re-arm.
 
 ## Switchboard
 
@@ -160,7 +154,7 @@ One inbox over every project's desk queue. It reads and routes; project desks st
 
 ## Relay diet
 
-Packet reports still send one actionable owner-queue message to the owner. The owner must verify and land them.
+Packet reports still send one actionable Rat King message to the owner. The owner must verify and land them.
 
 The Muster desk feed suppresses ids created by this session's `desk_post`, `desk_answer`, and `desk_rulings` tools. It reserves the queue id before writing, keeps it in memory, and saves a `muster-desk-self-post` custom session entry for reload. A failed attempt may leave an unused reserved id. Other sessions' items still arrive, even when their sender label matches. The queue and inbox remain unchanged; only self-delivery is suppressed.
 

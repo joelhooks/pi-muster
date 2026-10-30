@@ -11,15 +11,15 @@ vi.mock("node:child_process", async importOriginal => ({
     return child;
   },
 }));
-import { agentLaunch, laneOpen, projectOpen, runLaunchJob } from "./ops.ts";
+import { agentLaunch, laneOpen, projectOpen, readLaunchJob, runLaunchJob, undeliveredLaunchNotes } from "./ops.ts";
 import { ProcError } from "./errors.ts";
 import { load, mutate } from "./store.ts";
-import { readOwnerQueue } from "./owner-queue.ts";
 import { ratkingInbound } from "./comms-ratking.ts";
 import type { Project } from "./domain.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";
 
-const items = (owner: string, home: string) => readOwnerQueue(owner, home).items.map(entry => entry.item);
+// Slice 5: a result mail that does not go out is recorded on the job, not appended to a JSONL queue.
+const undelivered = (home: string, id: string) => readLaunchJob(home, id).undelivered;
 
 async function setup(withOwnerRow: boolean) {
   const h = harness();
@@ -39,7 +39,7 @@ const sentOk = () => Effect.succeed({ code: 0, stdout: '{"command":"send","ok":t
 describe("launch receipt mail", () => {
   beforeEach(() => vi.stubEnv("MUSTER_RATKING_CLI", "/fake/ratking.ts"));
 
-  it("exit 0 sends one mail from muster/launcher and appends nothing", async () => {
+  it("exit 0 sends one mail from muster/launcher and records nothing undelivered", async () => {
     const { h, dir, receipt, sends, respond } = await setup(true);
     respond(sentOk);
     const result = await runWith(h, runLaunchJob(dir, receipt.jobId));
@@ -47,7 +47,7 @@ describe("launch receipt mail", () => {
     expect(sends[0]!.slice(0, 5)).toEqual(["-u", "RATKING_NAME", "node", "/fake/ratking.ts", "send"]);
     expect(sends[0]).toEqual(expect.arrayContaining(["--as", "muster/launcher", "--to", "mail/desk", "--json", `action muster/launcher · Launch worker finished`]));
     expect(sends[0]!.at(sends[0]!.indexOf("--body") + 1)).toBe(`${result.body}\n\nlane work · refs ${receipt.log}`);
-    expect(items(h.sessionId, h.home)).toHaveLength(0);
+    expect(undelivered(h.home, receipt.jobId)).toBeUndefined();
     expect((await runWith(h, load(dir))).agents.find(row => row.name === "worker")?.state).toBe("running");
   });
 
@@ -56,14 +56,19 @@ describe("launch receipt mail", () => {
     ["exit 3", () => Effect.succeed({ code: 3, stdout: "", stderr: "uncertain" })],
     ["a timeout", () => Effect.fail(new ProcError({ command: "env", code: null, stderr: "", message: "timed out after 30000ms" }))],
     ["unparseable output", () => Effect.succeed({ code: 0, stdout: "not json", stderr: "" })],
-  ])("%s appends the JSONL fallback once and never resends", async (_name, reply) => {
+  ])("%s records the job undelivered once, never resends, and shows it on the owner's board for a day", async (_name, reply) => {
     const { h, dir, receipt, sends, respond } = await setup(true);
     respond(reply as never);
     await runWith(h, runLaunchJob(dir, receipt.jobId));
     expect(sends).toHaveLength(1);
-    const found = items(h.sessionId, h.home);
-    expect(found).toHaveLength(1);
-    expect(found[0]?.text).toContain("rat king mail not sent");
+    const job = readLaunchJob(h.home, receipt.jobId);
+    expect(job.undelivered).toEqual(expect.any(String));
+    const notes = undeliveredLaunchNotes([job], "mail", job.owner, Date.parse(job.startedAt) + 60_000);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("launch worker finished, but its result mail did not go out (");
+    expect(notes[0]).toContain(`read ${job.log}`);
+    expect(undeliveredLaunchNotes([job], "mail", job.owner, Date.parse(job.startedAt) + 86_400_001)).toEqual([]);
+    expect(undeliveredLaunchNotes([job], "mail", "someone-else", Date.parse(job.startedAt))).toEqual([]);
   });
 
   // A desk that restarts while its launch runs: the job names the old session, the row now holds the new one.
@@ -74,7 +79,7 @@ describe("launch receipt mail", () => {
     await runWith(h, runLaunchJob(dir, receipt.jobId));
     expect(sends).toHaveLength(1);
     expect(sends[0]).toEqual(expect.arrayContaining(["--to", "mail/desk"]));
-    expect(items(h.sessionId, h.home)).toHaveLength(0);
+    expect(undelivered(h.home, receipt.jobId)).toBeUndefined();
   });
 
   // Tin-Tin, P5 audit 1: desks started outside Muster own workers but have no row; their receipts bypassed mail.
@@ -85,7 +90,7 @@ describe("launch receipt mail", () => {
     await runWith(h, runLaunchJob(dir, receipt.jobId));
     expect(sends).toHaveLength(1);
     expect(sends[0]).toEqual(expect.arrayContaining(["--to", "rowless-owner"]));
-    expect(items(h.sessionId, h.home)).toHaveLength(0);
+    expect(undelivered(h.home, receipt.jobId)).toBeUndefined();
   });
 
   // Switchboard, 2026-10-28: a rowless owner with RATKING_NAME had every launch receipt parked, because the receipt read
@@ -97,19 +102,17 @@ describe("launch receipt mail", () => {
     await runWith(h, runLaunchJob(dir, receipt.jobId));
     expect(sends).toHaveLength(1);
     expect(sends[0]).toEqual(expect.arrayContaining(["--to", "rowless-owner"]));
-    expect(items(h.sessionId, h.home)).toHaveLength(0);
+    expect(undelivered(h.home, receipt.jobId)).toBeUndefined();
     vi.unstubAllEnvs();
   });
 
-  it("an owner with no row and no recorded name appends JSONL with the reason, without sending", async () => {
+  it("an owner with no row and no recorded name records the reason, without sending", async () => {
     const { h, dir, receipt, sends, respond } = await setup(false);
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(({ ownerName: _, ...row }) => row) }, null] as const)));
     respond(sentOk);
     await runWith(h, runLaunchJob(dir, receipt.jobId));
     expect(sends).toHaveLength(0);
-    const found = items(h.sessionId, h.home);
-    expect(found).toHaveLength(1);
-    expect(found[0]?.text).toContain("rat king mail not sent: owner has no Rat King name");
+    expect(undelivered(h.home, receipt.jobId)).toContain("owner has no Rat King name");
   });
 });
 

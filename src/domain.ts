@@ -268,6 +268,8 @@ export const LaunchJob = Schema.Struct({
   pid: Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1))), log: Path, startedAt: Iso, state: LaunchJobState,
   priorState: AgentState, owner: SessionId, request: AgentLaunchRequest,
   outcome: Schema.optionalKey(Schema.Literals(["action", "blocked"])),
+  /** Why the result mail did not go out; project_status shows it to the owner instead. */
+  undelivered: Schema.optionalKey(Schema.String),
 });
 export type LaunchJob = typeof LaunchJob.Type;
 export const decodeLaunchJob = Schema.decodeUnknownSync(LaunchJob);

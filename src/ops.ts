@@ -72,7 +72,7 @@ import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must, type ProcShape 
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
-import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
+import { deliverOwnerItem } from "./owner-queue.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeKeys, nudgeNote, silenceAlarm, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { launchDefaults } from "./fleet-steer.ts";
@@ -574,18 +574,16 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
     if (/[RC]/.test(field.slice(0, 2))) dirty.push(fields[++i]!);
   }
   const lane = project.lanes.find(lane => lane.slug === row.lane);
-  const env = yield* MusterEnv;
   const provenSidecars: string[] = [];
   if (row.machine !== "local") {
     const paths = dirty.filter(path => /^\.pi\/muster\/(?:packets\/[a-f0-9]{40,64}\/(?:packet\.json|report\.svx)|notes\/[a-f0-9]{64}\.json)$/.test(path));
     const contents = paths.length ? yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ path: Schema.String, text: Schema.String }))),
       yield* must("node", ["-e", `const fs=require('node:fs'),p=require('node:path');const root=process.argv[1];process.stdout.write(JSON.stringify(JSON.parse(process.argv[2]).flatMap(path=>{try{const file=p.join(root,path);return fs.lstatSync(file).isFile()?[{path,text:fs.readFileSync(file,'utf8')}]:[]}catch{return []}})));`, row.cwd, JSON.stringify(paths)], { cwd: source, timeoutMs: 10_000 })) : [];
-    const acceptedNotes = readOwnerQueue(row.owner, env.home).items.map(record => record.item);
     for (const file of contents) {
       try {
         if (file.path.startsWith(".pi/muster/notes/")) {
           const sidecar = decodeRemoteNote(JSON.parse(file.text));
-          if (file.text === JSON.stringify(sidecar) && sidecar.project === project.slug && sidecar.machine === row.machine && sidecar.agent === row.name && sidecar.lane === row.lane && acceptedNotes.some(item => JSON.stringify(item) === JSON.stringify(sidecar.item))) provenSidecars.push(file.path);
+          if (file.text === JSON.stringify(sidecar) && sidecar.project === project.slug && sidecar.machine === row.machine && sidecar.agent === row.name && sidecar.lane === row.lane) provenSidecars.push(file.path);
           continue;
         }
         const id = file.path.split("/")[3];
@@ -985,22 +983,9 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         // sidecars in every later clone; one naming another agent can't be this row's report (aih-support-sweep, 2026-10-14).
         // One naming this row with a foreign project still fails identity: it may be this row's own report under a drifted slug.
         const ignoreForeign = (other: string) => notes.push(`${entry.kind} sidecar ${entry.id.slice(0, 12)} belongs to project ${other}, copied from the clone's source; ignored for ${row.name} (that project's owner should check it landed)`);
-        if (entry.kind === "note") {
-          const sidecar = yield* decodeWith(decodeRemoteNote, entry.value);
-          if (sidecar.project !== project.slug && sidecar.agent !== row.name) return ignoreForeign(sidecar.project);
-          if (sidecar.project === project.slug && leftByClosed(sidecar.agent)) return ignoreLeft(sidecar.agent);
-          if (sidecar.project === project.slug && sharedLive(sidecar.agent)) return;
-          if (sidecar.project !== project.slug || sidecar.machine !== row.machine || sidecar.agent !== row.name || sidecar.lane !== row.lane || sidecar.item.lane !== row.lane || !sessionChain(row).includes(sidecar.item.author)) return yield* input(`machine ${row.machine}: invalid note sidecar identity`);
-          // drovr, 2026-10-12: sidecars stay on disk and the queue is per owner session, so an owner restart replayed old notes.
-          const ownerRow = project.agents.find(agent => agent.sessionId === row.owner);
-          const priorOwners = ownerRow ? sessionChain(ownerRow).filter(id => id !== row.owner) : [];
-          if (priorOwners.some(owner => readOwnerQueue(owner, env.home).items.some(record => record.item.uri === sidecar.item.uri))) return;
-          // The catalog owns routing; a remote recipient can be stale after a handover.
-          const added = yield* Effect.try({ try: () => ingestOwnerItem(row.owner, sidecar.item, env.home, project.slug), catch: error => new StoreError({ path: `remote note ${entry.id}`, message: String(error) }) });
-          if (added && sidecar.sendFailed !== undefined) notes.push(`owner note from ${row.name} arrived by sidecar (Rat King send had failed: ${sidecar.sendFailed.replace(/[\r\n]+/g, " ").slice(0, 80)})`);
-          // The existing owner feed reads this queue and wakes on the post's mention facets.
-          return;
-        }
+        // Slice 5 retired the owner queue these fed. A remote worker now retries its Rat King send and fails loudly; a
+        // note sidecar left by an older worker is not delivered.
+        if (entry.kind === "note") return;
         // A packet the catalog already holds is done, whichever row left it: a clone reused by a later row still
         // carries the earlier row's sidecars, and checking them against the new row refused close (🧠, 2026-10-12).
         if (project.packets.some(prior => prior.id === entry.id)) return;
@@ -1049,20 +1034,6 @@ export function sessionChain(row: Pick<AgentRow, "sessionId" | "events">): strin
   }
   return ids;
 }
-
-/** Explicit inbox pulls only rows owned by the caller; a dead host never prevents local reads. */
-export const pullRemoteOwnerInbox = (currentDir?: string) => Effect.gen(function* () {
-  const env = yield* MusterEnv;
-  const dirs = new Set([...readRegistry(env.home).values()].map(entry => entry.dir));
-  if (currentDir) dirs.add(currentDir);
-  const notes: string[] = [];
-  for (const dir of dirs) {
-    yield* backfillOwnerNames(dir).pipe(Effect.catch(error => Effect.sync(() => { notes.push(`owner name: ${error.message.replace(/[\r\n]+/g, " ")}`); })));
-    const result = yield* ingestRemotePackets(dir, env.sessionId, 5000).pipe(Effect.catch(error => Effect.succeed({ notes: [`remote inbox: ${error.message.replace(/[\r\n]+/g, " ")}`], failedMachines: new Set<string>() })));
-    notes.push(...result.notes.map(note => note.replace(/[\r\n]+/g, " ")));
-  }
-  return notes;
-});
 
 const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[]) => Effect.gen(function* () {
   const result = new Map<string, number | null>();
@@ -2536,7 +2507,7 @@ export const workPrompt = (row: AgentRow, prompt: string | undefined) => {
     case "judge":
       return `Read your brief at ${row.brief} and take up the role it describes. Report only through the channels it names.`;
     default:
-      return `Read your brief at ${row.brief} and do the work it describes. Skills aren't preloaded: call skill_find with your task's key words and read any skill that matches before you start. FYI, progress and done go through owner_note; a blocking question uses owner_note kind=question. Answer threaded questions with owner_reply. Intercom ask/reply is only for live back-and-forth. When your result is committed, call packet_report once with the commit and your checks.`;
+      return `Read your brief at ${row.brief} and do the work it describes. Skills aren't preloaded: call skill_find with your task's key words and read any skill that matches before you start. FYI, progress and done go through owner_note; a blocking question uses owner_note kind=question. Answer threaded questions with ratking reply and the message id. Intercom ask/reply is only for live back-and-forth. When your result is committed, call packet_report once with the commit and your checks.`;
   }
 };
 
@@ -2957,6 +2928,11 @@ const readLaunchJobs = (home: string): LaunchJob[] => {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter(file => file.endsWith(".json")).map(file => readLaunchJob(home, file.slice(0, -5)));
 };
+/** A day of launch results whose mail did not go out, for the owner that launched them. */
+export const undeliveredLaunchNotes = (jobs: readonly LaunchJob[], project: string, owner: string, now: number) =>
+  jobs.filter(job => job.project === project && job.owner === owner && job.outcome && job.undelivered && now - Date.parse(job.startedAt) < 86_400_000)
+    .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    .map(job => `launch ${job.name} ${job.outcome === "blocked" ? "failed" : "finished"}, but its result mail did not go out (${job.undelivered!.replace(/[\r\n]+/g, " ").slice(0, 160)}); read ${job.log}`);
 const findLaunchJob = (jobs: readonly LaunchJob[], project: string, row: AgentRow): LaunchJob | undefined => {
   const latest = jobs.filter(job => job.project === project && job.name === row.name && job.sessionId === row.sessionId).sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
   return latest?.outcome ? undefined : latest;
@@ -3077,7 +3053,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
   }))), Effect.mapError(error => new InputError({ message: error.message })));
   return { row, job: yield* readJob(env.home, id), jobId: id, log, tab: (yield* load(dir)).lanes.find(lane => lane.slug === row.lane)?.tabId,
     argv: [] as string[], readiness: "not checked (background launch)", proof: null, sessionIdMatched: null,
-    notes: [...modelNotes, "result arrives in your owner queue as an action; its turns wake you through turn records (done, blocked, crashed), no herdr_watch needed"] };
+    notes: [...modelNotes, "result arrives as Rat King mail from muster/launcher; its turns wake you through turn records (done, blocked, crashed), no herdr_watch needed"] };
 }).pipe(Effect.uninterruptible);
 
 export const launchResultText = (result: { row: AgentRow; argv: readonly string[]; readiness: string; proof: Proof | null; sessionIdMatched: boolean | null; notes: readonly string[] }) => [
@@ -3127,7 +3103,7 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     const tail = yield* Effect.try({ try: () => readFileSync(job.log, "utf8").slice(-4000), catch: () => new InputError({ message: "log unavailable" }) }).pipe(Effect.orElseSucceed(() => "log unavailable"));
     body += `\nLog tail (UNTRUSTED):\n${tail}`;
   } else {
-    // The full receipt (argv, input map, routine notes) goes to the launch log; the owner queue gets the short form.
+    // The full receipt (argv, input map, routine notes) goes to the launch log; the result mail gets the short form.
     yield* Effect.try({ try: () => appendFileSync(job.log, `\n${launchResultText(result.value)}\n`), catch: () => new InputError({ message: "log unavailable" }) }).pipe(Effect.ignore);
     body = launchOwnerText(result.value, job.log);
   }
@@ -3156,13 +3132,13 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
     const state = failed && !started && latest.state !== "failed" && latest.state !== "closed" ? yield* stepAgent(row.name, latest.state, { type: latest.state === "launching" || latest.state === "restoring" ? "LAUNCH_FAILED" : "FAIL" }) : latest.state;
     const next = { ...latest, state, updatedAt: iso(env),
       ...(failed ? { events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: body }] } : {}) };
-    // The caller is local even when the worker is remote or network-backed.
-    // Record an outcome only once the waking result is durable in its queue.
-    if (!mail.sent) yield* Effect.try({ try: () => appendOwnerItem(job.owner, { author: `muster-launch-${id}`, project: current.slug, lane: row.lane, kind, title, body: mail.reason ? `${body}\n(rat king mail not sent: ${mail.reason})` : body, refs: [job.log] }, env.home), catch: () => new InputError({ message: `launch result could not be queued; log: ${job.log}` }) });
-    yield* writeLaunchJob(env.home, { ...latestJob, sessionId: next.sessionId, state: yield* stepLaunchJob(id, latestJob.state, { type: failed ? "FAIL" : "SUCCEED" }), outcome: kind });
+    // Slice 5 retired the JSONL owner queue: a result mail that did not go out is recorded on the job, and the owner's
+    // next project_status shows it (Tin-Tin, scope 3mz4dyowy5lk4).
+    yield* writeLaunchJob(env.home, { ...latestJob, sessionId: next.sessionId, state: yield* stepLaunchJob(id, latestJob.state, { type: failed ? "FAIL" : "SUCCEED" }), outcome: kind,
+      ...(mail.sent ? {} : { undelivered: mail.reason ?? "not sent" }) });
     return [withRow(current, next), next] as const;
   }));
-  return { kind, body };
+  return { kind, title, body };
 });
 
 /** A desk that launched, restarted, forked or was adopted becomes its project's Rat King role target. */
@@ -4585,6 +4561,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
 
     const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
     const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
+    recoveryNotes.push(...undeliveredLaunchNotes(launchJobs, project.slug, env.sessionId, env.now().getTime()));
     const reapSources: ReapSources = new Map();
     for (const row of project.agents) {
       if (row.state === "closed") {

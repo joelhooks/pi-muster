@@ -8,10 +8,8 @@ import { board, laneClose, laneDeliver, laneOpen, packetLand, projectOpen, proje
 import { awaitingProof, flowLine, inFlight } from "./tokens.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
-import { OwnerTimelineView, readOwnerTimelineData } from "./owner-view.ts";
 import { registryPath } from "./registry.ts";
-import { ownerFeed } from "./owner-feed.ts";
-import { FEED_CLAIM, deskFeed } from "./desk-feed.ts";
+import { deskFeed } from "./desk-feed.ts";
 
 async function setup(limit: number | null = 3) {
   const h = harness();
@@ -216,44 +214,6 @@ describe("live delivery and WIP", () => {
     expect(note?.content).toContain("finished");
     expect(note?.content).not.toMatch(/WIP \d|not flowing|landed, not live/);
     expect(note?.details.flow).toContain("⚠ not flowing · WIP 1/3");
-  });
-  it("the owner feed includes a fresh line every turn, even with no notices", async () => {
-    const s = await setup();
-    const owner = ownerFeed({ session: "owner", home: s.h.home, project: s.dir, appendEntry: () => {}, sendMessage: () => {} });
-    mkdirSync(join(registryPath(s.h.home), ".."), { recursive: true });
-    writeFileSync(registryPath(s.h.home), JSON.stringify({ slug: "flow", dir: s.dir, spaceId: "w1", ts: s.h.now.toISOString() }) + "\n");
-    expect(owner.beforeTurn()?.message.content ?? "").not.toContain("WIP"); // nothing to act on: no line
-    await s.lane("one");
-    owner.turnEnded();
-    expect(owner.beforeTurn()?.message.content).toContain("WIP 1/3");
-    await s.lane("two");
-    owner.turnEnded();
-    expect(owner.beforeTurn()?.message.content).toContain("WIP 2/3");
-    owner.dispose();
-  });
-  it("lets the Muster desk feed own the line without an owner-feed duplicate", async () => {
-    const s = await setup();
-    const claims = globalThis as { [FEED_CLAIM]?: string };
-    const previous = claims[FEED_CLAIM];
-    const owner = ownerFeed({ session: "owner", home: s.h.home, project: s.dir, appendEntry: () => {}, sendMessage: () => {} });
-    try {
-      claims[FEED_CLAIM] = "pi-muster";
-      expect(owner.beforeTurn()).toBeUndefined();
-    } finally {
-      if (previous === undefined) delete claims[FEED_CLAIM]; else claims[FEED_CLAIM] = previous;
-      owner.dispose();
-    }
-  });
-  it("renders the flow line from feed details as one visible line", async () => {
-    const s = await setup();
-    await s.lane("one");
-    const owner = ownerFeed({ session: "owner", home: s.h.home, project: s.dir, appendEntry: () => {}, sendMessage: () => {} });
-    const details = readOwnerTimelineData(owner.beforeTurn()?.message.details);
-    expect(details?.flow).toContain("WIP 1/3");
-    const view = new OwnerTimelineView(details!, { expanded: false, noColor: true }, { fg: (_color, text) => text, bold: text => text });
-    expect(view.render(200)).toHaveLength(1);
-    expect(view.render(200)[0]).toContain("WIP 1/3");
-    owner.dispose();
   });
   it("keeps rejected and no_changes work out of delivery after closing", async () => {
     for (const outcome of ["rejected", "no_changes"] as const) {

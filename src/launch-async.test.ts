@@ -21,8 +21,6 @@ vi.mock("node:child_process", async importOriginal => ({
 import { agentClose, agentLaunch as launch, agentLaunchForeground, laneOpen, launchResultText, projectOpen, projectStatus, readLaunchJob, runLaunchJob } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { MusterEnv } from "./runtime.ts";
-import { readOwnerQueue, mentions } from "./owner-queue.ts";
-const readOwnerItems = (owner: string, home: string) => readOwnerQueue(owner, home).items.map(entry => entry.item);
 const agentLaunch = (...args: Parameters<typeof launch>) => launch(...args).pipe(Effect.map(result => { if (!("jobId" in result)) throw new Error("expected asynchronous admission"); return result; }));
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 
@@ -81,7 +79,7 @@ describe("asynchronous launch admission", () => {
     expect(spawned.calls).toHaveLength(1);
   });
 
-  it("runs the existing path and posts exactly one waking action with the full result", async () => {
+  it("runs the existing path, and an unsent result shows on the owner's project_status instead of a queue", async () => {
     const { h, dir, request } = await setup();
     const receipt = await runWith(h, agentLaunch(dir, request));
     const result = await runWith(h, runLaunchJob(dir, receipt.jobId!));
@@ -89,13 +87,11 @@ describe("asynchronous launch admission", () => {
     const row = (await runWith(h, load(dir))).agents[0]!;
     expect(row.state).toBe("running");
     expect(row.delivery).toBe("proven");
-    const items = readOwnerItems(h.sessionId, h.home);
-    expect(items).toHaveLength(1);
-    expect(items[0]?.kind).toBe("action");
-    // No Rat King CLI runs here, so the mail to the row's ownerName fails and the receipt falls back, naming why.
-    expect(items[0]?.text).toContain(result.body);
-    expect(items[0]?.text).toContain("rat king mail not sent");
-    expect(mentions(items[0]!, h.sessionId)).toBe(true);
+    // No Rat King CLI runs here, so the mail to the row's ownerName fails; the job records why (slice 5).
+    expect(readLaunchJob(h.home, receipt.jobId)).toMatchObject({ outcome: "action", undelivered: expect.any(String) });
+    const status = await runWith(h, projectStatus(dir, { act: false }));
+    expect(status.board).toContain(`launch worker finished, but its result mail did not go out (`);
+    expect(status.board).toContain(`read ${receipt.log}`);
     // rats-nest, 2026-10-13: the owner queue gets a short 🐑 receipt; argv and routine prose stay in the launch log.
     expect(result.body.split("\n")[0]).toMatch(new RegExp(`^🐑 launched ${row.name} · `));
     expect(result.body).toContain("delivery proven");
@@ -103,7 +99,6 @@ describe("asynchronous launch admission", () => {
     expect(result.body).toContain(`full launch receipt: ${receipt.log}`);
     expect(readFileSync(receipt.log!, "utf8")).toContain("argv: pi");
     await failWith(h, runLaunchJob(dir, receipt.jobId!));
-    expect(readOwnerItems(h.sessionId, h.home)).toHaveLength(1);
   });
 
   it("fails the row and posts a blocked item containing the log tail", async () => {
@@ -115,7 +110,8 @@ describe("asynchronous launch admission", () => {
     const result = await runWith(h, runLaunchJob(dir, receipt.jobId!));
     expect(result.kind).toBe("blocked");
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
-    expect(readOwnerItems(h.sessionId, h.home)).toMatchObject([{ kind: "blocked", text: expect.stringContaining("slow path diagnostic") }]);
+    expect(result.body).toContain("slow path diagnostic");
+    expect(readLaunchJob(h.home, receipt.jobId)).toMatchObject({ outcome: "blocked", undelivered: expect.any(String) });
   });
 
   it("fails the row, never crediting a Pi, when the fresh pane already hosts a foreign agent", async () => {
@@ -135,7 +131,7 @@ describe("asynchronous launch admission", () => {
     expect(result.kind).toBe("blocked");
     expect(result.body).toContain("still hosts agent claude");
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
-    expect(readOwnerItems(h.sessionId, h.home)[0]?.text).not.toContain("errored after its Pi started");
+    expect(result.title).not.toContain("errored after its Pi started");
     expect(readLaunchJob(h.home, receipt.jobId)).toMatchObject({ state: "failed", outcome: "blocked" });
   });
 
@@ -176,7 +172,7 @@ describe("asynchronous launch admission", () => {
     expect(result.kind).toBe("blocked");
     expect(result.body).toContain("still hosts agent claude");
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
-    expect(readOwnerItems(h.sessionId, h.home)[0]?.text).not.toContain("errored after its Pi started");
+    expect(result.title).not.toContain("errored after its Pi started");
   });
 
   it("still tells the owner to adopt a Pi that started before a later launch error", async () => {
@@ -192,7 +188,7 @@ describe("asynchronous launch admission", () => {
     };
     const result = await runWith(h, runLaunchJob(dir, receipt.jobId!));
     expect(result.kind).toBe("blocked");
-    expect(readOwnerItems(h.sessionId, h.home)[0]?.text).toContain("errored after its Pi started; adopt it");
+    expect(result.title).toContain("errored after its Pi started; adopt it");
     expect((await runWith(h, load(dir))).agents[0]?.state).not.toBe("failed");
   });
 
@@ -298,7 +294,7 @@ describe("asynchronous launch admission", () => {
     expect((await runWith(h, load(dir))).agents.map(row => row.name).sort()).toEqual(["one", "two"]);
     await Promise.all(receipts.map(receipt => runWith(h, runLaunchJob(dir, receipt.jobId!))));
     expect((await runWith(h, load(dir))).agents.map(row => row.state)).toEqual(["running", "running"]);
-    expect(readOwnerItems(h.sessionId, h.home)).toHaveLength(2);
+    expect(receipts.map(receipt => readLaunchJob(h.home, receipt.jobId).outcome)).toEqual(["action", "action"]);
   });
 
   it.each(["fork", "restore"] as const)("admits and completes %s through the same job path", async action => {

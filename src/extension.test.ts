@@ -7,9 +7,8 @@ import * as versionSkew from "./version-skew.ts";
 import { Cause, Effect, Schema } from "effect";
 import * as ops from "./ops.ts";
 import * as ownerQueue from "./owner-queue.ts";
-import { Packet, decodeOwnerItem } from "./domain.ts";
+import { Packet } from "./domain.ts";
 import { deskRecord } from "./desk.ts";
-import { POST_NSID } from "./owner-lexicon.ts";
 
 import muster, { failure as toolFailure } from "./extension-main.ts";
 import { musterToolNames } from "./reload-stale.ts";
@@ -151,7 +150,7 @@ describe("thinking_set", () => {
 const JOINED = "Collectionfence4/4behavior/propertytests";
 const PLAIN = "Collection fence: all four behavior and property tests passed.";
 const HINT = "Rewrite in plain sentences with spaces between words; put code, paths and ids in backticks.";
-const notice = { id: "uri", uri: "uri", queued: true, woke: false, path: "ratking" as const, delivery: { status: "delivered" as const }, owner: "boss", resolution: "explicit recipient", pendingPull: false, lost: false };
+const notice = { id: "uri", uri: "uri", queued: true, woke: false, path: "ratking" as const, delivery: { status: "delivered" as const }, owner: "boss", resolution: "explicit recipient", lost: false };
 const cleanReport = { commit: "HEAD", summary: PLAIN, body: PLAIN, checks: [{ name: "Unit tests", outcome: "pass", detail: PLAIN }] };
 const refusalCases: Array<[string, Record<string, unknown>]> = [
   ["packet_report", { ...cleanReport, summary: JOINED }],
@@ -160,8 +159,6 @@ const refusalCases: Array<[string, Record<string, unknown>]> = [
   ["packet_report", { ...cleanReport, checks: [{ name: "Unit tests", outcome: "pass", detail: JOINED }] }],
   ["owner_note", { kind: "fyi", title: JOINED, body: PLAIN }],
   ["owner_note", { kind: "fyi", title: PLAIN, body: JOINED, replyTo: "uri" }],
-  ["owner_reply", { uri: "uri", text: JOINED }],
-  ["owner_reply", { uri: "uri", text: `${PLAIN.repeat(100)}\n${JOINED}` }],
   ["desk_post", { kind: "fyi", title: JOINED, body: PLAIN }],
   ["desk_post", { kind: "fyi", title: PLAIN, body: JOINED }],
 ];
@@ -176,7 +173,6 @@ describe("readable message boundaries", () => {
     }));
     vi.spyOn(ops, "deskPost").mockReturnValue(Effect.succeed({ record: deskRecord({ kind: "fyi", title: PLAIN, from: "test" }, "12345678", new Date()), open: 1, path: "/p/desk.jsonl", notes: [] }));
     vi.spyOn(ownerQueue, "deliverOwnerItem").mockReturnValue(Effect.succeed(notice));
-    vi.spyOn(ownerQueue, "findOwnerPost").mockReturnValue(decodeOwnerItem({ $type: POST_NSID, uri: "uri", cid: "cid", author: "boss", createdAt: "2026-10-04T00:00:00Z", text: PLAIN, kind: "fyi" }));
   });
 
   const context = () => ({ cwd: "/p", sessionManager: { getSessionId: () => "test-session", getBranch: () => [] } });
@@ -191,7 +187,6 @@ describe("readable message boundaries", () => {
     expect(ops.packetReport).not.toHaveBeenCalled();
     expect(ops.deskPost).not.toHaveBeenCalled();
     expect(ownerQueue.deliverOwnerItem).not.toHaveBeenCalled();
-    expect(ownerQueue.findOwnerPost).not.toHaveBeenCalled();
     expect(fake.pi.appendEntry).not.toHaveBeenCalled();
     expect(fake.emitted).toEqual([]);
   });
@@ -199,7 +194,6 @@ describe("readable message boundaries", () => {
   it.each([
     ["packet_report", cleanReport, "Packet"],
     ["owner_note", { kind: "fyi", title: PLAIN, body: PLAIN }, "owner:"],
-    ["owner_reply", { uri: "uri", text: PLAIN }, "reply to:"],
     ["desk_post", { kind: "fyi", title: PLAIN, body: PLAIN }, "Posted desk item"],
   ])("accepts clean text for %s and reaches the operation", async (name, params, receipt) => {
     const fake = fakePi();
@@ -210,6 +204,21 @@ describe("readable message boundaries", () => {
     if (name === "packet_report") expect(ops.packetReport).toHaveBeenCalledOnce();
     else if (name === "desk_post") expect(ops.deskPost).toHaveBeenCalledOnce();
     else expect(ownerQueue.deliverOwnerItem).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["owner_inbox", {}, "OwnerInboxRetired", "ratking({ action: \"pending\" })"],
+    ["owner_reply", { uri: "uri", text: PLAIN }, "OwnerReplyRetired", "ratking({ action: \"reply\""],
+  ])("%s is a retired stub: it refuses with the replacement and touches no queue", async (name, params, code, instead) => {
+    const fake = fakePi();
+    muster(fake.pi as never);
+    const result = await fake.defs.get(String(name))!.execute("id", params, undefined, undefined, context());
+    expect(result).toMatchObject({ isError: true });
+    expect(result.content[0]?.text).toMatch(new RegExp(`^${code}: `));
+    expect(result.content[0]?.text).toContain(String(instead));
+    expect(result.content[0]?.text).toContain(`Fix: drop ${name} from any recurring instruction at its next re-arm.`);
+    expect(ownerQueue.deliverOwnerItem).not.toHaveBeenCalled();
+    expect(fake.pi.appendEntry).not.toHaveBeenCalled();
   });
 
   it("quotes at most three squashed samples across all report fields", async () => {
