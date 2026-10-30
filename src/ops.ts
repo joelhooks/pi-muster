@@ -66,7 +66,7 @@ import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cle
 import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, codemodeNote, laneLaunchPolicy, badToolNames, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
-import { ownerName, ownerSelfName, registeredCatalogs, subscribedSwitchboards } from "./comms-ratking.ts";
+import { OWNER_ALIASES, ownerName, ownerSelfName, registeredCatalogs, subscribedSwitchboards } from "./comms-ratking.ts";
 import { type LaunchMailResult, launchOwnerRatkingName, ratkingCliPath, sendLaunchMail } from "./launch-mail.ts";
 import { BOT_EMAIL, BOT_NAME, Comms, MusterEnv, Proc, git, must, type ProcShape } from "./runtime.ts";
 import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts";
@@ -3165,7 +3165,14 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
   return { kind, body };
 });
 
-export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, jobId?: string) =>
+/** A desk that launched, restarted, forked or was adopted becomes its project's Rat King role target. */
+export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, jobId?: string) => launchForeground(dir, params, jobId).pipe(
+  Effect.flatMap(result => Effect.gen(function* () {
+    const note = yield* publishProjectRole(yield* load(dir), result.row);
+    return note ? { ...result, notes: [...result.notes, note] } : result;
+  })));
+
+const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
@@ -3547,6 +3554,60 @@ const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | unde
     });
   });
 
+export type MailboxRole = { readonly name: string; readonly target: string; readonly role: string };
+
+/** Parse `role list --json`; null when the output is not a roles list. */
+export const parseMailboxRoles = (stdout: string): readonly MailboxRole[] | null => {
+  try {
+    const roles = (JSON.parse(stdout) as { roles?: unknown }).roles;
+    if (!Array.isArray(roles)) return null;
+    return roles.flatMap(entry => {
+      const { name, target, role } = (entry ?? {}) as Record<string, unknown>;
+      return typeof name === "string" ? [{ name, target: typeof target === "string" ? target : "", role: typeof role === "string" ? role : "" }] : [];
+    });
+  } catch { return null; }
+};
+
+/** The project's one-line role: its outcome's first sentence, at most 120 characters. */
+export const projectRoleLine = (outcome: string) => {
+  const flat = outcome.replace(/\s+/g, " ").trim();
+  const sentence = flat.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? flat;
+  return sentence.length <= 120 ? sentence : `${sentence.slice(0, 119).trimEnd()}…`;
+};
+
+/** The mailbox's project roles through the operator fleet shim; null before the mailbox has a role table. */
+const mailboxRoles = Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
+  if (!existsSync(shim)) return null;
+  const proc = yield* Proc;
+  const result = yield* proc.run("sh", [shim, "role", "list", "--json"], { cwd: env.home, timeoutMs: 30_000 }).pipe(Effect.result);
+  return result._tag === "Success" && result.success.code === 0 ? parseMailboxRoles(result.success.stdout) : null;
+});
+
+/**
+ * Point the project's Rat King role name at a live desk row, so mail to the project reaches whichever desk runs now
+ * (Joel, 2026-10-30, "fix"; rats-nest owns the mailbox half). A no-op before the mailbox has roles, for a row that is
+ * not the project's main desk, or for a slug that is an owner's name. Never fails the launch; a refusal is a note.
+ */
+const publishProjectRole = (project: Project, row: AgentRow) => Effect.gen(function* () {
+  if (project.policy?.comms && project.policy.comms !== "ratking") return null;
+  if (row.role !== "desk" || row.side || row.state === "closed" || row.state === "failed") return null;
+  if (OWNER_ALIASES.includes(project.slug)) return `Rat King role ${project.slug} not set: the slug is an owner's name`;
+  const roles = yield* mailboxRoles;
+  if (!roles) return null;
+  const target = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
+  const role = projectRoleLine(project.outcome);
+  const current = roles.find(entry => entry.name === project.slug);
+  if (current?.target === target && current.role === role) return null;
+  const env = yield* MusterEnv;
+  const proc = yield* Proc;
+  const result = yield* proc.run("sh", [join(env.home, ".config/muster/fleet-mailbox.sh"), "role", "set", project.slug, "--target", target, "--role", role], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
+  if (result._tag === "Failure") return `Rat King role ${project.slug} not set: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
+  if (result.success.code === 0) return `Rat King role ${project.slug} now reaches ${target}`;
+  return `Rat King role ${project.slug} not set (exit ${result.success.code}: ${cliErrorLine(`${result.success.stderr}\n${result.success.stdout}`) ?? "no output"})`;
+});
+
 /**
  * After close, retire the row's Rat King name so mail to it fails `Retired` instead of piling up unread (Nicodemus,
  * 2026-10-11). Only after close: a live reader re-acquiring its lease clears the mark, as does a later restore under
@@ -3557,6 +3618,8 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   const env = yield* MusterEnv;
   if (project.policy?.comms && project.policy.comms !== "ratking") return null;
   const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
+  // Joel, 2026-10-30 ("fix", projects not rows): once the project is a role name, mail to a closed row forwards to it.
+  const role = verb === "retire" && name !== project.slug && (yield* mailboxRoles)?.some(entry => entry.name === project.slug) ? project.slug : undefined;
   // Nicodemus, 2026-10-19: a plain Retired left senders guessing; name the owner desk so they are redirected to it.
   const owner = verb === "retire" ? ownerName(row.owner, {
     catalogs: [project, ...registeredCatalogs(env.home)], recorded: row.ownerName,
@@ -3565,15 +3628,17 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
     // recorded name got no successor.
     switchboards: subscribedSwitchboards(env.home),
   }) : undefined;
-  const successor = owner && owner !== name ? owner : null;
+  const successor = role ?? (owner && owner !== name ? owner : null);
   const done = verb === "retire" ? `retired: sends to it now fail Retired${successor ? `, naming ${successor}` : ""}` : "unretired: it takes mail again";
   const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
   if (!existsSync(shim)) return `Rat King name ${name} not ${verb}d: no ${shim}`;
   const proc = yield* Proc;
   const run = (args: readonly string[]) => proc.run("sh", [shim, verb, "--name", name, ...args], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
   let result = yield* run(successor ? ["--successor", successor] : []);
+  // A live reader still holds the name: no retry retires it, so report the refusal below.
+  const leaseLive = result._tag === "Success" && /LeaseLive/.test(`${result.success.stderr}\n${result.success.stdout}`);
   // A refused successor must not cost the retire: retry without one and say so, rather than point mail at a bad name.
-  if (successor && (result._tag === "Failure" || result.success.code !== 0)) {
+  if (successor && !leaseLive && (result._tag === "Failure" || result.success.code !== 0)) {
     const plain = yield* run([]);
     if (plain._tag === "Success" && plain.success.code === 0) return `Rat King name ${name} retired without a successor (--successor ${successor} refused): sends to it now fail Retired`;
     result = plain;
