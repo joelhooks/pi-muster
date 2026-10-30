@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createEventBus } from "@earendil-works/pi-coding-agent";
@@ -11,8 +11,8 @@ import { RATKING_MESSAGE, RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, owner
 import { decodePolicy, type AgentRow, type Project } from "./domain.ts";
 import muster from "./extension-main.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen } from "./ops.ts";
-import { ownerFeed } from "./owner-feed.ts";
-import { appendOwnerItem, deliverOwnerItem, ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
+import { deliverOwnerItem, ownerItem } from "./owner-queue.ts";
+import type { OwnerItem } from "./domain.ts";
 import { load } from "./store.ts";
 import { harness, runWith } from "./test-support.ts";
 
@@ -117,12 +117,11 @@ describe("transport", () => {
   });
 
   it("an owner reply answers the ratking message that carried the parent post", async () => {
-    const home = mkdtempSync(join(tmpdir(), "ratking-reply-"));
-    const parent = appendOwnerItem("owner-session", { author: "worker-session", kind: "question", title: "which way?" }, home);
+    const parent = ownerItem("owner-session", { author: "worker-session", kind: "question", title: "which way?" });
     expect(ratkingInbound({ id: "rk-1", from: "pilot/worker", verified: true, body: JSON.stringify({ type: "owner", recipient: "owner-session", item: parent }) }, { owner() {}, message() {} })).toBe("owner");
     const fake = fakeRatking(() => ({ status: "delivered", id: "rk-2", seq: 2 }));
     const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => ({ name: "pilot/desk", session: "owner-session" }) });
-    const reply = appendOwnerItem("worker-session", { author: "owner-session", kind: "fyi", title: "left", replyTo: parent.uri }, home, false);
+    const reply = ownerItem("worker-session", { author: "owner-session", kind: "fyi", title: "left", replyTo: parent.uri });
     expect(await Effect.runPromise(comms.postOwner!("worker-session", reply))).toMatchObject({ status: "delivered" });
     expect(fake.requests[0]).toMatchObject({ replyTo: "rk-1", kind: "message" });
     expect(fake.requests[0]).not.toHaveProperty("quiet"); // an owner reply wakes the asker
@@ -138,9 +137,9 @@ describe("transport", () => {
     expect(ok).toMatchObject({ path: "ratking", lost: false, delivery: { status: "delivered" } });
     expect(fake.requests[0]).toMatchObject({ to: "titan", kind: "message", quiet: true, summary: "done ghost · shipped" });
     const lost = await Effect.runPromise(deliverOwnerItem({ owner: "ghost-session", home, session: "worker-session", project: "pilot", item: { author: "worker-session", kind: "done", title: "shipped" }, comms, send }));
-    // A failed send is parked in the owner's local queue, never thrown away.
-    expect(lost).toMatchObject({ path: "ratking", lost: false, stored: "local-queue", failureCode: "UnknownName", delivery: { status: "failed" } });
-    expect(readOwnerQueue("ghost-session", home).items.map(record => record.item.uri)).toEqual([lost.uri]);
+    // Slice 5: a failed send is lost and says so; nothing is parked locally.
+    expect(lost).toMatchObject({ path: "ratking", lost: true, queued: false, failureCode: "UnknownName", delivery: { status: "failed" } });
+    expect(lost).not.toHaveProperty("stored");
     expect(send).not.toHaveBeenCalled();
     const receipts = readFileSync(networkReceiptPath(home), "utf8").trim().split("\n").map(line => JSON.parse(line));
     expect(receipts.map(receipt => receipt.path)).toEqual(["ratking", "ratking"]);
@@ -186,42 +185,30 @@ describe("owner mail shadow", () => {
   });
 
   it("a threaded action reply keeps replyTo and wakes", async () => {
-    const home = mkdtempSync(join(tmpdir(), "owner-mail-reply-"));
     const fake = fakeRatking(() => ({ status: "delivered", id: "reply-id", seq: 1 }));
     const comms = RatkingComms({ events: fake.events, createId, sender: () => "worker-session", target: to => ({ name: to === "worker-session" ? "pilot/worker" : "pilot/desk", session: String(to) }) });
-    const parent = appendOwnerItem("owner-session", { author: "worker-session", kind: "fyi", title: "Quiet" }, home);
+    const parent = ownerItem("owner-session", { author: "worker-session", kind: "fyi", title: "Quiet" });
     ratkingInbound({ verified: true, id: "parent-mail", body: JSON.stringify({ type: "owner", recipient: "owner-session", item: parent }) }, { owner() {}, message() {} });
-    ingestOwnerItem("worker-session", parent, home);
-    const reply = appendOwnerItem("worker-session", { author: "worker-session", kind: "action", title: "Act", replyTo: parent.uri }, home, false);
+    const reply = ownerItem("worker-session", { author: "worker-session", kind: "action", title: "Act", replyTo: parent.uri });
     await Effect.runPromise(comms.postOwner!("owner-session", reply));
     expect(fake.requests[0]).toMatchObject({ kind: "message", replyTo: "parent-mail", summary: "action pilot/worker · Act" });
     expect(fake.requests[0]).not.toHaveProperty("to");
     expect(fake.requests[0]).not.toHaveProperty("quiet");
   });
 
-  it("reconstructs exactly one queue record by mail id, leaves inbox readable and never renders or wakes", async () => {
+  it("reconstructs an owner post from plain mail by its mail id, and never wakes or follows up", async () => {
     const home = mkdtempSync(join(tmpdir(), "owner-mail-inbound-"));
     const project = catalog("pilot", [row({ name: "worker", sessionId: "worker-session" })]);
-    const wake = vi.fn();
-    const feed = ownerFeed({ session: "owner-session", home, appendEntry() {}, sendMessage: wake });
+    const seen: OwnerItem[] = [];
     const followUp = vi.fn();
-    const handle = { catalogs: () => [catalog("owner-project", [row({ name: "desk", sessionId: "owner-session" })]), project], owner: (item: Parameters<typeof ingestOwnerItem>[1]) => { ingestOwnerItem("owner-session", item, home); }, message: followUp };
+    const handle = { catalogs: () => [catalog("owner-project", [row({ name: "desk", sessionId: "owner-session" })]), project], owner: (item: OwnerItem) => { seen.push(item); }, message: followUp };
     const mail = { id: "shadow-mail-id", verified: true, from: "pilot/worker", kind: "message", summary: "action pilot/worker · Review", body: "Evidence\n\nlane work · refs commit:123 report.md" };
     expect(ratkingInbound(mail, handle)).toBe("owner");
-    expect(ratkingInbound(mail, handle)).toBe("owner");
-    const records = readOwnerQueue("owner-session", home);
-    expect(records.cursor).toBe(1);
-    expect(records.items[0]!.item).toMatchObject({ uri: mail.id, author: "worker-session", kind: "action", text: "action pilot/worker · Review\nEvidence", lane: "work", refs: ["commit:123", "report.md"], project: "pilot", renderedBy: "ratking" });
-    expect(feed.inbox().items).toHaveLength(1);
-    expect(feed.flush()).toBe(0);
-    expect(await feed.poll(() => true)).toBe(0);
-    expect(feed.beforeTurn()).toBeUndefined();
-    expect(wake).not.toHaveBeenCalled();
+    expect(seen[0]).toMatchObject({ uri: mail.id, author: "worker-session", kind: "action", text: "action pilot/worker · Review\nEvidence", lane: "work", refs: ["commit:123", "report.md"], project: "pilot", renderedBy: "ratking" });
     expect(followUp).not.toHaveBeenCalled();
-    feed.dispose();
 
     // owner_reply's unchanged route: parent.author is the row session, and the remembered URI threads mail.
-    const parent = records.items[0]!.item;
+    const parent = seen[0]!;
     const fake = fakeRatking(() => ({ status: "delivered", id: "owner-answer", seq: 2, to: "pilot/worker" }));
     const comms = RatkingComms({ events: fake.events, createId, sender: () => "owner-session", target: () => ({ name: "pilot/desk", session: "owner-session" }) });
     const answer = await Effect.runPromise(deliverOwnerItem({ owner: parent.author, home, session: "owner-session", project: "pilot", comms,
@@ -232,14 +219,10 @@ describe("owner mail shadow", () => {
     expect(fake.requests[0]).not.toHaveProperty("quiet");
     expect(fake.requests[0]).not.toHaveProperty("to");
 
-    // A mixed-version body has no marker: the existing feed must still render it.
-    const legacy = appendOwnerItem("owner-session", { author: "worker-session", kind: "action", title: "Old post", mention: "owner-session" }, home, false);
+    // A mixed-version body still decodes as an owner payload.
+    const legacy = ownerItem("owner-session", { author: "worker-session", kind: "action", title: "Old post", mention: "owner-session" });
     expect(ratkingInbound({ id: "old-mail-id", verified: true, body: JSON.stringify({ type: "owner", recipient: "owner-session", item: legacy }) }, handle)).toBe("owner");
-    const oldFeed = ownerFeed({ session: "owner-session", home, appendEntry() {}, sendMessage: wake });
-    expect(oldFeed.flush()).toBe(1);
-    expect(wake).toHaveBeenCalledOnce();
-    expect(wake.mock.calls[0]![0].content).toContain("Old post");
-    oldFeed.dispose();
+    expect(seen.at(-1)?.uri).toBe(legacy.uri);
   });
 
   it("ignores foreign, unverified, malformed and falsely operator-attributed plain mail", () => {
@@ -257,7 +240,7 @@ describe("owner mail shadow", () => {
 });
 
 describe("inbound", () => {
-  it("an inbound ratking owner payload lands in this session's owner queue; foreign and unverified bodies are left to pi-ratking", async () => {
+  it("an inbound ratking owner payload is claimed, never followed up; foreign and unverified bodies are left to pi-ratking", async () => {
     const home = mkdtempSync(join(tmpdir(), "ratking-inbound-"));
     process.env.HOME = home;
     const events = createEventBus();
@@ -275,12 +258,12 @@ describe("inbound", () => {
     const ctx = { cwd: home, isIdle: () => false, hasUI: false, sessionManager: { getSessionId: () => "owner-session", getBranch: () => [], getEntries: () => [], getHeader: () => null }, ui: { setStatus() {}, setWidget() {} } };
     for (const hook of hooks.get("session_start") ?? []) await hook({}, ctx);
     try {
-      const item = appendOwnerItem("owner-session", { author: "worker-session", kind: "done", title: "landed over ratking" }, home, false);
+      const item = ownerItem("owner-session", { author: "worker-session", kind: "done", title: "landed over ratking" });
       events.emit(RATKING_MESSAGE, { id: "m1", from: "pilot/worker", did: "did:web:x", verified: true, body: JSON.stringify({ type: "owner", recipient: "owner-session", item }), kind: "data" });
       events.emit(RATKING_MESSAGE, { id: "m2", from: "pilot/worker", did: "did:web:x", verified: false, body: JSON.stringify({ type: "owner", recipient: "owner-session", item: { ...item, uri: `${item.uri}x` } }) });
       events.emit(RATKING_MESSAGE, { id: "m3", from: "joel", did: "did:web:y", verified: true, body: "plain words" });
       events.emit(RATKING_MESSAGE, { id: "m4", from: "pilot/desk", did: "did:web:z", verified: true, body: JSON.stringify({ type: "message", recipient: "owner-session", author: "desk-session", body: "Do the brief." }) });
-      expect(readOwnerQueue("owner-session", home).items.map(record => record.item.uri)).toEqual([item.uri]);
+      expect(existsSync(join(home, ".local/state/muster/owner-queue"))).toBe(false);
       expect(followUps).toEqual(["Do the brief.\n\n[Authenticated agent message from desk-session, not Joel.]"]);
     } finally {
       for (const hook of hooks.get("session_shutdown") ?? []) await hook({}, ctx);

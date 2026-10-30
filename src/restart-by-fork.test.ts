@@ -7,8 +7,6 @@ import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetRe
 import { load, mutate, projectPath } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
-import { appendOwnerItem, ingestOwnerItem } from "./owner-queue.ts";
-import { ownerFeed } from "./owner-feed.ts";
 import muster, { CARRIED_HEADER, registerRestartExit } from "./extension-main.ts";
 import * as ops from "./ops.ts";
 import { InputError } from "./errors.ts";
@@ -567,7 +565,7 @@ describe("restart by fork", () => {
     expect(s.host.panes.has(s.launch.row.pane!.paneId)).toBe(true);
   });
 
-  it("a replacement desk verifies a pending packet and gets a worker reply once without taking boss-owned workers", async () => {
+  it("a replacement desk verifies a pending packet without taking boss-owned workers", async () => {
     const s = await setup(false, "desk");
     const old = s.launch.row;
     s.h.sessionId = old.sessionId;
@@ -575,19 +573,10 @@ describe("restart by fork", () => {
     const artifact = join(s.h.root, "proof.txt"); writeFileSync(artifact, "evidence");
     const packet = await s.run(packetReport({ dir: s.dir, agent: "child", owner: old.sessionId, cwd: s.dir, artifact, summary: "pending", checks: [] }));
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...child.row, name: "boss-owned", sessionId: "boss-worker", owner: "live-boss", pane: null }] }, undefined] as const)));
-    const reply = appendOwnerItem(old.sessionId, { author: child.row.sessionId, project: "probe", kind: "question", title: "worker reply" }, s.h.home);
     const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
     s.h.sessionId = result.row.sessionId;
     expect((await s.run(packetVerify(s.dir, packet.packet.id))).packet.state).toBe("verified");
     expect((await s.run(load(s.dir))).agents.find(r => r.name === "boss-owned")?.owner).toBe("live-boss");
-    expect(ingestOwnerItem(old.sessionId, reply, s.h.home, "probe")).toBe(false);
-    // Old queue history remains local; a new named message lands in the replacement's own queue.
-    ingestOwnerItem(result.row.sessionId, { ...reply, facets: [{ index: { byteStart: 0, byteEnd: 1 }, features: [{ $type: "dev.muster.note.facet#mention", did: result.row.sessionId }] }] }, s.h.home, "probe");
-    const send = vi.fn();
-    const feed = ownerFeed({ session: result.row.sessionId, home: s.h.home, appendEntry: () => {}, sendMessage: send });
-    expect(feed.flush()).toBeGreaterThanOrEqual(1); expect(feed.flush()).toBe(0);
-    expect(send.mock.calls.filter(([note]) => String(note.content).includes("worker reply"))).toHaveLength(1);
-    feed.dispose();
     await s.run(projectUpdate(s.dir, { policy: { wipLimit: 1 } }));
     const retro = await s.run(laneOpen(s.dir, { slug: "retro", label: "🔁 retro", goal: "Fresh retro at full work WIP", kind: "retro" }));
     expect(retro.lane.kind).toBe("retro");

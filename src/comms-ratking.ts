@@ -219,7 +219,7 @@ export const withSendRetry = (attempt: () => Effect.Effect<CommsDelivery>, delay
   return { ...delivery, detail: `${delivery.detail}; tried ${delaysMs.length + 1} times, so send it again with the same call` };
 });
 
-/** Ratking message ids by the owner post they carried: owner_reply answers the message, not a guessed name. */
+/** Ratking message ids by the owner post they carried: a threaded owner_note answers the message, not a guessed name. */
 const repliesByUri = new Map<string, string>();
 export const rememberRatkingMessage = (uri: string, id: string) => {
   repliesByUri.set(uri, id);

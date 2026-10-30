@@ -86,7 +86,7 @@ Read [done means live and proven](references/done.md) when finishing delivery. M
 - When Joel delegates an operation, record its scope in the handoff. Within it, the desk rules on execution choices. A new class of risk goes to Joel: customer sends beyond approval, broader production code, durability changes, deletion.
 - When Joel stops the line, use [stop the line](references/stop-the-line.md). Keep a hawk only for a named monitoring risk, recorded on the lane or in the launch. Only Joel resumes.
 - A desk holding several decisions for Joel publishes one [desk report](references/desk-report.md), not a chat digest.
-- Use plain sentences with spaces between words; put code, paths and ids in backticks. Quiet progress belongs in the owner queue; one packet report is the finish report.
+- Use plain sentences with spaces between words; put code, paths and ids in backticks. Quiet progress goes through `owner_note`; one packet report is the finish report.
 - Coordinate interfaces, shared files and ordering directly across lanes. Never write in another lane's scope. Record shared decisions once in the project's Brain; disagreements go to the desk.
 - Ask another project's desk for what it owns. Include sender and receiver, one concrete ask, receipt paths, and what you ruled out. The receiving desk acknowledges and returns the shipped result or a reason to decline.
 - Touch another project's pane only when its session asks, and only for what it asked. Never hand-edit another project's catalog.

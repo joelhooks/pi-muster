@@ -39,7 +39,7 @@ Create `~/.config/muster/machines.json` on the owner machine. Missing configurat
 
 Remote rows ride Rat King by name, like local ones. Under the legacy intercom policy, notes and packets reach the Flagg owner by SSH pull instead. Muster does not install a bridge.
 
-Remote `launch`, `fork`, and `restore` jobs run in the same locally detached process as local launches. The immediate receipt names the job and local log. Read the full owner-queue action for launch proof. Pi turn records wake the current owner on done, blocked and crashed; no worker pane watch is needed. Configuration errors fail admission immediately; transport and prerequisite failures arrive as a `blocked` owner item with the machine name. The forward's control master expires after ten idle minutes; live held sockets use the same forward. A machine-wide launch lock serializes capacity checks across projects. If a crashed launch leaves a lock, the error names its path; inspect it before clearing it.
+Remote `launch`, `fork`, and `restore` jobs run in the same locally detached process as local launches. The immediate receipt names the job and local log. Read the launch result mail for launch proof. Pi turn records wake the current owner on done, blocked and crashed; no worker pane watch is needed. Configuration errors fail admission immediately; transport and prerequisite failures arrive as a `blocked` launch result with the machine name. The forward's control master expires after ten idle minutes; live held sockets use the same forward. A machine-wide launch lock serializes capacity checks across projects. If a crashed launch leaves a lock, the error names its path; inspect it before clearing it.
 
 ## Launch and recover
 
@@ -62,9 +62,9 @@ Use the real lane slug and brief. Fork and restore reuse the source row's machin
 
 A remote `packet_report` writes its report and an atomic `packet.json` sidecar under the clone's `.pi/muster/packets/<id>/`. It does not touch a project catalog. Owner `project_status` ingests sidecars, and `packet_verify` also ingests before looking up an unknown id. Repeating ingestion does not reset a verified or landed packet. Non-ancestor follow-ups still need an outcome on the earlier packet.
 
-Remote `owner_note`, worker `owner_reply` and packet notices also publish atomic sidecars under `.pi/muster/notes/`. Each holds the full owner-queue post, its CID, recipient and project/machine/row/lane identity. If intercom cannot deliver, the result says queued for the Flagg owner to pull, not delivered. Delivery latency is one owner status pass.
+Remote `owner_note` and packet notices go over Rat King like local ones, with retries, then fail loudly. They write no sidecar. Note sidecars an older worker left under `.pi/muster/notes/` are ignored, and never block a close.
 
-The same ingestion pass reads packets and notes in one bounded SSH call per row. It appends notes once by CID, preserves existing queue rows and rejects identity mismatches. Question, blocked and action posts retain their mention facets, so the existing owner feed wakes the owner just as it does for local posts. Quiet progress stays quiet. Repeated pulls do not wake the owner again.
+The ingestion pass reads packets in one bounded SSH call per row.
 
 Ingestion failures appear as board notes instead of failing the owner pass. A bad sidecar is skipped independently. After a machine transport failure, the pass skips its remaining rows and preserves their state. Verifying a packet already in the local catalog does not run ingestion; verifying a local worker packet never contacts SSH.
 

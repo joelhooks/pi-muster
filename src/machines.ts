@@ -17,12 +17,6 @@ export const heavyJobMachine = setup({ types: { events: {} as { type: "FINISH" |
   states: { running: { on: { FINISH: "finished", LOSE: "lost" } }, finished: { type: "final" }, lost: { type: "final" } },
 });
 
-/** Owner feeds hold arrivals while a turn runs; polls never wake silent items. */
-export const ownerFeedMachine = setup({ types: { events: {} as { type: "START" | "END" } } }).createMachine({
-  initial: "idle",
-  states: { idle: { on: { START: "busy" } }, busy: { on: { END: "idle" } } },
-});
-
 /** Desk phone outbox: persist intent before send, feedback before resolution, and update receipts last. */
 export const deskPhoneMachine = setup({ types: { events: {} as { type: "SENT" | "ANSWER" | "RESOLVE" | "UPDATE" } } }).createMachine({
   initial: "sending",

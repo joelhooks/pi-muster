@@ -1,14 +1,15 @@
 import { RatkingComms, RATKING_SEND, RATKING_SEND_RESULT, ratkingInbound } from "./comms-ratking.ts";
 import { commsAddress } from "./comms.ts";
-import { decodeNetworkPayload, type Project } from "./domain.ts";
+import { decodeNetworkPayload, type OwnerItem, type Project } from "./domain.ts";
 import { registeredCatalogs } from "./comms-ratking.ts";
-import { ingestOwnerItem } from "./owner-queue.ts";
 
 /** pi-ratking event fake shared by orchestration tests. The wire stays identical to deployed Muster. */
 export function fakeRatking(home: string, sender: () => string, sent: Array<{ to: string; message: string }>, catalogs: () => readonly Project[] = () => registeredCatalogs(home)) {
   const listeners = new Map<string, Set<(value: unknown) => void>>();
   let id = 0;
   const requests: Array<{ requestId: string; to?: string; replyTo?: string; body: string; kind?: string; summary?: string }> = [];
+  /** Owner posts as the recipient's pi-ratking would show them. */
+  const received: Array<{ to: string; item: OwnerItem }> = [];
   const events = {
     on(event: string, listener: (value: unknown) => void) { const group = listeners.get(event) ?? new Set(); group.add(listener); listeners.set(event, group); return () => { group.delete(listener); }; },
     emit(event: string, value: unknown) {
@@ -26,13 +27,13 @@ export function fakeRatking(home: string, sender: () => string, sent: Array<{ to
         sent.push({ to, message: request.body });
         ratkingInbound({ ...request, id: messageId, verified: true, from: target(sender()).name }, {
           catalogs,
-          owner: item => { try { ingestOwnerItem(to, item, home); } catch { /* delivery and local projection are separate */ } }, message() {},
+          owner: item => { received.push({ to, item }); }, message() {},
         });
       } else {
         const payload = decodeNetworkPayload(JSON.parse(request.body));
         const to = payload.recipient;
         sent.push({ to, message: payload.type === "message" ? payload.body : payload.item.text });
-        if (payload.type === "owner") { try { ingestOwnerItem(to, payload.item, home); } catch { /* delivery and local projection are separate */ } }
+        if (payload.type === "owner") received.push({ to, item: payload.item });
       }
       events.emit(RATKING_SEND_RESULT, { requestId: request.requestId, status: "delivered", id: messageId, to: request.to });
     },
@@ -53,5 +54,5 @@ export function fakeRatking(home: string, sender: () => string, sent: Array<{ to
     return { name: `${address.project}/${address.row}`, session: row.sessionId };
   };
   const service = RatkingComms({ events, createId: () => String(++id), sender, target });
-  return { service, events, requests };
+  return { service, events, requests, received };
 }

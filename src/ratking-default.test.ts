@@ -3,15 +3,14 @@ import { join } from "node:path";
 import { createEventBus, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Effect, Layer } from "effect";
 import { Comms } from "./runtime.ts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createComms, selectComms } from "./comms.ts";
 import { RATKING_SEND, RATKING_SEND_RESULT, RatkingComms, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, subscribedSwitchboards } from "./comms-ratking.ts";
 import { decodeProject, roleDefaults } from "./domain.ts";
 import muster from "./extension-main.ts";
 const OUTBOX_REQUEST_EVENT = "intercom:outbox:request";
-import { ownerFeed } from "./owner-feed.ts";
-import { ingestOwnerItem, readOwnerQueue } from "./owner-queue.ts";
-import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate, pullRemoteOwnerInbox } from "./ops.ts";
+import type { OwnerItem } from "./domain.ts";
+import { agentLaunchForeground as agentLaunch, laneOpen, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { deskPost } from "./ops.ts";
 import { registerSwitchboardSession } from "./switchboard-ops.ts";
@@ -64,9 +63,8 @@ describe("ratking is the default", { timeout: 30_000 }, () => {
     writeRaw(dir, { ...raw(dir), policy: { comms: "carrier-pigeon" } });
     expect(decodeProject(raw(dir)).policy?.comms).toBe("carrier-pigeon");
     expect(selectComms(undefined, (await runWith(h, load(dir))).policy)).toBe("ratking");
-    // Routing still finds the project's rows, and the owner inbox pull reads the file.
+    // Routing still finds the project's rows.
     expect(registeredCatalogs(h.home, dir).map(project => project.slug)).toEqual(["pilot"]);
-    expect(await runWith(h, pullRemoteOwnerInbox(dir))).toEqual([]);
     const service = createComms({});
     expect(await Effect.runPromise(service.mode!())).toBe("ratking");
     const updated = await runWith(h, projectUpdate(dir, { policy: { nudgeAfterMin: 20 } }));
@@ -149,29 +147,27 @@ describe("no pi-intercom", { timeout: 30_000 }, () => {
     expect(fake.requests.at(-1)).toMatchObject({ to: "titan", kind: "message", summary: "question pilot/worker · which way?" });
     const uri = "rk-1";
     // The rowless owner's reader resolves the worker across its registered catalogs.
+    const seen: OwnerItem[] = [];
     ratkingInbound({ ...fake.requests[0], id: uri, verified: true, from: "pilot/worker" }, {
-      catalogs: () => [project], owner: item => { ingestOwnerItem(h.sessionId, item, h.home); }, message() {},
+      catalogs: () => [project], owner: item => { seen.push(item); }, message() {},
     });
-    expect(readOwnerQueue(h.sessionId, h.home).items).toHaveLength(1);
-    expect(readOwnerQueue(h.sessionId, h.home).items[0]!.item).toMatchObject({ uri, author: worker.sessionId, renderedBy: "ratking" });
-    const wake = vi.fn();
-    const feed = ownerFeed({ session: h.sessionId, home: h.home, appendEntry() {}, sendMessage: wake });
-    expect(feed.flush()).toBe(0); expect(feed.beforeTurn()).toBeUndefined();
-    expect(wake).not.toHaveBeenCalled(); feed.dispose();
+    expect(seen).toMatchObject([{ uri, author: worker.sessionId, renderedBy: "ratking" }]);
 
     // Without pi-ratking the same note fails at once, never over intercom.
     const lost = await piWith([]).get("owner_note")!.execute("id", { kind: "fyi", title: "lost" }, undefined, undefined, ctx(worker.sessionId));
-    expect(lost).not.toHaveProperty("isError");
-    expect(text(lost)).toContain("queued: Rat King send failed (pi-ratking not loaded in this Pi); saved for the owner's next pass");
+    expect(lost).toMatchObject({ isError: true });
+    expect(text(lost)).toContain("NOT DELIVERED: no fallback");
 
-    // The owner: owner_reply, desk_send and the Switchboard nudge from desk_post.
+    // The owner: owner_reply is a retired stub (pi-ratking's reply answers mail now), then desk_send and the Switchboard
+    // nudge from desk_post.
     for (const key of ["MUSTER_ROLE", "MUSTER_AGENT", "MUSTER_LANE", "MUSTER_OWNER", "MUSTER_OWNER_NAME"]) delete process.env[key];
     process.env.MUSTER_ROLE = "boss"; process.env.RATKING_NAME = "titan";
     const owner = piWith(piRatking);
+    const before = fake.requests.length;
     const reply = await owner.get("owner_reply")!.execute("id", { uri, text: "left" }, undefined, undefined, ctx(h.sessionId));
-    expect(reply).not.toHaveProperty("isError");
-    expect(fake.requests.at(-1)).toMatchObject({ replyTo: uri, kind: "message" });
-    expect(fake.requests.at(-1)).not.toHaveProperty("quiet");
+    expect(reply).toMatchObject({ isError: true });
+    expect(text(reply)).toContain("OwnerReplyRetired");
+    expect(fake.requests).toHaveLength(before);
     const desk = await owner.get("desk_send")!.execute("id", { to: "pilot/desk", text: "hello desk" }, undefined, undefined, ctx(h.sessionId));
     expect(text(desk)).toContain("delivery: ratking · delivered");
     expect(fake.requests.at(-1)).toMatchObject({ to: "pilot/desk", kind: "data" });
@@ -222,10 +218,10 @@ describe("rowless owners", { timeout: 30_000 }, () => {
     expect(rows.filter(row => row.owner === h.sessionId).map(row => [row.name, row.ownerName])).toEqual([["worker", "remote1-owner"], ["other", "remote1-owner"]]);
     expect(rows.filter(row => row.owner !== h.sessionId).every(row => row.ownerName === undefined)).toBe(true);
     expect(workerTarget()).toEqual({ name: "remote1-owner", session: h.sessionId });
-    // owner_inbox's pull backfills too.
+    // The next owner pass backfills again.
     await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: project.agents.map(({ ownerName: _, ...row }) => row) }, undefined] as const)));
     expect(workerTarget).toThrow("no Rat King name");
-    await runWith(h, pullRemoteOwnerInbox(dir));
+    await runWith(h, projectStatus(dir));
     expect(workerTarget()).toEqual({ name: "remote1-owner", session: h.sessionId });
   });
 

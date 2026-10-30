@@ -6,8 +6,8 @@ import { describe, expect, it, vi } from "vitest";
 // Dev Pi predates Theme.colors; this public theme loader resolves the same built-in palettes.
 import { getThemeByName, getResolvedThemeColors } from "../node_modules/@earendil-works/pi-coding-agent/dist/modes/interactive/theme/theme.js";
 import { checkTui } from "./tui-check.ts";
-import { OwnerTimelineView, ownerLine, ownerToolResult } from "./owner-view.ts";
-import type { OwnerTimelineData } from "./owner-view.ts";
+import { ownerLine, ownerToolResult } from "./owner-view.ts";
+import type { OwnerItem } from "./domain.ts";
 import { SwitchboardOverlay, SwitchboardState, renderOverlay, renderRankedSummary, renderWidget } from "./switchboard-view.ts";
 import { inbox } from "./switchboard.ts";
 import { registerDeskFeed } from "./desk-feed-ext.ts";
@@ -15,17 +15,13 @@ import { digestLine } from "./digest.ts";
 
 const now = Date.parse("2026-01-01T12:00:00Z");
 const title = "Review the 中文 preview 🐑 combining e\u0301 and a long synthetic explanation ".repeat(3);
-const question: OwnerTimelineData["items"][number] = {
+const question: OwnerItem = {
   $type: "dev.muster.note.post", uri: "fixture:post-one", cid: "fixture-cid", author: "fixture-writer",
   createdAt: "2026-01-01T11:58:00Z", kind: "question", text: title + "\nSecond line checks wrapping.",
   refs: ["synthetic-reference-".repeat(8)],
   facets: [{ index: { byteStart: 0, byteEnd: 6 }, features: [{ $type: "dev.muster.note.facet#mention", did: "fixture-reader" }] }],
 };
-const data: OwnerTimelineData = {
-  reader: "fixture-reader", authors: { "fixture-writer": "Example Writer 中文 🐑" }, parents: [question],
-  flow: "WIP 1/3 · synthetic preview ".repeat(5),
-  items: [question, { ...question, uri: "fixture:quiet", kind: "fyi", facets: [], reply: { root: { uri: question.uri, cid: question.cid }, parent: { uri: question.uri, cid: question.cid } } }],
-};
+const flow = "WIP 1/3 · synthetic preview ".repeat(5);
 function board() {
   const state = new SwitchboardState();
   state.now = now;
@@ -71,7 +67,7 @@ describe.each(["dark", "light"])("Muster TUI %s theme", themeName => {
     try {
       const state = board();
       const desk = renderDesk({ role: "custom", timestamp: now, customType: "fixture", content: "synthetic", display: true, details: {
-        project: "demo", flow: data.flow, pull: title,
+        project: "demo", flow, pull: title,
         items: [{ id: "ask", kind: "decision", title, body: title, refs: [title], from: "fixture", ts: question.createdAt }],
         inbox: { open: 1, blocked: 0, approval: 0, decision: 1, oldestMs: 900000 },
       } }, { expanded: true }, theme);
@@ -80,10 +76,6 @@ describe.each(["dark", "light"])("Muster TUI %s theme", themeName => {
       const parts = { prs: part, kodiak: part, main: part, gates: part, agents: part, packets: part };
       // Digest is plain text; its extension has no custom terminal renderer. Desk report builds HTML, not TUI.
       const surfaces = {
-        // Exact synthetic owner story from pi-tui-verify/stories/owned.ts:56-67.
-        ownerOriginal: new OwnerTimelineView({ reader: "fixture-reader", authors: { "fixture-writer": "Example Writer" }, parents: [], flow: "WIP 1/3 · synthetic preview", items: [{ ...question, text: "Review the 中文 preview 🐑", refs: undefined }] }, { expanded: true, now, noColor: false }, theme).render(width),
-        ownerExpanded: new OwnerTimelineView(data, { expanded: true, now, noColor: false }, theme).render(width),
-        ownerCollapsed: new OwnerTimelineView(data, { expanded: false, now, noColor: false }, theme).render(width),
         ownerLine: ownerLine(title, theme).render(width),
         ownerToolExpanded: ownerToolResult(title, true, theme).render(width),
         ownerToolCollapsed: ownerToolResult(title, false, theme).render(width),
@@ -110,7 +102,6 @@ describe.each(["dark", "light"])("Muster TUI %s theme", themeName => {
     expect(plain).toContain("▶ decision ask-39");
     expect(plain).not.toMatch(/[╭╮╰╯│]/);
     for (const hint of ["j/k move", "f fold", "c all", "o desk", "e discuss", "a answer", "d done", "q quit"]) expect(plain).toContain(hint);
-    expect(new OwnerTimelineView(data, { expanded: true, now, noColor: false }, theme).render(width).map(stripVTControlCharacters).join("\n")).toContain("2m ago");
   });
   it.each([6, 8, 12, 20])("selection and hints remain visible in %i rows", height => {
     const lines = renderOverlay(board(), 60, height, theme);

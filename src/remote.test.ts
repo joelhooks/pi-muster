@@ -11,16 +11,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
 import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource, herdrSocketFor } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
-import { projectUpdate, agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, runLaunchJob, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, pullRemoteOwnerInbox, sessionChain } from "./ops.ts";
+import { projectUpdate, agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, runLaunchJob, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, sessionChain } from "./ops.ts";
 import { FakeHerdr, forkHarness, harness, makeRepo, sh, type Harness } from "./test-support.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { ProcError } from "./errors.ts";
 import { agentRewind } from "./rewind.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { appendOwnerItem, deliverOwnerItem, ownerPath, readOwnerQueue, wakeKind } from "./owner-queue.ts";
+import { deliverOwnerItem, ownerItem } from "./owner-queue.ts";
 import { fakeRatking } from "./ratking-fake.ts";
-import { ownerFeed } from "./owner-feed.ts";
-import { registerOwnerFeed } from "./owner-feed-ext.ts";
 
 const config = (patch: Partial<MachineConfig> = {}): MachineConfig => decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: "/remote/worker-worktree.sh", env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off" }, wrap: [], ...patch } }).remote!;
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); });
@@ -516,31 +514,6 @@ describe("remote launch hygiene", () => {
 });
 
 describe("remote owner operations", () => {
-  it.each([false, true])("owner_inbox pulls before reading and tolerates an offline host (%s)", async offline => {
-    const { s, launched } = await launchedFork();
-    const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: "work", kind: "progress", title: "Remote-only note" }, join(s.h.root, "remote-home"));
-    const root = join(sidecarRoots(launched.row.cwd)[0]!, "notes"); mkdirSync(root, { recursive: true });
-    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: launched.row.name, lane: "work", owner: launched.row.owner, item }));
-    appendOwnerItem(launched.row.owner, { author: "local-worker", kind: "progress", title: "Local note" }, s.h.home);
-    if (offline) vi.spyOn(s.proc, "run").mockImplementation(() => Effect.fail(new ProcError({ command: "ssh", code: 255, stderr: "offline", message: "offline\nnow" })));
-    const tools = new Map<string, any>();
-    const stop = registerOwnerFeed({ on: vi.fn(), registerTool: (tool: any) => tools.set(tool.name, tool), registerMessageRenderer: vi.fn(), sendMessage: vi.fn(), appendEntry: vi.fn() } as never,
-      { HOME: s.h.home }, { pull: () => s.run(pullRemoteOwnerInbox(s.dir)) });
-    const result = await tools.get("owner_inbox").execute("id", {}, undefined, undefined, { sessionManager: { getSessionId: () => launched.row.owner, getBranch: () => [] } });
-    const text = result.content[0].text;
-    expect(text).toContain("Local note");
-    if (offline) expect(text).toContain("offline now");
-    else expect(text).toContain("Remote-only note");
-    if (!offline) expect(s.calls.filter(call => call.command === "ssh").at(-1)?.timeoutMs).toBe(5000);
-    stop();
-  });
-  it("does not pull another owner's rows", async () => {
-    const s = setup(); await s.open(); await s.launch();
-    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "different-owner" })) }, undefined] as const)));
-    s.calls.length = 0;
-    expect(await s.run(pullRemoteOwnerInbox(s.dir))).toEqual([]);
-    expect(s.calls.filter(call => call.command === "ssh")).toEqual([]);
-  });
   it("keeps gitfile checkout sidecars in its own git directory", () => {
     const s = setup(); const cwd = join(s.h.root, "linked");
     mkdirSync(cwd); mkdirSync(join(s.dir, ".git/worktrees"));
@@ -550,53 +523,34 @@ describe("remote owner operations", () => {
     mkdirSync(join(root, "notes"), { recursive: true }); writeFileSync(join(root, "notes/note.json"), "{}");
     expect(sh(cwd, "status", "--porcelain").trim()).toBe("");
   });
-  it.each(["question", "blocked", "action", "progress"] as const)("pushes a remote %s note through ratking and preserves local wake semantics", async kind => {
+  it.each(["question", "blocked", "action", "progress"] as const)("pushes a remote %s note through ratking, with no sidecar or local queue", async kind => {
     const { s, launched } = await launchedFork();
     vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
     const send = vi.fn(() => Effect.succeed({ status: "failed" as const, detail: "no reverse intercom" }));
     const fake = fakeRatking(s.h.home, () => "probe/remote-w", [], () => [decodeProject(JSON.parse(readFileSync(projectPath(s.dir), "utf8")))]);
     const posted = await s.run(deliverOwnerItem({ owner: launched.row.owner, home: join(s.h.root, "remote-home"), session: launched.row.sessionId, project: "probe", item: { author: launched.row.sessionId, lane: launched.row.lane, kind, title: "Need owner eyes", body: "Full note", refs: ["source"] }, comms: fake.service, send }));
-    expect(send).not.toHaveBeenCalled(); expect(posted.pendingPull).toBe(false);
+    expect(send).not.toHaveBeenCalled();
     expect(posted.delivery.status).toBe("delivered");
     expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
     {
       expect(fake.requests).toHaveLength(1);
       expect((fake.requests[0] as { quiet?: boolean }).quiet === true).toBe(kind === "progress");
       expect(fake.requests[0]).toMatchObject({ to: launched.row.owner, kind: "message", summary: `${kind} probe/remote-w · Need owner eyes` });
-      expect(readOwnerQueue(launched.row.owner, s.h.home).items[0]?.item).toMatchObject({ uri: posted.delivery.id, author: launched.row.sessionId, kind, renderedBy: "ratking" });
+      expect(fake.received[0]).toMatchObject({ to: launched.row.owner, item: { uri: posted.delivery.id, author: launched.row.sessionId, kind, renderedBy: "ratking" } });
     }
-    const before = readFileSync(ownerPath(launched.row.owner, s.h.home), "utf8");
-    await s.run(ingestRemotePackets(s.dir));
-    expect(readFileSync(ownerPath(launched.row.owner, s.h.home), "utf8")).toBe(before);
-    expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(1);
-    const wake = vi.fn();
-    const feed = ownerFeed({ session: launched.row.owner, home: s.h.home, appendEntry: vi.fn(), sendMessage: wake });
-    expect(feed.flush()).toBe(0); expect(wake).not.toHaveBeenCalled();
-    if (wakeKind(kind)) expect(feed.beforeTurn()).toBeUndefined();
-    expect(feed.flush()).toBe(0); feed.dispose();
-  });
-  it("uses the catalog owner when the sidecar names another owner", async () => {
-    const { s, launched } = await launchedFork();
-    const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: launched.row.lane, kind: "question", title: "Question" }, join(s.h.root, "remote-home"));
-    const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
-    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: launched.row.name, lane: launched.row.lane, owner: "another-owner", item }));
     expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
-    expect(readOwnerQueue(launched.row.owner, s.h.home).items.map(record => record.item)).toEqual([item]);
-    expect(readOwnerQueue("another-owner", s.h.home).items).toHaveLength(0);
+    expect(existsSync(join(s.h.home, ".local/state/muster/owner-queue"))).toBe(false);
   });
-  it.each(["project", "machine", "agent", "lane", "author"])("skips a note with mismatched %s and still pulls valid notes", async field => {
+  // Slice 5: the owner queue these fed is gone, so an older worker's note sidecar is left alone, valid or not.
+  it("ignores note sidecars an older worker left, without a board note or a local queue", async () => {
     const { s, launched } = await launchedFork();
-    const item = appendOwnerItem(launched.row.owner, { author: launched.row.sessionId, lane: launched.row.lane, kind: "question", title: "Question" }, join(s.h.root, "remote-home"));
+    const item = ownerItem(launched.row.owner, { author: launched.row.sessionId, lane: launched.row.lane, kind: "question", title: "Question" });
     const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
     const sidecar = { project: "probe", machine: "remote", agent: launched.row.name, lane: launched.row.lane, owner: launched.row.owner, item };
-    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify(field === "author" ? { ...sidecar, item: { ...item, author: "wrong-author" } } : { ...sidecar, [field]: "wrong" }));
-    writeFileSync(join(root, `${"b".repeat(64)}.json`), JSON.stringify(sidecar));
-    writeFileSync(join(root, `${"c".repeat(64)}.json`), "{broken");
-    writeFileSync(join(root, "unfinished.tmp"), "{broken");
-    const result = await s.run(ingestRemotePackets(s.dir));
-    expect(result.notes.join("\n")).toContain("invalid note sidecar identity");
-    expect(result.notes.join("\n")).toContain(`${"c".repeat(64)}.json`);
-    expect(readOwnerQueue(launched.row.owner, s.h.home).items.map(record => record.item)).toEqual([item]);
+    writeFileSync(join(root, `${"a".repeat(64)}.json`), JSON.stringify(sidecar));
+    writeFileSync(join(root, `${"b".repeat(64)}.json`), JSON.stringify({ ...sidecar, owner: "another-owner", agent: "wrong" }));
+    expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
+    expect(existsSync(join(s.h.home, ".local/state/muster/owner-queue"))).toBe(false);
   });
   ;
   it("launches, forks and restores on the row machine with wrapper, env and remote panes", async () => {
@@ -1128,16 +1082,15 @@ describe("remote owner operations", () => {
     const s = setup(); await s.open(); const launched = await s.launch();
     const sibling = { ...launched.row, name: "sibling", sessionId: "sibling-20261020T000000", state: "reported" as const, pane: null };
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, sibling] }, undefined] as const)));
-    const item = appendOwnerItem(sibling.owner, { author: sibling.sessionId, lane: sibling.lane, kind: "question", title: "From the sibling" }, join(s.h.root, "remote-home"));
+    const item = ownerItem(sibling.owner, { author: sibling.sessionId, lane: sibling.lane, kind: "question", title: "From the sibling" });
     const root = join(launched.row.cwd, ".pi/muster/notes"); mkdirSync(root, { recursive: true });
     writeFileSync(join(root, `${"d".repeat(64)}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: "sibling", lane: sibling.lane, owner: sibling.owner, item }));
     const result = await s.run(ingestRemotePackets(s.dir));
     expect(result.notes.join("\n")).not.toContain("invalid note sidecar identity");
-    expect(readOwnerQueue(sibling.owner, s.h.home).items.map(record => record.item)).toEqual([item]);
   });
   // rubicon-fitness, 2026-10-13: athlete-migration-sync-2 reused a closed row's worktree whose sidecar was never ingested; close refused.
   // codetv-workshop, 2026-10-13: a closed row in another lane ran in the source checkout, and every clone copied its sidecars.
-  it("notes and skips never-ingested packet and note sidecars left by a closed row in any lane", async () => {
+  it("notes and skips a never-ingested packet sidecar left by a closed row in any lane, and ignores its note sidecar", async () => {
     const { s, launched } = await launchedFork();
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents, { ...launched.row, name: "earlier-row", lane: "elsewhere", state: "closed" as const, pane: null }] }, undefined] as const)));
     const id = sh(launched.row.cwd, "rev-parse", "HEAD").trim();
@@ -1150,11 +1103,10 @@ describe("remote owner operations", () => {
     rmSync(root, { recursive: true });
     const noteId = "61829ad01878d31ffe835240707d15449cb03c3640264bd3a631b3954be8e1b2";
     mkdirSync(join(launched.row.cwd, ".pi/muster/notes"), { recursive: true });
-    const item = appendOwnerItem("old-owner", { author: "earlier-session", lane: "elsewhere", kind: "fyi", title: "old note" }, join(s.h.root, "remote-home"));
+    const item = ownerItem("old-owner", { author: "earlier-session", lane: "elsewhere", kind: "fyi", title: "old note" });
     writeFileSync(join(launched.row.cwd, ".pi/muster/notes", `${noteId}.json`), JSON.stringify({ project: "probe", machine: "remote", agent: "earlier-row", lane: "elsewhere", owner: "old-owner", item }));
     const notesResult = await s.run(ingestRemotePackets(s.dir));
-    expect(notesResult.notes.some(note => note.startsWith(`note sidecar ${noteId.slice(0, 12)} was left by closed row earlier-row`))).toBe(true);
-    expect(notesResult.notes.join("\n")).not.toContain("ingest skipped");
+    expect(notesResult.notes).toEqual([]);
   });
   // aih-support-sweep, 2026-10-14: codetv-workshop rows had run in the remote1 ai-hero source checkout; every aih clone
   // copied their sidecars, ingest refused them as "invalid sidecar identity" and close refused lgseat2 and giftnow.
@@ -1166,12 +1118,11 @@ describe("remote owner operations", () => {
     writeFileSync(join(root, "packet.json"), JSON.stringify({ project: "other-project", machine: "remote", packet, reportText: "report" }));
     const noteId = "058320c05962e3c644bad3c823b1b04cbd2bbea7af7968b3ee94244aae6cd652";
     mkdirSync(join(launched.row.cwd, ".pi/muster/notes"), { recursive: true });
-    const item = appendOwnerItem("other-owner", { author: "cb-bump-session", lane: "cb-security", kind: "fyi", title: "other note" }, join(s.h.root, "remote-home"));
+    const item = ownerItem("other-owner", { author: "cb-bump-session", lane: "cb-security", kind: "fyi", title: "other note" });
     writeFileSync(join(launched.row.cwd, ".pi/muster/notes", `${noteId}.json`), JSON.stringify({ project: "other-project", machine: "remote", agent: "cb-bump", lane: "cb-security", owner: "other-owner", item }));
     const result = await s.run(ingestRemotePackets(s.dir));
-    expect(result.notes).toEqual(expect.arrayContaining([
-      `packet sidecar ${id.slice(0, 12)} belongs to project other-project, copied from the clone's source; ignored for ${launched.row.name} (that project's owner should check it landed)`,
-      `note sidecar ${noteId.slice(0, 12)} belongs to project other-project, copied from the clone's source; ignored for ${launched.row.name} (that project's owner should check it landed)`]));
+    expect(result.notes).toEqual([
+      `packet sidecar ${id.slice(0, 12)} belongs to project other-project, copied from the clone's source; ignored for ${launched.row.name} (that project's owner should check it landed)`]);
     expect(result.notes.join("\n")).not.toContain("ingest skipped");
     expect((await s.run(load(s.dir))).packets).toEqual([]);
   });
@@ -1477,77 +1428,26 @@ describe("remote owner operations", () => {
     expect(s.calls.some(call => call.command === "ssh" && call.args.at(-1)?.includes("'remove'"))).toBe(true);
   });
 
-  describe("owner note outbox", () => {
+  describe("owner note sends", () => {
     const leaseMismatch = { status: "failed" as const, detail: "NOT DELIVERED: LeaseMismatch: Rejected LeaseMismatch (409) (ratking; no fallback)" };
     const failing = (delivery: { status: "failed"; detail: string } = leaseMismatch) => ({ postOwner: () => Effect.succeed(delivery) }) as unknown as import("./runtime.ts").CommsShape;
     const post = (s: ReturnType<typeof setup>, launched: Awaited<ReturnType<ReturnType<typeof setup>["launch"]>>, comms: import("./runtime.ts").CommsShape | undefined, kind: "question" | "progress" = "question") =>
       s.run(deliverOwnerItem({ owner: launched.row.owner, agent: launched.row.name, home: join(s.h.root, "remote-home"), session: launched.row.sessionId, project: "probe", item: { author: launched.row.sessionId, lane: launched.row.lane, kind, title: "Need owner eyes", body: "Full note" }, comms, send: () => Effect.succeed(leaseMismatch) }));
     const remoteEnv = (launched: Awaited<ReturnType<ReturnType<typeof setup>["launch"]>>) => { vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_AGENT", launched.row.name); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify(launched.row)); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe"); };
 
-    it("a remote worker's failed send is saved as a sidecar the owner pass ingests once, with a wake and a board note", async () => {
-      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
+    // Slice 5: no outbox. A send retries in pi-ratking's reach, then fails loudly; nothing is parked (Switchboard 3mz4dicaynv6b).
+    it.each([true, false])("a failed send is lost and says why, with no sidecar or local queue (remote %s)", async remote => {
+      const s = setup(); await s.open(); const launched = await s.launch(); if (remote) remoteEnv(launched);
       const posted = await post(s, launched, failing());
-      expect(posted.lost).toBe(false); expect(posted.stored).toBe("sidecar"); expect(posted.failureCode).toBe("LeaseMismatch");
-      const notes = join(sidecarRoots(launched.row.cwd)[0]!, "notes");
-      expect(readdirSync(notes)).toEqual([`${posted.uri.split("/").at(-1)}.json`]);
-      expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(0);
-      const first = await s.run(ingestRemotePackets(s.dir));
-      expect(first.notes.join("\n")).toContain(`owner note from ${launched.row.name} arrived by sidecar (Rat King send had failed: LeaseMismatch)`);
-      expect(readOwnerQueue(launched.row.owner, s.h.home).items.map(r => r.item.uri)).toEqual([posted.uri]);
-      const second = await s.run(ingestRemotePackets(s.dir));
-      expect(second.notes).toEqual([]); expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(1);
-      const wake = vi.fn(); const feed = ownerFeed({ session: launched.row.owner, home: s.h.home, appendEntry: vi.fn(), sendMessage: wake });
-      expect(feed.flush()).toBe(1); expect(wake).toHaveBeenCalledTimes(1); feed.dispose();
-    });
-    // drovr, 2026-10-12: sidecars stay on disk and the queue is per owner session, so an owner restart replayed a 10-11 note.
-    it("does not replay a note to an owner that restarted after taking it", async () => {
-      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
-      const posted = await post(s, launched, failing());
-      await s.run(ingestRemotePackets(s.dir));
-      const before = launched.row.owner;
-      await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents.map(row => row.name === launched.row.name ? { ...row, owner: "owner-2" } : row),
-        { ...launched.row, name: "owner-desk", machine: "local", pane: null, sessionId: "owner-2", events: [{ type: "RESTARTED", at: "2026-10-12T17:00:00.000Z", detail: `${before} -> owner-2 onto abc` }] }] }, undefined] as const)));
-      expect((await s.run(ingestRemotePackets(s.dir))).notes).toEqual([]);
-      expect(readOwnerQueue("owner-2", s.h.home).items).toHaveLength(0);
-      expect(readOwnerQueue(before, s.h.home).items.map(record => record.item.uri)).toEqual([posted.uri]);
-    });
-    it("accepts a note written under the worker's own earlier session", async () => {
-      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
-      const posted = await post(s, launched, failing());
-      await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => row.name === launched.row.name
-        ? { ...row, sessionId: "worker-2", events: [...(row.events ?? []), { type: "RESTARTED", at: "2026-10-12T17:00:00.000Z", detail: `${launched.row.sessionId} -> worker-2 onto abc` }] } : row) }, undefined] as const)));
-      const result = await s.run(ingestRemotePackets(s.dir));
-      expect(result.notes.join("\n")).not.toContain("invalid note sidecar identity");
-      expect(readOwnerQueue(launched.row.owner, s.h.home).items.map(record => record.item.uri)).toEqual([posted.uri]);
-    });
-    it("does not duplicate when the Rat King send was delivered after all", async () => {
-      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
-      const posted = await post(s, launched, failing());
-      const { ingestOwnerItem } = await import("./owner-queue.ts");
-      const item = JSON.parse(readFileSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes", `${posted.uri.split("/").at(-1)}.json`), "utf8")).item;
-      expect(ingestOwnerItem(launched.row.owner, item, s.h.home)).toBe(true);
-      const result = await s.run(ingestRemotePackets(s.dir));
-      expect(result.notes).toEqual([]);
-      expect(readOwnerQueue(launched.row.owner, s.h.home).items).toHaveLength(1);
-      const wake = vi.fn(); const feed = ownerFeed({ session: launched.row.owner, home: s.h.home, appendEntry: vi.fn(), sendMessage: wake });
-      expect(feed.flush()).toBe(1); expect(wake).toHaveBeenCalledTimes(1); feed.dispose();
-    });
-    it("a local worker's failed send persists into the local owner queue", async () => {
-      const s = setup(); await s.open(); const launched = await s.launch();
-      const posted = await post(s, launched, failing());
-      expect(posted.lost).toBe(false); expect(posted.stored).toBe("local-queue");
-      expect(readOwnerQueue(launched.row.owner, join(s.h.root, "remote-home")).items.map(r => r.item.uri)).toEqual([posted.uri]);
-    });
-    it("a failure that cannot be stored stays lost", async () => {
-      const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
-      vi.stubEnv("MUSTER_REMOTE_ROW", "");
-      const posted = await post(s, launched, failing());
-      expect(posted.lost).toBe(true); expect(posted.stored).toBeUndefined();
+      expect(posted).toMatchObject({ lost: true, queued: false, failureCode: "LeaseMismatch" });
+      expect(posted).not.toHaveProperty("stored");
+      expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
+      expect(existsSync(join(s.h.root, "remote-home/.local/state/muster/owner-queue"))).toBe(false);
     });
     it("a delivered send writes no sidecar", async () => {
       const s = setup(); await s.open(); const launched = await s.launch(); remoteEnv(launched);
       const posted = await post(s, launched, fakeRatking(s.h.home, () => "probe/remote-w", [], () => [decodeProject(JSON.parse(readFileSync(projectPath(s.dir), "utf8")))]).service);
-      expect(posted.lost).toBe(false); expect(posted.stored).toBeUndefined();
+      expect(posted.lost).toBe(false);
       expect(existsSync(join(sidecarRoots(launched.row.cwd)[0]!, "notes"))).toBe(false);
     });
   });

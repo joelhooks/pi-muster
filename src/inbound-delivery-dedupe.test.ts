@@ -1,8 +1,9 @@
 import { createEventBus } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import muster from "./extension-main.ts";
-import { appendOwnerItem, ownerPath, readOwnerQueue } from "./owner-queue.ts";
+import { ownerItem } from "./owner-queue.ts";
 import { harness, runWith } from "./test-support.ts";
 import { Effect } from "effect";
 import { decodeAgentRow } from "./domain.ts";
@@ -53,7 +54,7 @@ it.each(["done", "blocked", "crashed", "working", "idle"])("a %s turn record pos
   try {
     s.emit(state); s.emit(state);
     await s.start(); s.emit(state);
-    expect(readOwnerQueue(s.session, s.home).items).toEqual([]);
+    expect(existsSync(join(s.home, ".local/state/muster/owner-queue"))).toBe(false);
     expect(s.sendMessage).not.toHaveBeenCalled();
     expect(s.sendUserMessage).not.toHaveBeenCalled();
   } finally { await s.stop(); }
@@ -77,27 +78,22 @@ it("a repeated ratking message id produces exactly one followUp, including after
     await s.start(); s.events.emit("ratking/message", event);
     expect(s.sendUserMessage).toHaveBeenCalledOnce();
     expect(s.sendUserMessage.mock.calls[0]).toEqual(["One follow-up.\n\n[Authenticated agent message from worker, not Joel.]", { deliverAs: "followUp" }]);
-    expect(readOwnerQueue(s.session, s.home).items).toEqual([]);
+    expect(existsSync(join(s.home, ".local/state/muster/owner-queue"))).toBe(false);
   } finally { await s.stop(); }
 });
-it("a repeated owner delivery appends and wakes once; an existing URI under a new message id/CID is also a no-op", async () => {
+it("an owner delivery is claimed every time and never woken, followed up or written by Muster; pi-ratking shows it", async () => {
   const s = await setup();
-  const item = appendOwnerItem(s.session, { author: "worker", kind: "question", title: "One question" }, s.home, false);
-  const event = { id: `owner-${s.root}`, from: "worker", did: "did:web:worker.example.invalid", verified: true, kind: "data",
+  const item = ownerItem(s.session, { author: "worker", kind: "question", title: "One question" });
+  const claim = vi.fn();
+  const event = { id: `owner-${s.root}`, from: "worker", did: "did:web:worker.example.invalid", verified: true, kind: "data", claim,
     body: JSON.stringify({ type: "owner", recipient: s.session, item }) };
   try {
-    // The wake rides a real fs.watch plus a debounce; await the wake itself rather than a 1 s polling deadline.
-    const woke = new Promise<void>(resolve => s.sendMessage.mockImplementationOnce(() => resolve()));
     s.events.emit("ratking/message", event); s.events.emit("ratking/message", event);
-    await woke;
-    expect(s.sendMessage).toHaveBeenCalledOnce();
-    expect(readOwnerQueue(s.session, s.home).items.map(record => record.item)).toEqual([item]);
-    const before = readFileSync(ownerPath(s.session, s.home), "utf8");
-    s.events.emit("ratking/message", { ...event, id: `owner-new-envelope-${s.root}`,
-      body: JSON.stringify({ type: "owner", recipient: s.session, item: { ...item, cid: "different-cid", text: "Same URI cannot wake again" } }) });
-    expect(readFileSync(ownerPath(s.session, s.home), "utf8")).toBe(before);
-    expect(readOwnerQueue(s.session, s.home).items).toHaveLength(1);
-    expect(s.sendMessage).toHaveBeenCalledOnce(); expect(s.sendUserMessage).not.toHaveBeenCalled();
+    await s.start(); s.events.emit("ratking/message", event);
+    expect(claim).toHaveBeenCalledTimes(3);
+    expect(s.sendMessage).not.toHaveBeenCalled();
+    expect(s.sendUserMessage).not.toHaveBeenCalled();
+    expect(existsSync(join(s.home, ".local/state/muster/owner-queue"))).toBe(false);
   } finally { await s.stop(); }
 });
 

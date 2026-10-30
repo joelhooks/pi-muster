@@ -1,6 +1,6 @@
 // Pi TUI patterns: column-gauge, message-fold. Phone rows drop the Box;
 // desktop cards keep expanded detail, with styles closed after wrapping.
-import { existsSync, mkdirSync, readFileSync, watch } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, watch } from "node:fs";
 import type { FSWatcher } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -11,11 +11,18 @@ import { Box, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { queuePath } from "./desk.ts";
 import { FEED_CLAIM, NOTE, NOTE_GLYPH, deskFeed, summaryText } from "./desk-feed.ts";
 import type { InboxSummary, NoteMessage } from "./desk-feed.ts";
-import type { DeskItem } from "./domain.ts";
+import { decodeOwnerSession, type DeskItem } from "./domain.ts";
 import { readRegistry } from "./registry.ts";
 import { compactWords, mobileOwnerRow } from "./owner-view.ts";
 import { formatAge } from "./switchboard.ts";
-import { restartFeedActivated } from "./owner-feed-ext.ts";
+
+/** A restart replacement stays quiet until its first turn is proven: the restart gate file then names its session. */
+export function restartFeedActivated(session: string, env: Readonly<Record<string, string | undefined>>): boolean {
+  const gate = env.MUSTER_RESTART_GATE;
+  if (!gate) return true;
+  try { const stat = lstatSync(gate); return stat.isFile() && (stat.mode & 0o777) === 0o600 && decodeOwnerSession(JSON.parse(readFileSync(gate, "utf8"))) === session; }
+  catch { return false; }
+}
 
 const DEBOUNCE_MS = 150;
 /** fs.watch can miss events on some filesystems; the poll is the floor. */

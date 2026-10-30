@@ -23,7 +23,6 @@ import { createComms, catalogCommsSender } from "./comms.ts";
 import { commsDoctor, commsDoctorText } from "./comms-doctor.ts";
 import { RATKING_MESSAGE, RatkingComms, SEND_RETRY_DELAYS_MS, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking, subscribedSwitchboards } from "./comms-ratking.ts";
 import {
-  pullRemoteOwnerInbox,
   agentClose,
   agentLaunch,
   launchResultText,
@@ -44,9 +43,8 @@ import {
 } from "./ops.ts";
 import { Herdr, Comms, MusterEnv, Proc, liveProc, createEmitPaneClose } from "./runtime.ts";
 import { registerDeskFeed } from "./desk-feed-ext.ts";
-import { registerOwnerFeed } from "./owner-feed-ext.ts";
 import { ownerLine, ownerReceipt, ownerToolResult } from "./owner-view.ts";
-import { capBody, deliverOwnerItem, findOwnerPost, ingestOwnerItem } from "./owner-queue.ts";
+import { deliverOwnerItem } from "./owner-queue.ts";
 import { registerDeskReport } from "./desk-report-ext.ts";
 import { registerDigest } from "./digest-ext.ts";
 import { registerSwitchboard } from "./switchboard-ext.ts";
@@ -107,7 +105,6 @@ export function sessionCommsSender(dir: string, session: string, env: NodeJS.Pro
 
 
 /** A failed send that was stored for the owner's next pass is a quiet success, not a reason to pause. */
-export const queuedNotice = (result: { stored?: string | undefined; failureCode?: string | undefined }) => result.stored ? `queued: Rat King send failed (${result.failureCode ?? "unknown"}); saved for the owner's next pass` : undefined;
 
 export const remoteMachineProcess = (env: NodeJS.ProcessEnv) => env.MUSTER_MACHINE !== undefined && env.MUSTER_MACHINE !== "local";
 
@@ -117,10 +114,6 @@ export function loudDelivery<T extends { content: Array<{ type: "text"; text: st
   const [first, ...rest] = result.content;
   return { ...result, content: [{ type: "text" as const, text: `NOT DELIVERED: no fallback\n${first?.text ?? ""}` }, ...rest], isError: true as const };
 }
-
-/** The owner catalog and its sidecars live on Flagg; a remote row has nothing to pull. */
-export const remoteInboxPull = <C>(env: NodeJS.ProcessEnv, pull: (ctx: C) => Promise<readonly string[]>) =>
-  remoteMachineProcess(env) ? undefined : pull;
 
 export { commsDoctorText } from "./comms-doctor.ts";
 
@@ -233,7 +226,7 @@ export default function muster(host: ExtensionAPI) {
 
   const armRestartExit = registerRestartExit(pi, async (pending, ctx) => {
     await Effect.runPromise(finishRestart(pending.dir, pending.restart).pipe(Effect.provide(layer(ctx))));
-  }, () => stopOwnerFeed(), () => { pi.events.emit("ratking/retire", { requestId: `muster-retire-${randomUUID()}` }); },
+  }, async () => {}, () => { pi.events.emit("ratking/retire", { requestId: `muster-retire-${randomUUID()}` }); },
   async (pending, text, ctx) => { await Effect.runPromise(agentPromptOnce(pending.restart.replacementPane.paneId, text).pipe(Effect.provide(layer(ctx)))); },
   async (pending, uncarried, ctx) => {
     await Effect.runPromise(deskPost(pending.dir, { kind: "blocked", title: `${pending.restart.name}: restart held, operator text not carried`,
@@ -330,11 +323,10 @@ export default function muster(host: ExtensionAPI) {
           rejected: reason => console.warn(`[muster] ${reason}`),
           session: ctx.sessionManager.getSessionId(),
           catalogs: () => registeredCatalogs(homedir(), env.MUSTER_PROJECT ?? ctx.cwd),
-          owner: item => {
+          // pi-ratking renders and wakes owner mail itself; Muster only claims it, and remembers its message id for replies.
+          owner: () => {
             claimDelivery(message);
-            if (!handledDeliveries.claim(id)) return;
-            // ingestOwnerItem also rejects an existing URI, even under a different delivery id/CID.
-            ingestOwnerItem(ctx.sessionManager.getSessionId(), item, homedir());
+            handledDeliveries.claim(id);
           },
           // Preserve the brief prefix for first-turn proof; attribution is not operator authority.
           message: payload => {
@@ -380,13 +372,20 @@ export default function muster(host: ExtensionAPI) {
     comms.clear();
   });
 
-  const pull = remoteInboxPull(env, (ctx: ExtensionContext) => Effect.runPromise(pullRemoteOwnerInbox(env.MUSTER_PROJECT).pipe(Effect.provide(layer(ctx)))));
-  const stopOwnerFeed = registerOwnerFeed(pi, env, { ...(pull ? { pull } : {}) });
-
+  // Slice 5 (Tin-Tin, audit 3; Switchboard 3mz4dicaynv6b): the JSONL owner queue is gone. Both tools stay one release
+  // as refusals, because recurring pi-until passes are immutable snapshots that still name them; remove them after.
+  const retired = (tool: string, instead: string) => ({ content: [{ type: "text" as const, text: `${tool === "owner_inbox" ? "OwnerInboxRetired" : "OwnerReplyRetired"}: owner mail now arrives as Rat King messages in this session; ${tool} failed because Muster's JSONL owner queue was removed (slice 5). ${instead} Fix: drop ${tool} from any recurring instruction at its next re-arm.` }], details: {}, isError: true as const });
+  pi.registerTool({
+    name: "owner_inbox", label: "Muster owner inbox (retired)",
+    description: "Retired: owner mail arrives as Rat King messages. Use ratking pending for open asks and ratking reply to answer. Refuses with the replacement call.",
+    renderCall: (_args, theme) => ownerLine("🐦 owner inbox (retired)", theme),
+    parameters: Type.Object({ since: Type.Optional(Type.String()), kinds: Type.Optional(Type.Array(StringEnum(["fyi", "progress", "done", "question", "blocked", "action"] as const))), limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })), ack: Type.Optional(Type.Boolean()) }),
+    async execute() { return retired("owner_inbox", "Use ratking({ action: \"pending\" }) for open asks; new owner mail shows in this session as it arrives."); },
+  });
   if ((worker || role === "boss") && env.MUSTER_OWNER) {
     pi.registerTool({
       name: "owner_note", label: "Muster owner note",
-      description: "Post FYI, progress or done silently to your owner's queue. question and blocked mention and wake the owner. Use replyTo to thread a post. packet_report stays the single finish report.",
+      description: "Mail your owner over Rat King: FYI, progress or done arrive quietly; question and blocked wake the owner. A failed send is lost and says so. Use replyTo to thread a post. packet_report stays the single finish report.",
       renderCall: (args, theme) => ownerLine(`🐦 owner note · ${args.kind} "${args.title}"`, theme),
       renderResult(result, options, theme) {
         if (options.isPartial) return ownerLine("🐦 posting owner note…", theme);
@@ -397,28 +396,16 @@ export default function muster(host: ExtensionAPI) {
         const error = unreadable([params.title, params.body]);
         if (error) return error;
         const session = ctx.sessionManager.getSessionId();
-        if (params.replyTo) findOwnerPost(session, params.replyTo);
-        return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${queuedNotice(result) ?? (result.pendingPull ? "🐦 Queued for the Flagg owner to pull; not delivered." : ownerReceipt({ kind: params.kind, title: params.title, ...result }))}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
+        return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: env.MUSTER_OWNER!, agent: env.MUSTER_AGENT, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { ...params, author: session, lane: env.MUSTER_LANE }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${ownerReceipt({ kind: params.kind, title: params.title, ...result })}\nuri: ${result.uri ?? "not queued"} · owner: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
       },
     });
   }
   pi.registerTool({
-    name: "owner_reply", label: "Muster owner reply",
-    description: "Reply to a post in your own owner queue. Threads root and parent, mentions the author and writes to their queue; wakes them when idle. No path to Joel's desk queue.",
-    renderCall: (args, theme) => ownerLine(`🐦 owner reply · "${args.text.split("\n")[0]}"`, theme),
-    renderResult(result, options, theme) {
-      if (options.isPartial) return ownerLine("🐦 posting owner reply…", theme);
-      return ownerToolResult(result.content.filter(c => c.type === "text").map(c => c.text).join("\n"), options.expanded, theme);
-    },
+    name: "owner_reply", label: "Muster owner reply (retired)",
+    description: "Retired: answer owner mail with ratking reply and the message id it arrived with. Refuses with the replacement call.",
+    renderCall: (_args, theme) => ownerLine("🐦 owner reply (retired)", theme),
     parameters: Type.Object({ uri: Type.String(), text: Type.String() }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      const error = unreadable([params.text]);
-      if (error) return error;
-      const session = ctx.sessionManager.getSessionId();
-      const parent = findOwnerPost(session, params.uri);
-      const body = capBody(params.text);
-      return run(ctx, signal, Effect.flatMap(Comms, comms => deliverOwnerItem({ comms, owner: parent.author, home: homedir(), session, project: env.MUSTER_PROJECT ?? "", item: { author: session, lane: env.MUSTER_LANE, kind: "fyi", title: body.split("\n")[0] ?? "Reply", body, text: body, replyTo: parent.uri, mention: parent.author }, send: (to, message) => Effect.flatMap(Comms, service => service.send(to, message)) })), result => `${queuedNotice(result) ?? ownerReceipt({ kind: "reply", title: body.split("\n")[0] ?? "Reply", ...result })}\nuri: ${result.uri ?? "not queued"} · reply to: ${parent.uri} · recipient: ${result.owner} (${result.resolution}) · delivery: ${result.delivery.status}${result.delivery.detail ? ` · ${result.delivery.detail}` : ""}`, result => result.lost);
-    },
+    async execute() { return retired("owner_reply", "Answer with ratking({ action: \"reply\", replyTo: \"<message id>\", summary, message })."); },
   });
 
   pi.registerTool({
@@ -471,7 +458,7 @@ export default function muster(host: ExtensionAPI) {
           signal,
           packetReport({ dir: project, agent, owner, cwd: ctx.cwd, ...params }),
           (result) =>
-            `Packet ${result.packet.id.slice(0, 12)} reported (${result.packet.state}). Report: ${result.packet.report}. Owner notified: ${queuedNotice(result.notice) ?? `${result.delivery.status}${result.delivery.detail ? ` (${result.delivery.detail})` : ""}`}.${result.notice.lost ? " The packet is recorded; do not report it again. Tell your owner another way." : ""}`,
+            `Packet ${result.packet.id.slice(0, 12)} reported (${result.packet.state}). Report: ${result.packet.report}. Owner notified: ${result.delivery.status}${result.delivery.detail ? ` (${result.delivery.detail})` : ""}.${result.notice.lost ? " The packet is recorded; do not report it again. Tell your owner another way." : ""}`,
           (result) => result.notice.lost,
         );
       },
@@ -656,8 +643,8 @@ export default function muster(host: ExtensionAPI) {
     name: "agent_launch",
     label: "Muster agent launch",
     description:
-      "launch, fork and restore validate immediately and launch in a detached background process. The immediate receipt names the job and log, not delivery proof. The full result arrives as a waking owner-queue action (blocked on failure); arm herdr_watch after that result arrives. restart with name forks an owned row onto current code in a new pane, proves its first turn, rebinds the row and owned rows, then retires the old Pi (self-restart quits at agent_end); model and thinking switch it at the fork, the only safe way to change provider; it also takes extensions, env, compactAt and noSkills, and refuses skills, slim and appendSystemPrompt. A policy's noSkills and skills apply at launch only. Never reload or restart in place. Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; no tool allowlist unless the project role policy sets tools), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with name and pane re-binds an existing owned row to its live Pi session or direct fork without starting a process or sending input. adopt with side: true, from and lane keeps the side-desk path: re-point a running desk already moved into the parent's tab.",
-    promptSnippet: "agent_launch: asynchronously launch, fork, or restore; result arrives in owner queue",
+      "launch, fork and restore validate immediately and launch in a detached background process. The immediate receipt names the job and log, not delivery proof. The full result arrives as Rat King mail from muster/launcher (blocked on failure); arm herdr_watch after that result arrives. restart with name forks an owned row onto current code in a new pane, proves its first turn, rebinds the row and owned rows, then retires the old Pi (self-restart quits at agent_end); model and thinking switch it at the fork, the only safe way to change provider; it also takes extensions, env, compactAt and noSkills, and refuses skills, slim and appendSystemPrompt. A policy's noSkills and skills apply at launch only. Never reload or restart in place. Add and start, fork, or restore a Pi agent from its catalog row, in its lane's tab. Role defaults come from the fleet roster and the project policy (project_update shows both); model may name a roster alternate, which brings its own settings. Builds the full launch profile (--session-id, --name, --model id:thinking, --append-system-prompt, -ns plus --skill, --compact-at, --approve; no tool allowlist unless the project role policy sets tools), sets MUSTER_* env, checks the pane cwd, reads the real session id from Herdr, renames the pane, and delivers the work prompt with proof of life. clone: true allocates a rift clone through worker-worktree.sh. Boss and role agents take the lane's root pane; workers split into the right column. fork with side: true splits from the desk parent in its tab, for design work only. adopt with name and pane re-binds an existing owned row to its live Pi session or direct fork without starting a process or sending input. adopt with side: true, from and lane keeps the side-desk path: re-point a running desk already moved into the parent's tab.",
+    promptSnippet: "agent_launch: asynchronously launch, fork, or restore; result arrives as Rat King mail",
     parameters: Type.Object({
       project: ProjectParam,
       action: StringEnum(["launch", "fork", "restore", "adopt", "restart"] as const),
