@@ -21,7 +21,7 @@ import { inactiveOwnTools } from "./tool-loadout.ts";
 import { MAX_CADENCE_MINUTES, decodeProject, decodeTurnRecord } from "./domain.ts";
 import { createComms, catalogCommsSender } from "./comms.ts";
 import { commsDoctor, commsDoctorText } from "./comms-doctor.ts";
-import { RATKING_MESSAGE, RatkingComms, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking, subscribedSwitchboards } from "./comms-ratking.ts";
+import { RATKING_MESSAGE, RatkingComms, SEND_RETRY_DELAYS_MS, ratkingInbound, ratkingLoaded, ratkingTarget, registeredCatalogs, sendDeskRatking, subscribedSwitchboards } from "./comms-ratking.ts";
 import {
   pullRemoteOwnerInbox,
   agentClose,
@@ -227,7 +227,7 @@ export default function muster(host: ExtensionAPI) {
   const claimDelivery = (message: unknown) => { try { (message as { claim?: () => void } | null)?.claim?.(); } catch { /* an older pi-ratking has no claim */ } };
 
   // pi-ratking's transport whenever it is loaded; createComms decides at call time whether ratking is selected.
-  const ratkingFor = (dir: string, ctx: ExtensionContext) => ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID,
+  const ratkingFor = (dir: string, ctx: ExtensionContext) => ratkingHere() ? RatkingComms({ events: pi.events, createId: randomUUID, retryDelaysMs: SEND_RETRY_DELAYS_MS,
     sender: () => ctx.sessionManager.getSessionId(),
     target: to => ratkingTarget(to, { catalogs: registeredCatalogs(homedir(), dir), env, self: { session: ctx.sessionManager.getSessionId(), name: env.RATKING_NAME }, switchboards: subscribedSwitchboards(homedir()) }) }) : undefined;
 
