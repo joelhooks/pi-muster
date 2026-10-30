@@ -28,6 +28,7 @@ describe("project role names", () => {
     expect(projectRoleLine("Run the  probe\ndesk. Then more.")).toBe("Run the probe desk.");
     expect(projectRoleLine("x".repeat(200))).toBe(`${"x".repeat(119)}…`);
     expect(projectRoleLine("v1.2 ships")).toBe("v1.2 ships");
+    expect(projectRoleLine("Ship v1.4. then e.g. more. Next part.")).toBe("Ship v1.4. then e.g. more.");
   });
 
   it("parses only a roles list", () => {
@@ -63,7 +64,7 @@ describe("project role names", () => {
     const { args, launch } = await setup(NEW_MAILBOX, "switchboard");
     const result = await launch("desk", "desk");
     expect(args()).toEqual([]);
-    expect(result.notes).toContain("Rat King role switchboard not set: the slug is an owner's name");
+    expect(result.notes).toContain("Rat King role switchboard not set: the slug is an owner's name; mail the desk row by its own name");
   });
 
   it("forwards a closed row's name to the project role", async () => {
@@ -72,6 +73,15 @@ describe("project role names", () => {
     const closed = await runWith(h, agentClose(dir, { name: "worker" }));
     expect(args()).toEqual(["role list --json", "retire --name probe/worker --successor probe"]);
     expect(closed.notes).toContain("Rat King name probe/worker retired: sends to it now fail Retired, naming probe");
+  });
+
+  // Tin-Tin, #60 review: the role would forward the closed desk's mail back to the same retired name.
+  it("does not forward the role's own target to the role", async () => {
+    const roles = `'{"roles":[{"name":"probe","target":"probe/worker","role":"r"}]}'`;
+    const { h, dir, args, launch } = await setup(`case "$*" in "role list --json") echo ${roles};; esac; exit 0`);
+    await launch("worker", "worker");
+    await runWith(h, agentClose(dir, { name: "worker" }));
+    expect(args().filter(line => line.startsWith("retire"))).toEqual(["retire --name probe/worker"]);
   });
 
   it("does not retry a retire the mailbox refused for a live lease", async () => {

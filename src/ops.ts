@@ -3571,7 +3571,8 @@ export const parseMailboxRoles = (stdout: string): readonly MailboxRole[] | null
 /** The project's one-line role: its outcome's first sentence, at most 120 characters. */
 export const projectRoleLine = (outcome: string) => {
   const flat = outcome.replace(/\s+/g, " ").trim();
-  const sentence = flat.match(/^.*?[.!?](?=\s|$)/)?.[0] ?? flat;
+  // A sentence ends before a capital letter, so "e.g. this" and "v1.4. next" stay whole.
+  const sentence = flat.match(/^.*?[.!?](?=\s+[A-Z]|$)/)?.[0] ?? flat;
   return sentence.length <= 120 ? sentence : `${sentence.slice(0, 119).trimEnd()}…`;
 };
 
@@ -3593,7 +3594,7 @@ const mailboxRoles = Effect.gen(function* () {
 const publishProjectRole = (project: Project, row: AgentRow) => Effect.gen(function* () {
   if (project.policy?.comms && project.policy.comms !== "ratking") return null;
   if (row.role !== "desk" || row.side || row.state === "closed" || row.state === "failed") return null;
-  if (OWNER_ALIASES.includes(project.slug)) return `Rat King role ${project.slug} not set: the slug is an owner's name`;
+  if (OWNER_ALIASES.includes(project.slug)) return `Rat King role ${project.slug} not set: the slug is an owner's name; mail the desk row by its own name`;
   const roles = yield* mailboxRoles;
   if (!roles) return null;
   const target = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
@@ -3603,9 +3604,10 @@ const publishProjectRole = (project: Project, row: AgentRow) => Effect.gen(funct
   const env = yield* MusterEnv;
   const proc = yield* Proc;
   const result = yield* proc.run("sh", [join(env.home, ".config/muster/fleet-mailbox.sh"), "role", "set", project.slug, "--target", target, "--role", role], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
-  if (result._tag === "Failure") return `Rat King role ${project.slug} not set: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
+  const retry = "; check with fleet-mailbox.sh role list --json, then restart the desk to set it again";
+  if (result._tag === "Failure") return `Rat King role ${project.slug} not set: ${result.failure.message.split("\n")[0]?.slice(0, 160)}${retry}`;
   if (result.success.code === 0) return `Rat King role ${project.slug} now reaches ${target}`;
-  return `Rat King role ${project.slug} not set (exit ${result.success.code}: ${cliErrorLine(`${result.success.stderr}\n${result.success.stdout}`) ?? "no output"})`;
+  return `Rat King role ${project.slug} not set (exit ${result.success.code}: ${cliErrorLine(`${result.success.stderr}\n${result.success.stdout}`) ?? "no output"})${retry}`;
 });
 
 /**
@@ -3619,7 +3621,9 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   if (project.policy?.comms && project.policy.comms !== "ratking") return null;
   const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
   // Joel, 2026-10-30 ("fix", projects not rows): once the project is a role name, mail to a closed row forwards to it.
-  const role = verb === "retire" && name !== project.slug && (yield* mailboxRoles)?.some(entry => entry.name === project.slug) ? project.slug : undefined;
+  // Tin-Tin, #60 review: a role still aimed at the closing row would forward its mail back to itself, so use the owner.
+  const current = verb === "retire" && name !== project.slug ? (yield* mailboxRoles)?.find(entry => entry.name === project.slug) : undefined;
+  const role = current && current.target !== name ? project.slug : undefined;
   // Nicodemus, 2026-10-19: a plain Retired left senders guessing; name the owner desk so they are redirected to it.
   const owner = verb === "retire" ? ownerName(row.owner, {
     catalogs: [project, ...registeredCatalogs(env.home)], recorded: row.ownerName,
