@@ -3930,7 +3930,7 @@ const packetEvidenceRepo = (project: Project, lane: Lane | undefined, row: Agent
   return { source, run, baseRef, baseSha };
 });
 
-const packetEvidenceDiff = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet, verifiedBase?: string, numstatOnly = false) => Effect.gen(function* () {
+const packetEvidenceDiff = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet) => Effect.gen(function* () {
   const repo = yield* packetEvidenceRepo(project, lane, row);
   // The source may not contain the packet yet. Read its patch from the worker checkout instead.
   const inSource = (yield* repo.run.run("git", ["cat-file", "-e", `${packet.id}^{commit}`], { cwd: repo.source })).code === 0;
@@ -3940,16 +3940,24 @@ const packetEvidenceDiff = (project: Project, lane: Lane | undefined, row: Agent
   const run = inSource ? repo.run : machine ? sshProc(row.machine, machine, proc, env.home) : proc;
   const cwd = inSource ? repo.source : row.cwd;
   const git = (...args: string[]) => must("git", args, { cwd }).pipe(Effect.provideService(Proc, run));
-  const comparisonBase = verifiedBase ?? repo.baseSha;
+  const comparisonBase = repo.baseSha;
   if ((yield* run.run("git", ["cat-file", "-e", `${comparisonBase}^{commit}`], { cwd })).code !== 0) {
     const source = machine ? mapPath(sourceOf(project, lane, row), machine) : repo.source;
     yield* git("fetch", "-q", "--", source, comparisonBase);
   }
   const mergeBase = (yield* git("merge-base", comparisonBase, packet.id)).trim();
-  const paths = numstatOnly ? [] : (yield* git("diff", "--no-renames", "--name-only", "-z", mergeBase, packet.id, "--")).split("\0").filter(Boolean);
-  const diff = numstatOnly ? "" : yield* git("diff", "--no-ext-diff", "--no-textconv", mergeBase, packet.id, "--");
-  const lines = changedLines(yield* git("diff", "--no-ext-diff", "--no-textconv", "--numstat", mergeBase, packet.id, "--"));
-  return { ...repo, paths, diff, lines };
+  const paths = (yield* git("diff", "--no-renames", "--name-only", "-z", mergeBase, packet.id, "--")).split("\0").filter(Boolean);
+  const diff = yield* git("diff", "--no-ext-diff", "--no-textconv", mergeBase, packet.id, "--");
+  return { ...repo, paths, diff };
+});
+
+/** Landing alarms never reopen a worker clone, including owner-attested landings. */
+const packetEvidenceLines = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet) => Effect.gen(function* () {
+  const repo = yield* packetEvidenceRepo(project, lane, row);
+  const git = (...args: string[]) => must("git", args, { cwd: repo.source }).pipe(Effect.provideService(Proc, repo.run));
+  const base = packet.verification?.baseSha ?? row.clone?.base?.sha ?? `${packet.id}^`;
+  const mergeBase = (yield* git("merge-base", base, packet.id)).trim();
+  return changedLines(yield* git("diff", "--no-ext-diff", "--no-textconv", "--numstat", mergeBase, packet.id, "--"));
 });
 
 export const packetVerify = (dir: string, id: string) =>
@@ -4350,17 +4358,17 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     let note = "";
     let gate: PacketGate | null = null;
     let gateRan = false;
+    const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
+    let evidence = params.evidence?.trim();
+    if (params.attested && outcome !== "committed") return yield* input("attested is only supported for committed packets");
+    if (project.mode !== "rift-merge" && outcome === "committed" && ((!params.attested && !evidence) || (evidence !== undefined && /^(placeholder|tbd|todo|-|n\/a)$/i.test(evidence)))) return yield* input("committed landing requires non-empty, non-placeholder evidence");
+    if (recording && !evidence && !params.attested) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
     const staleAtLand = outcome === "committed" && packet.kind === "commit" && packet.verification?.baseSha && packet.verification.paths
       ? yield* Effect.gen(function* () {
         const repo = yield* packetEvidenceRepo(project, lane, row, true);
         const paths = (yield* must("git", ["diff", "--no-renames", "--name-only", "-z", packet.verification!.baseSha!, repo.baseSha, "--"], { cwd: repo.source }).pipe(Effect.provideService(Proc, repo.run))).split("\0").filter(Boolean);
         return evidenceNote(repo.baseRef, staleEvidence(packet.verification!.paths!, paths), false);
       }).pipe(Effect.catch(error => Effect.succeed(`packet evidence alarm unavailable: ${error.message}`))) : null;
-    const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
-    let evidence = params.evidence?.trim();
-    if (params.attested && outcome !== "committed") return yield* input("attested is only supported for committed packets");
-    if (project.mode !== "rift-merge" && outcome === "committed" && ((!params.attested && !evidence) || (evidence !== undefined && /^(placeholder|tbd|todo|-|n\/a)$/i.test(evidence)))) return yield* input("committed landing requires non-empty, non-placeholder evidence");
-    if (recording && !evidence && !params.attested) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
     if (outcome === "committed" && params.attested) {
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
@@ -4469,8 +4477,8 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     }
     if (outcome === "committed" && packet.kind === "commit") {
       // Alarms must not undo a successful landing if old refs or a retired clone are unavailable.
-      const reviewAlarm = !(params.review ?? packet.review) ? yield* packetEvidenceDiff(project, lane, row, packet, packet.verification?.baseSha ?? row.clone?.base?.sha ?? `${packet.id}^`, true).pipe(
-        Effect.map(snapshot => blindReviewNote(snapshot.lines, undefined)),
+      const reviewAlarm = !(params.review ?? packet.review) ? yield* packetEvidenceLines(project, lane, row, packet).pipe(
+        Effect.map(lines => blindReviewNote(lines, undefined)),
         Effect.catch(error => Effect.succeed(`blind review alarm unavailable: ${error.message}`)),
       ) : null;
       note = [note, !gateRan ? staleAtLand : null, reviewAlarm].filter(Boolean).join("; ");

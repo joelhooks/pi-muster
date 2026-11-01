@@ -143,6 +143,19 @@ describe("packet evidence integration", () => {
     if (alarm === "review") expect(result.note).toContain("evidence stale:");
     expect(patches).toEqual([]);
   });
+  it("keeps an attested landing live without reopening the clone when the packet object is absent", async () => {
+    const s = await fixture(201);
+    writeFileSync(join(s.dir, "work"), "ported packet plus other work\n"); sh(s.dir, "add", "work"); sh(s.dir, "commit", "-qm", "larger landing");
+    const landedAs = sh(s.dir, "rev-parse", "HEAD").trim();
+    const original = s.h.proc;
+    s.h.proc = { run: (command, args, options) => {
+      if (options.cwd === s.row.cwd || args.includes(s.row.cwd)) throw new Error("attested alarm reopened the worker clone");
+      return original.run(command, args, options);
+    } };
+    const result = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs, attested: true, evidence: "owner checked the port" }));
+    expect(result.packet.state).toBe("committed");
+    expect(result.note).toContain("blind review alarm unavailable:");
+  });
   it("does not warn on a small packet and rejects a relative review path before merging", async () => {
     const s = await fixture();
     expect((await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", review: "findings.md" }))).message).toContain("absolute path");

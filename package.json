@@ -87,6 +87,7 @@
     "src/ops.ts",
     "src/models.ts",
     "src/packet.ts",
+    "src/packet-evidence.ts",
     "src/roster.ts",
     "src/runtime.ts",
     "src/session-file.ts",
