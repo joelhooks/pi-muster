@@ -72,6 +72,8 @@ The space label is the project's name, not its status. The headline says what th
 Read [done means live and proven](references/done.md) when finishing delivery. Merged is not live. The land gate proves the exact candidate; live proof demonstrates the deployed outcome.
 
 - A packet report is a claim, not proof. Screen state, `DONE`, age, or a commit alone are not evidence.
+- `packet_verify` writes a capped blind-review brief at `<report dir>/<packet>-review.md`. For independent coverage review, launch `agent_launch role:"judge"` with a prompt naming only that file, not the worker's session. The reviewer numbers findings and answers the three questions with observed command/path/line evidence or “not checked”. Record the findings with `packet_land review:<absolute path>`.
+- Land warns if the base moved under the packet's verified paths without a land gate, or if a commit packet exceeds 200 changed lines without a recorded blind review. These are alarms, not refusals; the owner decides. Re-run verify or pass a gate for stale evidence.
 - Use one authoritative land gate for the candidate. Changed candidate or coverage needs fresh proof; another management role does not replace it.
 - A customer-facing check counts only when loaded signed out, as the recipient sees it.
 - A deploy gate needs a captured base-versus-head surface diff. An allowed-diff list reasoned from code is not evidence.

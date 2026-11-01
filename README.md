@@ -112,6 +112,10 @@ Live proof frees the slot.
 
 ## Delivery and flow
 
+`packet_verify` records the base SHA and changed paths for commit packets and writes `<report dir>/<packet>-review.md`: the lane brief, packet report, and merge-base diff, capped at 60 KiB. For a blind review, launch `agent_launch role:"judge"` with a prompt naming only that file. The reviewer numbers findings and answers the three coverage questions with observed command/path/line evidence or “not checked”. No worker transcript or pane text is included.
+
+`packet_land` warns when the base moved under verified paths, naming every overlapping path and the count; an actual land gate refreshes that evidence and suppresses the warning. Old packets without a recorded base SHA get no stale-evidence warning. Pass `review: <absolute path>` to record blind-review findings. A commit packet over 200 changed lines without a recorded review gets `no blind review recorded`. Both warnings are alarms, not refusals. These input-freshness and blind-review ideas come from [eas4ai/sudus](https://github.com/eas4ai/sudus).
+
 A lane is done when its work is live and proven, not merely merged. See [the definition of done and brief template](skills/muster/references/done.md). `packet_report` accepts `deploy`, `proof`, and `signals: { working, failing, where }` and includes them in its `.svx` report.
 
 Committed `packet_land` outcomes start delivery at `landed`, with a timestamp. `lane_deliver({ slug, stage: "deployed" | "proven" | "waived", evidence })` records the next stage and its plain-word evidence. Proof may follow a waiver or deploy at any level. Delivery otherwise only moves forward within a cycle; another committed packet starts a new cycle. Docs or probes with nothing to deploy can be waived. Rejected and `no_changes` packets need no delivery. Old catalogs decode committed lanes as `proven` with evidence `before done-live`; new landed work is never backfilled.
