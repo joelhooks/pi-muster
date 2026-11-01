@@ -117,6 +117,7 @@
     "src/desk-report-ops.ts",
     "src/desk-report-ext.ts",
     "src/tokens.ts",
+    "src/tool-loadout.ts",
     "src/task-status.ts",
     "src/version-skew.ts"
   ],
