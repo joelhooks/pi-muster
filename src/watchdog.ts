@@ -16,6 +16,12 @@ export interface ProgressSignals {
   errors: readonly string[];
 }
 export const workingRow = (row: Pick<AgentRow, "state">) => ["running", "silent", "nudged", "restarted"].includes(row.state);
+/** Spend bounded remote probes on live work before historical silence stats. */
+export function probeOrder<T extends Pick<AgentRow, "state" | "role" | "updatedAt">>(rows: readonly T[]): T[] {
+  const priority = (row: T) => workingRow(row) && ["worker", "boss"].includes(row.role) ? 0 : row.state === "closed" ? 2 : 1;
+  return [...rows].sort((a, b) => priority(a) - priority(b) ||
+    (a.state === "closed" && b.state === "closed" ? Date.parse(b.updatedAt) - Date.parse(a.updatedAt) : 0));
+}
 /** Alarm only. Wall time is not part of the fingerprint: a cadence is not new evidence. */
 export function progressFlags(row: Pick<AgentRow, "state">, signals: ProgressSignals, limits: ProgressLimits): string[] {
   if (!workingRow(row)) return [];

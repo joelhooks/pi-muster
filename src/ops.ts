@@ -74,7 +74,7 @@ import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem } from "./owner-queue.ts";
-import { reusableJudgment, watchdogHead, remoteWatchdogScript, artifactMtime, judgeProgress, previousJudgment, progressFlags, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail, workingRow, type WatchdogJudge } from "./watchdog.ts";
+import { probeOrder, reusableJudgment, watchdogHead, remoteWatchdogScript, artifactMtime, judgeProgress, previousJudgment, progressFlags, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail, workingRow, type WatchdogJudge } from "./watchdog.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeKeys, nudgeNote, silenceAlarm, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { launchDefaults } from "./fleet-steer.ts";
@@ -1052,7 +1052,7 @@ const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes
     if (failedMachines.has(name)) continue;
     yield* Effect.gen(function* () {
       const machine = yield* machineConfig(name);
-      const rows = watchdogProbeRows(project, project.agents.filter(row => row.machine === name).slice(0, 100), env.sessionId);
+      const rows = watchdogProbeRows(project, probeOrder(project.agents.filter(row => row.machine === name)).slice(0, 100), env.sessionId);
       const raw = yield* remoteNode(name, machine, remoteWatchdogScript(false), [JSON.stringify({ rows, limits: watchdogLimits(project.policy) })]);
       const entries = yield* decodeJsonWith(decodeWatchdogProbes, raw);
       for (const probe of entries) {
@@ -5038,7 +5038,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     }).pipe(Effect.catch((error) => Effect.succeed({ line: null, note: `fleet-compute: ${error.message}` })));
     const orphans = final.agents.filter(row => row.side && row.state !== "closed" && !final.agents.some(parent => parent.name === row.side?.parent && parent.role === "desk" && parent.state !== "closed"));
     const tracer = yield* traceProjectTasks(final, panes, ingestion.failedMachines);
-    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces, desk), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : []), ...unknownCommsNote(final.policy)] };
+    return { ...(endSession ? { endSession } : {}), project: final, agents: lines, openDesk: desk, board: [board(final, lines, desk.length, env.now().getTime(), fleet.line, tracer.traces, desk), ...(tracer.warning ? [tracer.warning] : []), ...ingestion.notes, ...recoveryNotes].join("\n"), notes: [...ingestion.notes, ...recoveryNotes.filter(note => !note.startsWith("clone kept:") && !note.startsWith("watchdog:")), tokens, `brain: ${brain}`, ...orphans.map(row => `orphan side desk ${row.name}: parent ${row.side?.parent} is closed or missing; the side desk stays open`), ...autolandNotes, ...(label ? [label] : []), ...(fleet.note ? [fleet.note] : []), ...unknownCommsNote(final.policy)] };
   });
 
 const k = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(Math.round(n)));
