@@ -158,16 +158,17 @@ const result=rows.slice(0,100).map(row=>{
 console.log(JSON.stringify(result));`;
 }
 
+const STATELESS_JUDGE_APIS = new Set(["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai", "google-vertex"]);
 class JudgeUnavailable extends Error {}
 export type WatchdogJudge = (request: { model: string; brief: string; tail: string; signal: AbortSignal }) => Promise<string>;
 /** Registry resolution happens only at tool execution, never extension startup. No model fallback. */
 export function registryJudge(registry: ExtensionContext["modelRegistry"], complete: typeof completeSimple = completeSimple): WatchdogJudge {
   return async request => {
-    // The bridge shares a live session with its owner; a side call could cross conversation/tool delivery.
-    if (request.model.startsWith("claude-bridge/")) throw new JudgeUnavailable("judge unavailable: claude-bridge models are session-bound; set watchdog.model to a stateless provider");
     const split = request.model.indexOf("/");
     const model = registry.find(request.model.slice(0, split), request.model.slice(split + 1));
     if (!model) throw new JudgeUnavailable(`judge unavailable: ${request.model} is not in the model registry; set watchdog.model to an available stateless model`);
+    // Custom provider names can alias a stateful API. Check the resolved capability, before auth or completion.
+    if (!STATELESS_JUDGE_APIS.has(model.api)) throw new JudgeUnavailable(`judge unavailable: ${model.api} is not a supported stateless HTTP API; set watchdog.model to a stateless provider`);
     const auth = await registry.getApiKeyAndHeaders(model);
     if (!auth.ok || !auth.apiKey) throw new JudgeUnavailable(`judge unavailable: ${request.model} authentication unavailable`);
     const response = await complete(model, {

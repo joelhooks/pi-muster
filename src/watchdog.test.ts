@@ -107,7 +107,7 @@ it("never falls back when the named registry model is absent", async () => {
 
 it("uses the real model registry lookup and auth shape with low thinking and bounded output", async () => {
   const registry = ModelRegistry.inMemory(AuthStorage.inMemory());
-  registry.registerProvider("cliproxy-codex", { baseUrl: "https://example.invalid", api: "openai-completions", apiKey: "test-placeholder", models: [{
+  registry.registerProvider("cliproxy-codex", { baseUrl: "https://example.invalid", api: "openai-responses", apiKey: "test-placeholder", models: [{
     id: "gpt-5.6-terra", name: "Terra", reasoning: true, input: ["text"], contextWindow: 10000, maxTokens: 300,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   }] });
@@ -117,12 +117,15 @@ it("uses the real model registry lookup and auth shape with low thinking and bou
   expect(line).toContain("stuck — same failing check");
   expect(completion).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ provider: "cliproxy-codex", id: "gpt-5.6-terra" }), expect.any(Object), expect.objectContaining({ reasoning: "low", maxTokens: 300, apiKey: "test-placeholder" }));
 });
-it("refuses session-bound bridge judges before registry lookup", async () => {
-  const find = vi.fn(() => undefined);
-  const judge = registryJudge({ find } as unknown as Parameters<typeof registryJudge>[0]);
-  const line = await Effect.runPromise(judgeProgress(judge, "claude-bridge/claude-haiku-5-5", "brief", "tail"));
-  expect(line).toBe("judge unavailable: claude-bridge models are session-bound; set watchdog.model to a stateless provider");
-  expect(find).not.toHaveBeenCalled();
+it.each(["claude-bridge/claude-haiku-5-5", "another-provider/alias"])("refuses session-bound APIs regardless of provider name: %s (plant: API)", async model => {
+  const find = vi.fn(() => ({ api: "claude-bridge" }));
+  const auth = vi.fn(); const complete = vi.fn();
+  const judge = registryJudge({ find, getApiKeyAndHeaders: auth } as unknown as Parameters<typeof registryJudge>[0], complete);
+  const line = await Effect.runPromise(judgeProgress(judge, model, "brief", "tail"));
+  expect(line).toBe("judge unavailable: claude-bridge is not a supported stateless HTTP API; set watchdog.model to a stateless provider");
+  expect(find).toHaveBeenCalledTimes(1);
+  expect(auth).not.toHaveBeenCalled();
+  expect(complete).not.toHaveBeenCalled();
   expect(watchdogLimits().model).toBe("cliproxy-codex/gpt-5.6-terra");
 });
 it("phone cap includes the trim marker and keeps full item details (plant: phone)", () => {
