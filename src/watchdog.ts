@@ -75,6 +75,9 @@ export function sessionProgress(text: string, since: number, limits: ProgressLim
       if ((block.name === "ratking" && ["send", "reply", "record", "ask"].includes(block.arguments?.action ?? "")) || block.name === "owner_note") calls.add(block.id);
       if (/secret|credential/i.test(block.name ?? "") || /(?:^|[/\\\\])(?:\.env(?:\.|$)|auth\.json|credentials|id_rsa|id_ed25519)|\.(?:pem|key)$|[/\\\\]sessions[/\\\\]/i.test(block.arguments?.path ?? "")) sensitiveCalls.add(block.id);
     }
+    for (const block of blocks) if (block.type === "toolCall" && block.id &&
+      (/\b(?:secrets\b|sc\s+fetch\b|op\s+(?:read|item)\b|printenv\b|env\b|security\s+find-)/i.test(block.arguments?.command ?? "") ||
+       /(?:\.env\b|auth\.json|credentials|id_rsa|id_ed25519|\.(?:pem|key)\b|[/]sessions[/])/i.test(block.arguments?.command ?? ""))) sensitiveCalls.add(block.id);
     const content = typeof message.content === "string" ? message.content : blocks.filter(block => block.type === "text").map(block => block.text ?? "").join("\n");
     if (message.role === "toolResult" && !message.isError && message.toolCallId && calls.has(message.toolCallId) &&
       !/NOT DELIVERED|not delivered|"ok"\s*:\s*false|refused|failed/i.test(content)) mailAt = Math.max(mailAt, at);
@@ -93,8 +96,15 @@ export function sessionProgress(text: string, since: number, limits: ProgressLim
 export function judgeText(text: string, maxBytes: number, env: NodeJS.ProcessEnv = process.env, keep: "head" | "tail" = "tail"): string {
   let safe = text.replace(/-----BEGIN [\s\S]*?-----END [^-\n]*-----/g, "[private material withheld]");
   for (const [key, value] of Object.entries(env)) if (value && value.length >= 4 && /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(key)) safe = safe.replaceAll(value, "[credential withheld]");
-  safe = safe.split("\n").map(line => /(?:bearer\s+\S+|\b(?:sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]+|(?:api[_-]?key|token|secret|password|authorization|credential|private.key)\s*["']?\s*[:=]|-----BEGIN|-----END)/i.test(line)
-    ? "[sensitive line withheld]" : line).join("\n");
+  safe = safe.split("\n").map(line => {
+    const opaque = (line.match(/[A-Za-z0-9+/_=-]{32,}/g) ?? []).some(token => {
+      if (/^[0-9a-f]{40}$/.test(token)) return false;
+      if (/^[0-9a-f]+$/.test(token)) return token.length === 64 ? !/\bsha256\b/i.test(line) : !/\b(?:sha|commit|HEAD)\b/i.test(line);
+      return true;
+    });
+    return opaque || /(?:bearer\s+\S+|\b(?:sk-|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]+|(?:api[_-]?key|token|secret|password|authorization|credential|private.key)\s*["']?\s*[:=]|\b[A-Z_]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[A-Z_]*\s*=|\w+:\/\/[^/\s:@]+:[^@\s]+@|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.|-----BEGIN|-----END)/i.test(line)
+      ? "[sensitive line withheld]" : line;
+  }).join("\n");
   // Re-encoding repairs a clipped multibyte codepoint, then enforce the byte cap.
   while (Buffer.byteLength(safe) > maxBytes) {
     const excess = Math.max(1, Math.floor((Buffer.byteLength(safe) - maxBytes) / 4));

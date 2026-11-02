@@ -59,6 +59,22 @@ it("counts bounded tail errors and turns only after artifacts; successful outbou
   expect(sessionProgress(text.replace('"Delivered"', '"NOT DELIVERED"'), now - 10_000, limits).mailAt).toBe(0);
 });
 
+it.each(["secrets lease token", "sc fetch token", "op read vault/item", "op item get item", "printenv SERVICE", "env", "security find-generic-password", "cat config/.env", "cat auth.json"])("withholds sensitive bash results: %s (plant: bash)", command => {
+  const text = [entry("assistant", [{ type: "toolCall", id: "lease", name: "bash", arguments: { command } }]), entry("toolResult", "leased-value", { toolCallId: "lease" })].join("\n");
+  expect(sessionProgress(text, now - 1000, limits).tail).not.toContain("leased-value");
+});
+it("withholds a bare mixed-case 40-character token (plant: opaque)", () => {
+  expect(judgeText("AbCdEf0123456789AbCdEf0123456789AbCdEf01", 1000, {})).toBe("[sensitive line withheld]");
+});
+it("keeps git sha1 and labelled sha256 but withholds bare 64-character hex (plant: hex)", () => {
+  expect(judgeText("a".repeat(64), 1000, {})).toBe("[sensitive line withheld]");
+  expect(judgeText("a".repeat(40), 1000, {})).toBe("a".repeat(40));
+  expect(judgeText(`sha256: ${"a".repeat(64)}`, 1000, {})).toBe(`sha256: ${"a".repeat(64)}`);
+  expect(judgeText(`commit ${"a".repeat(64)}`, 1000, {})).toBe("[sensitive line withheld]");
+});
+it.each([["AWS_SECRET_ACCESS_KEY=short-value", "AWS"], ["postgres://alice:pass@db.invalid/name", "DB URL"], ["eyJabc.def.gh", "JWT"]])("withholds %s (plant: %s)", (text) => {
+  expect(judgeText(text!, 1000, {})).toBe("[sensitive line withheld]");
+});
 it("redacts credential lines and environment values before byte capping", () => {
   const safe = judgeText("normal\nAPI_KEY=super-secret\nBearer abcdef\nsk-test1234\n" + "秘密".repeat(4000), 8192, { SERVICE_TOKEN: "super-secret" });
   expect(safe).not.toMatch(/super-secret|abcdef|sk-test1234/);

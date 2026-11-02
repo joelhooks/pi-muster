@@ -411,7 +411,7 @@ export const decodeWatchdogEntry = Schema.decodeUnknownSync(Schema.Struct({
       type: Schema.String, text: Schema.optionalKey(Schema.String), id: Schema.optionalKey(Schema.String),
       name: Schema.optionalKey(Schema.String), arguments: Schema.optionalKey(Schema.Struct({
         action: Schema.optionalKey(Schema.String), to: Schema.optionalKey(Schema.String),
-        path: Schema.optionalKey(Schema.String),
+        path: Schema.optionalKey(Schema.String), command: Schema.optionalKey(Schema.String),
       })),
     }))])),
   })),
