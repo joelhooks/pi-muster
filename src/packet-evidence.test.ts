@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { Packet } from "./domain.ts";
-import { blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
+import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
 import { agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
@@ -39,6 +39,20 @@ describe("packet evidence decisions", () => {
     expect(evidenceNote("main", ["a", "b"], false)).toContain('(2 paths) since verify');
     expect(evidenceNote("main", ["a"], true)).toBeNull();
     expect(evidenceNote("main", [], false)).toBeNull();
+  });
+  it("skips only the landing frame and preserves exact NUL-delimited paths", () => {
+    const a = "a".repeat(40), b = "b".repeat(40), empty = "c".repeat(40);
+    const log = `${a}\0\0\nshared\0${empty}\0\0${b}\0\0\nplain\0${a}\0 spaced \0\nleading\0`;
+    expect(basePathsExceptLanding(log, a)).toEqual(["plain", a, " spaced ", "\nleading"]);
+    expect(basePathsExceptLanding(log, b)).toEqual(["shared"]);
+    expect(basePathsExceptLanding(log, null)).toEqual(["shared", "plain", a, " spaced ", "\nleading"]);
+    expect(basePathsExceptLanding("", null)).toEqual([]);
+  });
+  it("attributes paths to the next frame after an empty commit header", () => {
+    const empty = "a".repeat(40), next = "b".repeat(40);
+    const log = `${empty}\0\0${next}\0\0\nshared\0work\0`;
+    expect(basePathsExceptLanding(log, empty)).toEqual(["shared", "work"]);
+    expect(basePathsExceptLanding(log, next)).toEqual([]);
   });
   it("counts insertions and deletions and alarms only above 200", () => {
     expect(changedLines("100\t101\ta\n-\t-\tb\n")).toBe(201);
@@ -94,6 +108,31 @@ describe("packet evidence integration", () => {
       expect(result.note).toContain('evidence stale: refs/heads/main moved under "shared" (1 paths) since verify; pass gate or re-run packet_verify');
     } else expect(result.note).not.toContain("evidence stale:");
   });
+  it.each([
+    ["merge", "none"], ["merge", "before"], ["merge", "after"],
+    ["squash", "none"], ["squash", "before"], ["squash", "after"],
+  ] as const)("attested %s landing excludes its own paths, keeping foreign commits %s (plant: own landing)", async (kind, foreign) => {
+    const s = await fixture();
+    if (foreign === "before") advance(s, true);
+    sh(s.dir, "fetch", "-q", s.row.cwd, s.id);
+    if (kind === "merge") sh(s.dir, "merge", "--no-ff", "-qm", "packet landing", s.id);
+    else { sh(s.dir, "merge", "--squash", s.id); sh(s.dir, "commit", "-qm", "packet squash landing"); }
+    const landedAs = sh(s.dir, "rev-parse", "HEAD").trim();
+    if (foreign === "after") advance(s, true);
+    const original = s.h.proc;
+    const seen: string[][] = [];
+    s.h.proc = { run: (command, args, options) => {
+      if (command === "git" && args[0] === "log") seen.push([...args]);
+      return original.run(command, args, options);
+    } };
+    const result = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: landedAs.slice(0, 12), attested: true, evidence: "owner checked packet landing" }));
+    expect(result.packet).toMatchObject({ state: "committed", landedAs });
+    expect(result.note).not.toContain("alarm unavailable");
+    if (foreign === "none") expect(result.note).not.toContain("evidence stale:");
+    else expect(result.note).toContain('moved under "shared" (1 paths) since verify');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual(expect.arrayContaining(["--no-merges", `^${s.id}`]));
+  });
   it("does not alarm when a gate actually runs", async () => {
     const s = await fixture(); advance(s, true);
     const result = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", gate: "true" }));
@@ -148,7 +187,7 @@ describe("packet evidence integration", () => {
     const patches: string[][] = [];
     s.h.proc = { run: (command, args, options) => {
       if (command === "git" && args.includes("diff") && args.includes("--no-textconv") && !args.includes("--numstat")) patches.push([...args]);
-      return command === "git" && args.includes("diff") && args.includes(alarm === "stale" ? "--name-only" : "--numstat") && args.at(-1) === "--"
+      return command === "git" && args.includes(alarm === "stale" ? "log" : "diff") && args.includes(alarm === "stale" ? "--name-only" : "--numstat") && args.at(-1) === "--"
         ? Effect.succeed({ code: 1, stdout: "", stderr: "alarm unavailable" }) : original.run(command, args, options);
     } };
     const result = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed" }));

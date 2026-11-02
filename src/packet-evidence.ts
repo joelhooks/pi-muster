@@ -4,6 +4,28 @@ export function staleEvidence(packetPaths: readonly string[], basePaths: readonl
   return [...new Set(packetPaths)].filter(path => changed.has(path)).sort();
 }
 
+/** Decode NUL-delimited git log frames; skip one landing commit, not its ancestors. */
+export function basePathsExceptLanding(log: string, landedAs: string | null): string[] {
+  const tokens = log.split("\0");
+  const paths: string[] = [];
+  let skip = true;
+  let firstPath = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (/^[a-f0-9]{40,64}$/.test(token) && tokens[i + 1] === "") {
+      skip = token === landedAs;
+      firstPath = true;
+      i++;
+      continue;
+    }
+    // Git adds one newline before the first path; a filename's own newline remains.
+    const path = firstPath ? token.replace(/^\n/, "") : token;
+    firstPath = false;
+    if (path && !skip) paths.push(path);
+  }
+  return paths;
+}
+
 export function evidenceNote(base: string, overlap: readonly string[], gated: boolean): string | null {
   return !gated && overlap.length
     ? `evidence stale: ${base} moved under ${overlap.map(path => JSON.stringify(path)).join(", ")} (${overlap.length} paths) since verify; pass gate or re-run packet_verify`
