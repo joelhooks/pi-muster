@@ -1768,7 +1768,7 @@ describe("packet_land external squash landings", () => {
     sh(dir, "merge", "--no-ff", "-m", "external merge", commit);
     const landedAs = sh(dir, "rev-parse", "HEAD").trim();
     const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
-    expect(result.note).toBe('recorded an external landing; evidence stale: refs/heads/main moved under "work.txt" (1 paths) since verify; pass gate or re-run packet_verify');
+    expect(result.note).toBe("recorded an external landing");
     expect(result.packet.state).toBe("committed");
     expect(result.packet.landedAs).toBe(landedAs);
   });
@@ -1777,7 +1777,7 @@ describe("packet_land external squash landings", () => {
     const { h, dir, commit } = await verifiedWorker();
     const landedAs = squash(dir, commit);
     const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
-    expect(result.note).toBe('recorded a squash landing (patch-id match); evidence stale: refs/heads/main moved under "work.txt" (1 paths) since verify; pass gate or re-run packet_verify');
+    expect(result.note).toBe("recorded a squash landing (patch-id match)");
     expect(result.packet.landedAs).toBe(landedAs);
     expect(result.packet.evidence).toBe("reviewed PR\nrecorded a squash landing (patch-id match)");
     expect((await runWith(h, load(dir))).packets[0]?.evidence).toBe(result.packet.evidence);
@@ -1789,7 +1789,7 @@ describe("packet_land external squash landings", () => {
     sh(dir, "fetch", "-q", clone, "HEAD");
     const landedAs = squash(dir, sh(clone, "rev-parse", "HEAD").trim());
     const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
-    expect(result.note).toBe('recorded a squash landing (paths identical at landedAs); evidence stale: refs/heads/main moved under "work.txt" (1 paths) since verify; pass gate or re-run packet_verify');
+    expect(result.note).toBe("recorded a squash landing (paths identical at landedAs)");
     expect(result.packet.evidence).toBe("reviewed PR\nrecorded a squash landing (paths identical at landedAs)");
     expect(result.packet.state).toBe("committed");
   });
@@ -1814,7 +1814,7 @@ describe("packet_land external squash landings", () => {
     sh(dir, "fetch", "-q", clone, extra);
     const landedAs = squash(dir, extra);
     const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
-    expect(result.note).toBe('recorded a squash landing (paths identical at landedAs); evidence stale: refs/heads/main moved under "literal[1].txt", "renamed.txt" (2 paths) since verify; pass gate or re-run packet_verify');
+    expect(result.note).toBe("recorded a squash landing (paths identical at landedAs)");
   });
 
   it("harvests the packet object from its clone when missing from the source", async () => {
@@ -1829,7 +1829,7 @@ describe("packet_land external squash landings", () => {
     sh(dir, "commit", "-q", "-m", "squash without packet object");
     const landedAs = sh(dir, "rev-parse", "HEAD").trim();
     const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
-    expect(result.note).toBe('recorded a squash landing (patch-id match); evidence stale: refs/heads/main moved under "work.txt" (1 paths) since verify; pass gate or re-run packet_verify');
+    expect(result.note).toBe("recorded a squash landing (patch-id match)");
   });
 
   it("refuses a different change on a packet path and names the path", async () => {
@@ -1863,7 +1863,7 @@ describe("packet_land external squash landings", () => {
     const landedAs = squash(remote, commit);
     sh(dir, "remote", "add", "origin", remote);
     const result = await runWith(h, packetLand(dir, { id: commit, outcome: "committed", landedAs, evidence: "reviewed PR" }));
-    expect(result.note).toBe('recorded a squash landing (patch-id match); evidence stale: refs/remotes/origin/main moved under "work.txt" (1 paths) since verify; pass gate or re-run packet_verify');
+    expect(result.note).toBe("recorded a squash landing (patch-id match)");
     expect(result.packet.landedAs).toBe(landedAs);
   });
 });
