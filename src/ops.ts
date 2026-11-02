@@ -1037,17 +1037,29 @@ export function sessionChain(row: Pick<AgentRow, "sessionId" | "events">): strin
   return ids;
 }
 
-const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[]) => Effect.gen(function* () {
+const watchdogProbeRows = (project: Project, rows: readonly AgentRow[], sessionId: string) => rows.map(row => {
+  const packets = project.packets.filter(packet => packet.agent === row.name);
+  return { name: row.name, cwd: row.cwd, sessionFile: row.sessionFile, brief: row.brief, clone: row.clone ? { base: row.clone.base } : null,
+    watchdog: workingRow(row) && ["worker", "boss"].includes(row.role) && row.sessionId !== sessionId,
+    artifactAt: Math.max(Date.parse(row.createdAt), ...packets.map(packet => Date.parse(packet.reportedAt))),
+    artifact: packets.map(packet => packet.id).join(","), files: packets.flatMap(packet => [packet.report, ...(packet.artifact ? [packet.artifact] : [])]) };
+});
+const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[], probes: Map<string, ReturnType<typeof decodeWatchdogProbes>[number]>) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
   const result = new Map<string, number | null>();
   const names = [...new Set(project.agents.filter(row => row.machine !== "local" && row.state !== "closed").map(row => row.machine))];
   for (const name of names) {
     if (failedMachines.has(name)) continue;
     yield* Effect.gen(function* () {
       const machine = yield* machineConfig(name);
-      const files = project.agents.filter(row => row.machine === name).slice(0, 100).map(row => row.sessionFile).filter((file): file is string => file !== null);
-      const raw = yield* remoteNode(name, machine, `import {statSync} from 'node:fs';console.log(JSON.stringify(process.argv.slice(1).map(p=>{try{return [p,statSync(p).mtimeMs]}catch{return [p,null]}})));`, files);
-      const entries = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.String, Schema.NullOr(Schema.Number)]))), raw);
-      for (const [file, mtime] of entries) result.set(`${name}:${file}`, mtime);
+      const rows = watchdogProbeRows(project, project.agents.filter(row => row.machine === name && row.state !== "closed"), env.sessionId);
+      const raw = yield* remoteNode(name, machine, remoteWatchdogScript(false), [JSON.stringify({ rows, limits: watchdogLimits(project.policy) })]);
+      const entries = yield* decodeJsonWith(decodeWatchdogProbes, raw);
+      for (const probe of entries) {
+        const row = rows.find(row => row.name === probe.name);
+        if (row?.sessionFile) result.set(`${name}:${row.sessionFile}`, probe.mtime ?? null);
+        probes.set(`${name}:${probe.name}`, probe);
+      }
     }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(name); notes.push(`machine ${name}: session stats skipped: ${error.message}`); })));
   }
   return result;
@@ -4650,7 +4662,8 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     let endSession: Parameters<typeof finishRestart>[1] | undefined;
     let stuck = 0;
 
-    const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
+    const remoteProbes = new Map<string, ReturnType<typeof decodeWatchdogProbes>[number]>();
+    const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes, remoteProbes);
     const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
     recoveryNotes.push(...undeliveredLaunchNotes(launchJobs, project.slug, env.sessionId, env.now().getTime()));
     const reapSources: ReapSources = new Map();
@@ -4905,22 +4918,16 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     // Independent alarm pass: never sends keys, prompts, restarts or lifecycle events.
     const progressLimits = watchdogLimits(project.policy);
     const watchdogRows = (yield* load(dir)).agents.filter(row => workingRow(row) && ["worker", "boss"].includes(row.role) && row.sessionId !== env.sessionId);
-    const remoteProbes = new Map<string, ReturnType<typeof decodeWatchdogProbes>[number]>();
     const remoteTails = new Map<string, ReturnType<typeof decodeWatchdogTails>[number]>();
-    const probeRows = (rows: readonly AgentRow[]) => rows.map(row => {
-      const packets = project.packets.filter(packet => packet.agent === row.name);
-      return { name: row.name, cwd: row.cwd, sessionFile: row.sessionFile, brief: row.brief, clone: row.clone ? { base: row.clone.base } : null,
-        artifactAt: Math.max(Date.parse(row.createdAt), ...packets.map(packet => Date.parse(packet.reportedAt))),
-        artifact: packets.map(packet => packet.id).join(","), files: packets.flatMap(packet => [packet.report, ...(packet.artifact ? [packet.artifact] : [])]) };
-    });
+    const probeRows = (rows: readonly AgentRow[]) => watchdogProbeRows(project, rows, env.sessionId);
     for (const name of new Set(watchdogRows.filter(row => row.machine !== "local").map(row => row.machine))) {
       if (ingestion.failedMachines.has(name)) { recoveryNotes.push(`watchdog: ${name} probes unavailable: machine status failed`); continue; }
       yield* Effect.gen(function* () {
         const machine = yield* machineConfig(name);
-        const rows = probeRows(watchdogRows.filter(row => row.machine === name));
-        const raw = yield* remoteNode(name, machine, remoteWatchdogScript(false), [JSON.stringify({ rows, limits: progressLimits })]);
-        const probes = yield* decodeJsonWith(decodeWatchdogProbes, raw);
-        for (const probe of probes) remoteProbes.set(`${name}:${probe.name}`, probe);
+        const probes = watchdogRows.filter(row => row.machine === name).flatMap(row => {
+          const probe = remoteProbes.get(`${name}:${row.name}`);
+          return probe ? [probe] : [];
+        });
         const flagged = watchdogRows.filter(row => row.machine === name && row.owner === env.sessionId && act && probes.some(probe => probe.name === row.name &&
           !probe.unavailable && progressFlags(row, { ...probe, now }, progressLimits).length &&
           !previousJudgment(row, watchdogFingerprint({ ...probe, now }, progressFlags(row, { ...probe, now }, progressLimits), progressLimits.model), now, progressLimits)));

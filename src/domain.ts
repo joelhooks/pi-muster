@@ -423,7 +423,7 @@ export const WatchdogVerdict = Schema.Struct({
 });
 export const decodeWatchdogVerdict = Schema.decodeUnknownSync(WatchdogVerdict, { onExcessProperty: "error" });
 export const decodeWatchdogProbes = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({
-  name: Schema.String, artifactAt: Schema.Number, artifact: Schema.String, turns: Schema.Number,
+  name: Schema.String, mtime: Schema.optionalKey(Schema.NullOr(Schema.Number)), artifactAt: Schema.Number, artifact: Schema.String, turns: Schema.Number,
   errors: Schema.Array(Schema.String), unavailable: Schema.optionalKey(Schema.String),
 })));
 export const decodeWatchdogTails = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ name: Schema.String, brief: Schema.String, tail: Schema.String })));

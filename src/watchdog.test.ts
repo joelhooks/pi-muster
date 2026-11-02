@@ -2,6 +2,8 @@ import { execFileSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
+import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
+import * as ai from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodePolicy, decodeWatchdogProbes, decodeWatchdogTails, decodeWatchdogVerdict, mergePolicy, type AgentRow } from "./domain.ts";
 import { artifactMtime, judgeProgress, judgeText, previousJudgment, progressFlags, registryJudge, remoteWatchdogScript, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail } from "./watchdog.ts";
@@ -86,6 +88,18 @@ it("never falls back when the named registry model is absent", async () => {
   expect(line).toContain("missing/model");
 });
 
+it("uses the real model registry lookup and auth shape with low thinking and bounded output", async () => {
+  const registry = ModelRegistry.inMemory(AuthStorage.inMemory());
+  registry.registerProvider("cliproxy-codex", { baseUrl: "https://example.invalid", api: "openai-completions", apiKey: "test-placeholder", models: [{
+    id: "gpt-5.6-terra", name: "Terra", reasoning: true, input: ["text"], contextWindow: 10000, maxTokens: 300,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  }] });
+  const completion = vi.fn<typeof ai.completeSimple>().mockResolvedValue({ content: [{ type: "text", text: verdict }], stopReason: "stop" } as Awaited<ReturnType<typeof ai.completeSimple>>);
+  expect(registry.getAll().some(model => model.provider === "cliproxy-codex" && model.id === "gpt-5.6-terra")).toBe(true);
+  const line = await Effect.runPromise(judgeProgress(registryJudge(registry, completion), limits.model, "brief", "tail"));
+  expect(line).toContain("stuck — same failing check");
+  expect(completion).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ provider: "cliproxy-codex", id: "gpt-5.6-terra" }), expect.any(Object), expect.objectContaining({ reasoning: "low", maxTokens: 300, apiKey: "test-placeholder" }));
+});
 it("refuses session-bound bridge judges before registry lookup", async () => {
   const find = vi.fn(() => undefined);
   const judge = registryJudge({ find } as unknown as Parameters<typeof registryJudge>[0]);
