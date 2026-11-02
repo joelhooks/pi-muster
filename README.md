@@ -122,6 +122,12 @@ Committed `packet_land` outcomes start delivery at `landed`, with a timestamp. `
 
 Feature WIP includes open and draining work lanes, plus closed lanes still at `landed` or `deployed`, even if archived. At deploy levels 2 and 3, deployed lanes leave WIP even with an open tab; the flow line keeps them visible as `watching`. Role tabs and proposed (`open: false`) ideas do not count. `policy.wipLimit` defaults to 3; `null` disables it. At the limit, `lane_open` refuses and lists in-flight lanes with stage and age. Park ideas with `open: false`, or pass `override` containing Joel's words; the lane records them.
 
+`project_status` also reports progress alarms as `watchdog: <row> ...`. The fast path checks artifact age, repeated tool errors and turns without an artifact. Only flagged rows owned by the calling session can invoke the judge; `act: false` never invokes it. The watchdog records an alarm, never types, nudges or restarts. The owner decides what to do.
+
+Tune `policy.watchdog` with `project_update`: `progressStallMin` (120), `repeatedErrors` (3), `errorWindow` (50 tail messages), `turnsWithoutArtifact` (30), and `model` (`claude-bridge/claude-haiku-5-5`). Fields are optional and merge individually. The named model must exist in Pi's registry; there is no fallback. A judgment uses low thinking, 300 output tokens, a 15-second deadline, the brief (or next action), and at most 8 KB of redacted assistant/tool text. Unchanged artifact/error/flag evidence reuses the last judgment for `progressStallMin`. Bounded session tails give conservative turn counts; unavailable probes or judges are alarms, not status failures.
+
+Muster's phone records keep the item title plus explanation, or an update's text, within 100 words including the trim marker. Trimmed item detail stays in the card body.
+
 The board header and turn feeds show one flow line: `WIP 2/3 · landed, not live: lexicon-pin 40m · oldest in flight 2h · last proven 35m ago`. `⚠ not flowing` marks WIP with no recent proof or stage movement for `policy.flowStallMin` (default 120), or a reported packet waiting longer than `policy.landWaitMin` (default 30). These limits are minutes and can be changed with `project_update`. No extra sounds or toasts.
 
 Worker side, when `MUSTER_AGENT` is set: `owner_note`, `packet_report` and per-role compaction (`--compact-at`, `/compact-at`). A worker (`MUSTER_ROLE=worker`) gets no project-management or operator tools. `owner_inbox` and `owner_reply` remain for one release as refusals that name their Rat King replacements.

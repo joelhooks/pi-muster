@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { StringEnum } from "@earendil-works/pi-ai";
+import { registryJudge } from "./watchdog.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createHerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
 import { Cause, Effect, Exit, Layer } from "effect";
@@ -802,7 +803,7 @@ export default function muster(host: ExtensionAPI) {
       takeover: Type.Optional(Type.Boolean({ description: "Adopt all non-closed catalog rows into this owner session without restarting or closing their panes. Explicit handover; works with act: false." })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
-      return run(ctx, signal, projectStatus(projectDir(ctx, params.project), { act: params.act, takeover: params.takeover }), (result) => {
+      return run(ctx, signal, projectStatus(projectDir(ctx, params.project), { act: params.act, takeover: params.takeover }, registryJudge(ctx.modelRegistry)), (result) => {
         if (result.endSession) armRestartExit({ sessionId: ctx.sessionManager.getSessionId(), dir: projectDir(ctx, params.project), restart: result.endSession });
         return [result.board, ...result.notes].join("\n");
       });
@@ -839,6 +840,13 @@ export default function muster(host: ExtensionAPI) {
           deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Set fallback deploy permission on the 0 locked to 3 jfdi scale." })),
           comms: Type.Optional(StringEnum(["intercom", "network", "ratking"] as const)),
           wipLimit: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
+          watchdog: Type.Optional(Type.Object({
+            progressStallMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+            repeatedErrors: Type.Optional(Type.Integer({ minimum: 1 })),
+            errorWindow: Type.Optional(Type.Integer({ minimum: 1 })),
+            turnsWithoutArtifact: Type.Optional(Type.Integer({ minimum: 1 })),
+            model: Type.Optional(Type.String({ minLength: 1 })),
+          })),
           flowStallMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
           landWaitMin: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
           gateTimeoutMin: Type.Optional(Type.Number({ exclusiveMinimum: 0, description: "Minutes a packet_land gate may run; default 45" })),

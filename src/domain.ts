@@ -399,6 +399,36 @@ export const decodeFirstTurnEntry = Schema.decodeUnknownSync(Schema.Struct({
   })),
 }));
 export const decodeSessionSlice = Schema.decodeUnknownSync(Schema.Struct({ size: Schema.Number, text: Schema.String }));
+/** Bounded watchdog projection: never retain tool arguments, thinking or images as judge text. */
+export const decodeWatchdogEntry = Schema.decodeUnknownSync(Schema.Struct({
+  timestamp: Schema.optionalKey(Schema.String),
+  message: Schema.optionalKey(Schema.Struct({
+    role: Schema.String,
+    isError: Schema.optionalKey(Schema.Boolean),
+    toolCallId: Schema.optionalKey(Schema.String),
+    toolName: Schema.optionalKey(Schema.String),
+    content: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.Struct({
+      type: Schema.String, text: Schema.optionalKey(Schema.String), id: Schema.optionalKey(Schema.String),
+      name: Schema.optionalKey(Schema.String), arguments: Schema.optionalKey(Schema.Struct({
+        action: Schema.optionalKey(Schema.String), to: Schema.optionalKey(Schema.String),
+        path: Schema.optionalKey(Schema.String),
+      })),
+    }))])),
+  })),
+}));
+const WatchdogLine = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(600), Schema.isPattern(/^[^\r\n]+$/));
+export const WatchdogVerdict = Schema.Struct({
+  verdict: Schema.Literals(["progressing", "stuck", "drifting", "waiting"]),
+  on: Schema.optionalKey(WatchdogLine), why: WatchdogLine, nudge: WatchdogLine,
+});
+export const decodeWatchdogVerdict = Schema.decodeUnknownSync(WatchdogVerdict, { onExcessProperty: "error" });
+export const decodeWatchdogProbes = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({
+  name: Schema.String, artifactAt: Schema.Number, artifact: Schema.String, turns: Schema.Number,
+  errors: Schema.Array(Schema.String), unavailable: Schema.optionalKey(Schema.String),
+})));
+export const decodeWatchdogTails = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ name: Schema.String, brief: Schema.String, tail: Schema.String })));
+export const decodeWatchdogMemo = Schema.decodeUnknownSync(Schema.Struct({ fingerprint: Schema.String, line: Schema.String }));
+export const decodeWatchdogText = Schema.decodeUnknownSync(Schema.String);
 export const decodeSessionEntryCount = Schema.decodeUnknownSync(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)));
 
 export const LaneDelivery = Schema.Literals(["none", "landed", "deployed", "proven", "waived"]);
@@ -557,7 +587,15 @@ export function withRoleLaunch<P extends { readonly policy?: RoleLaunch | undefi
  * A project's tuning. Muster ships defaults that fit most work; the owner
  * shapes them to the job with `project_update` instead of reading rules.
  */
+export const WatchdogPolicy = Schema.Struct({
+  progressStallMin: Schema.optionalKey(Minutes),
+  repeatedErrors: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+  errorWindow: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+  turnsWithoutArtifact: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+  model: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1))),
+});
 export const Policy = Schema.Struct({
+  watchdog: Schema.optionalKey(WatchdogPolicy),
   deployLevel: Schema.optionalKey(DeployLevel),
   wipLimit: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)))),
   flowStallMin: Schema.optionalKey(Minutes),
@@ -857,6 +895,7 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
     // Ignore comms patches; preserve only the value already on disk.
     ...(patch.deployLevel !== undefined ? { deployLevel: patch.deployLevel } : {}),
     ...(patch.wipLimit !== undefined ? { wipLimit: patch.wipLimit } : {}),
+    ...(patch.watchdog !== undefined ? { watchdog: { ...base?.watchdog, ...patch.watchdog } } : {}),
     ...(patch.flowStallMin !== undefined ? { flowStallMin: patch.flowStallMin } : {}),
     ...(patch.landWaitMin !== undefined ? { landWaitMin: patch.landWaitMin } : {}),
     ...(patch.gateTimeoutMin !== undefined ? { gateTimeoutMin: patch.gateTimeoutMin } : {}),
@@ -898,7 +937,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { deployLevel: policy?.deployLevel ?? 1, machines: { deny: policy?.machines?.deny ?? [] }, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, gateTimeoutMin: policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { watchdog: { progressStallMin: 120, repeatedErrors: 3, errorWindow: 50, turnsWithoutArtifact: 30, model: "claude-bridge/claude-haiku-5-5", ...policy?.watchdog }, deployLevel: policy?.deployLevel ?? 1, machines: { deny: policy?.machines?.deny ?? [] }, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, gateTimeoutMin: policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 /** Legacy comms hints decode tolerantly; mergePolicy never writes them. */

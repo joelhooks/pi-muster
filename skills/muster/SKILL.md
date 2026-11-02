@@ -51,6 +51,8 @@ Deploy posture belongs in the project's VISION.md, in Joel's words. Choose the l
 
 Role models and alternates come from the fleet roster. Pick an alternate when its stated purpose matches the lane. An explicit model from Joel wins. Give workers only the skills their packet needs.
 
+Read `watchdog:` board lines as progress alarms, not verdicts to obey. Compare the suggested action with the brief and current evidence; the owner decides whether to unblock, redirect or leave the worker alone. A progressing judgment can be right even when artifact age is high. An unavailable judge means inspect the row, not restart it.
+
 Long builds need silence limits that allow them to finish. Cheap scouts need less context; a lane that must retain context needs a suitable compaction limit. Change project policy rather than working around it.
 
 A prompt to a live Pi worker is mail. `herdr_agent prompt` routes it through Rat King for the owning session; proof of life is the worker's working turn record, not pane text. Queued mail waits for the busy worker's turn to end. An unproven receipt is not permission to resend blindly.
