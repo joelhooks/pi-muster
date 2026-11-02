@@ -361,8 +361,11 @@ const remoteLaunch = (dir: string, project: Project, params: Omit<AgentLaunchInp
       clone = { source, branch: allocated.branch, base: allocated.base };
       cloneNotes.push(...allocated.notes);
       // A private/local base may not exist on GitHub: retain the mapped checkout as the fetch remote.
-      // pi-tui-research, 2026-10-13: a source checkout seeded from a bundle has no origin, and set-url failed after the clone existed.
-      yield* git(cwd, "remote", "set-url", "origin", remoteSource).pipe(Effect.catch(() => git(cwd, "remote", "add", "origin", remoteSource)));
+      // Keep rift's real origin for pushes; private base objects come from the mapped source.
+      yield* git(cwd, "remote", "set-url", "source", remoteSource).pipe(Effect.catch(() => git(cwd, "remote", "add", "source", remoteSource)));
+      // A source seeded from a bundle may have no origin at all.
+      if (!(yield* git(cwd, "remote", "get-url", "origin").pipe(Effect.orElseSucceed(() => ""))).trim())
+        yield* git(cwd, "remote", "add", "origin", remoteSource);
       yield* must("git", ["fetch", "--no-tags", "--", remoteSource, allocated.base?.sha ?? "HEAD"], { cwd, timeoutMs: 30_000 });
     }
     yield* must("test", ["-d", cwd], { cwd: "/", timeoutMs: 10_000 });
@@ -2782,7 +2785,15 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   if (modelNote) notes.push(modelNote);
   if (machine && old.clone) {
     const source = mapPath(old.clone.source, machine);
-    yield* git(old.cwd, "remote", "set-url", "origin", source);
+    yield* git(old.cwd, "remote", "set-url", "source", source).pipe(Effect.catch(() => git(old.cwd, "remote", "add", "source", source)));
+    const origin = (yield* git(old.cwd, "remote", "get-url", "origin").pipe(Effect.orElseSucceed(() => ""))).trim();
+    if (!origin) yield* git(old.cwd, "remote", "add", "origin", source);
+    else if (origin === source) {
+      // Heal only the old mapped-path overwrite, never a worker's deliberate origin.
+      const upstream = (yield* git(source, "remote", "get-url", "origin").pipe(Effect.orElseSucceed(() => ""))).trim();
+      if (/^[a-z][a-z\d+.-]*:\/\//i.test(upstream) || /^(?:[^/\s:]+@)?[^/\s:]+:.+/.test(upstream))
+        yield* git(old.cwd, "remote", "set-url", "origin", upstream);
+    }
     yield* must("git", ["fetch", "--no-tags", "--", source, "HEAD"], { cwd: old.cwd, timeoutMs: 30_000 });
     notes.push(`machine ${old.machine}: restart fetched its base objects from mapped source ${source}`);
   }
