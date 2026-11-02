@@ -154,6 +154,16 @@ async function setup() {
   h.herdr.calls.length = 0;
   return { h, dir, row, patch };
 }
+it("project_update persists watchdog policy while old project files still load", async () => {
+  const s = await setup();
+  const old = await runWith(s.h, load(s.dir));
+  expect(old.policy?.watchdog).toBeUndefined();
+  expect(watchdogLimits(old.policy).progressStallMin).toBe(120);
+  await runWith(s.h, projectUpdate(s.dir, { policy: { watchdog: { progressStallMin: 30 } } }));
+  const saved = await runWith(s.h, load(s.dir));
+  expect(saved.policy?.watchdog).toEqual({ progressStallMin: 30 });
+  expect(watchdogLimits(saved.policy)).toMatchObject({ progressStallMin: 30, repeatedErrors: 3, model: "cliproxy-codex/gpt-5.6-terra" });
+});
 it("status preview uses fast flags only, no model call or event", async () => {
   const s = await setup(); const judge = vi.fn(async () => verdict);
   const before = await runWith(s.h, load(s.dir));
