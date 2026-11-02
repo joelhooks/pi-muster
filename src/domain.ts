@@ -937,7 +937,7 @@ export function effectivePolicy(roster: Roster | undefined, policy: Policy | und
       return [role, { ...roleDefaults(roster, policy, role, undefined, project), ...(alternates.length ? { alternates } : {}) }];
     }),
   );
-  return { watchdog: { progressStallMin: 120, repeatedErrors: 3, errorWindow: 50, turnsWithoutArtifact: 30, model: "claude-bridge/claude-haiku-5-5", ...policy?.watchdog }, deployLevel: policy?.deployLevel ?? 1, machines: { deny: policy?.machines?.deny ?? [] }, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, gateTimeoutMin: policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
+  return { watchdog: { progressStallMin: 120, repeatedErrors: 3, errorWindow: 50, turnsWithoutArtifact: 30, model: "cliproxy-codex/gpt-5.6-terra", ...policy?.watchdog }, deployLevel: policy?.deployLevel ?? 1, machines: { deny: policy?.machines?.deny ?? [] }, wipLimit: policy?.wipLimit ?? null, flowStallMin: policy?.flowStallMin ?? 120, landWaitMin: policy?.landWaitMin ?? 30, gateTimeoutMin: policy?.gateTimeoutMin ?? DEFAULT_GATE_TIMEOUT_MIN, comms: policyComms(policy), aliases: modelAliases(roster), nudgeAfterMin: limits.nudgeMs / 60_000, restartAfterMin: limits.restartMs === null ? null : limits.restartMs / 60_000, roles };
 }
 
 /** Legacy comms hints decode tolerantly; mergePolicy never writes them. */

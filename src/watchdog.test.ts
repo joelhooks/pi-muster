@@ -86,6 +86,14 @@ it("never falls back when the named registry model is absent", async () => {
   expect(line).toContain("missing/model");
 });
 
+it("refuses session-bound bridge judges before registry lookup", async () => {
+  const find = vi.fn(() => undefined);
+  const judge = registryJudge({ find } as unknown as Parameters<typeof registryJudge>[0]);
+  const line = await Effect.runPromise(judgeProgress(judge, "claude-bridge/claude-haiku-5-5", "brief", "tail"));
+  expect(line).toBe("judge unavailable: claude-bridge models are session-bound; set watchdog.model to a stateless provider");
+  expect(find).not.toHaveBeenCalled();
+  expect(watchdogLimits().model).toBe("cliproxy-codex/gpt-5.6-terra");
+});
 it("phone cap includes the trim marker and keeps full item details (plant: phone)", () => {
   const long = Array.from({ length: 130 }, (_, i) => `word${i}`).join(" ");
   expect(phoneSummary(long).split(/\s+/)).toHaveLength(100);
