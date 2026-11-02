@@ -732,7 +732,7 @@ export default function muster(host: ExtensionAPI) {
     parameters: Type.Object({ project: ProjectParam, id: Type.String({ description: "Packet id or a unique prefix of at least 7 chars" }) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       return run(ctx, signal, packetVerify(projectDir(ctx, params.project), params.id), (result) =>
-        [`Packet ${result.packet.id.slice(0, 12)} verified.`, ...result.checks.map((check) => `- ${check.outcome} ${check.name}${check.detail ? `: ${check.detail}` : ""}`)].join("\n"),
+        [`Packet ${result.packet.id.slice(0, 12)} verified.`, ...result.checks.map((check) => `- ${check.outcome} ${check.name}${check.detail ? `: ${check.detail}` : ""}`), result.note].filter(Boolean).join("\n"),
       );
     },
   });
@@ -750,6 +750,7 @@ export default function muster(host: ExtensionAPI) {
       takeover: Type.Optional(Type.Boolean({ description: "Allow correcting a packet owned by another session" })),
       gate: Type.Optional(Type.String({ description: "Shell command run in the source checkout before the merge commit" })),
       landedAs: Type.Optional(Type.String()),
+      review: Type.Optional(Type.String({ description: "Absolute path to the recorded blind review findings." })),
       attested: Type.Optional(Type.Boolean({ description: "Owner vouches for work landed inside a larger commit; requires landedAs on the base branch and non-empty evidence. Does not inspect or merge the clone." })),
       evidence: Type.Optional(Type.String({ description: "Required for artifact or clone-less packets: what the owner checked and where" })),
       message: Type.Optional(Type.String()),

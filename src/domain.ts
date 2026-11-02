@@ -351,7 +351,8 @@ export const Packet = Schema.Struct({
   report: Path,
   checks: Schema.Array(CheckOutcome),
   state: PacketState,
-  verification: Schema.NullOr(Schema.Struct({ at: Iso, checks: Schema.Array(CheckOutcome) })),
+  verification: Schema.NullOr(Schema.Struct({ at: Iso, checks: Schema.Array(CheckOutcome), baseSha: Schema.optionalKey(Schema.String), paths: Schema.optionalKey(Schema.Array(Schema.String)) })),
+  review: Schema.optionalKey(Path),
   landedAs: Schema.NullOr(Schema.String),
   /** Owner vouched for this landing instead of proving packet equivalence. Absent in old catalogs. */
   attested: Schema.optionalKey(Schema.Boolean),

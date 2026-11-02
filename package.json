@@ -87,6 +87,7 @@
     "src/ops.ts",
     "src/models.ts",
     "src/packet.ts",
+    "src/packet-evidence.ts",
     "src/roster.ts",
     "src/runtime.ts",
     "src/session-file.ts",
@@ -116,6 +117,7 @@
     "src/desk-report-ops.ts",
     "src/desk-report-ext.ts",
     "src/tokens.ts",
+    "src/tool-loadout.ts",
     "src/task-status.ts",
     "src/version-skew.ts"
   ],

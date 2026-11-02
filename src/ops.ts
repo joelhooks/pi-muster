@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { turnLog, turnUnsupported } from "./turn-wake.ts";
 import { spawn } from "node:child_process";
-import { appendFileSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
@@ -60,6 +60,7 @@ import type { PaneInfo, Proof } from "./herdr.ts";
 import { untilJournalLines } from "./restart-snapshot.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
+import { blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
@@ -3912,6 +3913,53 @@ export const packetReport = (params: PacketReportInput) =>
     return { packet: saved.packet, delivery: notice.delivery, notice };
   });
 
+/** Resolve evidence where the repository lives, including remote workers and retired clones. */
+const packetEvidenceRepo = (project: Project, lane: Lane | undefined, row: AgentRow, refresh = false) => Effect.gen(function* () {
+  const proc = yield* Proc;
+  const env = yield* MusterEnv;
+  const localSource = sourceOf(project, lane, row);
+  const ownBranch = lane?.base?.startsWith("refs/heads/") && existsSync(localSource);
+  const machine = row.machine === "local" || ownBranch ? undefined : yield* machineConfig(row.machine);
+  const source = machine ? mapPath(localSource, machine) : localSource;
+  const run = machine ? sshProc(row.machine, machine, proc, env.home) : proc;
+  const landing = yield* landingBase(source, branchBase(lane?.base)).pipe(Effect.provideService(Proc, run));
+  if (refresh && landing.hasRemote) yield* must("git", ["fetch", "--no-tags", "--", landing.remote, `+refs/heads/${landing.branch}:refs/remotes/${landing.remote}/${landing.branch}`], { cwd: source }).pipe(Effect.provideService(Proc, run));
+  const baseRef = lane?.base && /^[a-f0-9]{7,64}$/.test(lane.base) ? lane.base
+    : landing.hasRemote ? `refs/remotes/${landing.remote}/${landing.branch}` : `refs/heads/${landing.branch}`;
+  const baseSha = (yield* must("git", ["rev-parse", "--verify", `${baseRef}^{commit}`], { cwd: source }).pipe(Effect.provideService(Proc, run))).trim();
+  return { source, run, baseRef, baseSha };
+});
+
+const packetEvidenceDiff = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet) => Effect.gen(function* () {
+  const repo = yield* packetEvidenceRepo(project, lane, row);
+  // The source may not contain the packet yet. Read its patch from the worker checkout instead.
+  const inSource = (yield* repo.run.run("git", ["cat-file", "-e", `${packet.id}^{commit}`], { cwd: repo.source })).code === 0;
+  const proc = yield* Proc;
+  const env = yield* MusterEnv;
+  const machine = row.machine === "local" ? undefined : yield* machineConfig(row.machine);
+  const run = inSource ? repo.run : machine ? sshProc(row.machine, machine, proc, env.home) : proc;
+  const cwd = inSource ? repo.source : row.cwd;
+  const git = (...args: string[]) => must("git", args, { cwd }).pipe(Effect.provideService(Proc, run));
+  const comparisonBase = repo.baseSha;
+  if ((yield* run.run("git", ["cat-file", "-e", `${comparisonBase}^{commit}`], { cwd })).code !== 0) {
+    const source = machine ? mapPath(sourceOf(project, lane, row), machine) : repo.source;
+    yield* git("fetch", "-q", "--", source, comparisonBase);
+  }
+  const mergeBase = (yield* git("merge-base", comparisonBase, packet.id)).trim();
+  const paths = (yield* git("diff", "--no-renames", "--name-only", "-z", mergeBase, packet.id, "--")).split("\0").filter(Boolean);
+  const diff = yield* git("diff", "--no-ext-diff", "--no-textconv", mergeBase, packet.id, "--");
+  return { ...repo, paths, diff };
+});
+
+/** Landing alarms never reopen a worker clone, including owner-attested landings. */
+const packetEvidenceLines = (project: Project, lane: Lane | undefined, row: AgentRow, packet: Packet) => Effect.gen(function* () {
+  const repo = yield* packetEvidenceRepo(project, lane, row);
+  const git = (...args: string[]) => must("git", args, { cwd: repo.source }).pipe(Effect.provideService(Proc, repo.run));
+  const base = packet.verification?.baseSha ?? row.clone?.base?.sha ?? `${packet.id}^`;
+  const mergeBase = (yield* git("merge-base", base, packet.id)).trim();
+  return changedLines(yield* git("diff", "--no-ext-diff", "--no-textconv", "--numstat", mergeBase, packet.id, "--"));
+});
+
 export const packetVerify = (dir: string, id: string) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -3936,6 +3984,27 @@ export const packetVerify = (dir: string, id: string) =>
         message: `packet ${packet.id.slice(0, 12)} failed ${failed.length} check(s)${recovery}`,
       });
     }
+    const snapshotResult = packet.kind === "commit" ? yield* packetEvidenceDiff(project, lane, row, packet).pipe(
+      Effect.map(snapshot => ({ snapshot, note: null as string | null })),
+      Effect.catch(error => Effect.succeed({ snapshot: null, note: `evidence snapshot unavailable: ${error.message}; stale-evidence check off for this packet` })),
+    ) : { snapshot: null, note: null };
+    const { snapshot } = snapshotResult;
+    let reviewFile: string | null = null;
+    if (snapshot) {
+      const reviewDir = join(env.home, ".local", "state", "muster", "reviews", project.slug);
+      reviewFile = join(reviewDir, `${packet.id}.md`);
+      yield* Effect.try({
+        try: () => {
+          mkdirSync(reviewDir, { recursive: true, mode: 0o700 });
+          chmodSync(reviewDir, 0o700);
+          if (existsSync(reviewFile!)) chmodSync(reviewFile!, 0o600);
+          writeFileSync(reviewFile!, reviewBrief({ packet: packet.id,
+            ...(row.brief ? { briefPath: row.brief, ...(existsSync(row.brief) ? { brief: readFileSync(row.brief, "utf8") } : {}) } : {}),
+            report: readFileSync(packet.report, "utf8"), diff: snapshot.diff }), { mode: 0o600 });
+        },
+        catch: error => new StoreError({ path: reviewFile!, message: String(error) }),
+      });
+    }
     const verified = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
@@ -3945,7 +4014,7 @@ export const packetVerify = (dir: string, id: string) =>
           return yield* input(`agent ${agent.name} clone changed during verification; retry packet_verify`);
         }
         if (branch && agent.clone) checks.push({ name: "clone branch", outcome: "pass", detail: `updated to ${branch} (was ${agent.clone.branch})` });
-        const next: Packet = { ...latest, state: "verified", verification: { at: iso(env), checks }, updatedAt: iso(env) };
+        const next: Packet = { ...latest, state: "verified", verification: { at: iso(env), checks, ...(snapshot ? { baseSha: snapshot.baseSha, paths: snapshot.paths } : {}) }, updatedAt: iso(env) };
         const state = agent.state === "reported" ? yield* stepAgent(agent.name, agent.state, { type: "VERIFY" }) : agent.state;
         const withAgent = withRow(current, {
           ...agent, state,
@@ -3955,7 +4024,11 @@ export const packetVerify = (dir: string, id: string) =>
         return [withPacket(withAgent, next), next] as const;
       }),
     );
-    return { packet: verified, checks, note: branch && row.clone ? `updated clone.branch to ${branch} (was ${row.clone.branch})` : null };
+    return { packet: verified, checks, reviewFile, note: [
+      branch && row.clone ? `updated clone.branch to ${branch} (was ${row.clone.branch})` : null,
+      snapshotResult.note,
+      reviewFile ? `Blind review brief: ${reviewFile}. Run agent_launch role:"judge" with a prompt naming only that file.` : null,
+    ].filter(Boolean).join("\n") || null };
   });
 
 export type LandOutcome = "committed" | "rejected" | "no_changes";
@@ -3967,6 +4040,7 @@ export interface PacketLandInput {
   readonly outcome?: LandOutcome | undefined;
   readonly gate?: string | undefined;
   readonly landedAs?: string | undefined;
+  readonly review?: string | undefined;
   readonly attested?: boolean | undefined;
   readonly evidence?: string | undefined;
   readonly message?: string | undefined;
@@ -4080,7 +4154,7 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
     if (merged) {
       const head = (yield* git(source, "rev-parse", "HEAD")).trim();
       yield* proveLandingContent(source, row, packet, head);
-      return { landedAs: head, note: "already on HEAD; content proven; nothing merged", gate: null };
+      return { landedAs: head, note: "already on HEAD; content proven; nothing merged", gate: null, gateRan: false };
     }
     const base = (yield* git(source, "merge-base", "HEAD", branch)).trim();
     const incoming = (yield* git(source, "diff", "--name-only", "--no-renames", "-z", base, branch)).split("\0").filter(Boolean);
@@ -4163,7 +4237,7 @@ const riftMerge = (project: Project, lane: Lane | undefined, row: AgentRow, pack
         if (committedTree !== receipt.tree) return yield* new GuardFailed({ guard: "gate-tree", message: `committed HEAD tree ${committedTree} differs from gated tree ${receipt.tree}; commit left intact for owner (receipt: ${gateEvidence?.receipt})` });
       }
       if (incoming.length) yield* git(source, "--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--", ...incoming);
-      return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), gate: gateEvidence, note: `merged ${branch} --no-ff as shitratgit[bot]; not pushed${receipt ? `; gate ran on ${receipt.host} at tree ${receipt.tree.slice(0, 12)} (run ${receipt.runId})` : ""}` };
+      return { landedAs: (yield* git(source, "rev-parse", "HEAD")).trim(), gate: gateEvidence, gateRan: !!params.gate, note: `merged ${branch} --no-ff as shitratgit[bot]; not pushed${receipt ? `; gate ran on ${receipt.host} at tree ${receipt.tree.slice(0, 12)} (run ${receipt.runId})` : ""}` };
     }).pipe(Effect.ensuring(Effect.sync(() => rmSync(scratch, { recursive: true }))));
   });
 
@@ -4283,16 +4357,24 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     const row = yield* findRow(project, packet.agent);
     const lane = project.lanes.find((candidate) => candidate.slug === packet.lane);
 
+    if (params.review && !isAbsolute(params.review)) return yield* input("review must be an absolute path to the blind review findings");
     const outcome = params.outcome;
     if (!outcome) return yield* input("outcome is required unless correcting a landing");
     let landedAs: string | null = null;
     let note = "";
     let gate: PacketGate | null = null;
+    let gateRan = false;
     const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
     let evidence = params.evidence?.trim();
     if (params.attested && outcome !== "committed") return yield* input("attested is only supported for committed packets");
     if (project.mode !== "rift-merge" && outcome === "committed" && ((!params.attested && !evidence) || (evidence !== undefined && /^(placeholder|tbd|todo|-|n\/a)$/i.test(evidence)))) return yield* input("committed landing requires non-empty, non-placeholder evidence");
     if (recording && !evidence && !params.attested) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
+    const staleAtLand = outcome === "committed" && packet.kind === "commit" && packet.verification?.baseSha && packet.verification.paths
+      ? yield* Effect.gen(function* () {
+        const repo = yield* packetEvidenceRepo(project, lane, row, true);
+        const paths = (yield* must("git", ["diff", "--no-renames", "--name-only", "-z", packet.verification!.baseSha!, repo.baseSha, "--"], { cwd: repo.source }).pipe(Effect.provideService(Proc, repo.run))).split("\0").filter(Boolean);
+        return evidenceNote(repo.baseRef, staleEvidence(packet.verification!.paths!, paths), false);
+      }).pipe(Effect.catch(error => Effect.succeed(`packet evidence alarm unavailable: ${error.message}`))) : null;
     if (outcome === "committed" && params.attested) {
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
@@ -4336,7 +4418,7 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       if (recording) {
         note = "recorded without a merge";
       } else if (project.mode === "rift-merge" && !params.landedAs) {
-        ({ landedAs, note, gate } = yield* riftMerge(project, lane, row, packet, params));
+        ({ landedAs, note, gate, gateRan } = yield* riftMerge(project, lane, row, packet, params));
       } else {
         if (!params.landedAs) return yield* input(`mode ${project.mode} lands outside Muster; pass landedAs with the merge commit`);
         const source = sourceOf(project, lane, row);
@@ -4399,11 +4481,19 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       if (proof.note) note = [note, proof.note].filter(Boolean).join("; ");
       landedAs = (yield* git(source, "rev-parse", "--verify", "--end-of-options", `${landedAs}^{commit}`)).trim();
     }
+    if (outcome === "committed" && packet.kind === "commit") {
+      // Alarms must not undo a successful landing if old refs or a retired clone are unavailable.
+      const reviewAlarm = !(params.review ?? packet.review) ? yield* packetEvidenceLines(project, lane, row, packet).pipe(
+        Effect.map(lines => blindReviewNote(lines, undefined)),
+        Effect.catch(error => Effect.succeed(`blind review alarm unavailable: ${error.message}`)),
+      ) : null;
+      note = [note, !gateRan ? staleAtLand : null, reviewAlarm].filter(Boolean).join("; ");
+    }
     const event: AgentEvent | null = outcome === "rejected" ? { type: "REWORK" } : { type: "LAND" };
     const saved = yield* mutate(dir, (current) =>
       Effect.gen(function* () {
         const latest = yield* findPacket(current, packet.id);
-        const recorded = yield* recordPacketOutcome(current, { ...latest, gate: gate ?? latest.gate, ...(params.attested ? { attested: true } : {}) }, outcome, landedAs, gate ? [evidence, note].filter(Boolean).join("\n") : evidence, iso(env));
+        const recorded = yield* recordPacketOutcome(current, { ...latest, gate: gate ?? latest.gate, ...(params.review ? { review: params.review } : {}), ...(params.attested ? { attested: true } : {}) }, outcome, landedAs, gate ? [evidence, note].filter(Boolean).join("\n") : evidence, iso(env));
         const agent = yield* findRow(current, packet.agent);
         const moves = agent.state === "reported" || agent.state === "verified" || (agent.state === "landed" && event.type === "REWORK");
         let updated = moves ? withRow(recorded.project, { ...agent, state: yield* stepAgent(agent.name, agent.state, event), updatedAt: iso(env) }) : recorded.project;
