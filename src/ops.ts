@@ -74,7 +74,7 @@ import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem } from "./owner-queue.ts";
-import { watchdogHead, remoteWatchdogScript, artifactMtime, judgeProgress, previousJudgment, progressFlags, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail, workingRow, type WatchdogJudge } from "./watchdog.ts";
+import { reusableJudgment, watchdogHead, remoteWatchdogScript, artifactMtime, judgeProgress, previousJudgment, progressFlags, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail, workingRow, type WatchdogJudge } from "./watchdog.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeKeys, nudgeNote, silenceAlarm, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { launchDefaults } from "./fleet-steer.ts";
@@ -4967,7 +4967,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
         const remoteText = remoteTails.get(`${row.machine}:${row.name}`);
         line = cached ?? (row.machine !== "local" && (!remoteText || remoteText.unavailable) ? `judge unavailable: ${remoteText?.unavailable ?? "remote session evidence unavailable"}; owner: inspect the row` :
           yield* judgeProgress(judge, progressLimits.model, remoteText?.brief ?? (row.brief ? watchdogHead(row.brief, 16_384) : project.nextAction), remoteText?.tail ?? tail, 15_000, { ...process.env, ...row.profile.policy?.env, ...row.restore?.env }));
-        if (!cached) yield* mutate(dir, current => Effect.gen(function* () {
+        if (!cached && reusableJudgment(line)) yield* mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findRow(current, row.name);
           if (latest.owner !== env.sessionId || latest.sessionId !== row.sessionId || !workingRow(latest)) return [current, undefined] as const;
           return [withRow(current, { ...latest, events: [...(latest.events ?? []).filter(event => event.type !== "WATCHDOG"), { type: "WATCHDOG", at: iso(env), detail: JSON.stringify({ fingerprint, line }) }] }), undefined] as const;

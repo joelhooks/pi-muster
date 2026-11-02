@@ -184,10 +184,11 @@ export function watchdogFingerprint(signals: ProgressSignals, flags: readonly st
   // A turn alone is not material change: otherwise a looping agent defeats the cooldown every pass.
   return createHash("sha256").update(JSON.stringify([signals.artifact, signals.artifactAt, [...new Set(signals.errors)].sort(), flags, model])).digest("hex");
 }
+export const reusableJudgment = (line: string) => /^(?:progressing|stuck|drifting|waiting) — /.test(line);
 export function previousJudgment(row: AgentRow, fingerprint: string, now: number, limits: ProgressLimits): string | null {
   const event = row.events?.filter(event => event.type === "WATCHDOG").at(-1);
   if (!event || now - Date.parse(event.at) >= limits.progressStallMin * 60_000) return null;
-  try { const memo = decodeWatchdogMemo(JSON.parse(event.detail)); return memo.fingerprint === fingerprint ? memo.line : null; }
+  try { const memo = decodeWatchdogMemo(JSON.parse(event.detail)); return memo.fingerprint === fingerprint && reusableJudgment(memo.line) ? memo.line : null; }
   catch { return null; }
 }
 

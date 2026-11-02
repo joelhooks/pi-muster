@@ -172,6 +172,20 @@ it.each(["bad JSON", "failure", "timeout"])("status finishes after judge %s", as
   expect(result.board).toContain("watchdog: worker judge unavailable");
   expect(result.project.agents.find(r => r.name === "worker")?.state).toBe("running");
 });
+it("retries a failed judgment next pass instead of caching unavailable (plant: failure cache)", async () => {
+  const s = await setup();
+  const judge = vi.fn<WatchdogJudge>().mockRejectedValueOnce(new Error("provider offline")).mockResolvedValue(verdict);
+  const first = await runWith(s.h, projectStatus(s.dir, {}, judge));
+  expect(first.board).toContain("judge unavailable");
+  expect(first.project.agents.find(row => row.name === "worker")?.events?.filter(event => event.type === "WATCHDOG") ?? []).toHaveLength(0);
+  const second = await runWith(s.h, projectStatus(s.dir, {}, judge));
+  expect(judge).toHaveBeenCalledTimes(2);
+  expect(second.board).toContain("watchdog: worker stuck");
+  const row = second.project.agents.find(row => row.name === "worker")!;
+  const memo = JSON.parse(row.events!.find(event => event.type === "WATCHDOG")!.detail);
+  const old = { ...row, events: [{ type: "WATCHDOG", at: s.h.now.toISOString(), detail: JSON.stringify({ fingerprint: memo.fingerprint, line: "judge unavailable: old failure" }) }] };
+  expect(previousJudgment(old, memo.fingerprint, s.h.now.getTime(), limits)).toBeNull();
+});
 it("owned flagged rows judge once, persist cooldown, and rejudge only changed evidence", async () => {
   const s = await setup(); const judge = vi.fn<WatchdogJudge>(async () => verdict);
   const first = await runWith(s.h, projectStatus(s.dir, {}, judge));
