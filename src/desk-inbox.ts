@@ -22,6 +22,7 @@ const identitiesFrom = (value: unknown): DeskInboxIdentities => {
 
 /** Marker counts as a word. Detail belongs in the card body, not the phone summary. */
 export function phoneSummary(text: string, limit = 100): string {
+  if (limit <= 0) return "";
   const words = text.trim().split(/\s+/).filter(Boolean);
   return words.length <= limit ? text : [...words.slice(0, Math.max(0, limit - 1)), "[trimmed]"].join(" ");
 }
@@ -37,7 +38,7 @@ export function deskInboxItem(options: { project: string; queueItem: unknown; ca
   const trimmed = title !== queue.title || why !== card.why;
   const record = decodeItem({
     $type: "sh.mschf.ratking.desk.item", project: options.project, itemId: queue.id,
-    kind: queue.kind, title, why, body: trimmed ? `${queue.title}\n\n${card.why}\n\n${queue.body ?? ""}` : queue.body ?? "",
+    kind: queue.kind, title, why, body: trimmed ? [queue.title, card.why, queue.body].filter(Boolean).join("\n\n") : queue.body ?? "",
     choices: card.choices.map(choice => ({ key: choice.key, label: choice.label, suggest: choice.suggest,
       options: choice.options.map(option => ({ id: option.v, label: option.label, outcome: option.then })) })),
     ...(card.rows ? { rows: { key: card.rows.key, label: card.rows.label,

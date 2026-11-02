@@ -128,6 +128,15 @@ it.each(["claude-bridge/claude-haiku-5-5", "another-provider/alias"])("refuses s
   expect(complete).not.toHaveBeenCalled();
   expect(watchdogLimits().model).toBe("cliproxy-codex/gpt-5.6-terra");
 });
+it.each([0, -1])("empty phone budget %s yields no marker (plant: phone zero)", limit => {
+  expect(phoneSummary("detail", limit)).toBe("");
+});
+it.each(["full why", ""])("trimmed phone detail with empty body has no trailing separator: %s", why => {
+  const long = Array(110).fill("word").join(" ");
+  const record = deskInboxItem({ project: "test", queueItem: { id: "item", ts: new Date(now).toISOString(), from: "desk", kind: "decision", title: long, body: "" }, card: { id: "item", kind: "decision", title: long, why, group: "test", age: "", timeline: "", shows: [], not_shows: [], choices: [] } });
+  expect(record.body).toBe(why ? `${long}\n\n${why}` : long);
+  expect(record.body.endsWith("\n\n")).toBe(false);
+});
 it("phone cap includes the trim marker and keeps full item details (plant: phone)", () => {
   const long = Array.from({ length: 130 }, (_, i) => `word${i}`).join(" ");
   expect(phoneSummary(long).split(/\s+/)).toHaveLength(100);
