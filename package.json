@@ -97,6 +97,7 @@
     "src/remote.ts",
     "skills/muster/references/remote-lanes.md",
     "src/silence.ts",
+    "src/watchdog.ts",
     "src/skills.ts",
     "src/store.ts",
     "src/switchboard-ext.ts",

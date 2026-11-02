@@ -27,7 +27,7 @@ import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, autolandDue, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
 import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PaneBinding, Project, Role, Thinking } from "./domain.ts";
-import { decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, CACHE_WARM_CADENCE_MINUTES, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
+import { decodeWatchdogProbes, decodeWatchdogTails, decodePacketCorrection, GateReceipt, Project as ProjectSchema, SessionId, CACHE_WARM_CADENCE_MINUTES, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
 import { GuardFailed, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
 import { fleetRunner, fleetStatus } from "./fleet-gate.ts";
@@ -74,6 +74,7 @@ import { CACHE_TTL_MS, readSessionCost, sessionMtimeMs } from "./session-file.ts
 import type { SessionCost } from "./session-file.ts";
 import { nudgeSwitchboards } from "./switchboard-ops.ts";
 import { deliverOwnerItem } from "./owner-queue.ts";
+import { reusableJudgment, watchdogHead, remoteWatchdogScript, artifactMtime, judgeProgress, previousJudgment, progressFlags, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail, workingRow, type WatchdogJudge } from "./watchdog.ts";
 import { CAPTURE_REFRESH_MARK, captureRefreshNote, nudgeKeys, nudgeNote, silenceAlarm, silenceDecision } from "./silence.ts";
 import { loadRoster } from "./roster.ts";
 import { launchDefaults } from "./fleet-steer.ts";
@@ -1036,17 +1037,29 @@ export function sessionChain(row: Pick<AgentRow, "sessionId" | "events">): strin
   return ids;
 }
 
-const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[]) => Effect.gen(function* () {
+const watchdogProbeRows = (project: Project, rows: readonly AgentRow[], sessionId: string) => rows.map(row => {
+  const packets = project.packets.filter(packet => packet.agent === row.name);
+  return { name: row.name, cwd: row.cwd, sessionFile: row.sessionFile, brief: row.brief, clone: row.clone ? { base: row.clone.base } : null,
+    watchdog: workingRow(row) && ["worker", "boss"].includes(row.role) && row.sessionId !== sessionId,
+    artifactAt: Math.max(Date.parse(row.createdAt), ...packets.map(packet => Date.parse(packet.reportedAt))),
+    artifact: packets.map(packet => packet.id).join(","), files: packets.flatMap(packet => [packet.report, ...(packet.artifact ? [packet.artifact] : [])]) };
+});
+const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes: string[], probes: Map<string, ReturnType<typeof decodeWatchdogProbes>[number]>) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
   const result = new Map<string, number | null>();
   const names = [...new Set(project.agents.filter(row => row.machine !== "local" && row.state !== "closed").map(row => row.machine))];
   for (const name of names) {
     if (failedMachines.has(name)) continue;
     yield* Effect.gen(function* () {
       const machine = yield* machineConfig(name);
-      const files = project.agents.filter(row => row.machine === name).slice(0, 100).map(row => row.sessionFile).filter((file): file is string => file !== null);
-      const raw = yield* remoteNode(name, machine, `import {statSync} from 'node:fs';console.log(JSON.stringify(process.argv.slice(1).map(p=>{try{return [p,statSync(p).mtimeMs]}catch{return [p,null]}})));`, files);
-      const entries = yield* decodeJsonWith(Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.String, Schema.NullOr(Schema.Number)]))), raw);
-      for (const [file, mtime] of entries) result.set(`${name}:${file}`, mtime);
+      const rows = watchdogProbeRows(project, project.agents.filter(row => row.machine === name).slice(0, 100), env.sessionId);
+      const raw = yield* remoteNode(name, machine, remoteWatchdogScript(false), [JSON.stringify({ rows, limits: watchdogLimits(project.policy) })]);
+      const entries = yield* decodeJsonWith(decodeWatchdogProbes, raw);
+      for (const probe of entries) {
+        const row = rows.find(row => row.name === probe.name);
+        if (row?.sessionFile) result.set(`${name}:${row.sessionFile}`, probe.mtime ?? null);
+        probes.set(`${name}:${probe.name}`, probe);
+      }
     }).pipe(Effect.catch(error => Effect.sync(() => { failedMachines.add(name); notes.push(`machine ${name}: session stats skipped: ${error.message}`); })));
   }
   return result;
@@ -3993,13 +4006,22 @@ export const packetVerify = (dir: string, id: string) =>
     if (snapshot) {
       const reviewDir = join(env.home, ".local", "state", "muster", "reviews", project.slug);
       reviewFile = join(reviewDir, `${packet.id}.md`);
+      const briefPath = row.brief;
+      const brief = briefPath ? yield* Effect.gen(function* () {
+        if (row.machine === "local") return watchdogHead(briefPath, 60 * 1024);
+        const machine = yield* machineConfig(row.machine);
+        const proc = yield* Proc;
+        return yield* must("head", ["-c", String(60 * 1024), "--", briefPath], { cwd: "/", timeoutMs: 10_000 }).pipe(
+          Effect.provideService(Proc, sshProc(row.machine, machine, proc, env.home)),
+        );
+      }).pipe(Effect.orElseSucceed(() => "[Lane brief unavailable on the row machine; inspect before review.]")) : undefined;
       yield* Effect.try({
         try: () => {
           mkdirSync(reviewDir, { recursive: true, mode: 0o700 });
           chmodSync(reviewDir, 0o700);
           if (existsSync(reviewFile!)) chmodSync(reviewFile!, 0o600);
           writeFileSync(reviewFile!, reviewBrief({ packet: packet.id,
-            ...(row.brief ? { briefPath: row.brief, ...(existsSync(row.brief) ? { brief: readFileSync(row.brief, "utf8") } : {}) } : {}),
+            ...(briefPath ? { briefPath, brief } : {}),
             report: readFileSync(packet.report, "utf8"), diff: snapshot.diff }), { mode: 0o600 });
         },
         catch: error => new StoreError({ path: reviewFile!, message: String(error) }),
@@ -4592,7 +4614,7 @@ export interface StatusInput {
   readonly takeover?: boolean | undefined;
 }
 
-export const projectStatus = (dir: string, params: StatusInput = {}) =>
+export const projectStatus = (dir: string, params: StatusInput = {}, judge?: WatchdogJudge) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     const intercom = yield* Comms;
@@ -4649,7 +4671,8 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
     let endSession: Parameters<typeof finishRestart>[1] | undefined;
     let stuck = 0;
 
-    const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes);
+    const remoteProbes = new Map<string, ReturnType<typeof decodeWatchdogProbes>[number]>();
+    const remoteTimes = yield* remoteSessionTimes(project, ingestion.failedMachines, ingestion.notes, remoteProbes);
     const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
     recoveryNotes.push(...undeliveredLaunchNotes(launchJobs, project.slug, env.sessionId, env.now().getTime()));
     const reapSources: ReapSources = new Map();
@@ -4899,6 +4922,67 @@ export const projectStatus = (dir: string, params: StatusInput = {}) =>
         action,
       });
       if (endSession) break; // The replacement now owns the remaining rows.
+    }
+
+    // Independent alarm pass: never sends keys, prompts, restarts or lifecycle events.
+    const progressLimits = watchdogLimits(project.policy);
+    const watchdogRows = (yield* load(dir)).agents.filter(row => workingRow(row) && ["worker", "boss"].includes(row.role) && row.sessionId !== env.sessionId);
+    const remoteTails = new Map<string, ReturnType<typeof decodeWatchdogTails>[number]>();
+    const probeRows = (rows: readonly AgentRow[]) => watchdogProbeRows(project, rows, env.sessionId);
+    for (const name of new Set(watchdogRows.filter(row => ingestion.failedMachines.has(row.machine)).map(row => row.machine))) recoveryNotes.push(`watchdog: ${name} probes unavailable: machine status failed`);
+    const observations: { row: AgentRow; artifactAt: number; flags: string[]; fingerprint: string; cached: string | null; tail: string }[] = [];
+    for (const row of watchdogRows) {
+      const packets = project.packets.filter(packet => packet.agent === row.name);
+      let artifactAt = Math.max(Date.parse(row.createdAt), ...packets.map(packet => Date.parse(packet.reportedAt)));
+      let artifact = packets.map(packet => packet.id).join(",");
+      let tail = "";
+      if (row.machine === "local") {
+        const head = row.clone ? yield* must("git", ["log", "-1", "--format=%H %ct"], { cwd: row.cwd, timeoutMs: 5000 }).pipe(Effect.orElseSucceed(() => "")) : "";
+        const [sha, seconds] = head.trim().split(" ");
+        if (sha && sha !== row.clone?.base?.sha && Number.isFinite(Number(seconds))) {
+          artifact += sha;
+          artifactAt = Math.max(artifactAt, Number(seconds) * 1000);
+        }
+        artifactAt = Math.max(artifactAt, ...packets.flatMap(packet => [artifactMtime(packet.report), artifactMtime(packet.artifact)]));
+        tail = watchdogTail(row.sessionFile);
+      }
+      const progress = sessionProgress(tail, artifactAt, progressLimits);
+      const remote = row.machine !== "local" ? remoteProbes.get(`${row.machine}:${row.name}`) : undefined;
+      if (row.machine !== "local" && (!remote || remote.unavailable)) {
+        if (!ingestion.failedMachines.has(row.machine)) recoveryNotes.push(`watchdog: ${row.name} probes unavailable: ${remote?.unavailable ?? "100-row probe cap"}`);
+        continue;
+      }
+      const signals = remote ? { ...remote, now } : { now, artifactAt: progress.artifactAt, artifact: `${artifact}:${progress.mailAt}`, turns: progress.turns, errors: progress.errors };
+      const flags = progressFlags(row, signals, progressLimits);
+      if (!flags.length) continue;
+      const fingerprint = watchdogFingerprint(signals, flags, progressLimits.model);
+      observations.push({ row, artifactAt: signals.artifactAt, flags, fingerprint, cached: previousJudgment(row, fingerprint, now, progressLimits), tail: progress.tail });
+    }
+    observations.sort((a, b) => a.artifactAt - b.artifactAt || a.row.name.localeCompare(b.row.name));
+    const selected = new Set(observations.filter(item => act && item.row.owner === env.sessionId && !item.cached).slice(0, 3).map(item => item.row.name));
+    for (const name of new Set(observations.filter(item => selected.has(item.row.name) && item.row.machine !== "local").map(item => item.row.machine))) {
+      yield* Effect.gen(function* () {
+        const machine = yield* machineConfig(name);
+        const rows = observations.filter(item => item.row.machine === name && selected.has(item.row.name)).map(item => item.row);
+        const text = yield* remoteNode(name, machine, remoteWatchdogScript(true), [JSON.stringify({ rows: probeRows(rows), limits: progressLimits, nextAction: project.nextAction })]);
+        for (const tail of yield* decodeJsonWith(decodeWatchdogTails, text)) remoteTails.set(`${name}:${tail.name}`, tail);
+      }).pipe(Effect.catch(() => Effect.sync(() => { recoveryNotes.push(`watchdog: ${name} probes unavailable: remote read failed; retry project_status`); })));
+    }
+    for (const { row, flags, fingerprint, cached, tail } of observations) {
+      const prefix = `watchdog: ${row.name} `;
+      let line = `${flags.join(", ")} (fast path${act ? "" : "; act: false"})`;
+      if (act && row.owner === env.sessionId && !cached && !selected.has(row.name)) line = `${flags.join(", ")} (fast path; judge deferred)`;
+      else if (act && row.owner === env.sessionId) {
+        const remoteText = remoteTails.get(`${row.machine}:${row.name}`);
+        line = cached ?? (row.machine !== "local" && (!remoteText || remoteText.unavailable) ? `judge unavailable: ${remoteText?.unavailable ?? "remote session evidence unavailable"}; owner: inspect the row` :
+          yield* judgeProgress(judge, progressLimits.model, remoteText?.brief ?? (row.brief ? watchdogHead(row.brief, 16_384) : project.nextAction), remoteText?.tail ?? tail, 15_000, { ...process.env, ...row.profile.policy?.env, ...row.restore?.env }));
+        if (!cached && reusableJudgment(line)) yield* mutate(dir, current => Effect.gen(function* () {
+          const latest = yield* findRow(current, row.name);
+          if (latest.owner !== env.sessionId || latest.sessionId !== row.sessionId || !workingRow(latest)) return [current, undefined] as const;
+          return [withRow(current, { ...latest, events: [...(latest.events ?? []).filter(event => event.type !== "WATCHDOG"), { type: "WATCHDOG", at: iso(env), detail: JSON.stringify({ fingerprint, line }) }] }), undefined] as const;
+        }));
+      }
+      recoveryNotes.push(`${prefix}${line}`);
     }
 
     const autolandNotes: string[] = [];
