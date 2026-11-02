@@ -7,7 +7,7 @@ import { AuthStorage, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import * as ai from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodePolicy, decodeWatchdogProbes, decodeWatchdogTails, decodeWatchdogVerdict, mergePolicy, type AgentRow } from "./domain.ts";
-import { artifactMtime, judgeProgress, judgeText, previousJudgment, progressFlags, registryJudge, remoteWatchdogScript, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail } from "./watchdog.ts";
+import { probeOrder, artifactMtime, judgeProgress, judgeText, previousJudgment, progressFlags, registryJudge, remoteWatchdogScript, sessionProgress, watchdogFingerprint, watchdogLimits, watchdogTail } from "./watchdog.ts";
 import { deskInboxItem, deskInboxUpdate, phoneSummary } from "./desk-inbox.ts";
 import { agentLaunchForeground, laneOpen, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate } from "./store.ts";
@@ -25,6 +25,15 @@ const verdict = JSON.stringify({ verdict: "stuck", why: "same failing check", nu
 
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); vi.stubEnv("MUSTER_PROJECT", ""); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers(); });
+
+it("orders working workers and bosses, other open rows, then newest closed rows without mutating input", () => {
+  const row = (name: string, state: AgentRow["state"], role: AgentRow["role"], day = 1) => ({ name, state, role, updatedAt: `2026-11-0${day}T00:00:00Z` });
+  const rows = [row("old", "closed", "worker"), row("desk", "running", "desk"), row("reported", "reported", "worker"),
+    row("new", "closed", "boss", 2), row("worker", "silent", "worker"), row("boss", "nudged", "boss"), row("restarted", "restarted", "worker")];
+  const original = [...rows];
+  expect(probeOrder(rows).map(row => row.name)).toEqual(["worker", "boss", "restarted", "desk", "reported", "new", "old"]);
+  expect(rows).toEqual(original);
+});
 
 describe("free progress flags", () => {
   it("flags no artifact at the stall threshold (plant: stall)", () => {
@@ -177,7 +186,9 @@ it("status preview uses fast flags only, no model call or event", async () => {
   const s = await setup(); const judge = vi.fn(async () => verdict);
   const before = await runWith(s.h, load(s.dir));
   const result = await runWith(s.h, projectStatus(s.dir, { act: false }, judge));
-  expect(result.board).toContain("watchdog: worker no artifact (fast path; act: false)");
+  const line = "watchdog: worker no artifact (fast path; act: false)";
+  expect(result.board).toContain(line);
+  expect([result.board, ...result.notes].join("\n").split("\n").filter(printed => printed === line)).toHaveLength(1);
   expect(judge).not.toHaveBeenCalled();
   expect(await runWith(s.h, load(s.dir))).toEqual(before);
 });
@@ -336,6 +347,31 @@ it("remote scripts return counters only, then bounded flagged text; local/remote
   expect(watchdogTail(file)).toContain("working");
   expect(artifactMtime(file)).toBeGreaterThan(0);
 });
+it("remote probe cap covers three working rows after 120 closed rows", async () => {
+  const s = await setup(); await s.patch({ machine: "remote" });
+  await runWith(s.h, mutate(s.dir, project => {
+    const base = project.agents.find(row => row.name === "worker")!;
+    const closed = Array.from({ length: 120 }, (_, i) => ({ ...base, name: `closed${i}`, sessionId: randomUUID(), state: "closed" as const, pane: null }));
+    const working = Array.from({ length: 3 }, (_, i) => ({ ...base, name: `worker${i}`, sessionId: randomUUID(), pane: null }));
+    return Effect.succeed([{ ...project, agents: [...closed, ...working] }, undefined] as const);
+  }));
+  const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: s.h.workerWorktree, env: {}, wrap: [] } });
+  const probed: string[] = [];
+  vi.spyOn(remote, "remoteNode").mockImplementation((_name, _machine, script, args) => {
+    if (!script.includes("const {rows,limits,nextAction}")) return Effect.succeed("[]");
+    const rows = JSON.parse(args![0]!).rows as { name: string }[];
+    probed.push(...rows.map(row => row.name));
+    return Effect.succeed(JSON.stringify(rows.map(row => ({ name: row.name, mtime: s.h.now.getTime(), artifactAt: s.h.now.getTime() - 3 * 3600_000, artifact: "", turns: 0, errors: [] }))));
+  });
+  const result = await runWith(s.h, projectStatus(s.dir, { act: false }).pipe(
+    Effect.provideService(MusterEnv, { home: s.h.home, now: () => s.h.now, sessionId: s.h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: s.h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: noEmitPaneClose, machines, remoteHerdr: () => Effect.succeed(s.h.herdr.client()) }),
+  ));
+  expect(probed).toHaveLength(100);
+  expect(probed.slice(0, 3)).toEqual(["worker0", "worker1", "worker2"]);
+  expect(result.board).not.toContain("100-row probe cap");
+  for (let i = 0; i < 3; i++) expect(result.board).toContain(`watchdog: worker${i} no artifact`);
+});
+
 it("owned remote act:true probes, fetches a tail, judges and records its alarm", async () => {
   const s = await setup(); await s.patch({ machine: "remote" });
   await runWith(s.h, mutate(s.dir, project => {
