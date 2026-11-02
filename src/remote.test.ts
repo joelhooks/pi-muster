@@ -971,6 +971,30 @@ describe("remote owner operations", () => {
     expect(landed.packet).toMatchObject({ state: "committed", landedAs, attested: true });
   });
 
+  it("the blind review brief reads a remote row's lane brief", async () => {
+    const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
+    writeFileSync(join(cwd, "work.txt"), "packet\n"); sh(cwd, "add", "work.txt"); sh(cwd, "commit", "-qm", "remote work");
+    const commit = sh(cwd, "rev-parse", "HEAD").trim();
+    const brief = "/remote-only/lane-brief.md";
+    expect(existsSync(brief)).toBe(false);
+    await s.run(mutate(s.dir, project => Effect.succeed([{ ...project, agents: project.agents.map(row => row.name === launched.row.name ? { ...row, brief } : row) }, undefined] as const)));
+    vi.stubEnv("MUSTER_MACHINE", "remote"); vi.stubEnv("MUSTER_REMOTE_ROW", JSON.stringify({ ...launched.row, brief })); vi.stubEnv("MUSTER_PROJECT_SLUG", "probe");
+    await s.run(packetReport({ dir: "/not-on-remote", agent: launched.row.name, owner: launched.row.owner, cwd, commit, summary: "remote work", checks: [] }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: launched.row.sessionId, home: join(s.h.root, "remote-home") })));
+    vi.unstubAllEnvs(); vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", "");
+    let readRemote = false;
+    const proc: ProcShape = { run: (command, args, options) => {
+      if (command === "ssh" && args.at(-1)?.includes("head") && args.at(-1)?.includes(brief)) {
+        readRemote = true;
+        expect(args.at(-1)).toContain("61440");
+        return Effect.succeed({ code: 0, stdout: "Outcome: preserve the remote lane brief.\n", stderr: "" });
+      }
+      return s.proc.run(command, args, options);
+    } };
+    const result = await s.run(packetVerify(s.dir, commit).pipe(Effect.provideService(Proc, proc)));
+    expect(readRemote).toBe(true);
+    expect(readFileSync(result.reviewFile!, "utf8")).toContain("Outcome: preserve the remote lane brief.");
+    expect(readFileSync(result.reviewFile!, "utf8")).not.toContain("No lane brief recorded");
+  });
   it("verifies and records a remote sibling branch", async () => {
     const { s, launched } = await launchedFork(); const cwd = launched.row.cwd;
     sh(cwd, "checkout", "-qb", "worker/remote-next", "main");

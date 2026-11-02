@@ -4006,13 +4006,22 @@ export const packetVerify = (dir: string, id: string) =>
     if (snapshot) {
       const reviewDir = join(env.home, ".local", "state", "muster", "reviews", project.slug);
       reviewFile = join(reviewDir, `${packet.id}.md`);
+      const briefPath = row.brief;
+      const brief = briefPath ? yield* Effect.gen(function* () {
+        if (row.machine === "local") return watchdogHead(briefPath, 60 * 1024);
+        const machine = yield* machineConfig(row.machine);
+        const proc = yield* Proc;
+        return yield* must("head", ["-c", String(60 * 1024), "--", briefPath], { cwd: "/", timeoutMs: 10_000 }).pipe(
+          Effect.provideService(Proc, sshProc(row.machine, machine, proc, env.home)),
+        );
+      }).pipe(Effect.orElseSucceed(() => "[Lane brief unavailable on the row machine; inspect before review.]")) : undefined;
       yield* Effect.try({
         try: () => {
           mkdirSync(reviewDir, { recursive: true, mode: 0o700 });
           chmodSync(reviewDir, 0o700);
           if (existsSync(reviewFile!)) chmodSync(reviewFile!, 0o600);
           writeFileSync(reviewFile!, reviewBrief({ packet: packet.id,
-            ...(row.brief ? { briefPath: row.brief, ...(existsSync(row.brief) ? { brief: readFileSync(row.brief, "utf8") } : {}) } : {}),
+            ...(briefPath ? { briefPath, brief } : {}),
             report: readFileSync(packet.report, "utf8"), diff: snapshot.diff }), { mode: 0o600 });
         },
         catch: error => new StoreError({ path: reviewFile!, message: String(error) }),
