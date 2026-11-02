@@ -426,7 +426,7 @@ export const decodeWatchdogProbes = Schema.decodeUnknownSync(Schema.Array(Schema
   name: Schema.String, mtime: Schema.optionalKey(Schema.NullOr(Schema.Number)), artifactAt: Schema.Number, artifact: Schema.String, turns: Schema.Number,
   errors: Schema.Array(Schema.String), unavailable: Schema.optionalKey(Schema.String),
 })));
-export const decodeWatchdogTails = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ name: Schema.String, brief: Schema.String, tail: Schema.String })));
+export const decodeWatchdogTails = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ name: Schema.String, brief: Schema.String, tail: Schema.String, unavailable: Schema.optionalKey(Schema.String) })));
 export const decodeWatchdogMemo = Schema.decodeUnknownSync(Schema.Struct({ fingerprint: Schema.String, line: Schema.String }));
 export const decodeWatchdogText = Schema.decodeUnknownSync(Schema.String);
 export const decodeSessionEntryCount = Schema.decodeUnknownSync(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0)));

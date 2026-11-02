@@ -115,7 +115,7 @@ export function judgeText(text: string, maxBytes: number, env: NodeJS.ProcessEnv
 
 /** Remote transport scripts send counters/hashes only on the fast path. Text crosses SSH only for flagged,
  * owned rows. Both sides use the same bounded reader/scanner/redactor functions. The wire is decoded in domain.ts. */
-export function remoteWatchdogScript(tails: boolean): string {
+export function remoteWatchdogScript(tails: boolean, budgetMs = 10_000): string {
   return `import * as fs from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
@@ -132,18 +132,21 @@ const artifactMtime = file => (${artifactMtime.toString()})(file,fs.statSync);
 const sessionProgress = (text,since,limits) => (${sessionProgress.toString()})(text,since,limits,decodeWatchdogEntry);
 const judgeText = ${judgeText.toString()};
 const {rows,limits,nextAction} = JSON.parse(process.argv.at(-1));
-const result=rows.map(row=>{
+const deadline=Date.now()+${budgetMs};
+const result=rows.slice(0,100).map(row=>{
   let mtime=null;
   try { if(row.sessionFile) mtime=fs.statSync(row.sessionFile).mtimeMs; } catch {}
   try {
     if(row.watchdog===false) return {name:row.name,mtime,artifactAt:row.artifactAt,artifact:row.artifact,turns:0,errors:[]};
+    if(Date.now()>=deadline) return ${tails ? `{name:row.name,brief:'',tail:'',unavailable:'probe budget'}` : `{name:row.name,mtime,artifactAt:row.artifactAt,artifact:row.artifact,turns:0,errors:[],unavailable:'probe budget'}`};
     const raw=watchdogTail(row.sessionFile);
     ${tails ? `return {name:row.name,brief:judgeText(row.brief?watchdogHead(row.brief,16384):nextAction,16384,process.env,'head'),tail:judgeText(sessionProgress(raw,row.artifactAt,limits).tail,8192)};` : `
     let artifactAt=Math.max(row.artifactAt,...row.files.map(artifactMtime));
     let artifact=row.artifact;
+    if(Date.now()>=deadline) return {name:row.name,mtime,artifactAt:row.artifactAt,artifact:row.artifact,turns:0,errors:[],unavailable:'probe budget'};
     if(row.clone){
       try {
-        const [sha,seconds]=execFileSync('git',['log','-1','--format=%H %ct'],{cwd:row.cwd,encoding:'utf8',timeout:3000}).trim().split(' ');
+        const [sha,seconds]=execFileSync('git',['log','-1','--format=%H %ct'],{cwd:row.cwd,encoding:'utf8',timeout:Math.max(1,Math.min(3000,deadline-Date.now()))}).trim().split(' ');
         if(sha!==row.clone.base?.sha && Number.isFinite(Number(seconds))){ artifact+=sha; artifactAt=Math.max(artifactAt,Number(seconds)*1000); }
       } catch {}
     }

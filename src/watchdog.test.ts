@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -209,6 +210,36 @@ it("cooldown expires without making new turns into new evidence", async () => {
   expect(previousJudgment(row, fingerprint, s.h.now.getTime() + 120 * 60_000, limits)).toBeNull();
   expect(watchdogFingerprint(signals, ["no artifact"], limits.model)).toBe(watchdogFingerprint({ ...signals, turns: 20 }, ["no artifact"], limits.model));
 });
+it("caps new judgments at three, oldest artifact first, then serves deferred rows (plant: judge cap)", async () => {
+  const s = await setup(); const judge = vi.fn<WatchdogJudge>(async () => verdict);
+  await runWith(s.h, mutate(s.dir, project => {
+    const base = project.agents.find(row => row.name === "worker")!;
+    const rows = Array.from({ length: 5 }, (_, index) => {
+      const sessionFile = join(s.h.root, `row-${index}.jsonl`);
+      writeFileSync(sessionFile, entry("assistant", [{ type: "text", text: "working" }], {}, s.h.now.getTime()));
+      return { ...base, name: `worker${index}`, pane: null, sessionFile, sessionId: randomUUID(), createdAt: new Date(s.h.now.getTime() - (7 - index) * 3600_000).toISOString() };
+    });
+    return Effect.succeed([{ ...project, agents: rows }, undefined] as const);
+  }));
+  const first = await runWith(s.h, projectStatus(s.dir, {}, judge));
+  expect(judge).toHaveBeenCalledTimes(3);
+  expect(first.project.agents.filter(row => row.events?.some(event => event.type === "WATCHDOG")).map(row => row.name)).toEqual(["worker0", "worker1", "worker2"]);
+  expect(first.board).toContain("watchdog: worker3 no artifact (fast path; judge deferred)");
+  expect(first.board).toContain("watchdog: worker4 no artifact (fast path; judge deferred)");
+  await runWith(s.h, projectStatus(s.dir, {}, judge));
+  expect(judge).toHaveBeenCalledTimes(5);
+});
+it("remote probes stop at the budget, retain closed-row mtimes, and cap at 100 rows (plant: probe budget)", () => {
+  const h = harness(); const file = join(h.root, "tail.jsonl");
+  writeFileSync(file, entry("assistant", [{ type: "text", text: "working" }]));
+  const row = { name: "worker", cwd: h.root, artifactAt: 0, artifact: "", files: [], sessionFile: file, brief: null, clone: { base: null } };
+  const raw = execFileSync(process.execPath, ["--input-type=module", "-e", remoteWatchdogScript(false, 0), JSON.stringify({ rows: [{ ...row, name: "closed", watchdog: false }, ...Array.from({ length: 101 }, (_, i) => ({ ...row, name: `worker${i}` }))], limits })], { encoding: "utf8" });
+  const probes = decodeWatchdogProbes(JSON.parse(raw));
+  expect(probes).toHaveLength(100);
+  expect(probes[0]).toMatchObject({ name: "closed", mtime: expect.any(Number), errors: [], turns: 0 });
+  expect(probes[0]?.unavailable).toBeUndefined();
+  expect(probes.slice(1).every(probe => probe.unavailable === "probe budget")).toBe(true);
+});
 it("unflagged and foreign-owned rows never call the judge", async () => {
   const s = await setup(); const judge = vi.fn(async () => verdict);
   await s.patch({ createdAt: s.h.now.toISOString() });
@@ -248,7 +279,6 @@ it.each([false, true])("remote status flags rows or reports unavailable probes (
   const original = remote.remoteNode;
   const probe = vi.spyOn(remote, "remoteNode").mockImplementation((...args) => {
     if (args[2].includes("const {rows,limits,nextAction}")) return failure ? Effect.fail(new ProcError({ command: "ssh", code: 255, stderr: "offline", message: "offline" })) : Effect.succeed(JSON.stringify([{ name: "worker", artifactAt: s.h.now.getTime() - 3 * 3600_000, artifact: "", turns: 0, errors: [] }]));
-    if (args[2].includes("statSync")) return Effect.succeed("[]");
     return original(...args);
   });
   const result = await runWith(s.h, projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { home: s.h.home, now: () => s.h.now, sessionId: s.h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: s.h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: noEmitPaneClose, machines, remoteHerdr: () => Effect.succeed(s.h.herdr.client()) })));

@@ -1052,7 +1052,7 @@ const remoteSessionTimes = (project: Project, failedMachines: Set<string>, notes
     if (failedMachines.has(name)) continue;
     yield* Effect.gen(function* () {
       const machine = yield* machineConfig(name);
-      const rows = watchdogProbeRows(project, project.agents.filter(row => row.machine === name && row.state !== "closed"), env.sessionId);
+      const rows = watchdogProbeRows(project, project.agents.filter(row => row.machine === name).slice(0, 100), env.sessionId);
       const raw = yield* remoteNode(name, machine, remoteWatchdogScript(false), [JSON.stringify({ rows, limits: watchdogLimits(project.policy) })]);
       const entries = yield* decodeJsonWith(decodeWatchdogProbes, raw);
       for (const probe of entries) {
@@ -4920,23 +4920,8 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     const watchdogRows = (yield* load(dir)).agents.filter(row => workingRow(row) && ["worker", "boss"].includes(row.role) && row.sessionId !== env.sessionId);
     const remoteTails = new Map<string, ReturnType<typeof decodeWatchdogTails>[number]>();
     const probeRows = (rows: readonly AgentRow[]) => watchdogProbeRows(project, rows, env.sessionId);
-    for (const name of new Set(watchdogRows.filter(row => row.machine !== "local").map(row => row.machine))) {
-      if (ingestion.failedMachines.has(name)) { recoveryNotes.push(`watchdog: ${name} probes unavailable: machine status failed`); continue; }
-      yield* Effect.gen(function* () {
-        const machine = yield* machineConfig(name);
-        const probes = watchdogRows.filter(row => row.machine === name).flatMap(row => {
-          const probe = remoteProbes.get(`${name}:${row.name}`);
-          return probe ? [probe] : [];
-        });
-        const flagged = watchdogRows.filter(row => row.machine === name && row.owner === env.sessionId && act && probes.some(probe => probe.name === row.name &&
-          !probe.unavailable && progressFlags(row, { ...probe, now }, progressLimits).length &&
-          !previousJudgment(row, watchdogFingerprint({ ...probe, now }, progressFlags(row, { ...probe, now }, progressLimits), progressLimits.model), now, progressLimits)));
-        if (flagged.length) {
-          const text = yield* remoteNode(name, machine, remoteWatchdogScript(true), [JSON.stringify({ rows: probeRows(flagged), limits: progressLimits, nextAction: project.nextAction })]);
-          for (const tail of yield* decodeJsonWith(decodeWatchdogTails, text)) remoteTails.set(`${name}:${tail.name}`, tail);
-        }
-      }).pipe(Effect.catch(() => Effect.sync(() => { recoveryNotes.push(`watchdog: ${name} probes unavailable: remote read failed; retry project_status`); })));
-    }
+    for (const name of new Set(watchdogRows.filter(row => ingestion.failedMachines.has(row.machine)).map(row => row.machine))) recoveryNotes.push(`watchdog: ${name} probes unavailable: machine status failed`);
+    const observations: { row: AgentRow; artifactAt: number; flags: string[]; fingerprint: string; cached: string | null; tail: string }[] = [];
     for (const row of watchdogRows) {
       const packets = project.packets.filter(packet => packet.agent === row.name);
       let artifactAt = Math.max(Date.parse(row.createdAt), ...packets.map(packet => Date.parse(packet.reportedAt)));
@@ -4955,20 +4940,33 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
       const progress = sessionProgress(tail, artifactAt, progressLimits);
       const remote = row.machine !== "local" ? remoteProbes.get(`${row.machine}:${row.name}`) : undefined;
       if (row.machine !== "local" && (!remote || remote.unavailable)) {
-        if (remote?.unavailable) recoveryNotes.push(`watchdog: ${row.name} probes unavailable: ${remote.unavailable}`);
+        if (!ingestion.failedMachines.has(row.machine)) recoveryNotes.push(`watchdog: ${row.name} probes unavailable: ${remote?.unavailable ?? "100-row probe cap"}`);
         continue;
       }
       const signals = remote ? { ...remote, now } : { now, artifactAt: progress.artifactAt, artifact: `${artifact}:${progress.mailAt}`, turns: progress.turns, errors: progress.errors };
       const flags = progressFlags(row, signals, progressLimits);
       if (!flags.length) continue;
-      const prefix = `watchdog: ${row.name} `;
       const fingerprint = watchdogFingerprint(signals, flags, progressLimits.model);
-      const cached = previousJudgment(row, fingerprint, now, progressLimits);
+      observations.push({ row, artifactAt: signals.artifactAt, flags, fingerprint, cached: previousJudgment(row, fingerprint, now, progressLimits), tail: progress.tail });
+    }
+    observations.sort((a, b) => a.artifactAt - b.artifactAt || a.row.name.localeCompare(b.row.name));
+    const selected = new Set(observations.filter(item => act && item.row.owner === env.sessionId && !item.cached).slice(0, 3).map(item => item.row.name));
+    for (const name of new Set(observations.filter(item => selected.has(item.row.name) && item.row.machine !== "local").map(item => item.row.machine))) {
+      yield* Effect.gen(function* () {
+        const machine = yield* machineConfig(name);
+        const rows = observations.filter(item => item.row.machine === name && selected.has(item.row.name)).map(item => item.row);
+        const text = yield* remoteNode(name, machine, remoteWatchdogScript(true), [JSON.stringify({ rows: probeRows(rows), limits: progressLimits, nextAction: project.nextAction })]);
+        for (const tail of yield* decodeJsonWith(decodeWatchdogTails, text)) remoteTails.set(`${name}:${tail.name}`, tail);
+      }).pipe(Effect.catch(() => Effect.sync(() => { recoveryNotes.push(`watchdog: ${name} probes unavailable: remote read failed; retry project_status`); })));
+    }
+    for (const { row, flags, fingerprint, cached, tail } of observations) {
+      const prefix = `watchdog: ${row.name} `;
       let line = `${flags.join(", ")} (fast path${act ? "" : "; act: false"})`;
-      if (act && row.owner === env.sessionId) {
+      if (act && row.owner === env.sessionId && !cached && !selected.has(row.name)) line = `${flags.join(", ")} (fast path; judge deferred)`;
+      else if (act && row.owner === env.sessionId) {
         const remoteText = remoteTails.get(`${row.machine}:${row.name}`);
-        line = cached ?? (row.machine !== "local" && !remoteText ? "judge unavailable: remote session evidence unavailable; owner: inspect the row" :
-          yield* judgeProgress(judge, progressLimits.model, remoteText?.brief ?? (row.brief ? watchdogHead(row.brief, 16_384) : project.nextAction), remoteText?.tail ?? progress.tail, 15_000, { ...process.env, ...row.profile.policy?.env, ...row.restore?.env }));
+        line = cached ?? (row.machine !== "local" && (!remoteText || remoteText.unavailable) ? `judge unavailable: ${remoteText?.unavailable ?? "remote session evidence unavailable"}; owner: inspect the row` :
+          yield* judgeProgress(judge, progressLimits.model, remoteText?.brief ?? (row.brief ? watchdogHead(row.brief, 16_384) : project.nextAction), remoteText?.tail ?? tail, 15_000, { ...process.env, ...row.profile.policy?.env, ...row.restore?.env }));
         if (!cached) yield* mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findRow(current, row.name);
           if (latest.owner !== env.sessionId || latest.sessionId !== row.sessionId || !workingRow(latest)) return [current, undefined] as const;
