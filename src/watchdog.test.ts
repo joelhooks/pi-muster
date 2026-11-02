@@ -14,7 +14,7 @@ import { load, mutate } from "./store.ts";
 import { harness, makeRepo, runWith } from "./test-support.ts";
 import { ProcError } from "./errors.ts";
 import type { WatchdogJudge } from "./watchdog.ts";
-import { MusterEnv, noEmitPaneClose } from "./runtime.ts";
+import { MusterEnv, Proc, noEmitPaneClose } from "./runtime.ts";
 import * as remote from "./remote.ts";
 
 const limits = watchdogLimits();
@@ -260,20 +260,54 @@ it.each(["desk", "hawk", "judge", "caller"])("watchdog excludes %s rows", async 
 });
 it("remote scripts return counters only, then bounded flagged text; local/remote scanning agrees", () => {
   const h = harness(); const file = join(h.root, "tail.jsonl");
-  writeFileSync(file, Array.from({ length: 31 }, () => entry("assistant", [{ type: "text", text: "working" }])).join("\n"));
   const repo = makeRepo(join(h.root, "source"));
+  const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  const commitAt = Date.parse("2026-11-01T11:00:00Z");
+  execFileSync("git", ["-c", "user.name=shitratgit[bot]", "-c", "user.email=286405550+shitratgit[bot]@users.noreply.github.com", "commit", "--allow-empty", "-m", "fixture artifact"], { cwd: repo, env: { ...process.env, GIT_AUTHOR_DATE: new Date(commitAt).toISOString(), GIT_COMMITTER_DATE: new Date(commitAt).toISOString() } });
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  const brief = join(h.root, "brief.txt");
+  writeFileSync(brief, "Outcome: ship\nAWS_SECRET_ACCESS_KEY=brief-private");
+  writeFileSync(file, [entry("assistant", "before artifact", {}, commitAt - 1000),
+    ...Array.from({ length: 31 }, () => entry("assistant", [{ type: "text", text: "working" }], {}, commitAt + 1000)),
+    ...Array.from({ length: 3 }, () => entry("toolResult", "repeat failure", { isError: true }, commitAt + 2000)),
+    entry("toolResult", "AWS_SECRET_ACCESS_KEY=remote-private", {}, commitAt + 3000),
+  ].join("\n"));
   const script = join(h.root, "probe.mjs");
-  const rows = [{ name: "worker", cwd: repo, artifactAt: now - 3600_000, artifact: "", files: [], sessionFile: file, brief: null, clone: { base: { sha: execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim() } } }];
+  const rows = [{ name: "worker", cwd: repo, artifactAt: commitAt - 10_000, artifact: "", files: [], sessionFile: file, brief, clone: { base: { sha: base } } }];
   const run = (tails: boolean) => {
     writeFileSync(script, remoteWatchdogScript(tails));
     return execFileSync(process.execPath, [script, JSON.stringify({ rows, limits, nextAction: "ship" })], { encoding: "utf8" });
   };
   const probes = decodeWatchdogProbes(JSON.parse(run(false)));
-  expect(probes[0]).toMatchObject({ turns: 31, errors: [] });
-  expect(run(false)).not.toContain("working");
-  expect(decodeWatchdogTails(JSON.parse(run(true)))[0]).toMatchObject({ brief: "ship" });
+  expect(probes[0]).toMatchObject({ turns: 31, artifactAt: commitAt, artifact: `${sha}:0`, errors: Array(3).fill(createHash("sha256").update("repeat failure").digest("hex")) });
+  expect(run(false)).not.toMatch(/working|repeat failure|remote-private/);
+  const tails = decodeWatchdogTails(JSON.parse(run(true)));
+  expect(tails[0]?.brief).toBe("Outcome: ship\n[sensitive line withheld]");
+  expect(tails[0]?.tail).toContain("assistant: working");
+  expect(tails[0]?.tail).toContain("toolResult: repeat failure");
+  expect(tails[0]?.tail).toContain("[sensitive line withheld]");
+  expect(tails[0]?.tail).not.toMatch(/remote-private|brief-private/);
   expect(watchdogTail(file)).toContain("working");
   expect(artifactMtime(file)).toBeGreaterThan(0);
+});
+it("owned remote act:true probes, fetches a tail, judges and records its alarm", async () => {
+  const s = await setup(); await s.patch({ machine: "remote" });
+  const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: s.h.workerWorktree, env: {}, wrap: [] } });
+  const calls: string[] = [];
+  vi.spyOn(remote, "remoteNode").mockImplementation((_name, _machine, script) => {
+    if (!script.includes("const {rows,limits,nextAction}")) return Effect.succeed("[]");
+    const tails = script.includes("brief:judgeText"); calls.push(tails ? "tails" : "signals");
+    return Effect.succeed(JSON.stringify(tails ? [{ name: "worker", brief: "remote lane brief", tail: "assistant: repeating a failing check" }] : [{ name: "worker", mtime: s.h.now.getTime(), artifactAt: s.h.now.getTime() - 3 * 3600_000, artifact: "", turns: 0, errors: [] }]));
+  });
+  const judge = vi.fn<WatchdogJudge>(async () => verdict);
+  const result = await runWith(s.h, projectStatus(s.dir, { act: true }, judge).pipe(
+    Effect.provideService(MusterEnv, { home: s.h.home, now: () => s.h.now, sessionId: s.h.sessionId, paneId: undefined, musterRoot: "/muster", workerWorktree: s.h.workerWorktree, createId: () => "id", sleep: () => Effect.void, emitPaneClose: noEmitPaneClose, machines, remoteHerdr: () => Effect.succeed(s.h.herdr.client()) }),
+    Effect.provideService(Proc, { run: (command, args, options) => command === "ssh" ? Effect.succeed({ code: 0, stdout: "0", stderr: "" }) : s.h.proc.run(command, args, options) }),
+  ));
+  expect(calls).toEqual(["signals", "tails"]);
+  expect(judge).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ brief: "remote lane brief", tail: "assistant: repeating a failing check" }));
+  expect(result.board).toContain("watchdog: worker stuck — same failing check; suggest: inspect the fixture");
+  expect(result.project.agents.find(row => row.name === "worker")?.events?.filter(event => event.type === "WATCHDOG")).toHaveLength(1);
 });
 it.each([false, true])("remote status flags rows or reports unavailable probes (failure=%s)", async failure => {
   const s = await setup();
