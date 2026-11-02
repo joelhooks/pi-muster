@@ -5,7 +5,7 @@ import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate, projectPath } from "./store.ts";
-import { FakeHerdr, harness, makeRepo, runWith } from "./test-support.ts";
+import { FakeHerdr, harness, makeRepo, runWith, sh } from "./test-support.ts";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
 import muster, { CARRIED_HEADER, registerRestartExit } from "./extension-main.ts";
 import * as ops from "./ops.ts";
@@ -16,9 +16,30 @@ import { existsSync } from "node:fs";
 
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_PROJECT", ""); vi.stubEnv("MUSTER_MACHINE", ""); });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
-async function setup(remote = false, role: "worker" | "desk" = "worker") {
+async function setup(remote = false, role: "worker" | "desk" = "worker", cloneOrigin?: "url" | "github" | "none") {
   const h = harness();
   const dir = makeRepo(join(h.root, "repo"));
+  const source = cloneOrigin ? join(h.root, "remote-source") : dir;
+  const bareUrl = `file://${join(h.root, "upstream.git")}`;
+  const upstream = cloneOrigin === "github" ? "https://github.com/muster-test/clone-origin.git" : bareUrl;
+  if (cloneOrigin) {
+    sh(h.root, "clone", "-q", "--bare", dir, join(h.root, "upstream.git"));
+    sh(h.root, "clone", "-q", bareUrl, source);
+    if (cloneOrigin === "github") {
+      // Route this GitHub-shaped origin to the local bare repo, never the network.
+      sh(source, "config", `url.${bareUrl}.insteadOf`, upstream);
+      sh(source, "remote", "set-url", "origin", upstream);
+    }
+    if (cloneOrigin === "none") sh(source, "remote", "remove", "origin");
+    // rift copies the source's origin, unlike the generic harness's plain git clone.
+    const original = readFileSync(h.workerWorktree, "utf8");
+    writeFileSync(h.workerWorktree, original.replace('git clone -q "$2" "$target"', () => `git clone -q "$2" "$target"
+    git -C "$target" remote remove origin
+    upstream=$(git -C "$2" config --get remote.origin.url 2>/dev/null || true)
+    if [ -n "$upstream" ]; then git -C "$target" remote add origin "$upstream"; fi
+    rewrite=$(git -C "$2" config --get-regexp '^url\\..*\\.insteadof$' || true)
+    if [ -n "$rewrite" ]; then git -C "$target" config "\${rewrite%% *}" "\${rewrite#* }"; fi`));
+  }
   await runWith(h, projectOpen({ dir, slug: "probe", outcome: "restart", reviewTrigger: "weekly", nextAction: "test", criticalPath: [], space: "w1", sidebar: false, ephemeral: true }));
   await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "restart" }));
   const host = remote ? new FakeHerdr(h.home) : h.herdr;
@@ -39,13 +60,62 @@ async function setup(remote = false, role: "worker" | "desk" = "worker") {
   } };
   const env: EnvShape = { home: h.home, now: () => h.now, sessionId: h.sessionId, paneId: undefined, musterRoot: dir, workerWorktree: h.workerWorktree,
     createId: () => "receipt", sleep: ms => Effect.sync(() => h.sleep(ms)), emitPaneClose: h.emitPaneClose,
-    machines: { remote: { comms: { config: "/private/network.json" }, herdr: "remote", ssh: "remote", paths: {}, musterExtension: dir, workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: [] } },
+    machines: { remote: { comms: { config: "/private/network.json" }, herdr: "remote", ssh: "remote", paths: { [dir]: source }, musterExtension: dir, workerWorktree: h.workerWorktree, env: { MUSTER_FLEET_COMPUTE: "off", HOME: h.home }, wrap: [] } },
     remoteHerdr: () => Effect.succeed(host.client()),
   };
   const run = <A, E>(effect: Effect.Effect<A, E, MusterEnv | Proc | import("./runtime.ts").Herdr | import("./runtime.ts").Comms>) => runWith(h, effect.pipe(Effect.provideService(MusterEnv, { ...env, sessionId: h.sessionId }), Effect.provideService(Proc, proc)));
-  const launch = await run(agentLaunch(dir, { action: "launch", machine: remote ? "remote" : "local", name: "worker", role, lane: "work", label: "worker", cwd: dir, noSkills: true, prompt: "Initial work." }));
-  return { h, dir, host, run, launch, env, proc };
+  const launch = await run(agentLaunch(dir, { action: "launch", machine: remote ? "remote" : "local", name: "worker", role, lane: "work", label: "worker", cwd: dir, noSkills: true, prompt: "Initial work.", ...(cloneOrigin ? { clone: true } : {}) }));
+  return { h, dir, source, upstream, host, run, launch, env, proc };
 }
+
+describe("remote clone origins", () => {
+  it.each(["url", "github"] as const)("launch keeps the %s upstream URL and records the mapped source separately", async kind => {
+    const s = await setup(true, "worker", kind);
+    expect(sh(s.launch.row.cwd, "config", "--get", "remote.origin.url").trim()).toBe(s.upstream);
+    expect(sh(s.launch.row.cwd, "remote", "get-url", "source").trim()).toBe(s.source);
+    expect(s.source).not.toBe(s.dir);
+  });
+
+  it("launch and restart retain the mapped-path origin fallback for a bundle source", async () => {
+    const s = await setup(true, "worker", "none");
+    const cwd = s.launch.row.cwd;
+    expect(sh(cwd, "remote", "get-url", "origin").trim()).toBe(s.source);
+    expect(sh(cwd, "remote", "get-url", "source").trim()).toBe(s.source);
+    sh(cwd, "remote", "remove", "origin");
+    await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(sh(cwd, "remote", "get-url", "origin").trim()).toBe(s.source);
+  });
+
+  it("restart heals an overwritten origin and resets source to the mapped path", async () => {
+    const s = await setup(true, "worker", "url");
+    const cwd = s.launch.row.cwd;
+    sh(cwd, "remote", "set-url", "origin", s.source);
+    sh(cwd, "remote", "set-url", "source", s.dir);
+    await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(sh(cwd, "remote", "get-url", "origin").trim()).toBe(s.upstream);
+    expect(sh(cwd, "remote", "get-url", "source").trim()).toBe(s.source);
+  });
+
+  it("restart leaves a deliberate worker origin untouched and adds a missing source", async () => {
+    const s = await setup(true, "worker", "url");
+    const cwd = s.launch.row.cwd;
+    const deliberate = `file://${join(s.h.root, "deliberate.git")}`;
+    sh(cwd, "remote", "set-url", "origin", deliberate);
+    sh(cwd, "remote", "remove", "source");
+    await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(sh(cwd, "remote", "get-url", "origin").trim()).toBe(deliberate);
+    expect(sh(cwd, "remote", "get-url", "source").trim()).toBe(s.source);
+  });
+
+  it("restart does not heal from a path-valued source origin", async () => {
+    const s = await setup(true, "worker", "url");
+    const cwd = s.launch.row.cwd;
+    sh(cwd, "remote", "set-url", "origin", s.source);
+    sh(s.source, "remote", "set-url", "origin", join(s.h.root, "upstream.git"));
+    await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(sh(cwd, "remote", "get-url", "origin").trim()).toBe(s.source);
+  });
+});
 
 describe("restart by fork", () => {
   it.each([false, true])("a non-owner restarts its own session from a moved pane (remote %s)", async remote => {
