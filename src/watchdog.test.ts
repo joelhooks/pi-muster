@@ -276,6 +276,19 @@ it("remote probes stop at the budget, retain closed-row mtimes, and cap at 100 r
   expect(probes[0]?.unavailable).toBeUndefined();
   expect(probes.slice(1).every(probe => probe.unavailable === "probe budget")).toBe(true);
 });
+it("a malformed remote watchdog row retains its mtime and cannot break other silence stats", () => {
+  const h = harness(); const bad = join(h.root, "bad.jsonl"); const good = join(h.root, "good.jsonl");
+  writeFileSync(bad, entry("assistant", [null]));
+  writeFileSync(good, entry("assistant", [{ type: "text", text: "working" }]));
+  const row = { cwd: h.root, artifactAt: 0, artifact: "", files: [], brief: null, clone: null };
+  const raw = execFileSync(process.execPath, ["--input-type=module", "-e", remoteWatchdogScript(false), JSON.stringify({ rows: [{ ...row, name: "bad", sessionFile: bad }, { ...row, name: "closed", sessionFile: good, watchdog: false }, { ...row, name: "good", sessionFile: good }], limits })], { encoding: "utf8" });
+  const probes = decodeWatchdogProbes(JSON.parse(raw));
+  expect(probes[0]).toMatchObject({ name: "bad", mtime: expect.any(Number), unavailable: "session probe failed" });
+  expect(probes[1]).toMatchObject({ name: "closed", mtime: expect.any(Number), turns: 0 });
+  expect(probes[1]?.unavailable).toBeUndefined();
+  expect(probes[2]).toMatchObject({ name: "good", mtime: expect.any(Number), turns: 1 });
+  expect(probes[2]?.unavailable).toBeUndefined();
+});
 it("unflagged and foreign-owned rows never call the judge", async () => {
   const s = await setup(); const judge = vi.fn(async () => verdict);
   await s.patch({ createdAt: s.h.now.toISOString() });
@@ -325,11 +338,17 @@ it("remote scripts return counters only, then bounded flagged text; local/remote
 });
 it("owned remote act:true probes, fetches a tail, judges and records its alarm", async () => {
   const s = await setup(); await s.patch({ machine: "remote" });
+  await runWith(s.h, mutate(s.dir, project => {
+    const row = project.agents.find(row => row.name === "worker")!;
+    return Effect.succeed([{ ...project, agents: [...project.agents, { ...row, name: "retired", sessionId: randomUUID(), state: "closed" as const, pane: null }] }, undefined] as const);
+  }));
   const machines = decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/muster", workerWorktree: s.h.workerWorktree, env: {}, wrap: [] } });
   const calls: string[] = [];
-  vi.spyOn(remote, "remoteNode").mockImplementation((_name, _machine, script) => {
+  vi.spyOn(remote, "remoteNode").mockImplementation((_name, _machine, script, args) => {
     if (!script.includes("const {rows,limits,nextAction}")) return Effect.succeed("[]");
     const tails = script.includes("brief:judgeText"); calls.push(tails ? "tails" : "signals");
+    const rows = JSON.parse(args![0]!).rows;
+    expect(rows.map((row: { name: string; watchdog: boolean }) => ({ name: row.name, watchdog: row.watchdog }))).toEqual(tails ? [{ name: "worker", watchdog: true }] : [{ name: "worker", watchdog: true }, { name: "retired", watchdog: false }]);
     return Effect.succeed(JSON.stringify(tails ? [{ name: "worker", brief: "remote lane brief", tail: "assistant: repeating a failing check" }] : [{ name: "worker", mtime: s.h.now.getTime(), artifactAt: s.h.now.getTime() - 3 * 3600_000, artifact: "", turns: 0, errors: [] }]));
   });
   const judge = vi.fn<WatchdogJudge>(async () => verdict);
