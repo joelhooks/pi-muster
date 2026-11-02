@@ -112,7 +112,7 @@ Live proof frees the slot.
 
 ## Delivery and flow
 
-`packet_verify` records the base SHA and changed paths for commit packets and writes `<report dir>/<packet>-review.md`: the lane brief, packet report, and merge-base diff, capped at 60 KiB. For a blind review, launch `agent_launch role:"judge"` with a prompt naming only that file. The reviewer numbers findings and answers the three coverage questions with observed command/path/line evidence or “not checked”. No worker transcript or pane text is included.
+`packet_verify` records the base SHA and changed paths for commit packets and writes `~/.local/state/muster/reviews/<project slug>/<packet>.md` on the owner machine (private directory `0700`, file `0600`), outside the project's Brain: the lane brief, packet report, and merge-base diff, capped at 60 KiB. For a blind review, launch `agent_launch role:"judge"` with a prompt naming only that file. The reviewer numbers findings and answers the three coverage questions with observed command/path/line evidence or “not checked”. No worker transcript or pane text is included.
 
 `packet_land` warns when the base moved under verified paths, naming every overlapping path and the count; an actual land gate refreshes that evidence and suppresses the warning. Old packets without a recorded base SHA get no stale-evidence warning. Pass `review: <absolute path>` to record blind-review findings. A commit packet over 200 changed lines without a recorded review gets `no blind review recorded`. Both warnings are alarms, not refusals. These input-freshness and blind-review ideas come from [eas4ai/sudus](https://github.com/eas4ai/sudus).
 

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { turnLog, turnUnsupported } from "./turn-wake.ts";
 import { spawn } from "node:child_process";
-import { appendFileSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
@@ -3991,11 +3991,17 @@ export const packetVerify = (dir: string, id: string) =>
     const { snapshot } = snapshotResult;
     let reviewFile: string | null = null;
     if (snapshot) {
-      reviewFile = join(dirname(packet.report), `${packet.id}-review.md`);
+      const reviewDir = join(env.home, ".local", "state", "muster", "reviews", project.slug);
+      reviewFile = join(reviewDir, `${packet.id}.md`);
       yield* Effect.try({
-        try: () => writeFileSync(reviewFile!, reviewBrief({ packet: packet.id,
-          ...(row.brief ? { briefPath: row.brief, ...(existsSync(row.brief) ? { brief: readFileSync(row.brief, "utf8") } : {}) } : {}),
-          report: readFileSync(packet.report, "utf8"), diff: snapshot.diff }), { mode: 0o600 }),
+        try: () => {
+          mkdirSync(reviewDir, { recursive: true, mode: 0o700 });
+          chmodSync(reviewDir, 0o700);
+          if (existsSync(reviewFile!)) chmodSync(reviewFile!, 0o600);
+          writeFileSync(reviewFile!, reviewBrief({ packet: packet.id,
+            ...(row.brief ? { briefPath: row.brief, ...(existsSync(row.brief) ? { brief: readFileSync(row.brief, "utf8") } : {}) } : {}),
+            report: readFileSync(packet.report, "utf8"), diff: snapshot.diff }), { mode: 0o600 });
+        },
         catch: error => new StoreError({ path: reviewFile!, message: String(error) }),
       });
     }

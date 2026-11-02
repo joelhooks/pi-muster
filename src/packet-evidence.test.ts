@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { describe, expect, it } from "vitest";
@@ -22,8 +22,9 @@ async function fixture(lines = 1) {
   const id = sh(row.cwd, "rev-parse", "HEAD").trim();
   await runWith(h, packetReport({ dir, agent: row.name, owner: row.owner, cwd: row.cwd, commit: id, summary: "shared work", checks: [{ name: "fixture check", outcome: "pass" }] }));
   const base = sh(dir, "rev-parse", "main").trim();
+  const brainBeforeVerify = readdirSync(join(dir, ".brain"), { recursive: true }).sort();
   const verified = await runWith(h, packetVerify(dir, id));
-  return { h, dir, row, id, brief, base, verified };
+  return { h, dir, row, id, brief, base, verified, brainBeforeVerify };
 }
 function advance(s: Awaited<ReturnType<typeof fixture>>, overlap: boolean) {
   const path = overlap ? "shared" : "other";
@@ -57,7 +58,7 @@ describe("packet evidence integration", () => {
   it("records base and changed paths, and writes a context-blind review brief", async () => {
     const s = await fixture();
     expect(s.verified.packet.verification).toMatchObject({ baseSha: s.base, paths: ["shared", "work"] });
-    const file = join(s.verified.packet.report, "..", `${s.id}-review.md`);
+    const file = join(s.h.home, ".local", "state", "muster", "reviews", "probe", `${s.id}.md`);
     expect(s.verified.reviewFile).toBe(file);
     const text = readFileSync(file, "utf8");
     expect(text).toContain(s.brief);
@@ -69,6 +70,21 @@ describe("packet evidence integration", () => {
     expect(text).not.toContain(s.row.sessionFile!);
     expect(s.verified.note).toContain('agent_launch role:"judge"');
     expect(s.verified.note).toContain("prompt naming only that file");
+  });
+  it("keeps the brief in private owner state without adding files to the project Brain", async () => {
+    const s = await fixture();
+    const dir = join(s.h.home, ".local", "state", "muster", "reviews", "probe");
+    const file = join(dir, `${s.id}.md`);
+    expect(s.verified.reviewFile).toBe(file);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readdirSync(join(s.dir, ".brain"), { recursive: true }).sort()).toEqual(s.brainBeforeVerify);
+    // Re-verifying restores private modes and still adds nothing to the project's Brain.
+    chmodSync(dir, 0o755); chmodSync(file, 0o644);
+    await runWith(s.h, packetVerify(s.dir, s.id));
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(readdirSync(join(s.dir, ".brain"), { recursive: true }).sort()).toEqual(s.brainBeforeVerify);
   });
   it.each([true, false])("alarms on overlapping moved inputs only (overlap=%s), without refusing", async overlap => {
     const s = await fixture(); advance(s, overlap);
