@@ -60,7 +60,7 @@ import type { PaneInfo, Proof } from "./herdr.ts";
 import { untilJournalLines } from "./restart-snapshot.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
-import { blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
+import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
@@ -4391,12 +4391,6 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (params.attested && outcome !== "committed") return yield* input("attested is only supported for committed packets");
     if (project.mode !== "rift-merge" && outcome === "committed" && ((!params.attested && !evidence) || (evidence !== undefined && /^(placeholder|tbd|todo|-|n\/a)$/i.test(evidence)))) return yield* input("committed landing requires non-empty, non-placeholder evidence");
     if (recording && !evidence && !params.attested) return yield* input(`packet ${packet.id.slice(0, 12)} has no clone branch to merge; pass evidence (what you checked and where) to record its outcome`);
-    const staleAtLand = outcome === "committed" && packet.kind === "commit" && packet.verification?.baseSha && packet.verification.paths
-      ? yield* Effect.gen(function* () {
-        const repo = yield* packetEvidenceRepo(project, lane, row, true);
-        const paths = (yield* must("git", ["diff", "--no-renames", "--name-only", "-z", packet.verification!.baseSha!, repo.baseSha, "--"], { cwd: repo.source }).pipe(Effect.provideService(Proc, repo.run))).split("\0").filter(Boolean);
-        return evidenceNote(repo.baseRef, staleEvidence(packet.verification!.paths!, paths), false);
-      }).pipe(Effect.catch(error => Effect.succeed(`packet evidence alarm unavailable: ${error.message}`))) : null;
     if (outcome === "committed" && params.attested) {
       const targetRef = params.landedAs;
       if (!targetRef || !evidence) return yield* input("attested landing requires landedAs and non-empty evidence");
@@ -4505,6 +4499,14 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     }
     if (outcome === "committed" && packet.kind === "commit") {
       // Alarms must not undo a successful landing if old refs or a retired clone are unavailable.
+      const staleAtLand = !gateRan && packet.verification?.baseSha && packet.verification.paths
+        ? yield* Effect.gen(function* () {
+          const repo = yield* packetEvidenceRepo(project, lane, row, true);
+          const git = (...args: string[]) => must("git", args, { cwd: repo.source }).pipe(Effect.provideService(Proc, repo.run));
+          const landing = landedAs ? (yield* git("rev-parse", "--verify", "--end-of-options", `${landedAs}^{commit}`)).trim() : null;
+          const log = yield* git("log", "--no-merges", "--no-renames", "--name-only", "-z", "--format=%H%x00", `${packet.verification!.baseSha!}..${repo.baseSha}`, `^${packet.id}`, "--");
+          return evidenceNote(repo.baseRef, staleEvidence(packet.verification!.paths!, basePathsExceptLanding(log, landing)), false);
+        }).pipe(Effect.catch(error => Effect.succeed(`packet evidence alarm unavailable: ${error.message}`))) : null;
       const reviewAlarm = !(params.review ?? packet.review) ? yield* packetEvidenceLines(project, lane, row, packet).pipe(
         Effect.map(lines => blindReviewNote(lines, undefined)),
         Effect.catch(error => Effect.succeed(`blind review alarm unavailable: ${error.message}`)),

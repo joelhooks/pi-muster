@@ -47,7 +47,8 @@ describe("owner-attested landing", () => {
     expect(calls.some(call => /patch-id|cat-file/.test(call))).toBe(false);
     // Advisory reads are allowed, but never a packet-content proof or a worker-clone read.
     expect(calls.filter(call => /diff /.test(call)).every(call => /--name-only|--numstat/.test(call))).toBe(true);
-    expect(landed.note).toContain('evidence stale: refs/remotes/origin/main moved under "work" (1 paths) since verify');
+    expect(landed.note).not.toContain("evidence stale:");
+    expect(landed.note).not.toContain("packet evidence alarm unavailable:");
     expect(sh(s.row.cwd, "rev-parse", "HEAD")).toBe(cloneHead);
     expect(sh(s.dir, "rev-parse", "HEAD")).toBe(sourceHead);
     expect((await runWith(s.h, load(s.dir))).agents.find(row => row.name === s.row.name)?.state).toBe("landed");
