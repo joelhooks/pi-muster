@@ -257,6 +257,9 @@ export const AgentLaunchRequest = Schema.Struct({
   env: Schema.optional(Schema.Record(Schema.String, Schema.String)), compactAt: Schema.optional(Schema.NullOr(Schema.Number)),
   brief: Schema.optional(Schema.String), prompt: Schema.optional(Schema.String), pane: Schema.optional(Schema.String),
   slot: Schema.optional(Schema.Literals(["root", "split"])),
+  // Harm (2026-11-03): these were missing, so the decode stripped them and restart takeover and adopt-with-session
+  // reached the handler without their flag or reason. Every field the tool schema offers must be listed here.
+  session: Schema.optional(Schema.String), reason: Schema.optional(Schema.String), takeover: Schema.optional(Schema.Boolean),
 });
 export const decodeAgentLaunchRequest = Schema.decodeUnknownSync(AgentLaunchRequest);
 export const LaunchJobState = Schema.Literals(["queued", "running", "succeeded", "failed"]);

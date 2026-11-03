@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
+import { agentLaunch as agentLaunchPublic, agentLaunchForeground as agentLaunch, finishRestart, laneOpen, packetReport, packetVerify, projectOpen, projectStatus, projectUpdate } from "./ops.ts";
 import { load, mutate, projectPath } from "./store.ts";
 import { FakeHerdr, harness, makeRepo, runWith, sh } from "./test-support.ts";
 import { MusterEnv, Proc, type EnvShape, type ProcShape } from "./runtime.ts";
@@ -387,6 +387,16 @@ describe("restart by fork", () => {
     expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_OWNER='wave-runner'");
     expect(result.notes.join("\n")).toContain("takeover: told previous owner previous-owner");
     expect(s.h.sent.length).toBeGreaterThanOrEqual(sentBefore);
+  });
+
+  // 2026-11-03: the first wave failed because the public entry decoded takeover and reason away.
+  it("the public agent_launch entry keeps takeover and reason for restart", async () => {
+    const s = await setup();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "previous-owner" })) }, undefined] as const)));
+    s.h.sessionId = "wave-runner";
+    await expect(s.run(agentLaunchPublic(s.dir, { action: "restart", name: "worker", takeover: true }))).rejects.toThrow("needs a reason");
+    const result = await s.run(agentLaunchPublic(s.dir, { action: "restart", name: "worker", takeover: true, reason: "wave" }));
+    expect("row" in result ? result.row.owner : undefined).toBe("wave-runner");
   });
 
   it("takeover on the caller's own row changes nothing about ownership", async () => {
