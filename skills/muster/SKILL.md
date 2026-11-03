@@ -33,6 +33,7 @@ Bosses, the hawk, judges and arbiters are opt-in for a named risk. Record the ri
 - Cut packets by write scope and by what fits the time available. Park an outcome you cannot name yet rather than launching it.
 - An unready dependency gets a placeholder packet, not a blocked lane.
 - Separate code and live-config writers when the release needs both now. Keep their scopes disjoint and prove the combined candidate at the land gate. Independent review is opt-in for a named risk, not an automatic third lane.
+- A project whose code is published gets two repos (Joel, 2026-11-03: "i think our generall policy shoold be two repos one for dev and brain etc and the other clean for publishing"). The Muster project dir is the private dev repo, with Brain, Muster state, briefs and secrets config, and it never has a public remote. The public repo is a separate clean checkout with fresh history and a pre-push guard that refuses Brain and Muster paths, private paths, tailnet names and secrets. Lanes work and land in the dev repo; publishing is a separate export into the clean repo, checked by its guard.
 - Briefs live in the project's Brain, never `/tmp`. Read the [done and brief template](references/done.md#brief-template) when cutting a brief, and [brief patterns](references/briefs.md) when a section needs judgment.
 
 ## Keep work flowing
