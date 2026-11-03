@@ -4,6 +4,7 @@ import { stripVTControlCharacters } from "node:util";
 import { getKeybindings, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { Component, Focusable, KeybindingsManager } from "@earendil-works/pi-tui";
 
+import type { CallsSummary } from "./switchboard-calls.ts";
 import { compactWords, mobileOwnerRow } from "./owner-view.ts";
 import { ActivityState, activityEnabled, activitySummary, renderActivity } from "./switchboard-flame.ts";
 import { KIND_GLYPH, KIND_RANK, TICKER_WINDOW_MS, eventText, formatAge, itemRef, openCount } from "./switchboard.ts";
@@ -215,8 +216,30 @@ export function systemLine(state: SwitchboardState, theme: ViewTheme, room = Num
   return [`${head}${age}${fleet}`, `${head}${fleet}`, `${head}${age}`].find(fits) ?? head;
 }
 
+/** Calls are display-only: sanitize external text and reserve room for the page link. */
+function callsLine(calls: CallsSummary, width: number, theme: ViewTheme, plain: boolean): string {
+  const clean = (text: string) => stripVTControlCharacters(text).replace(/[\p{Cc}\s]+/gu, " ").trim();
+  let line: string;
+  if (calls.kind === "unreadable") line = `Joel calls: unreadable (${clean(calls.basename)})`;
+  else if (width <= 40) line = `calls ${calls.count}`;
+  else {
+    const head = `Joel calls (${calls.count})`;
+    const link = calls.url ? ` · ${clean(calls.url)}` : "";
+    const room = Math.max(0, width - visibleWidth(head) - visibleWidth(link) - 3);
+    const titles = truncateToWidth(calls.titles.map(clean).join(" · "), room);
+    line = `${head}${titles ? ` · ${titles}` : ""}${link}`;
+  }
+  return plain ? stripVTControlCharacters(fitLine(line, width)) : fitLine(theme.fg(calls.kind === "unreadable" ? "dim" : "muted", line), width);
+}
+
 /** Collapsed ambient display; plain terminals get only the summary. */
-export function renderWidget(state: SwitchboardState, width: number, theme: ViewTheme, env: Readonly<Record<string, string | undefined>> = process.env, now = state.now): string[] {
+export function renderWidget(state: SwitchboardState, width: number, theme: ViewTheme, env: Readonly<Record<string, string | undefined>> = process.env, now = state.now, calls?: CallsSummary): string[] {
+  const lines = renderWidgetBody(state, width, theme, env, now);
+  if (calls && width > 0) lines.push(callsLine(calls, width, theme, env.NO_COLOR !== undefined || env.TERM === "dumb"));
+  return lines;
+}
+
+function renderWidgetBody(state: SwitchboardState, width: number, theme: ViewTheme, env: Readonly<Record<string, string | undefined>>, now: number): string[] {
   if (width <= 0) return [];
   if (width <= 40) {
     const lines = [compactWords(`${openCount(state.groups)} open · /switchboard`, width), ...state.groups.slice(0, 3).map(group => mobileOwnerRow(`${group.items.length} open`, group.project, formatAge(group.oldestMs), width))];
