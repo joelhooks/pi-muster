@@ -2229,6 +2229,8 @@ export interface AgentLaunchInput {
   /** adopt: an unrelated live session to bind, with a recorded reason. */
   readonly session?: string | undefined;
   readonly reason?: string | undefined;
+  /** restart: act on a row another owner launched; moves only that row, needs reason. */
+  readonly takeover?: boolean | undefined;
 }
 
 /** Keep warm selection independent of side-desk fork topology. */
@@ -2746,16 +2748,32 @@ const pushRemoteBindings = (dirs: readonly string[]) => Effect.gen(function* () 
   return notes;
 });
 
+/** Best-effort: the previous owner's turn records stop reaching it, so say why. Liveness wins over the note. */
+const tellTakenOwner = (project: Project, old: AgentRow, previous: string, reason: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const comms = yield* Comms;
+  const title = `${old.name} taken over by restart`;
+  const body = `Row ${project.slug}/${old.name} was restarted and taken over by session ${env.sessionId}${process.env.RATKING_NAME ? ` (${process.env.RATKING_NAME})` : ""}: ${reason}. It now answers to that session; its turn records no longer reach you.`;
+  const sent = yield* deliverOwnerItem({ owner: previous, home: env.home, session: env.sessionId, project: project.slug, item: { author: env.sessionId, ...(old.lane ? { lane: old.lane } : {}), kind: "fyi", title, body }, comms, send: comms.send }).pipe(Effect.result);
+  if (sent._tag === "Failure") return `takeover: telling previous owner ${previous} failed (${sent.failure.message}); the restart stands`;
+  return sent.success.lost ? `takeover: note to previous owner ${previous} not delivered (${sent.success.delivery.detail ?? "lost"}); the restart stands` : `takeover: told previous owner ${previous}`;
+}).pipe(Effect.catch(error => Effect.succeed(`takeover: telling previous owner ${previous} failed (${String((error as { message?: unknown }).message ?? error)}); the restart stands`)));
+
 /** One restart per project row at a time. Every project has a row named desk, so the key carries the project. */
 export const restartLockName = (project: string, row: string) =>
   `r-${createHash("sha256").update(`${project}\0${row}`).digest("hex").slice(0, 8)}-${row.slice(0, 21)}`;
 
 /** `overrides` switch the model or thinking at the fork. Switching providers mid-session (/model) can leave an orphaned
  * tool result that Sol rejects; a restart rebuilds the context from the session file (Ernestine SOP, 2026-10-12). */
-const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env" | "compactAt" | "noSkills"> = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
+/** `takeover` restarts a row another owner launched (Switchboard, 2026-11-03: Node CVE restart waves across every desk).
+ * Only that row moves to the caller; its reason is recorded on the row and the previous owner is told. A self-restart
+ * ignores it: the session already owns its own row. The per-row restart lock refuses a takeover while the row restarts itself. */
+const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env" | "compactAt" | "noSkills"> & { takeover?: { reason: string } } = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
-  if (!self) yield* requireOwner(old, env.sessionId, false, project.slug, false);
+  const takeover = !self && overrides.takeover !== undefined;
+  if (!self) yield* requireOwner(old, env.sessionId, takeover, project.slug);
+  const takenFrom = takeover && old.owner !== env.sessionId ? old.owner : undefined;
   if (!old.sessionFile) return yield* input("restart needs a live pane and current session file");
   const matches = (yield* paneList()).filter(pane => paneProvesSession(pane, old));
   const pane = matches.length === 1 ? matches[0] : matches.find(pane => pane.pane_id === old.pane?.paneId && pane.terminal_id === old.pane?.terminalId);
@@ -2803,6 +2821,11 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   if (loadsFrom !== (machine?.musterExtension ?? env.musterRoot)) notes.push(`the replacement loads pi-muster from ${loadsFrom} at ${sha.slice(0, 7)}, not this owner's checkout`);
   let row: AgentRow = { ...old, profile: selected.profile, sessionId: `${mintSessionId(old.name, env.now())}-${randomUUID().slice(0, 8)}`, sessionFile: null, parentSessionFile: old.sessionFile, pane: null };
   if (row.owner === old.sessionId) row = { ...row, owner: row.sessionId };
+  if (takenFrom !== undefined) {
+    const { ownerName: _previous, ...rest } = row;
+    const detail = `${takenFrom}${old.ownerName ? ` (${old.ownerName})` : ""} -> ${env.sessionId}: ${overrides.takeover!.reason}`;
+    row = { ...rest, owner: env.sessionId, ...launchOwnerName(env.home, dir, env.sessionId, yield* liveSelfName), events: [...(old.events ?? []), { type: "TAKEOVER", at: iso(env), detail }] };
+  }
   const profile = extensionsFor(launchProject, row);
   // provisional → proven → rebound → activated. Failed provisional forks never
   // acquire the identity lease. Network work is submitted only after activation.
@@ -2872,14 +2895,14 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (loadout.note) notes.push(loadout.note);
       if (loadout.failure) return yield* input(`restart failed before rebind: ${loadout.failure}; old agent untouched. Fix ${toolListSource(project, old)}, then restart again`);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
-        events: [...(old.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
+        events: [...(row.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
         restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: withoutSuccession(environment) } };
       const stillOld = yield* locatePane(oldPane);
       if (!stillOld || !paneProvesSession(stillOld, old)) return yield* input("old Pi changed during restart; rebind refused");
       row = yield* mutate(dir, current => Effect.gen(function* () {
         const latest = yield* findRow(current, old.name);
         if (latest.sessionId !== old.sessionId || latest.sessionFile !== recorded.sessionFile || latest.owner !== old.owner || latest.state !== old.state || latest.pane?.terminalId !== recorded.pane?.terminalId) return yield* input("row changed during restart; old agent untouched, retry");
-        if (!self) yield* requireOwner(latest, env.sessionId, false, project.slug, false);
+        if (!self) yield* requireOwner(latest, env.sessionId, takeover, project.slug, false);
         yield* guardPaneBinding(current, latest, binding);
         const next = withRow(current, row);
         const agents = next.agents.map(other => other.owner === old.sessionId ? { ...other, owner: id, restore: other.restore ? { ...other.restore, env: { ...other.restore.env, MUSTER_OWNER: id } } : null, updatedAt: iso(env) } : other);
@@ -2897,6 +2920,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       phase = "rebound";
       // Rows this session owns in other registered catalogs move too, before any mail can name the old owner.
       notes.push(...yield* moveOwnedRows(dir, old.sessionId, id));
+      if (takenFrom !== undefined) notes.push(yield* tellTakenOwner(project, old, takenFrom, overrides.takeover!.reason));
 
       // Activation is host-local, including remote hosts without the owner's catalog.
       // Never roll back a committed catalog or claim the old agent is untouched here.
@@ -3184,6 +3208,7 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
     if (job && (!jobRow || jobRow.state === "closed" || job.outcome || job.project !== catalog.slug)) return yield* input("launch job is stale or already finished");
     const project = jobRow && job ? { ...catalog, agents: catalog.agents.map(row => row === jobRow ? { ...row, state: job.priorState } : row) } : catalog;
     if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
+    if (params.takeover && params.action !== "restart") return yield* input("takeover applies to restart only; agent_close and packet_land take their own, and project_status takeover moves a whole project");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
     if (params.action === "launch" && params.machine !== undefined && previous && params.machine !== previous.machine) return yield* input(`explicit machine ${params.machine} differs from row ${previous.name}'s ${previous.machine}; cross-machine relaunch cannot reuse its cwd, clone or session. Choose a new row name on ${params.machine}; the old row is unchanged`);
     const placed = params.action === "adopt" ? { machine: params.machine ?? previous?.machine ?? "local" }
@@ -3195,8 +3220,11 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
       // Harm: a profile argument restart cannot apply was dropped without a word, and the row ran on unchanged.
       const unsupported = (["skills", "slim", "appendSystemPrompt"] as const).filter(key => params[key] !== undefined);
       if (unsupported.length) return yield* input(`restart does not apply ${unsupported.join(", ")}; restart takes model, thinking, extensions, env, compactAt and noSkills. For prompt files, set policy.roles.<role>.appendSystemPrompt with project_update; restart re-reads it. For skills or slim, close the row and launch again`);
+      const reason = params.reason?.trim();
+      // Harm: a takeover without a why leaves the previous owner and the row history unable to say who moved it or why.
+      if (params.takeover && !reason) return yield* input("restart with takeover needs a reason; it is recorded on the row and sent to the previous owner");
       const row = yield* findRow(project, name);
-      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt, noSkills: params.noSkills });
+      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt, noSkills: params.noSkills, ...(params.takeover ? { takeover: { reason: reason! } } : {}) });
       return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
     }
     if (params.action === "adopt") {
@@ -3544,7 +3572,7 @@ export interface AgentCloseInput {
   readonly takeover?: boolean | undefined;
 }
 
-/** `callTakeover` is false where the calling tool has no takeover flag (adopt, restart): the refusal names the one that does. */
+/** `callTakeover` is false where the calling tool has no takeover flag (adopt): the refusal names the one that does. */
 const requireOwner = (row: AgentRow, sessionId: string, takeover: boolean | undefined, project: string, callTakeover = true) =>
   Effect.gen(function* () {
     if (row.owner === sessionId || takeover) return;
