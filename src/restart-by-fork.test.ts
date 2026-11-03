@@ -362,6 +362,50 @@ describe("restart by fork", () => {
     expect((await s.run(load(s.dir))).agents[0]?.sessionId).toBe(s.launch.row.sessionId);
   });
 
+  // Switchboard, 2026-11-03: the Node CVE restart waves needed one session to restart every desk, and project_status
+  // takeover would have moved every row in 40 projects. takeover on restart moves the restarted row only.
+  it("restart takeover needs a reason, moves only the restarted row, records it and tells the previous owner", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents.map(row => ({ ...row, owner: "previous-owner" })), { ...old, name: "sibling", sessionId: "sibling-session", owner: "previous-owner", pane: null, state: "planned" as const }] }, undefined] as const)));
+    s.h.sessionId = "wave-runner";
+    await expect(s.run(agentLaunch(s.dir, { action: "restart", name: old.name, takeover: true }))).rejects.toThrow("needs a reason");
+    await expect(s.run(agentLaunch(s.dir, { action: "restart", name: old.name, takeover: true, reason: "   " }))).rejects.toThrow("needs a reason");
+    await expect(s.run(agentLaunch(s.dir, { action: "restart", name: old.name, reason: "node cve" }))).rejects.toThrow("belongs to owner");
+    const sentBefore = s.h.sent.length;
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, takeover: true, reason: "node 24.22.1 cve wave" }));
+    expect(result.row.owner).toBe("wave-runner");
+    expect(result.row.sessionId).not.toBe(old.sessionId);
+    const saved = await s.run(load(s.dir));
+    const restarted = saved.agents.find(row => row.name === old.name)!;
+    expect(restarted.owner).toBe("wave-runner");
+    expect(restarted.restore?.env.MUSTER_OWNER ?? "wave-runner").toBe("wave-runner");
+    const taken = restarted.events?.filter(event => event.type === "TAKEOVER") ?? [];
+    expect(taken).toHaveLength(1);
+    expect(taken[0]?.detail).toBe(`previous-owner -> wave-runner: node 24.22.1 cve wave`);
+    expect(saved.agents.find(row => row.name === "sibling")?.owner).toBe("previous-owner");
+    expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_OWNER='wave-runner'");
+    expect(result.notes.join("\n")).toContain("takeover: told previous owner previous-owner");
+    expect(s.h.sent.length).toBeGreaterThanOrEqual(sentBefore);
+  });
+
+  it("takeover on the caller's own row changes nothing about ownership", async () => {
+    const s = await setup(false, "desk");
+    const old = s.launch.row;
+    s.h.sessionId = old.sessionId;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "other-owner" })) }, undefined] as const)));
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, takeover: true, reason: "self" }));
+    expect(result.row.owner).toBe("other-owner");
+    expect(result.row.events?.some(event => event.type === "TAKEOVER") ?? false).toBe(false);
+    expect(result.notes.join("\n")).not.toContain("takeover:");
+  });
+
+  it("takeover is refused on actions other than restart", async () => {
+    const s = await setup();
+    s.h.sessionId = "outsider";
+    await expect(s.run(agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.launch.row.pane!.paneId, takeover: true, reason: "x" }))).rejects.toThrow("takeover applies to restart only");
+  });
+
   it.each([false, true])("restore preserves another owner's row (remote %s)", async remote => {
     const s = await setup(remote);
     delete s.host.panes.get(s.launch.row.pane!.paneId)!.agent;
@@ -563,15 +607,14 @@ describe("restart by fork", () => {
     expect(watches).toEqual([`live1 "fleet health digest" (recurring, every 7200 s)`, `live3 "seaweed memory" (recurring, every 7200 s)`]);
   });
 
-  it("refusals for another owner's row name project_status takeover, the only takeover restart and adopt have", async () => {
+  it("refusals for another owner's row name project_status takeover; restart also names its own takeover", async () => {
     const s = await setup();
     s.h.sessionId = "outsider";
     const restart = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }).pipe(Effect.result));
     const adopt = await s.run(agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.launch.row.pane!.paneId }).pipe(Effect.result));
-    for (const outcome of [restart, adopt]) {
-      expect(outcome).toMatchObject({ _tag: "Failure", failure: { message: expect.stringContaining("run project_status takeover: true") } });
-      expect(outcome).not.toMatchObject({ failure: { message: expect.stringContaining("to this call") } });
-    }
+    for (const outcome of [restart, adopt]) expect(outcome).toMatchObject({ _tag: "Failure", failure: { message: expect.stringContaining("run project_status takeover: true") } });
+    expect(restart).toMatchObject({ failure: { message: expect.stringContaining("pass takeover: true to this call") } });
+    expect(adopt).not.toMatchObject({ failure: { message: expect.stringContaining("to this call") } });
   });
 
   it.each([false, true])("failed fresh-turn proof keeps the original catalog and pane (remote %s)", async remote => {
