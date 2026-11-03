@@ -14,8 +14,9 @@ export function readCalls(path: string, url?: string): CallsSummary {
     if (!isAbsolute(path)) throw new Error("Calls path must be absolute");
     const report = Effect.runSync(Effect.try(() => JSON.parse(readFileSync(path, "utf8"))).pipe(Effect.flatMap(decodeReport)));
     if (report.schema !== REPORT_SCHEMA) throw new Error("Unknown report schema");
-    const titles = report.groups.flatMap(group => report.items.filter(item => item.group === group.key)).slice(0, 3).map(item => item.title);
-    return { kind: "ready", count: report.items.length, titles, url };
+    const items = report.groups.flatMap(group => report.items.filter(item => item.group === group.key));
+    const titles = items.slice(0, 3).map(item => item.title);
+    return { kind: "ready", count: items.length, titles, url };
   } catch {
     return { kind: "unreadable", basename: basename(path) };
   }

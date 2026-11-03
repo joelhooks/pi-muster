@@ -57,6 +57,15 @@ describe("Joel calls widget line", () => {
     expect(draw(summary)[0]).toContain("0 open");
   });
 
+  it("neither counts nor shows items in unknown groups, matching the page", () => {
+    const { path } = setup();
+    writeFileSync(path, JSON.stringify({ ...fixture, items: [card("Hidden", "unknown"), ...fixture.items] }));
+    const summary = readCalls(path);
+    expect(summary).toEqual({ kind: "ready", count: 4, titles: ["First", "Second", "Third"], url: undefined });
+    expect(draw(summary).at(-1)).toBe("Joel calls (4) · First · Second · Third");
+    expect(draw(summary).join("\n")).not.toContain("Hidden");
+  });
+
   it("catches missing, malformed, wrong schema and structurally invalid reports with a dim basename only", () => {
     const { path, dir } = setup();
     for (const contents of [undefined, "{", JSON.stringify({ ...fixture, schema: "other" }), JSON.stringify({ ...fixture, items: [{ title: "bad" }] })]) {
