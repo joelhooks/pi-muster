@@ -13,6 +13,8 @@ import { Type } from "typebox";
 
 import { paneGet, reportTokens } from "./herdr.ts";
 import { deskAnswer, focusDesk, inboxText, loadSystem, loadSystemWith, registerSwitchboardSession, registryPath } from "./switchboard-ops.ts";
+import { watchCalls } from "./switchboard-calls.ts";
+import type { CallsSummary } from "./switchboard-calls.ts";
 import { ActivityClock, activityEnabled } from "./switchboard-flame.ts";
 import { OPEN_HINT, SwitchboardOverlay, SwitchboardState, renderWidget } from "./switchboard-view.ts";
 import type { Intent } from "./switchboard-view.ts";
@@ -67,6 +69,8 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
   let animation: ActivityClock | undefined;
   let overlayOpen = false;
   let stopWatch: (() => void) | undefined;
+  let stopCalls: (() => void) | undefined;
+  let calls: CallsSummary | undefined;
   let unregister: (() => void) | undefined;
   let overlayTui: { requestRender(): void } | undefined;
   let refreshing: Promise<void> | undefined;
@@ -180,6 +184,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     active = true;
     const home = deps.env.HOME ?? homedir();
     stopWatch = watchSwitchboard(home, schedule);
+    stopCalls = watchCalls(deps.env, summary => { calls = summary; tui?.requestRender(); });
     // An agent Muster launched (desk, hawk, boss, worker, judge) owns one project; it may browse
     // the fleet locally but never registers for every tenant's pages.
     if (deps.env.MUSTER_ROLE) ctx.ui.notify(`📞 ${deps.env.MUSTER_ROLE} sessions browse the Switchboard but are not paged; only a non-project session registers`, "info");
@@ -203,7 +208,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
       return {
         render: (width: number) => {
           animation?.show(active && !overlayOpen && width > 40 && activityEnabled(width, theme, deps.env));
-          return renderWidget(state, width, theme, deps.env, Date.now());
+          return renderWidget(state, width, theme, deps.env, Date.now(), calls);
         },
         invalidate() {},
         dispose: () => { widgetAnimation.dispose(); removeInput?.(); },
@@ -221,6 +226,7 @@ export function registerSwitchboard(pi: ExtensionAPI, deps: SwitchboardDeps) {
     stopInput?.(); stopInput = undefined;
     stopWatch?.();
     stopWatch = undefined;
+    stopCalls?.(); stopCalls = undefined; calls = undefined;
     unregister?.();
     unregister = undefined;
     if (pending) clearTimeout(pending);
