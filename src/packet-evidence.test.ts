@@ -135,9 +135,31 @@ describe("packet evidence integration", () => {
   });
   it("does not alarm when a gate actually runs", async () => {
     const s = await fixture(); advance(s, true);
-    const result = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", gate: "true" }));
-    expect(result.packet.gate).not.toBeNull();
-    expect(result.note).not.toContain("evidence stale:");
+    // Pin discovery as well as execution: the host may disable or lack fleet-compute.
+    const runner = join(s.h.root, "fleet-compute.js");
+    writeFileSync(runner, "// Execution is handled by the Proc fake.\n");
+    const original = s.h.proc;
+    const calls: string[][] = [];
+    s.h.proc = { run: (command, args, options) => command === "node" && args[0] === runner
+      ? Effect.sync(() => {
+        calls.push([...args]);
+        const value = (flag: string) => args[args.indexOf(flag) + 1]!;
+        writeFileSync(value("--receipt"), JSON.stringify({ host: "gate-host", runId: "packet-evidence-gate", tree: value("--tree"), slot: 1, durationMs: 5, exit: 0 }));
+        return { code: 0, stdout: "", stderr: "" };
+      }) : original.run(command, args, options) };
+    const saved = process.env.MUSTER_FLEET_COMPUTE;
+    process.env.MUSTER_FLEET_COMPUTE = runner;
+    try {
+      const result = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", gate: "true" }));
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toEqual(expect.arrayContaining(["gate", "--receipt", "--tree"]));
+      expect(calls[0]!.slice(-4)).toEqual(["--", "sh", "-c", "true"]);
+      expect(result.packet.gate).toMatchObject({ runId: "packet-evidence-gate", tree: sh(s.dir, "rev-parse", "HEAD^{tree}").trim() });
+      expect(result.note).not.toContain("evidence stale:");
+    } finally {
+      if (saved === undefined) delete process.env.MUSTER_FLEET_COMPUTE;
+      else process.env.MUSTER_FLEET_COMPUTE = saved;
+    }
   });
   it("suppresses stale evidence after a local gate with no fleet receipt", async () => {
     const s = await fixture(); advance(s, true);
