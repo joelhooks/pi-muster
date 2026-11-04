@@ -2192,8 +2192,10 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
         return [withLane(current, next), next] as const;
       }),
     );
-    yield* publishTokens(yield* load(dir));
-    return { lane: closed, closed: true, pending: [] as string[], paneNote };
+    const latest = yield* load(dir);
+    const mailboxNotes = yield* retireClosedStandingNames(latest, slug);
+    yield* publishTokens(latest);
+    return { lane: closed, closed: true, pending: [] as string[], paneNote: [paneNote, ...mailboxNotes].join("; ") };
   });
 
 // ---------- agents ----------
@@ -3639,12 +3641,9 @@ const publishProjectRole = (project: Project, row: AgentRow) => Effect.gen(funct
   return `Rat King role ${project.slug} not set (exit ${result.success.code}: ${cliErrorLine(`${result.success.stderr}\n${result.success.stdout}`) ?? "no output"})${retry}`;
 });
 
-/**
- * After close, retire the row's Rat King name so mail to it fails `Retired` instead of piling up unread (Nicodemus,
- * 2026-10-11). Only after close: a live reader re-acquiring its lease clears the mark, as does a later restore under
- * the same name. Never fails the close; a missing shim or refusal is a note.
+/** Finished workers and final lane/project closes retire names. Parked standing roles keep queued mail.
+ * Restore takes the same name back. A missing shim or refusal is a note, never a failed close.
  */
-/** Close retires a row's Rat King name; restoring the closed row takes the same name back (Tin-Tin, 2026-10-11). */
 const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "unretire" = "retire") => Effect.gen(function* () {
   const env = yield* MusterEnv;
   if (project.policy?.comms && project.policy.comms !== "ratking") return null;
@@ -3705,10 +3704,29 @@ const dropReaderHeartbeat = (project: Project, row: AgentRow) => Effect.gen(func
     : said === "absent" ? null : `reader heartbeat ${file} not removed (${said}); the crash sweep may report this close as a crash`;
 }).pipe(Effect.catch(() => Effect.succeed("reader heartbeat not removed (host unreachable); the crash sweep may report this close as a crash")));
 
+const standingRole = (row: AgentRow) => row.role === "desk" || row.role === "hawk" || row.role === "boss";
+
+const keepStandingName = (project: Project, row: AgentRow) => {
+  if (project.policy?.comms && project.policy.comms !== "ratking") return null;
+  const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
+  return `Rat King name ${name} kept: mail queues until restore. For a permanent close: sh ~/.config/muster/fleet-mailbox.sh retire --name ${name}`;
+};
+
+const retireClosedStandingNames = (project: Project, lane?: string) => Effect.gen(function* () {
+  const notes: string[] = [];
+  for (const row of project.agents) {
+    if (row.state !== "closed" || !standingRole(row) || (lane !== undefined && row.lane !== lane)) continue;
+    const note = yield* retireRatkingName(project, row);
+    if (note) notes.push(note);
+  }
+  return notes;
+});
+
 export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir, params).pipe(
   Effect.flatMap(result => result.row.state !== "closed" ? Effect.succeed(result) : Effect.gen(function* () {
     const project = yield* load(dir);
-    const notes = [yield* retireRatkingName(project, result.row), yield* dropReaderHeartbeat(project, result.row)].filter((note): note is string => !!note);
+    const nameNote = standingRole(result.row) ? keepStandingName(project, result.row) : yield* retireRatkingName(project, result.row);
+    const notes = [nameNote, yield* dropReaderHeartbeat(project, result.row)].filter((note): note is string => !!note);
     return notes.length ? { ...result, notes: [...result.notes, ...notes] } : result;
   })));
 
@@ -5238,10 +5256,11 @@ export const projectReview = (dir: string, params: ReviewInput) =>
         return [next, next] as const;
       }),
     );
+    const mailboxNotes = decision === "archive" && reviewed.state === "archived" ? yield* retireClosedStandingNames(reviewed) : [];
     const archivedLanes = reviewed.lanes.filter((lane) => lane.archived && !before.lanes.find((prior) => prior.slug === lane.slug)?.archived).map((lane) => lane.slug);
     const tokens = yield* publishTokens(reviewed);
     const brain = yield* writeBrain(reviewed);
-    return { project: reviewed, proposal, decision, archivedLanes, retroLanes, notes: [tokens, `brain: ${brain}`, "retro: run references/retro.md; record its artifact before project_review retro: true"] };
+    return { project: reviewed, proposal, decision, archivedLanes, retroLanes, notes: [tokens, `brain: ${brain}`, "retro: run references/retro.md; record its artifact before project_review retro: true", ...mailboxNotes] };
   });
 
 // ---------- project_update ----------
