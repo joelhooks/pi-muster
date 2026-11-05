@@ -117,7 +117,7 @@ describe("blind review diff budget", () => {
     expect(text).not.toContain("Not shown");
   });
 
-  it("cuts whole tail files and lists every omitted path, including deletions and renames", () => {
+  it("skips a whole oversized file and still admits later deletions and renames", () => {
     const source = patch("src/worker.ts", "+new\n".repeat(7_000));
     const second = patch("tests/worker.ts", "+test\n".repeat(7_000));
     const deleted = 'diff --git a/old.txt b/old.txt\ndeleted file mode 100644\n--- a/old.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n';
@@ -127,8 +127,10 @@ describe("blind review diff budget", () => {
     expect(text).not.toContain("diff --git a/tests/worker.ts");
     expect(text).not.toContain("[cut:");
     expect(text).toContain('"tests/worker.ts": +7000 -0');
-    expect(text).toContain('"old.txt": +0 -2');
-    expect(text).toContain('"new.md": +0 -0');
+    expect(text).toContain(deleted);
+    expect(text).toContain(renamed);
+    expect(text).not.toContain('"old.txt": +0 -2');
+    expect(text).not.toContain('"new.md": +0 -0');
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
   });
 
@@ -136,10 +138,46 @@ describe("blind review diff budget", () => {
     const source = patch("src/worker.ts", "+new\n".repeat(7_000));
     const space = patch("docs/a b/file.md", "+++added\n---removed\n".repeat(3_000));
     const quoted = 'diff --git "a/docs/quoted\\\\t.md" "b/docs/quoted\\\\t.md"\n--- "a/docs/quoted\\\\t.md"\n+++ "b/docs/quoted\\\\t.md"\n@@ -1 +1 @@\n+new\n-old\n';
-    const text = render(source + space + quoted);
+    const text = render(source + space + quoted.replace("+new\n", "+new\n".repeat(10_000)));
     expect(text).toContain(source);
     expect(text).toContain('"docs/a b/file.md": +3000 -3000');
-    expect(text).toContain(JSON.stringify("docs/quoted\\\\t.md") + ": +1 -1");
+    expect(text).toContain(JSON.stringify("docs/quoted\\\\t.md") + ": +10000 -1");
+  });
+
+  it("admits a small test after skipping an oversized first source file", () => {
+    const source = patch("src/a.ts", "+source\n".repeat(15_000));
+    const test = patch("src/a.test.ts");
+    const text = render(source + test);
+    expect(text).toContain(test);
+    expect(text).not.toContain("diff --git a/src/a.ts");
+    expect(text).not.toContain("[cut:");
+    expect(text).toContain('"src/a.ts": +15000 -0');
+    expect(text).not.toContain('"src/a.test.ts":');
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
+  });
+
+  it("ranks allowlisted config JSON ahead of receipts while keeping data overrides", () => {
+    const data = [".brain/data/package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "generated/package.json", "dist/tsconfig.json", "vendor/biome.json", "events.jsonl", "data.json"];
+    const configs = ["package.json", "tsconfig.json", "tsconfig.build.json", ".oxlintrc.json", "biome.json", ".eslintrc.json", ".eslintrc.strict.json", "nested/jsconfig.json", ".prettierrc.json", "deno.json", "typedoc.json", "turbo.json", "lerna.json", "nx.json"];
+    const text = render([...data, ...configs].map(path => patch(path)).join(""));
+    expect(text.split("## Packet diff\n\n")[1]).toBe([...configs, ...data].map(path => patch(path)).join("") + "\n");
+  });
+
+  it("keeps every earlier skip reserved when later files consume nearly all available space", () => {
+    const large = patch("src/a.ts", "+large\n".repeat(15_000));
+    const next = patch("src/b.ts", "+next\n".repeat(10_000));
+    const skipped = patch("src/c.ts", "+large\n".repeat(15_000));
+    const tiny = patch("src/z.test.ts");
+    const text = render(large + next + skipped + tiny);
+    expect(text).toContain(next);
+    expect(text).toContain(tiny);
+    expect(text).toContain('"src/a.ts": +15000 -0');
+    expect(text).toContain('"src/c.ts": +15000 -0');
+    expect(text).not.toContain('"src/b.ts":');
+    expect(text).not.toContain('"src/z.test.ts":');
+    expect(text).not.toContain("[cut:");
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
+    expect(render(large + next + skipped + tiny)).toBe(text);
   });
 
   it("bounds an inventory larger than the entire review and names its overflow", () => {

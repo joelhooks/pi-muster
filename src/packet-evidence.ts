@@ -55,7 +55,9 @@ function cappedSection(text: string, budget: number, marker: string): string {
 }
 
 function diffClass(path: string): number {
-  if (/^\.brain\/data\//.test(path) || /\.(?:json|jsonl|lock)$|(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock|uv\.lock|generated|dist|build|coverage|vendor|node_modules)(?:\/|$)/i.test(path)) return 3;
+  if (/^\.brain\/data\//.test(path) || /\.(?:jsonl|lock)$|(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock|uv\.lock|generated|dist|build|coverage|vendor|node_modules)(?:\/|$)/i.test(path)) return 3;
+  if (/(?:^|\/)(?:package|tsconfig[^/]*|jsconfig[^/]*|\.oxlintrc|biome|\.eslintrc[^/]*|\.prettierrc|deno|typedoc|turbo|lerna|nx)\.json$/i.test(path)) return 2;
+  if (/\.json$/i.test(path)) return 3;
   if (/(?:^|\/)(?:tests?|__tests__)(?:\/|$)|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]+\.py|[^/]+_test\.(?:go|py))$/i.test(path)) return 1;
   return /^src\//.test(path) || /\.(?:[cm]?[jt]sx?|py|rs|go|c|h|cpp|hpp|cs|java|kt|swift|rb|php|sh|bash|zsh|svelte|vue|ex|exs|erl|hs|scala|sql|lua|r|jl)$/i.test(path) ? 0 : 2;
 }
@@ -84,26 +86,33 @@ function reviewDiff(diff: string, budget: number): string {
 
   const entries = files.map(file => `- ${JSON.stringify(file.path)}: +${file.added} -${file.removed}\n`);
   const heading = "\n\n## Not shown\n\nOmitted or truncated files (counts cover the full diff):\n";
-  // Reserve the tail's inventory before admitting a complete file.
-  let tailBytes = entries.reduce((sum, entry) => sum + Buffer.byteLength(entry), 0);
+  // Reserve every unshown entry, including earlier skips, before admitting a file.
+  let inventoryBytes = entries.reduce((sum, entry) => sum + Buffer.byteLength(entry), 0);
+  const skipped: string[] = [];
   let shown = "";
+  let shownBytes = 0;
   for (let i = 0; i < files.length; i++) {
     const file = files[i]!;
-    const remainingBytes = tailBytes - Buffer.byteLength(entries[i]!);
-    const suffixBytes = i + 1 < files.length ? Buffer.byteLength(heading) + remainingBytes : 0;
-    if (Buffer.byteLength(shown) + Buffer.byteLength(file.text) + suffixBytes <= budget) {
+    const remainingBytes = inventoryBytes - Buffer.byteLength(entries[i]!);
+    const suffixBytes = skipped.length || i + 1 < files.length ? Buffer.byteLength(heading) + remainingBytes : 0;
+    const fileBytes = Buffer.byteLength(file.text);
+    if (shownBytes + fileBytes + suffixBytes <= budget) {
       shown += file.text;
-      tailBytes = remainingBytes;
-      continue;
+      shownBytes += fileBytes;
+      inventoryBytes = remainingBytes;
+    } else {
+      skipped.push(entries[i]!);
     }
-    const inventory = heading + entries.slice(i).join("");
-    const marker = `\n[cut: ${JSON.stringify(file.path)} truncated]\n`;
-    if (!shown) shown = byteHead(file.text, budget - Buffer.byteLength(inventory) - Buffer.byteLength(marker)) + marker;
-    // An inventory alone can exceed the entire budget for pathological diffs.
-    // Keep the hard byte limit and explicitly identify that metadata overflow.
-    return cappedSection(shown + inventory, budget, "\n[cut: Not shown inventory exceeds review budget]\n");
   }
-  return shown;
+  const inventory = skipped.length ? heading + skipped.join("") : "";
+  // Only truncate a head if no whole file fits, not before trying later files.
+  if (!shown && files.length) {
+    const marker = `\n[cut: ${JSON.stringify(files[0]!.path)} truncated]\n`;
+    shown = byteHead(files[0]!.text, budget - Buffer.byteLength(inventory) - Buffer.byteLength(marker)) + marker;
+  }
+  // An inventory alone can exceed the entire budget for pathological diffs.
+  // Keep the hard byte limit and explicitly identify that metadata overflow.
+  return cappedSection(shown + inventory, budget, "\n[cut: Not shown inventory exceeds review budget]\n");
 }
 
 /** Only explicit report, brief and diff inputs; no session or pane context. */
