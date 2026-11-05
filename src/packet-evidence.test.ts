@@ -62,9 +62,90 @@ describe("packet evidence decisions", () => {
   });
   it("caps UTF-8 review inputs with a visible cut", () => {
     const brief = reviewBrief({ packet: "hash", report: "report", diff: "é".repeat(100_000) });
-    expect(Buffer.byteLength(brief)).toBeLessThanOrEqual(60 * 1024 + 2);
+    expect(Buffer.byteLength(brief)).toBeLessThanOrEqual(60 * 1024);
+    expect(brief).not.toContain("�");
     expect(brief).toContain("[cut:");
     expect(brief).toContain("What was not tested?");
+  });
+});
+
+describe("blind review diff budget", () => {
+  const patch = (path: string, content = "+new\n-old\n") =>
+    `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n${content}`;
+  const render = (diff: string, extra = {}) => reviewBrief({ packet: "hash", report: "report", diff, ...extra });
+
+  it("puts source ahead of 80 KiB of receipts and inventories their full counts", () => {
+    const receipt = patch(".brain/data/receipts.jsonl", "+receipt\n".repeat(10_240));
+    const source = patch("src/worker.ts");
+    const input = receipt + source;
+    const text = render(input);
+    expect(text).toContain(source);
+    expect(text).not.toContain("+receipt\n");
+    expect(text).toContain('## Not shown');
+    expect(text).toContain('".brain/data/receipts.jsonl": +10240 -0');
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
+    expect(render(input)).toBe(text);
+  });
+
+  it("keeps the head of an oversized source file, with full counts and a cut marker", () => {
+    const text = render(patch("src/large.ts", "-old\n" + "+é🙂\n".repeat(15_000)));
+    expect(text).toContain("diff --git a/src/large.ts b/src/large.ts");
+    expect(text).toContain("+é🙂\n");
+    expect(text).toContain('[cut: "src/large.ts" truncated]');
+    expect(text).toContain('"src/large.ts": +15000 -1');
+    expect(text).not.toContain("�");
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
+  });
+
+  it("caps both prose sections without starving a 30 KiB source diff", () => {
+    const source = patch("src/worker.ts", "+new\n".repeat(6_000));
+    const text = render(source, { brief: "é".repeat(80_000), report: "🙂".repeat(80_000) });
+    expect(text).toContain("[cut: lane brief capped at 12 KiB]");
+    expect(text).toContain("[cut: packet report capped at 12 KiB]");
+    expect(text).toContain(source);
+    expect(text).not.toContain("Not shown");
+    expect(text).not.toContain("�");
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
+  });
+
+  it("preserves small file content and git order inside each class", () => {
+    const paths = [".brain/data/a.ts", "package-lock.json", "docs/guide.md", "tests/worker.ts", "src/a.test.ts", "lib/main.py", "src/z.ts", "src/clock.ts", "generated/a.ts", "config.json", "README.md"];
+    const text = render(paths.map(path => patch(path)).join(""));
+    const expected = ["lib/main.py", "src/z.ts", "src/clock.ts", "tests/worker.ts", "src/a.test.ts", "docs/guide.md", "README.md", ".brain/data/a.ts", "package-lock.json", "generated/a.ts", "config.json"].map(path => patch(path)).join("");
+    expect(text.split("## Packet diff\n\n")[1]).toBe(expected + "\n");
+    expect(text).not.toContain("[cut:");
+    expect(text).not.toContain("Not shown");
+  });
+
+  it("cuts whole tail files and lists every omitted path, including deletions and renames", () => {
+    const source = patch("src/worker.ts", "+new\n".repeat(7_000));
+    const second = patch("tests/worker.ts", "+test\n".repeat(7_000));
+    const deleted = 'diff --git a/old.txt b/old.txt\ndeleted file mode 100644\n--- a/old.txt\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-one\n-two\n';
+    const renamed = 'diff --git a/old.md b/new.md\nsimilarity index 100%\nrename from old.md\nrename to new.md\n';
+    const text = render(source + second + deleted + renamed);
+    expect(text).toContain(source);
+    expect(text).not.toContain("diff --git a/tests/worker.ts");
+    expect(text).not.toContain("[cut:");
+    expect(text).toContain('"tests/worker.ts": +7000 -0');
+    expect(text).toContain('"old.txt": +0 -2');
+    expect(text).toContain('"new.md": +0 -0');
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
+  });
+
+  it("names space-containing and quoted paths, and counts content resembling file headers", () => {
+    const source = patch("src/worker.ts", "+new\n".repeat(7_000));
+    const space = patch("docs/a b/file.md", "+++added\n---removed\n".repeat(3_000));
+    const quoted = 'diff --git "a/docs/quoted\\\\t.md" "b/docs/quoted\\\\t.md"\n--- "a/docs/quoted\\\\t.md"\n+++ "b/docs/quoted\\\\t.md"\n@@ -1 +1 @@\n+new\n-old\n';
+    const text = render(source + space + quoted);
+    expect(text).toContain(source);
+    expect(text).toContain('"docs/a b/file.md": +3000 -3000');
+    expect(text).toContain(JSON.stringify("docs/quoted\\\\t.md") + ": +1 -1");
+  });
+
+  it("bounds an inventory larger than the entire review and names its overflow", () => {
+    const text = render(Array.from({ length: 2_000 }, (_, i) => patch(`data/receipt-${i}.json`, "+receipt\n".repeat(20))).join(""));
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
+    expect(text).toContain("[cut: Not shown inventory exceeds review budget]");
   });
 });
 
