@@ -42,9 +42,73 @@ export function changedLines(numstat: string): number {
   }, 0);
 }
 
+/** Cut at a UTF-8 boundary so replacement characters cannot exceed the byte budget. */
+function byteHead(text: string, budget: number): string {
+  const bytes = Buffer.from(text);
+  let end = Math.max(0, Math.min(budget, bytes.length));
+  while (end < bytes.length && end > 0 && (bytes[end]! & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+function cappedSection(text: string, budget: number, marker: string): string {
+  return Buffer.byteLength(text) <= budget ? text : byteHead(text, budget - Buffer.byteLength(marker)) + marker;
+}
+
+function diffClass(path: string): number {
+  if (/^\.brain\/data\//.test(path) || /\.(?:json|jsonl|lock)$|(?:^|\/)(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.lock|Gemfile\.lock|poetry\.lock|uv\.lock|generated|dist|build|coverage|vendor|node_modules)(?:\/|$)/i.test(path)) return 3;
+  if (/(?:^|\/)(?:tests?|__tests__)(?:\/|$)|\.(?:test|spec)\.[^/]+$|(?:^|\/)(?:test_[^/]+\.py|[^/]+_test\.(?:go|py))$/i.test(path)) return 1;
+  return /^src\//.test(path) || /\.(?:[cm]?[jt]sx?|py|rs|go|c|h|cpp|hpp|cs|java|kt|swift|rb|php|sh|bash|zsh|svelte|vue|ex|exs|erl|hs|scala|sql|lua|r|jl)$/i.test(path) ? 0 : 2;
+}
+
+function reviewDiff(diff: string, budget: number): string {
+  // Preserve every byte of a file, including its trailing newline. Non-git input is
+  // still bounded, but has no file identity to report.
+  const files = diff.split(/(?=^diff --git )/m).filter(Boolean).map(text => {
+    const header = text.split("\n", 1)[0]!;
+    const destination = text.match(/^\+\+\+ (.+)$/m)?.[1];
+    const original = text.match(/^--- (.+)$/m)?.[1];
+    const raw = (destination === "/dev/null" ? original : destination) ?? header.match(/ ("b\/.*"|b\/.*)$/)?.[1];
+    const renamed = text.match(/^rename to (.+)$/m)?.[1];
+    const path = (renamed?.replace(/^"|"$/g, "")
+      ?? (raw?.startsWith('"') ? raw.slice(3, -1) : raw?.slice(2))) ?? "(unframed diff)";
+    let added = 0, removed = 0, inHunk = false;
+    for (const line of text.split("\n")) {
+      if (line.startsWith("@@")) inHunk = true;
+      else if (inHunk && line.startsWith("+")) added++;
+      else if (inHunk && line.startsWith("-")) removed++;
+    }
+    return { text, path, added, removed, rank: diffClass(path) };
+  }).sort((a, b) => a.rank - b.rank);
+  const ordered = files.map(file => file.text).join("");
+  if (Buffer.byteLength(ordered) <= budget) return ordered;
+
+  const entries = files.map(file => `- ${JSON.stringify(file.path)}: +${file.added} -${file.removed}\n`);
+  const heading = "\n\n## Not shown\n\nOmitted or truncated files (counts cover the full diff):\n";
+  // Reserve the tail's inventory before admitting a complete file.
+  let tailBytes = entries.reduce((sum, entry) => sum + Buffer.byteLength(entry), 0);
+  let shown = "";
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    const remainingBytes = tailBytes - Buffer.byteLength(entries[i]!);
+    const suffixBytes = i + 1 < files.length ? Buffer.byteLength(heading) + remainingBytes : 0;
+    if (Buffer.byteLength(shown) + Buffer.byteLength(file.text) + suffixBytes <= budget) {
+      shown += file.text;
+      tailBytes = remainingBytes;
+      continue;
+    }
+    const inventory = heading + entries.slice(i).join("");
+    const marker = `\n[cut: ${JSON.stringify(file.path)} truncated]\n`;
+    if (!shown) shown = byteHead(file.text, budget - Buffer.byteLength(inventory) - Buffer.byteLength(marker)) + marker;
+    // An inventory alone can exceed the entire budget for pathological diffs.
+    // Keep the hard byte limit and explicitly identify that metadata overflow.
+    return cappedSection(shown + inventory, budget, "\n[cut: Not shown inventory exceeds review budget]\n");
+  }
+  return shown;
+}
+
 /** Only explicit report, brief and diff inputs; no session or pane context. */
 export function reviewBrief(input: { packet: string; briefPath?: string; brief?: string; report: string; diff: string }): string {
-  const text = `# Blind review: ${input.packet}
+  const text = `# Blind review: ${cappedSection(input.packet, 1024, "[cut]")}
 
 Read only this file and run nothing. The report's checks describe what already ran. Number findings. Answer each question with either observed evidence naming a command, path or line, or "not checked".
 
@@ -52,20 +116,14 @@ Read only this file and run nothing. The report's checks describe what already r
 2. What could still be wrong while every check passes?
 3. What was not tested?
 
-## Lane brief${input.briefPath ? `: ${input.briefPath}` : ""}
-
-${input.brief ?? "No lane brief recorded."}
+${cappedSection(`## Lane brief${input.briefPath ? `: ${input.briefPath}` : ""}\n\n${input.brief ?? "No lane brief recorded."}`, 12 * 1024, "\n[cut: lane brief capped at 12 KiB]\n")}
 
 ## Packet report
 
-${input.report}
+${cappedSection(input.report, 12 * 1024, "\n[cut: packet report capped at 12 KiB]\n")}
 
 ## Packet diff
 
-${input.diff}
 `;
-  const limit = 60 * 1024;
-  const bytes = Buffer.from(text);
-  const marker = "\n\n[cut: review brief capped at 60 KiB]\n";
-  return bytes.length <= limit ? text : bytes.subarray(0, limit - Buffer.byteLength(marker)).toString("utf8") + marker;
+  return text + reviewDiff(input.diff, 60 * 1024 - Buffer.byteLength(text) - 1) + "\n";
 }
