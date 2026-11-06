@@ -219,8 +219,13 @@ describe("restart by fork", () => {
     const script = s.host.launcherScripts.at(-1)!;
     expect(script).toContain(`RATKING_SUCCEEDS='${old.sessionId}'`);
     expect(script).toContain(`RATKING_NAME='${name}'`);
+    // pi-until hands watches only to the exact successor session, the --session-id this restart passes.
+    expect(result.row.sessionId).not.toBe(old.sessionId);
+    expect(script).toContain(`PI_UNTIL_SUCCESSOR_ID='${result.row.sessionId}'`);
+    expect(script).toMatch(new RegExp(`--session-id'? '?${result.row.sessionId}`));
     expect(result.row.restore?.env.RATKING_NAME).toBe(name);
     expect(result.row.restore?.env).not.toHaveProperty("RATKING_SUCCEEDS");
+    expect(result.row.restore?.env).not.toHaveProperty("PI_UNTIL_SUCCESSOR_ID");
   });
 
   // Switchboard, 2026-10-19: restoring a session that a restart forked claimed `<row>-<label>`, since pi-ratking reads
