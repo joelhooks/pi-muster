@@ -84,6 +84,7 @@
     "src/heavy-lock.ts",
     "src/herdr.ts",
     "src/restart-snapshot.ts",
+    "src/restart-distill.ts",
     "src/machines.ts",
     "src/ops.ts",
     "src/models.ts",

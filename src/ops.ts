@@ -58,6 +58,7 @@ import {
 } from "./herdr.ts";
 import type { PaneInfo, Proof } from "./herdr.ts";
 import { untilJournalLines } from "./restart-snapshot.ts";
+import { restartDistill } from "./restart-distill.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
@@ -2842,6 +2843,8 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   yield* must("mkdir", ["-p", launchDir], { cwd: old.cwd });
   // Never a .jsonl in the Pi agent root: Pi's startup migration moves those into sessions/,
   // so the replacement's own startup moved its --fork source away and it exited (2026-10-07).
+  // A distilled child's stubs resolve back into this snapshot. It is an archive, not disposable scratch:
+  // never prune it while any distilled descendant references it (until an immutable archive owns those bytes).
   const snapshotDir = remote ? launchDir : join(env.home, ".local/state/muster/restart-snapshots");
   if (!remote) yield* must("mkdir", ["-p", snapshotDir], { cwd: old.cwd });
   const snapshot = join(snapshotDir, `restart-${row.sessionId}.jsonl`);
@@ -2850,17 +2853,22 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // The fork starts at the thinking level it launches with; the snapshot records it (Pi would not).
   if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile!, snapshot, profile.thinking ?? ""], { cwd: old.cwd });
   else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot, profile.thinking ?? undefined), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
+  const distilled = yield* restartDistill({ policy: project.policy?.distill, role: old.role, remote, self,
+    paneId: pane.pane_id, sessionFile: old.sessionFile!, snapshot,
+    childOut: join(snapshotDir, `distilled-${row.sessionId}.jsonl`), cwd: old.cwd });
+  const forkSource = distilled.parentSessionFile;
+  if (distilled.note) notes.push(distilled.note);
   // pi-until persists live watches only when Pi quits or reloads, so a fork cannot carry them. Name them instead.
   const watchLines = remote
-    ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, snapshot], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))
-    : yield* Effect.sync(() => [untilJournalText(snapshot), untilFinishedLines(readOrEmpty(untilTelemetryPath(env.home)))].join("\n"));
+    ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, forkSource], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))
+    : yield* Effect.sync(() => [untilJournalText(forkSource), untilFinishedLines(readOrEmpty(untilTelemetryPath(env.home)))].join("\n"));
   const watches = openUntilWatches(watchLines);
   if (watches.length) notes.push(`pi-until watches not carried into the fork (re-arm in the successor): ${watches.join("; ")}`);
   const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.${watches.length ? ` Your parent session's pi-until watches did not carry across this fork; re-arm the ones still needed: ${watches.join("; ")}.` : ""}`;
-  const inherited = yield* inheritedStartEntries(snapshot);
+  const inherited = yield* inheritedStartEntries(forkSource);
   const gate = join(launchDir, `restart-${row.sessionId}.ready`);
   environment.MUSTER_RESTART_GATE = gate;
-  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: snapshot, profile, musterExtension: launchProject.musterExtension, prompt });
+  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: forkSource, profile, musterExtension: launchProject.musterExtension, prompt });
   const receipt = env.createId();
   const wrap = machine?.wrap.map(arg => arg.replaceAll("{name}", old.name)) ?? [];
   const script = yield* writeLaunchFile(launchDir, `#!/bin/sh\nset -e\n${shellPrelude(old.cwd, environment, environment.PATH === undefined ? bin : undefined)}${piReceiptSuffix(receipt)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
@@ -2897,7 +2905,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (loadout.note) notes.push(loadout.note);
       if (loadout.failure) return yield* input(`restart failed before rebind: ${loadout.failure}; old agent untouched. Fix ${toolListSource(project, old)}, then restart again`);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
-        events: [...(row.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}` }],
+        events: [...(row.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}${distilled.detail ? `; ${distilled.detail}` : ""}` }],
         restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: withoutSuccession(environment) } };
       const stillOld = yield* locatePane(oldPane);
       if (!stillOld || !paneProvesSession(stillOld, old)) return yield* input("old Pi changed during restart; rebind refused");

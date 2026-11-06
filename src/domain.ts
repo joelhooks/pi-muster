@@ -597,7 +597,32 @@ export const WatchdogPolicy = Schema.Struct({
   turnsWithoutArtifact: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
   model: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1))),
 });
+export const RestartDistillPolicy = Schema.Struct({
+  command: Schema.Array(Schema.String.check(Schema.isMinLength(1))).check(Schema.isMinLength(1)),
+  minMb: Schema.optionalKey(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0))),
+  minCut: Schema.optionalKey(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(1))),
+});
+export type RestartDistillPolicy = typeof RestartDistillPolicy.Type;
+export const decodeRestartDistillReceipt = Schema.decodeUnknownSync(Schema.Struct({
+  pivotAllowed: Schema.Boolean,
+  parentBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  childBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),
+  child: Schema.String.check(Schema.isMinLength(1)),
+  parentSha256: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/i)),
+}));
+/** Only the tool boundary fields needed to refuse a pivot with unresolved tool calls. */
+export const decodeRestartToolEntry = Schema.decodeUnknownSync(Schema.Struct({
+  message: Schema.optionalKey(Schema.Struct({
+    role: Schema.String,
+    toolCallId: Schema.optionalKey(Schema.String),
+    content: Schema.optionalKey(Schema.Union([Schema.String, Schema.Array(Schema.Struct({
+      type: Schema.String, id: Schema.optionalKey(Schema.String),
+    }))])),
+  })),
+}));
 export const Policy = Schema.Struct({
+  /** Absent or null: off. Only an explicitly requested restart consults this policy. */
+  distill: Schema.optionalKey(Schema.NullOr(RestartDistillPolicy)),
   watchdog: Schema.optionalKey(WatchdogPolicy),
   deployLevel: Schema.optionalKey(DeployLevel),
   wipLimit: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)))),
@@ -898,6 +923,7 @@ export function mergePolicy(base: Policy | undefined, patch: Policy): Policy {
     // Ignore comms patches; preserve only the value already on disk.
     ...(patch.deployLevel !== undefined ? { deployLevel: patch.deployLevel } : {}),
     ...(patch.wipLimit !== undefined ? { wipLimit: patch.wipLimit } : {}),
+    ...(patch.distill !== undefined ? { distill: patch.distill } : {}),
     ...(patch.watchdog !== undefined ? { watchdog: { ...base?.watchdog, ...patch.watchdog } } : {}),
     ...(patch.flowStallMin !== undefined ? { flowStallMin: patch.flowStallMin } : {}),
     ...(patch.landWaitMin !== undefined ? { landWaitMin: patch.landWaitMin } : {}),
