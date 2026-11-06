@@ -47,12 +47,19 @@ export function boundedToolResult(home: string, tool: string, body: string, valu
   const details = boundedDetails(value, tool);
   const bytes = Buffer.byteLength(body);
   if (bytes > TEXT_LIMIT) {
-    const dir = join(dirname(registryPath(home)), "results");
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const file = join(dir, `${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}-${Date.now()}-${randomUUID()}.txt`);
-    writeFileSync(file, body, { mode: 0o600, flag: "wx" });
-    pruneResults(dir, file);
-    body = `${Buffer.from(body).subarray(0, TEXT_PREVIEW).toString("utf8")}\n\n[Truncated. Full text: ${file} (${bytes} bytes)]`;
+    const preview = Buffer.from(body).subarray(0, TEXT_PREVIEW).toString("utf8");
+    try {
+      const dir = join(dirname(registryPath(home)), "results");
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const file = join(dir, `${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}-${Date.now()}-${randomUUID()}.txt`);
+      writeFileSync(file, body, { mode: 0o600, flag: "wx" });
+      pruneResults(dir, file);
+      body = `${preview}\n\n[Truncated. Full text: ${file} (${bytes} bytes)]`;
+    } catch (error) {
+      // The operation already ran. A diagnostic write must not make it look failed (or invite a retry).
+      const reason = Buffer.from(error instanceof Error ? error.message : String(error)).subarray(0, 512).toString("utf8");
+      body = `${preview}\n\n[Truncated; full text not saved: ${reason} (${bytes} bytes)]`;
+    }
   }
   return { content: [{ type: "text" as const, text: body }], details };
 }

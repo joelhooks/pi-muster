@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,6 +61,23 @@ describe("persisted tool result bounds", () => {
     expect(files.filter(name => name !== "unrelated.txt")).toHaveLength(200);
     expect(files).not.toContain(firstFile.split("/").at(-1));
     expect(readFileSync(join(dir, "unrelated.txt"), "utf8")).toBe("keep");
+  });
+
+  it("returns the bounded preview when a spill cannot be written", () => {
+    const home = mkdtempSync(join(tmpdir(), "muster-unwritable-"));
+    const state = join(home, ".local", "state", "muster");
+    mkdirSync(state, { recursive: true });
+    const blocked = join(state, "results");
+    writeFileSync(blocked, "preserve this file");
+    const body = "x".repeat(TEXT_LIMIT + 1);
+    const result = boundedToolResult(home, "project_status", body, { catalog: "x".repeat(5 * 1024 * 1024) });
+    expect(result.content[0]!.text).toContain("[Truncated; full text not saved:");
+    expect(result.content[0]!.text).toContain(`(${Buffer.byteLength(body)} bytes)]`);
+    expect(result.content[0]!.text).toMatch(/^x{24576}\n\n\[Truncated;/);
+    expect(Buffer.byteLength(result.content[0]!.text)).toBeLessThan(TEXT_LIMIT);
+    expect(result).toMatchObject({ details: { ok: true, truncated: true, tool: "project_status" } });
+    expect(result).not.toHaveProperty("isError");
+    expect(readFileSync(blocked, "utf8")).toBe("preserve this file");
   });
 
   it("does not touch disk for text at the limit", () => {
