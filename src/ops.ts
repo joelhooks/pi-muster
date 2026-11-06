@@ -2510,7 +2510,7 @@ export const mergedExtensions = (kept: readonly string[] | undefined, named: rea
 
 /** A row's saved environment never claims succession: only the restart that forks the parent does, and a restore re-derives it. */
 const withoutSuccession = (environment: Record<string, string>) => {
-  const { RATKING_SUCCEEDS: _succeeds, ...rest } = environment;
+  const { RATKING_SUCCEEDS: _succeeds, PI_UNTIL_SUCCESSOR_ID: _successor, ...rest } = environment;
   return rest;
 };
 
@@ -2837,6 +2837,9 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // desk came up as drovr/drovr-desk-2-drovr-desk. A restart is a successor, not a sibling: pi-ratking (3b5dbc9) lets
   // RATKING_NAME stand when RATKING_SUCCEEDS names the parent session. Restart only; a fork or side desk never sets it.
   environment.RATKING_SUCCEEDS = old.sessionId;
+  // flowing-pi, 2026-11-06: pi-until hands a restarted row's watches only to the session whose id matches, so child
+  // Pis that inherit this environment (subagents, /resume) cannot claim them. The exact --session-id passed below.
+  environment.PI_UNTIL_SUCCESSOR_ID = row.sessionId;
   const bin = join(machine?.musterExtension ?? env.musterRoot, "bin");
   if (machine || environment.PATH !== undefined) environment.PATH = [bin, environment.PATH ?? (yield* must("printenv", ["PATH"], { cwd: old.cwd })).trim()].join(":");
   const launchDir = remote ? (yield* git(old.cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")).trim() : join(env.home, ".pi/agent");
