@@ -44,6 +44,8 @@ async function setup(remote = false, role: "worker" | "desk" = "worker", cloneOr
   await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "restart" }));
   const host = remote ? new FakeHerdr(h.home) : h.herdr;
   const proc: ProcShape = { run: (command, args, options) => {
+    if (command === "sh" && args[1] === "command -v muster-heavy") return Effect.succeed({ code: 1, stdout: "", stderr: "" });
+    if (args[0]?.endsWith("distill.cjs") && args[1] === "timeout") return h.proc.run(command, args, { ...options, timeoutMs: 40 });
     if (command === "ssh") {
       const script = args.at(-1) ?? "";
       if (script.includes("snapshotRestartSession")) return Effect.sync(() => {
@@ -67,6 +69,79 @@ async function setup(remote = false, role: "worker" | "desk" = "worker", cloneOr
   const launch = await run(agentLaunch(dir, { action: "launch", machine: remote ? "remote" : "local", name: "worker", role, lane: "work", label: "worker", cwd: dir, noSkills: true, prompt: "Initial work.", ...(cloneOrigin ? { clone: true } : {}) }));
   return { h, dir, source, upstream, host, run, launch, env, proc };
 }
+
+describe("distilled restart integration", () => {
+  async function configured(mode = "ok", role: "desk" | "worker" = "desk", remote = false) {
+    const s = await setup(remote, role);
+    const file = s.launch.row.sessionFile!;
+    for (let i = 0; i < 12; i++) appendFileSync(file, JSON.stringify({ type: "message", id: `pad${i}`, parentId: null, message: { role: "user", content: [{ type: "text", text: "padding".repeat(200) }] } }) + "\n");
+    appendFileSync(file, JSON.stringify({ type: "custom", customType: "pi-until-started", data: { receipt: { id: "parentOnly", label: "removed watch", kind: "recurring" } } }) + "\n");
+    const script = join(s.h.root, "distill.cjs");
+    writeFileSync(script, `const fs = require('node:fs'), crypto = require('node:crypto');
+const [mode, parent, child] = process.argv.slice(2);
+const bytes = fs.readFileSync(parent);
+fs.writeFileSync(parent + '.called', bytes);
+if (mode === 'exit') process.exit(7);
+if (mode === 'timeout') { setInterval(() => {}, 1000); return; }
+if (mode === 'json') { console.log('bad json'); return; }
+const lines = bytes.toString().trim().split('\\n');
+const kept = lines.filter((line, i) => i === 0 || line.includes('thinking_level_change'));
+kept.push(JSON.stringify({type: 'custom', customType: 'pi-until-started', data: {receipt: {id: 'childOnly', label: 'child watch', kind: 'recurring'}}}));
+const output = kept.join('\\n') + '\\n';
+if (mode !== 'missing') fs.writeFileSync(child, output, {flag: 'wx'});
+console.log(JSON.stringify({pivotAllowed: mode !== 'pivot', parentBytes: bytes.length, childBytes: mode === 'cut' ? bytes.length : Buffer.byteLength(output), child, parentSha256: crypto.createHash('sha256').update(bytes).digest('hex')}));`);
+    await s.run(projectUpdate(s.dir, { policy: { distill: { command: [process.execPath, script, mode], minMb: mode === "small" ? 64 : 0 } } }));
+    return { ...s, oldBytes: readFileSync(file, "utf8"), file };
+  }
+  it("forks the child, records byte detail, and proves the child's smaller first-turn/watch boundary", async () => {
+    const s = await configured();
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    const source = result.argv[result.argv.indexOf("--fork") + 1]!;
+    expect(source).toContain("/distilled-");
+    // The row's restore ancestry stays the original live session; the argv alone names the pivot input.
+    expect(result.row.parentSessionFile).toBe(s.file);
+    expect(result.row.delivery).toBe("proven");
+    expect([...(result.row.events ?? [])].reverse().find(e => e.type === "RESTARTED")?.detail).toMatch(/; distilled \d+ -> \d+$/);
+    expect(result.notes.join("\n")).toContain("childOnly");
+    expect(result.notes.join("\n")).not.toContain("parentOnly");
+    expect(readFileSync(s.file, "utf8")).toBe(s.oldBytes);
+    const snapshots = join(s.h.home, ".local/state/muster/restart-snapshots");
+    const { readdirSync } = await import("node:fs");
+    const snapshot = join(snapshots, readdirSync(snapshots).find(f => f.startsWith("restart-") && f.endsWith(".jsonl"))!);
+    // The snapshot is now the archive backing the child's stubs: it survives restart, byte-for-byte.
+    expect(existsSync(snapshot)).toBe(true);
+    expect(readFileSync(snapshot)).toEqual(readFileSync(snapshot + ".called"));
+  });
+  it.each([
+    ["pivot", "pivotAllowed false"], ["cut", "cut 0 < 0.5"], ["missing", "ENOENT"], ["exit", "exited 7"],
+    ["timeout", "timed out"], ["json", "SyntaxError"], ["small", "< 64 MiB"], ["idle", "not settled idle"],
+  ])("%s forks the full snapshot with a skip note", async (mode, note) => {
+    const s = await configured(mode);
+    if (mode === "idle") s.host.panes.get(s.launch.row.pane!.paneId)!.agent_status = "working";
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    const source = result.argv[result.argv.indexOf("--fork") + 1]!;
+    expect(source).toContain("/restart-"); expect(source).not.toContain("/distilled-");
+    expect(result.notes.filter(n => n.startsWith("distill skipped:"))).toHaveLength(1);
+    expect(result.notes.join("\n")).toContain(note);
+    expect([...(result.row.events ?? [])].reverse().find(e => e.type === "RESTARTED")?.detail).not.toContain("distilled");
+    expect(readFileSync(s.file, "utf8")).toBe(s.oldBytes);
+    if (!["small", "idle"].includes(mode)) expect(readFileSync(source)).toEqual(readFileSync(source + ".called"));
+  });
+  it("keeps the full snapshot when disabled, when a worker, or when remote", async () => {
+    for (const mode of ["off", "worker", "remote"]) {
+      const s = await configured("ok", mode === "worker" ? "worker" : "desk", mode === "remote");
+      if (mode === "off") await s.run(projectUpdate(s.dir, { policy: { distill: null } }));
+      const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+      const source = result.argv[result.argv.indexOf("--fork") + 1]!;
+      expect(source).toContain("/restart-"); expect(source).not.toContain("/distilled-");
+      expect(existsSync(source + ".called")).toBe(false);
+      expect(readFileSync(s.file, "utf8")).toBe(s.oldBytes);
+      if (mode === "remote") expect(result.notes.join("\n")).toContain("distill: local rows only");
+      if (mode === "worker") expect(result.notes.join("\n")).toContain("not standing");
+      if (mode === "off") expect(result.notes.some(n => n.startsWith("distill skipped:"))).toBe(false);
+    }
+  });
+});
 
 describe("remote clone origins", () => {
   it.each(["url", "github"] as const)("launch keeps the %s upstream URL and records the mapped source separately", async kind => {

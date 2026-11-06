@@ -845,6 +845,11 @@ export default function muster(host: ExtensionAPI) {
       label: Type.Optional(Type.String()),
       policy: Type.Optional(
         Type.Object({
+          distill: Type.Optional(Type.Union([Type.Null(), Type.Object({
+            command: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: "Opt-in restart distiller argv; snapshot and child output paths are appended. Absent/null: off." }),
+            minMb: Type.Optional(Type.Number({ minimum: 0, description: "Minimum snapshot MiB; default 64" })),
+            minCut: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: "Minimum fraction removed; default 0.5" })),
+          })])),
           deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Set fallback deploy permission on the 0 locked to 3 jfdi scale." })),
           comms: Type.Optional(StringEnum(["intercom", "network", "ratking"] as const)),
           wipLimit: Type.Optional(Type.Union([Type.Integer({ minimum: 1 }), Type.Null()])),
