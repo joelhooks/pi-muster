@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,11 +7,14 @@ import * as versionSkew from "./version-skew.ts";
 import { Cause, Effect, Schema } from "effect";
 import * as ops from "./ops.ts";
 import * as ownerQueue from "./owner-queue.ts";
-import { Packet } from "./domain.ts";
+import { effectivePolicy, Packet } from "./domain.ts";
 import { deskRecord } from "./desk.ts";
 
 import muster, { failure as toolFailure } from "./extension-main.ts";
 import { musterToolNames } from "./reload-stale.ts";
+import { harness, makeRepo, runWith } from "./test-support.ts";
+import { load, mutate } from "./store.ts";
+import { watchFallback } from "./desk-local.ts";
 
 function fakePi() {
   const tools: string[] = [];
@@ -145,6 +148,63 @@ describe("thinking_set", () => {
     expect((await tool?.execute("id", { level: "low" }))?.content[0]?.text).toBe("Thinking high → low, from the next model call.");
     expect((await tool?.execute("id", { level: "xhigh" }))?.content[0]?.text).toContain("this model clamps xhigh to high");
   });
+});
+
+describe("bounded registered results", () => {
+  it("bounds unbounded failure fields without turning a failure into success", () => {
+    const result = toolFailure(Cause.fail({ _tag: "ProcError", message: "command failed", stderr: "x".repeat(5 * 1024 * 1024) }));
+    expect(result).toMatchObject({ isError: true, details: { ok: false, truncated: true } });
+    expect(result.content[0]!.text).toBe("ProcError: command failed");
+    expect(Buffer.byteLength(JSON.stringify(result.details))).toBeLessThan(16 * 1024);
+  });
+
+  it("persists a real 137-lane project_status under 64 KiB and preserves custom-entry watch recovery", async () => {
+    vi.stubEnv("MUSTER_FLEET_COMPUTE", "off");
+    try {
+      const h = harness();
+      const dir = makeRepo(join(h.root, "large"));
+      await runWith(h, ops.projectOpen({ dir, slug: "large", outcome: "size regression", reviewTrigger: "weekly", nextAction: "measure", criticalPath: [], space: "w1", sidebar: true, ephemeral: true, cadenceMinutes: 15, musterExtension: "/muster", deskExtension: null }));
+      await runWith(h, ops.laneOpen(dir, { slug: "seed", label: "Seed", goal: "size regression" }));
+      const brief = join(dir, "brief.md");
+      writeFileSync(brief, "Measure bounded results.\n");
+      const launched = await runWith(h, ops.agentLaunchForeground(dir, { action: "launch", name: "seed", role: "worker", lane: "seed", label: "Seed", cwd: dir, clone: false, brief }));
+      const seed = (await runWith(h, load(dir))).lanes[0]!;
+      await runWith(h, mutate(dir, project => Effect.succeed([{ ...project,
+        lanes: Array.from({ length: 137 }, (_, i) => ({ ...seed, slug: `lane-${i}`, label: `Lane ${i}`, goal: "Review the size regression fixture. ".repeat(20) })),
+        agents: Array.from({ length: 137 * 4 }, (_, i) => ({ ...launched.row, name: `worker-${i}`, lane: `lane-${Math.floor(i / 4)}`, state: "interrupted" as const, pane: null, sessionFile: null, events: [{ type: "receipt", at: h.now.toISOString(), detail: "Synthetic receipt. ".repeat(500) }] })),
+      }, undefined] as const)));
+      const value = await runWith(h, ops.projectStatus(dir, { act: false }));
+      const before = Buffer.byteLength(JSON.stringify({ content: [{ type: "text", text: [value.board, ...value.notes].join("\n") }], details: JSON.parse(JSON.stringify(value)) }));
+      vi.spyOn(ops, "projectStatus").mockReturnValue(Effect.promise(async () => { await Promise.resolve(); return value; }));
+      vi.spyOn(ops, "projectUpdate").mockReturnValue(Effect.promise(async () => { await Promise.resolve(); return { project: value.project, policy: effectivePolicy(undefined, value.project.policy), notes: [value.board] }; }));
+      vi.spyOn(versionSkew, "createVersionSkew").mockReturnValue({ check: async () => undefined });
+      vi.stubEnv("HOME", h.home);
+      const fake = fakePi();
+      muster(fake.pi as never);
+      const entries = [
+        { type: "message", message: { role: "toolResult", toolName: "project_status", details: { ok: true, truncated: true } } },
+        { type: "custom", customType: "bellwether-herdr-watch-started", data: { id: "watch-1", status: "running", pane: "pane-1" } },
+      ];
+      const ctx = { cwd: dir, sessionManager: { getSessionId: () => h.sessionId, getBranch: () => entries } };
+      const [result, update] = await Promise.all([
+        fake.defs.get("project_status")!.execute("id", { project: dir, act: false }, undefined, undefined, ctx),
+        fake.defs.get("project_update")!.execute("id", { project: dir }, undefined, undefined, ctx),
+      ]);
+      expect(result).toMatchObject({ details: { tool: "project_status" } });
+      expect(update).toMatchObject({ details: { tool: "project_update" } });
+      expect(update.content[0]!.text).toContain("/project_update-");
+      const after = Buffer.byteLength(JSON.stringify(result));
+      expect(before).toBeGreaterThan(5 * 1024 * 1024);
+      expect(after).toBeLessThan(64 * 1024);
+      expect(result).toMatchObject({ details: { ok: true, truncated: true } });
+      const text = result.content[0]!.text;
+      const file = text.match(/Full text: (.+) \(\d+ bytes\)/)?.[1];
+      expect(file).toContain("/project_status-");
+      expect(readFileSync(file!, "utf8")).toBe([value.board, ...value.notes].join("\n"));
+      expect(watchFallback(["pane-1"], entries)).toContain("watch-1");
+      process.stdout.write(`project_status size: ${before} -> ${after} persisted bytes (137 lanes, 548 rows)\n`);
+    } finally { vi.unstubAllEnvs(); }
+  }, 120000);
 });
 
 const JOINED = "Collectionfence4/4behavior/propertytests";

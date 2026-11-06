@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { boundedToolResult } from "./tool-result.ts";
 import { readFileSync } from "node:fs";
 import { load, projectPath } from "./store.ts";
 import { turnLog } from "./turn-wake.ts";
@@ -77,8 +79,7 @@ export function failure(cause: Cause.Cause<unknown>) {
   const message = typeof error?.message === "string" && error.message !== "" ? error.message : fields.length > 0 ? fields.join(" · ") : String(error);
   const extra = Array.isArray(error?.failures) ? `\n${(error.failures as string[]).map((line) => `- ${line}`).join("\n")}` : "";
   return {
-    content: [{ type: "text" as const, text: `${tag}: ${message}${extra}` }],
-    details: { ok: false, error: JSON.parse(JSON.stringify({ ...error, _tag: tag, message })) as unknown },
+    ...boundedToolResult(homedir(), "failure", `${tag}: ${message}${extra}`, { ok: false, error: { ...error, _tag: tag, message } }),
     isError: true as const,
   };
 }
@@ -210,7 +211,12 @@ export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pendin
 }
 
 export default function muster(host: ExtensionAPI) {
-  const pi = withDeskWrites(withVersionSkew(host, createVersionSkew({ root: MUSTER_ROOT, loaded: LOADED_VERSION })));
+  const toolScope = new AsyncLocalStorage<string>();
+  const scopedHost = new Proxy(host, { get(target, key, receiver) {
+    if (key !== "registerTool") return Reflect.get(target, key, receiver);
+    return ((tool) => host.registerTool({ ...tool, execute: (...args) => toolScope.run(tool.name, () => tool.execute(...args)) })) satisfies ExtensionAPI["registerTool"];
+  } });
+  const pi = withDeskWrites(withVersionSkew(scopedHost, createVersionSkew({ root: MUSTER_ROOT, loaded: LOADED_VERSION })));
   const env = process.env;
   const role = env.MUSTER_ROLE;
   const worker = role === "worker";
@@ -265,8 +271,9 @@ export default function muster(host: ExtensionAPI) {
     );
 
   const run = async <A>(ctx: ExtensionContext, signal: AbortSignal | undefined, program: Effect.Effect<A, unknown, Services>, render: (value: A) => string, lost?: (value: A) => boolean) => {
-    const exit = await watchEntries.run(ctx.sessionManager.getBranch(), () => Effect.runPromiseExit(program.pipe(Effect.provide(layer(ctx))), signal ? { signal } : undefined));
-    if (Exit.isSuccess(exit)) return loudDelivery(text(render(exit.value), JSON.parse(JSON.stringify(exit.value)) as unknown), lost?.(exit.value) === true);
+    const bounded = program.pipe(Effect.flatMap(value => Effect.try(() => loudDelivery(boundedToolResult(homedir(), toolScope.getStore() ?? "result", render(value), value), lost?.(value) === true))));
+    const exit = await watchEntries.run(ctx.sessionManager.getBranch(), () => Effect.runPromiseExit(bounded.pipe(Effect.provide(layer(ctx))), signal ? { signal } : undefined));
+    if (Exit.isSuccess(exit)) return exit.value;
     return failure(exit.cause);
   };
 
