@@ -3274,11 +3274,16 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
           // Joel can hand a row to an unrelated live Pi ("you are the tokenmaxx desk now", 2026-10-12). Explicit, audited, never over a live row.
           const reason = params.reason?.trim();
           if (!reason) return yield* input("adopt with session needs a reason; it is recorded on the row");
-          if (row.state === "running" || row.state === "launching") return yield* input(`row ${row.name} is ${row.state}; adopt a foreign session only over a row that is not live`);
           const other = project.agents.find(agent => agent.name !== row.name && agent.state !== "closed" && agent.sessionId === params.session);
           if (other) return yield* input(`session ${params.session} is already row ${other.name}'s`);
           const pane = (yield* readoptionPanes(project, row)).find(pane => pane.pane_id === params.pane);
           if (!pane) return yield* input("adopt needs a pane in the project's workspace");
+          // fleet desk, 2026-11-07: a live row's own terminal can carry a later session (a continuation of the recorded one),
+          // and restart and plain adopt both refuse it. The row's own pane, proven by terminal id, is the same process slot,
+          // so re-pointing it steals nothing. Any other pane over a live row stays refused.
+          const ownTerminal = row.pane !== null && pane.terminal_id === row.pane.terminalId;
+          // Only a running row: a launching row's own terminal may still be mid-start, and an adopt there races the launcher's rebind (Tin-Tin).
+          if (row.state === "launching" || (row.state === "running" && !ownTerminal)) return yield* input(`row ${row.name} is ${row.state}; adopt a foreign session only over a row that is not live, or in a running row's own terminal`);
           const holder = adoptionHolder(project, row, pane);
           if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
           const foreign = yield* adoptionSession(row, pane, params.session);

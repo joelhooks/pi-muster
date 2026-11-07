@@ -339,10 +339,37 @@ it("adopts an unrelated live session only when named explicitly with a reason, a
   s.untouched();
 });
 
-it("refuses to adopt a foreign session over a live row", async () => {
+it("refuses to adopt a foreign session over a live row from another terminal", async () => {
   const s = await setup("running");
+  s.pane.terminal_id = "term_other";
   await expect(runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id, session: "01a0ff19-c75d-74c5-85d6-c269a2c1e18e", reason: "x" })))
     .rejects.toThrow("adopt a foreign session only over a row that is not live");
+  expect((await s.saved()).sessionId).toBe(s.row.sessionId);
+});
+
+// fleet desk, 2026-11-07: a remote desk's pane ran a continuation of its recorded session; restart and adopt both refused.
+it("adopts a named session over a live row in the row's own terminal", async () => {
+  const s = await setup("running");
+  // The live row is bound to this pane; its terminal now runs a later continuation of the recorded session.
+  await s.patch({ pane: { paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: s.pane.tab_id, openedByMuster: true } });
+  s.h.herdr.calls.length = 0;
+  const next = "01a1a9e6-e962-70d5-8a03-3e3106885c8b";
+  const file = join(s.h.root, `2026-11-05T00-00-00-000Z_${next}.jsonl`);
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: next, timestamp: "2026-11-05T00:00:00.000Z", cwd: s.dir }) + "\n");
+  s.pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: file };
+  await runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id, session: next, reason: "continuation in its own pane" }));
+  const saved = await s.saved();
+  expect(saved).toMatchObject({ sessionId: next, sessionFile: file });
+  expect(saved.events?.at(-1)).toMatchObject({ type: "ADOPT_FOREIGN" });
+  s.untouched();
+});
+
+it("refuses to adopt a named session over a launching row even in its own terminal", async () => {
+  const s = await setup("launching");
+  await s.patch({ pane: { paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: s.pane.tab_id, openedByMuster: true } });
+  await expect(runWith(s.h, agentLaunch(s.dir, { action: "adopt", name: "worker", pane: s.pane.pane_id, session: "01a1a9e6-e962-70d5-8a03-3e3106885c8b", reason: "x" })))
+    .rejects.toThrow("adopt a foreign session only over a row that is not live");
+  expect((await s.saved()).sessionId).toBe(s.row.sessionId);
 });
 
 // drovr, 2026-10-12: agent_close on a landed row killed Quartermaster's armed release watch with the pane.
