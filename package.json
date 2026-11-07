@@ -30,7 +30,8 @@
   "bin": {
     "muster-heavy": "./bin/muster-heavy.ts",
     "muster-digest": "./bin/muster-digest.ts",
-    "muster-launch": "./bin/muster-launch"
+    "muster-launch": "./bin/muster-launch",
+    "muster-close-after": "./bin/muster-close-after"
   },
   "files": [
     "AGENTS.md",
@@ -41,6 +42,8 @@
     "bin/muster-heavy.ts",
     "bin/muster-launch.ts",
     "bin/muster-launch",
+    "bin/muster-close-after.ts",
+    "bin/muster-close-after",
     "bin/muster-digest.ts",
     "src/digest.ts",
     "src/digest-ext.ts",
