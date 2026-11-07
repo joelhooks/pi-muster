@@ -3262,7 +3262,8 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
           // and restart and plain adopt both refuse it. The row's own pane, proven by terminal id, is the same process slot,
           // so re-pointing it steals nothing. Any other pane over a live row stays refused.
           const ownTerminal = row.pane !== null && pane.terminal_id === row.pane.terminalId;
-          if ((row.state === "running" || row.state === "launching") && !ownTerminal) return yield* input(`row ${row.name} is ${row.state}; adopt a foreign session only over a row that is not live, or in the row's own terminal`);
+          // Only a running row: a launching row's own terminal may still be mid-start, and an adopt there races the launcher's rebind (Tin-Tin).
+          if (row.state === "launching" || (row.state === "running" && !ownTerminal)) return yield* input(`row ${row.name} is ${row.state}; adopt a foreign session only over a row that is not live, or in a running row's own terminal`);
           const holder = adoptionHolder(project, row, pane);
           if (holder) return yield* input(`pane ${pane.pane_id} already bound to ${holder.name}`);
           const foreign = yield* adoptionSession(row, pane, params.session);
