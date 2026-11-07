@@ -2776,7 +2776,7 @@ const tellTakenOwner = (project: Project, old: AgentRow, previous: string, reaso
   const env = yield* MusterEnv;
   const comms = yield* Comms;
   const title = `${old.name} taken over by restart`;
-  const body = `Row ${project.slug}/${old.name} was restarted and taken over by session ${env.sessionId}${process.env.RATKING_NAME ? ` (${process.env.RATKING_NAME})` : ""}: ${reason}. It now answers to that session; its turn records no longer reach you.`;
+  const body = `Row ${project.slug}/${old.name} was restarted under takeover by session ${env.sessionId}${process.env.RATKING_NAME ? ` (${process.env.RATKING_NAME})` : ""}: ${reason}. It still answers to you; nothing about its ownership changed.`;
   const sent = yield* deliverOwnerItem({ owner: previous, home: env.home, session: env.sessionId, project: project.slug, item: { author: env.sessionId, ...(old.lane ? { lane: old.lane } : {}), kind: "fyi", title, body }, comms, send: comms.send }).pipe(Effect.result);
   if (sent._tag === "Failure") return `takeover: telling previous owner ${previous} failed (${sent.failure.message}); the restart stands`;
   return sent.success.lost ? `takeover: note to previous owner ${previous} not delivered (${sent.success.delivery.detail ?? "lost"}); the restart stands` : `takeover: told previous owner ${previous}`;
@@ -2845,9 +2845,11 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   let row: AgentRow = { ...old, profile: selected.profile, sessionId: `${mintSessionId(old.name, env.now())}-${randomUUID().slice(0, 8)}`, sessionFile: null, parentSessionFile: old.sessionFile, pane: null };
   if (row.owner === old.sessionId) row = { ...row, owner: row.sessionId };
   if (takenFrom !== undefined) {
-    const { ownerName: _previous, ...rest } = row;
-    const detail = `${takenFrom}${old.ownerName ? ` (${old.ownerName})` : ""} -> ${env.sessionId}: ${overrides.takeover!.reason}`;
-    row = { ...rest, owner: env.sessionId, ...launchOwnerName(env.home, dir, env.sessionId, yield* liveSelfName), events: [...(old.events ?? []), { type: "TAKEOVER", at: iso(env), detail }] };
+    // fleet desk, 2026-11-07: moving the owner here leaked 24 rows to the wave runner in the 11-04 CVE wave, and every
+    // later restart of the runner carried them, so the real owners' silence checks stopped covering them (one sat idle
+    // 92 h). A takeover authorizes this restart only; the owner stays. project_status takeover moves ownership for good.
+    const detail = `${env.sessionId} restarted it for ${takenFrom}${old.ownerName ? ` (${old.ownerName})` : ""}: ${overrides.takeover!.reason}`;
+    row = { ...row, events: [...(old.events ?? []), { type: "TAKEOVER", at: iso(env), detail }] };
   }
   const profile = extensionsFor(launchProject, row);
   // provisional → proven → rebound → activated. Failed provisional forks never
