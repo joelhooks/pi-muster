@@ -444,7 +444,8 @@ describe("restart by fork", () => {
 
   // Switchboard, 2026-11-03: the Node CVE restart waves needed one session to restart every desk, and project_status
   // takeover would have moved every row in 40 projects. takeover on restart moves the restarted row only.
-  it("restart takeover needs a reason, moves only the restarted row, records it and tells the previous owner", async () => {
+  // fleet desk, 2026-11-07: moving the owner leaked rows to the wave runner; a takeover now leaves the owner as it was.
+  it("restart takeover needs a reason, keeps the row's owner, records it and tells the owner", async () => {
     const s = await setup();
     const old = s.launch.row;
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: [...p.agents.map(row => ({ ...row, owner: "previous-owner" })), { ...old, name: "sibling", sessionId: "sibling-session", owner: "previous-owner", pane: null, state: "planned" as const }] }, undefined] as const)));
@@ -454,19 +455,32 @@ describe("restart by fork", () => {
     await expect(s.run(agentLaunch(s.dir, { action: "restart", name: old.name, reason: "node cve" }))).rejects.toThrow("belongs to owner");
     const sentBefore = s.h.sent.length;
     const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, takeover: true, reason: "node 24.22.1 cve wave" }));
-    expect(result.row.owner).toBe("wave-runner");
+    expect(result.row.owner).toBe("previous-owner");
     expect(result.row.sessionId).not.toBe(old.sessionId);
     const saved = await s.run(load(s.dir));
     const restarted = saved.agents.find(row => row.name === old.name)!;
-    expect(restarted.owner).toBe("wave-runner");
-    expect(restarted.restore?.env.MUSTER_OWNER ?? "wave-runner").toBe("wave-runner");
+    expect(restarted.owner).toBe("previous-owner");
+    expect(restarted.restore?.env.MUSTER_OWNER ?? "previous-owner").toBe("previous-owner");
     const taken = restarted.events?.filter(event => event.type === "TAKEOVER") ?? [];
     expect(taken).toHaveLength(1);
-    expect(taken[0]?.detail).toBe(`previous-owner -> wave-runner: node 24.22.1 cve wave`);
+    expect(taken[0]?.detail).toBe(`wave-runner restarted it for previous-owner: node 24.22.1 cve wave`);
     expect(saved.agents.find(row => row.name === "sibling")?.owner).toBe("previous-owner");
-    expect(s.host.launcherScripts.at(-1)).toContain("MUSTER_OWNER='wave-runner'");
+    expect(s.host.launcherScripts.at(-1)).not.toContain("MUSTER_OWNER='wave-runner'");
     expect(result.notes.join("\n")).toContain("takeover: told previous owner previous-owner");
     expect(s.h.sent.length).toBeGreaterThanOrEqual(sentBefore);
+  });
+
+  // Tin-Tin, 2026-11-07: a takeover keeps the owner, so a gone owner leaves the row uncovered unless the result says so.
+  it("a takeover restart over an owner nobody reads warns and names project_status takeover", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "gone-owner" })) }, undefined] as const)));
+    s.h.sessionId = "wave-runner";
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, takeover: true, reason: "wave" }));
+    expect(result.row.owner).toBe("gone-owner");
+    const notes = result.notes.join("\n");
+    expect(notes).toContain("note to previous owner gone-owner not delivered");
+    expect(notes).toContain("run project_status with takeover: true");
   });
 
   // 2026-11-03: the first wave failed because the public entry decoded takeover and reason away.
@@ -476,7 +490,7 @@ describe("restart by fork", () => {
     s.h.sessionId = "wave-runner";
     await expect(s.run(agentLaunchPublic(s.dir, { action: "restart", name: "worker", takeover: true }))).rejects.toThrow("needs a reason");
     const result = await s.run(agentLaunchPublic(s.dir, { action: "restart", name: "worker", takeover: true, reason: "wave" }));
-    expect("row" in result ? result.row.owner : undefined).toBe("wave-runner");
+    expect("row" in result ? result.row.owner : undefined).toBe("previous-owner");
   });
 
   it("takeover on the caller's own row changes nothing about ownership", async () => {
