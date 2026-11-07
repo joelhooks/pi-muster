@@ -19,6 +19,8 @@ export function fakeRatking(home: string, sender: () => string, sent: Array<{ to
       if (event !== RATKING_SEND) return;
       const request = value as { requestId: string; to?: string; replyTo?: string; body: string; kind?: string; summary?: string };
       requests.push(request);
+      // A recipient session nobody runs: the mailbox has no reader for it.
+      if (request.to === "gone-owner") { events.emit(RATKING_SEND_RESULT, { requestId: request.requestId, status: "failed", code: "UnknownName", to: request.to }); return; }
       const messageId = `fake-${++id}`;
       if (request.kind === "message") {
         const projects = catalogs();

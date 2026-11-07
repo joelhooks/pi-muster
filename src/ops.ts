@@ -2778,9 +2778,14 @@ const tellTakenOwner = (project: Project, old: AgentRow, previous: string, reaso
   const title = `${old.name} taken over by restart`;
   const body = `Row ${project.slug}/${old.name} was restarted under takeover by session ${env.sessionId}${process.env.RATKING_NAME ? ` (${process.env.RATKING_NAME})` : ""}: ${reason}. It still answers to you; nothing about its ownership changed.`;
   const sent = yield* deliverOwnerItem({ owner: previous, home: env.home, session: env.sessionId, project: project.slug, item: { author: env.sessionId, ...(old.lane ? { lane: old.lane } : {}), kind: "fyi", title, body }, comms, send: comms.send }).pipe(Effect.result);
-  if (sent._tag === "Failure") return `takeover: telling previous owner ${previous} failed (${sent.failure.message}); the restart stands`;
-  return sent.success.lost ? `takeover: note to previous owner ${previous} not delivered (${sent.success.delivery.detail ?? "lost"}); the restart stands` : `takeover: told previous owner ${previous}`;
-}).pipe(Effect.catch(error => Effect.succeed(`takeover: telling previous owner ${previous} failed (${String((error as { message?: unknown }).message ?? error)}); the restart stands`)));
+  if (sent._tag === "Failure") return `takeover: telling previous owner ${previous} failed (${sent.failure.message}); the restart stands${ownerGone(project)}`;
+  return sent.success.lost ? `takeover: note to previous owner ${previous} not delivered (${sent.success.delivery.detail ?? "lost"}); the restart stands${ownerGone(project)}` : `takeover: told previous owner ${previous}`;
+}).pipe(Effect.catch(error => Effect.succeed(`takeover: telling previous owner ${previous} failed (${String((error as { message?: unknown }).message ?? error)}); the restart stands${ownerGone(project)}`)));
+
+/** Tin-Tin, 2026-11-07: a takeover keeps the owner, and takeovers often happen because the owner is gone. When the note
+ * reached no reader, say so, so the row is not left answering to a session nobody runs. A warning, never a refusal. */
+const ownerGone = (project: Project) =>
+  `. The owner may be gone, so no silence check covers this row: run project_status with takeover: true on ${project.slug} to move ownership for good`;
 
 /** One restart per project row at a time. Every project has a row named desk, so the key carries the project. */
 export const restartLockName = (project: string, row: string) =>

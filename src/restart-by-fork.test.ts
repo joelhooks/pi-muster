@@ -470,6 +470,19 @@ describe("restart by fork", () => {
     expect(s.h.sent.length).toBeGreaterThanOrEqual(sentBefore);
   });
 
+  // Tin-Tin, 2026-11-07: a takeover keeps the owner, so a gone owner leaves the row uncovered unless the result says so.
+  it("a takeover restart over an owner nobody reads warns and names project_status takeover", async () => {
+    const s = await setup();
+    const old = s.launch.row;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(row => ({ ...row, owner: "gone-owner" })) }, undefined] as const)));
+    s.h.sessionId = "wave-runner";
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: old.name, takeover: true, reason: "wave" }));
+    expect(result.row.owner).toBe("gone-owner");
+    const notes = result.notes.join("\n");
+    expect(notes).toContain("note to previous owner gone-owner not delivered");
+    expect(notes).toContain("run project_status with takeover: true");
+  });
+
   // 2026-11-03: the first wave failed because the public entry decoded takeover and reason away.
   it("the public agent_launch entry keeps takeover and reason for restart", async () => {
     const s = await setup();
