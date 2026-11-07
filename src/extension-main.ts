@@ -198,7 +198,8 @@ export function registerRestartExit(pi: Pick<ExtensionAPI, "on">, close: (pendin
     const pending = closing;
     closing = undefined;
     if (!pending || pending.sessionId !== ctx.sessionManager.getSessionId()) return;
-    // close may kill this Pi process: finish the consumer's scoped release before asking Herdr.
+    // Release and rename here; the detached closer must wait for this Pi to exit.
+    // Later extensions still need their session_shutdown handlers to return.
     await release();
     await close(pending, ctx);
   });

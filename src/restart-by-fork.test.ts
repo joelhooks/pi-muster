@@ -633,8 +633,10 @@ describe("restart by fork", () => {
     expect(s.host.panes.has(old.pane!.paneId)).toBe(true); // no active-turn close
     expect("endSession" in result && result.endSession).toBeTruthy();
     if (!("endSession" in result) || !result.endSession) throw Error("missing shutdown receipt");
-    await s.run(finishRestart(s.dir, result.endSession));
-    expect(s.host.panes.has(old.pane!.paneId)).toBe(false);
+    const start = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    await s.run(finishRestart(s.dir, result.endSession, start as never));
+    expect(start).toHaveBeenCalledOnce();
+    expect(s.host.panes.has(old.pane!.paneId)).toBe(true);
   });
 
   it("a self-restart moves the two workers it owns, here and in another registered catalog, before any mail can name the old owner", async () => {

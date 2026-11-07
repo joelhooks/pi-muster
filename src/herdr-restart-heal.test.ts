@@ -232,17 +232,17 @@ it.each(["live agent", "changed terminal", "quit failed"])("does not close an ad
   expect(s.h.herdr.calls.some(call => call.method === "pane.close" && call.params.pane_id === s.pane.pane_id)).toBe(false);
 });
 
-it("self restart defers rename until finishRestart closes the old pane", async () => {
+it("self restart renames without closing the old pane in shutdown", async () => {
   const s = await restartSetup();
   await s.patch({ sessionId: s.h.sessionId, pane: { paneId: s.pane.pane_id, terminalId: s.pane.terminal_id, tabId: s.pane.tab_id, openedByMuster: true } });
   const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
   expect(s.h.herdr.calls.some(call => call.method === "agent.rename")).toBe(false);
   if (!("endSession" in result) || !result.endSession) throw Error("missing exit receipt");
-  await s.run(finishRestart(s.dir, result.endSession));
-  const close = s.h.herdr.calls.findIndex(call => call.method === "pane.close" && call.params.pane_id === s.pane.pane_id);
-  const rename = s.h.herdr.calls.findIndex(call => call.method === "agent.rename");
-  expect(close).toBeGreaterThanOrEqual(0);
-  expect(rename).toBeGreaterThan(close);
+  const start = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+  await s.run(finishRestart(s.dir, result.endSession, start as never));
+  expect(start).toHaveBeenCalledOnce();
+  expect(s.h.herdr.calls.some(call => call.method === "pane.close")).toBe(false);
+  expect(s.h.herdr.calls.some(call => call.method === "agent.rename")).toBe(true);
 });
 
 it("a self adopted restart leaves its shell with the exact guarded cleanup note", async () => {

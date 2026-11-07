@@ -3,7 +3,7 @@ import { turnLog, turnUnsupported } from "./turn-wake.ts";
 import { spawn } from "node:child_process";
 import { appendFileSync, chmodSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { availableParallelism, loadavg } from "node:os";
+import { availableParallelism, homedir, loadavg } from "node:os";
 import { stripVTControlCharacters } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -2119,7 +2119,7 @@ const laneCounts = (project: Project, slug: string) => ({
 });
 
 /** Close a pane only when it is still the terminal Muster opened. Never by name. */
-const closeOwnedPane = (binding: PaneBinding | null, dir: string, reason: string) =>
+export const closeOwnedPane = (binding: PaneBinding | null, dir: string, reason: string) =>
   Effect.gen(function* () {
     if (!binding) return "no pane";
     if (!binding.openedByMuster) return `left ${binding.paneId} open: Muster did not open it`;
@@ -2624,14 +2624,34 @@ const closeRestartShell = (dir: string, old: PaneBinding, quitRequested: boolean
 
 const adoptedSelfNote = (pane: PaneBinding) => `adopted shell ${pane.paneId}/${pane.terminalId}: close after its agent is gone: herdr_pane close ${pane.paneId} once herdr pane get shows no agent on terminal ${pane.terminalId}`;
 
-/** Called only at session_shutdown after the old caller's agent_end. */
-export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; replacementPane: PaneBinding; name: string }) => Effect.gen(function* () {
-  // This awaited hook cannot observe its own Pi's exit. The replacement is Muster-owned;
-  // its next restart closes normally. Never invent close authority for this one adopted shell.
-  const closed = restart.oldPane.openedByMuster
-    ? yield* closeOwnedPane(restart.oldPane, dir, `self restart ${restart.name}`)
-    : adoptedSelfNote(restart.oldPane);
+/** The child must outlive Pi so every later extension can finish session_shutdown. */
+export function spawnRestartCloser(root: string, dir: string, binding: PaneBinding, reason: string, start = spawn, home = homedir()) {
+  if (!binding.openedByMuster) return;
+  let log: number | undefined;
+  try {
+    const state = join(home, ".local/state/muster");
+    mkdirSync(state, { recursive: true });
+    log = openSync(join(state, "close-after.log"), "a", 0o600);
+  } catch { /* Best effort: a logging failure must not prevent shutdown. */ }
+  try {
+    const child = start(process.execPath, ["--import", import.meta.resolve("tsx"), join(root, "bin/muster-close-after.ts"),
+      String(process.pid), dir, JSON.stringify(binding), reason], { detached: true, stdio: log === undefined ? "ignore" : ["ignore", log, log] });
+    child.on("error", error => { console.error("Muster restart closer failed to start:", error); });
+    child.unref();
+  } catch (error) { console.error("Muster restart closer failed to start:", error); }
+  finally { if (log !== undefined) { try { closeSync(log); } catch { /* best effort */ } } }
+}
+
+/** Called only at session_shutdown after the old caller's agent_end. Never close this process's pane here. */
+export const finishRestart = (dir: string, restart: { oldPane: PaneBinding; replacementPane: PaneBinding; name: string }, start = spawn) => Effect.gen(function* () {
   const renamed = yield* renameRestart(restart.replacementPane, restart.name);
+  const env = yield* MusterEnv;
+  const closed = restart.oldPane.openedByMuster
+    ? yield* Effect.sync(() => {
+      spawnRestartCloser(env.musterRoot, dir, restart.oldPane, `self restart ${restart.name}`, start, env.home);
+      return `deferred close of ${restart.oldPane.paneId} until Pi ${process.pid} exits`;
+    })
+    : adoptedSelfNote(restart.oldPane);
   return { notes: [closed, renamed] };
 });
 
