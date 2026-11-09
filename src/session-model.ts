@@ -137,6 +137,10 @@ export function parseSessionModel(text: string, getModel?: ModelLookup): Session
 export function restoreProfile({ profile, live, model, thinking, roster, project, role }: {
   profile: LaunchProfile; live: SessionModel; model?: string; thinking?: Thinking; roster?: Roster; project?: string; role?: Role;
 }): { profile: LaunchProfile; note: string } {
+  // No silent route into Fable: a session switched to Fable mid-way restores onto it only when its launch profile or
+  // this call names Fable explicitly.
+  if (model === undefined && live.model && /fable/i.test(live.model) && !/fable/i.test(profile.model))
+    throw new Error(`Fable needs its full route: the session switched to ${live.model}, but its launch profile is ${profile.model}. Next: restore with model: "${live.model}" to keep Fable, or model: "${profile.model}".`);
   const selected = resolveModel(model ?? live.model ?? profile.model, roster, project, role);
   const next = { ...profile, model: selected.model, thinking: thinking ?? selected.thinking ?? live.thinking ?? profile.thinking };
   const time = live.switchedAt && !Number.isNaN(Date.parse(live.switchedAt)) ? new Date(live.switchedAt).toISOString().slice(11, 16) + "Z" : null;

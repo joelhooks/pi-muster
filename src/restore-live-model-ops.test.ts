@@ -71,7 +71,7 @@ it("refuses the session's forbidden model without changing catalog or panes", as
   await runWith(h, agentClose(dir, { name: "worker" }));
   append({ ...switched, modelId: "claude-fable-5-1" });
   const before = await runWith(h, load(dir)); const panes = [...h.herdr.panes.keys()];
-  expect((await failWith(h, agentLaunch(dir, { action: "restore", name: "worker" }))).message).toContain("Fable is off fleet-wide");
+  expect((await failWith(h, agentLaunch(dir, { action: "restore", name: "worker" }))).message).toContain("Fable needs its full route");
   expect(await runWith(h, load(dir))).toEqual(before);
   expect([...h.herdr.panes.keys()]).toEqual(panes);
 });

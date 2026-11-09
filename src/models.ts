@@ -23,18 +23,24 @@ const allowed = (model: string, project?: string, role?: Role) =>
 
 function refuse(model: string, project?: string, role?: Role) {
   // Errors are prompts (rule hunt, 2026-10-17): what failed, why, what is accepted, and the next call.
-  if (/fable/i.test(model)) throw new Error(`Fable is off fleet-wide: ${model} is refused. Fleet policy runs Claude Code Fable only when Joel asks for it, outside Muster's rows. Accepted: opus, sol, or another roster route. Next: relaunch with model: "opus".`);
+  if (/fable/i.test(model)) throw new Error(`Fable needs its full route: ${model} is refused. Fable runs only when a role policy or launch names its exact provider/model route, never through an alias, a default or a fallback. Next: model: "claude-bridge/claude-fable-5-2", or "opus".`);
   if (/sonnet/i.test(model) && !allowed(model, project, role)) throw new Error(`Sonnet is not used for ${role ?? "this"} rows${project ? ` in ${project}` : ""}: ${model} is refused. Joel's exceptions: workers may opt into claude-bridge/claude-sonnet-5-5 ("${ROLE_MODEL_EXCEPTIONS[0]?.ruling}", ${ROLE_MODEL_EXCEPTIONS[0]?.date}), and ${MODEL_EXCEPTIONS.map(e => `${e.project} may use ${e.model}`).join("; ")}. Next: model: "sol" or "opus", or role: "worker" with model: "claude-bridge/claude-sonnet-5-5".`);
 }
 
+/** Joel, 2026-11-09 19:31Z: "i think we wipl iltimately want desks on fable and workers on opus". A direction, not a
+ * default flip ("ultimately"). An exact Fable route named in a role policy or a launch is asking for it; an alias,
+ * a roster default substitution or a fallback route is not. */
+export const explicitFable = (choice: string) => /^[^/\s:]+\/claude-fable-[\w.-]+(:(off|minimal|low|medium|high|xhigh|max))?$/i.test(choice);
+
 export function resolveModel(choice: string, roster?: Roster, project?: string, role?: Role): { model: string; thinking?: Thinking } {
-  if (/fable/i.test(choice) || (/sonnet/i.test(choice) && !choice.includes("/"))) refuse(choice, project, role); // a bare alias never matches an exception route
+  const fable = explicitFable(choice);
+  if ((/fable/i.test(choice) && !fable) || (/sonnet/i.test(choice) && !choice.includes("/"))) refuse(choice, project, role); // a bare alias never matches an exception route
   const suffix = /:(off|minimal|low|medium|high|xhigh|max)$/.exec(choice);
   const name = suffix ? choice.slice(0, suffix.index) : choice;
   const aliases = modelAliases(roster);
   const model = name.includes("/") ? name : aliases[name];
   if (!model) throw new Error(`Unknown model alias ${name}; aliases: ${Object.keys(aliases).sort().join(", ")}`);
-  refuse(model, project, role);
+  if (!fable) refuse(model, project, role);
   if (!/^[^/\s:]+\/[^/\s:]+$/.test(model)) throw new Error(`Invalid model route ${model}; expected provider/model`);
   const thinking = suffix?.[1];
   switch (thinking) {

@@ -30,7 +30,14 @@ it("explicit model and thinking win, including a model thinking suffix", () => {
   expect(restoreProfile({ profile, live, model: "sol:low", thinking: "xhigh" }).profile.thinking).toBe("xhigh");
 });
 it("applies model refusal to a session route", () => {
-  expect(() => restoreProfile({ profile, live: parseSessionModel(lines({ type: "model_change", provider: "claude-bridge", modelId: "claude-fable-5-1" })) })).toThrow("Fable is off fleet-wide");
+  expect(() => restoreProfile({ profile, live: parseSessionModel(lines({ type: "model_change", provider: "claude-bridge", modelId: "claude-fable-5-1" })) })).toThrow("Fable needs its full route");
+});
+// No silent route into Fable: a session switched to it mid-way restores onto it only when named explicitly.
+it("restores onto Fable only when the launch profile or the call names it", () => {
+  const live = parseSessionModel(lines({ type: "model_change", provider: "claude-bridge", modelId: "claude-fable-5-2" }));
+  expect(() => restoreProfile({ profile, live })).toThrow(/the session switched to claude-bridge\/claude-fable-5-2, but its launch profile is/);
+  expect(restoreProfile({ profile, live, model: "claude-bridge/claude-fable-5-2" }).profile.model).toBe("claude-bridge/claude-fable-5-2");
+  expect(restoreProfile({ profile: { ...profile, model: "claude-bridge/claude-fable-5-2" }, live }).profile.model).toBe("claude-bridge/claude-fable-5-2");
 });
 it("ignores error usage and uses native totalTokens when available", () => {
   expect(parseSessionModel(session + "\n" + lines({ type: "message", id: "error", parentId: "e3", message: { role: "assistant", stopReason: "error", usage: { totalTokens: 0 } } })).contextTokens).toBe(434000);
