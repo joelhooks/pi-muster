@@ -49,18 +49,25 @@ it.each([ ["opus", "claude-bridge/claude-opus-5-5"], ["sol", "openai-codex/gpt-6
   const explicit = await runWith(h, agentLaunch(dir, { action: "launch", name: "explicit", role: "worker", lane: "probe", label: "explicit", cwd: dir, model: alias }));
   expect(explicit.row.profile.model).toBe(model);
 });
-it.each(["sonnet", "anthropic/claude-sonnet-5", "anthropic/claude-sonnet-5-5", "fable", "fable:high", "claude-bridge/claude-fable-5-1", "nope"])("rejects forbidden/unknown choice %s", async (model) => {
+it.each(["sonnet", "anthropic/claude-sonnet-5", "anthropic/claude-sonnet-5-5", "fable", "fable:high", "nope"])("rejects forbidden/unknown choice %s", async (model) => {
   const { h, launch } = await setup();
   const error = await failWith(h, launch(model));
-  expect(error.message).toMatch(model.includes("sonnet") ? /Sonnet is not used/ : model.includes("fable") ? /Fable is off fleet-wide: .*Next: relaunch with model: "opus"/ : /aliases: opus, sol$/);
+  expect(error.message).toMatch(model.includes("sonnet") ? /Sonnet is not used/ : model.includes("fable") ? /Fable needs its full route: .*Next: model: "claude-bridge\/claude-fable-5-2"/ : /aliases: opus, sol$/);
 });
-it("allows Joel's named front-desk Sonnet route there only, and Fable nowhere", async () => {
+// Joel, 2026-11-09: "i think we wipl iltimately want desks on fable and workers on opus". An exact route is asking for it.
+it("launches on an exact Fable route", async () => {
+  const { h, launch } = await setup();
+  const result = await runWith(h, launch("claude-bridge/claude-fable-5-1:high"));
+  expect(result.row.profile).toMatchObject({ model: "claude-bridge/claude-fable-5-1", thinking: "high" });
+});
+it("allows Joel's named front-desk Sonnet route there only, and Fable only by its exact route", async () => {
   const front = await setup("front-desk");
   const update = await runWith(front.h, projectUpdate(front.dir, { policy: { roles: { worker: { model: "claude-bridge/claude-sonnet-5-5", thinking: "medium" } } } }));
   expect(update.policy.roles.worker).toMatchObject({ model: "claude-bridge/claude-sonnet-5-5", thinking: "medium" });
   expect((await runWith(front.h, front.launch())).row.profile.model).toBe("claude-bridge/claude-sonnet-5-5");
   expect((await failWith(front.h, projectUpdate(front.dir, { policy: { roles: { judge: { model: "claude-bridge/claude-sonnet-5" } } } }))).message).toContain("Sonnet is not used");
-  expect((await failWith(front.h, projectUpdate(front.dir, { policy: { roles: { judge: { model: "claude-bridge/claude-fable-5-1" } } } }))).message).toContain("Fable is off");
+  expect((await runWith(front.h, projectUpdate(front.dir, { policy: { roles: { judge: { model: "claude-bridge/claude-fable-5-1" } } } }))).policy.roles.judge).toMatchObject({ model: "claude-bridge/claude-fable-5-1" });
+  expect((await failWith(front.h, projectUpdate(front.dir, { policy: { roles: { judge: { model: "fable" } } } }))).message).toContain("Fable needs its full route");
   const other = await setup("not-front-desk");
   expect((await failWith(other.h, projectUpdate(other.dir, { policy: { roles: { worker: { model: "claude-bridge/claude-sonnet-5-5" } } } }))).message).toContain("Sonnet is not used");
 });

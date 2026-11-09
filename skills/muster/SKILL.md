@@ -52,6 +52,8 @@ Deploy posture belongs in the project's VISION.md, in Joel's words. Choose the l
 
 Role models and alternates come from the fleet roster. Pick an alternate when its stated purpose matches the lane. An explicit model from Joel wins. Give workers only the skills their packet needs.
 
+Joel's direction on models, 2026-11-09: "i think we wipl iltimately want desks on fable and workers on opus". Keep his "ultimately": it is a direction, not a switch. No role default changes until the Fable desk pilot reports its quota and cache cost. Until then, name Fable's exact route (`claude-bridge/claude-fable-5-2`) in the launch or role policy that pilots it.
+
 Read `watchdog:` board lines as progress alarms, not verdicts to obey. Compare the suggested action with the brief and current evidence; the owner decides whether to unblock, redirect or leave the worker alone. A progressing judgment can be right even when artifact age is high. An unavailable judge means inspect the row, not restart it. The default judge is `cliproxy-codex/gpt-5.6-terra`; use a stateless provider, never a session-bound `claude-bridge` model.
 
 Long builds need silence limits that allow them to finish. Cheap scouts need less context; a lane that must retain context needs a suitable compaction limit. Change project policy rather than working around it.

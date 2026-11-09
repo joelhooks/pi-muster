@@ -20,11 +20,23 @@ it("refuses a roster alias targeting sonnet", () => {
   const roster = decodeRoster({ version: 1, aliases: { sneaky: "claude-bridge/claude-sonnet-5" }, roles: {} });
   expect(() => resolveModel("sneaky", roster)).toThrow("Sonnet is not used");
 });
-it("refuses Fable by alias, roster alias and route, and keeps the built-in fable alias gone", () => {
-  const roster = decodeRoster({ version: 1, aliases: { fable: "claude-bridge/claude-fable-5-1", judge: "claude-bridge/claude-fable-5-1" }, roles: {} });
-  for (const choice of ["fable", "judge", "claude-bridge/claude-fable-5-1:high"]) expect(() => resolveModel(choice, roster, "front-desk")).toThrow(/Fable is off fleet-wide: .* is refused\. .*Next: relaunch with model: "opus"/);
-  expect(() => resolveModel("fable")).toThrow("Fable is off");
+// Joel, 2026-11-09: "i think we wipl iltimately want desks on fable and workers on opus". An exact route is asking for it.
+it("refuses Fable by alias or roster alias, and keeps the built-in fable alias gone", () => {
+  const roster = decodeRoster({ version: 1, aliases: { fable: "claude-bridge/claude-fable-5-1", judge: "claude-bridge/claude-fable-5-1", fable52: "claude-bridge/claude-fable-5-2" }, roles: {} });
+  for (const choice of ["fable", "judge", "fable52", "fable52:high", "claude-fable-5-2"]) expect(() => resolveModel(choice, roster, "front-desk")).toThrow(/Fable needs its full route: .* is refused\. .*Next: model: "claude-bridge\/claude-fable-5-2"/);
+  expect(() => resolveModel("fable")).toThrow("Fable needs its full route");
   expect(roleDefaults(undefined, undefined, "judge").model).toBe("claude-bridge/claude-opus-5-5");
+  expect(roleDefaults(undefined, undefined, "desk").model).toBe("claude-bridge/claude-opus-5-5");
+});
+it("accepts an exact Fable route named in a launch or role policy, with its thinking suffix", () => {
+  expect(resolveModel("claude-bridge/claude-fable-5-2", undefined, "drovr", "desk")).toEqual({ model: "claude-bridge/claude-fable-5-2" });
+  expect(resolveModel("anthropic/claude-fable-5-2:high", undefined, "drovr", "desk")).toEqual({ model: "anthropic/claude-fable-5-2", thinking: "high" });
+  expect(resolveModel("claude-bridge/claude-fable-5-2:medium", undefined, undefined, "worker")).toEqual({ model: "claude-bridge/claude-fable-5-2", thinking: "medium" });
+});
+it("never offers Fable as a substitute or fallback route", () => {
+  const runnable = ["claude-bridge/claude-fable-5-2", "claude-bridge/claude-opus-5-5"];
+  expect(workingRoutes("claude-bridge/claude-fable-5-2", runnable)).toEqual([]);
+  expect(workingRoutes("claude-bridge/claude-opus-5-5", runnable)).toEqual(["claude-bridge/claude-opus-5-5"]);
 });
 it("scopes the Sonnet exception to front-desk and its exact route", () => {
   expect(resolveModel("claude-bridge/claude-sonnet-5-5:medium", undefined, "front-desk")).toEqual({ model: "claude-bridge/claude-sonnet-5-5", thinking: "medium" });
