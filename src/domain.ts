@@ -517,7 +517,11 @@ export const RolePolicy = Schema.Struct({
   compactAt: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt()))),
   noSkills: Schema.optionalKey(Schema.Boolean),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
-  /** Opt-in direct tools, emitted as Pi `--tools`; everything else stays reachable through codemode. null or absent: Pi's default registry. */
+  /**
+   * Opt-in direct tools, emitted as Pi `--tools`. An unlisted tool is gone, codemode included: lean-loadout probed
+   * 2026-11-10 and `tools.ratking` did not exist inside codemode. To keep the rest behind codemode, leave this unset
+   * and set env PI_CODEMODE_MODE=only with PI_CODEMODE_DECLARE. null or absent: Pi's default registry.
+   */
   tools: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   appendSystemPrompt: Schema.optionalKey(Schema.Array(Schema.String)),
@@ -893,8 +897,28 @@ export function silenceLimits(policy: Policy | undefined): SilenceLimits {
  * launch choice; picking an alternate brings its settings (a smaller window's
  * compact-at, say) with it.
  */
+/**
+ * Roster keys a launch never applies. AGENTS.md: emit --tools only from a project role policy's opt-in list (Joel,
+ * desk page sb-desk-20261022c); with no policy, no tool flag. lean-loadout, 2026-11-10: the roster decoded these and
+ * dropped them silently, so 656 workers ran without a list the roster named. Name them instead of showing them in force.
+ */
+export const ROSTER_LAUNCH_IGNORED = ["tools", "appendSystemPrompt", "env"] as const;
+
+/** Roster keys for this role that a launch ignores because the project policy does not set them. Alternates never decode them. */
+export function rosterIgnoredKeys(roster: Roster | undefined, policy: Policy | undefined, role: Role): string[] {
+  const entry = roster?.roles?.[role];
+  const project = policy?.roles?.[role] ?? {};
+  return entry ? ROSTER_LAUNCH_IGNORED.filter(key => project[key] === undefined && entry[key] !== undefined) : [];
+}
+
+function launchable<T extends object>(value: T): T {
+  const copy = { ...value } as Record<string, unknown>;
+  for (const key of ROSTER_LAUNCH_IGNORED) delete copy[key];
+  return copy as T;
+}
+
 export function roleDefaults(roster: Roster | undefined, policy: Policy | undefined, role: Role, model?: string, slug?: string, steer?: FleetSteer, now?: number, workType?: string): RoleDefaults {
-  const { alternates = [], ...fleet } = knownLevel(roster?.roles?.[role] ?? {});
+  const { alternates = [], ...fleet } = launchable(knownLevel(roster?.roles?.[role] ?? {}));
   const project = knownLevel(policy?.roles?.[role] ?? {});
   const steered = role === "worker" && now !== undefined && model === undefined && project.model === undefined ? steerChoice(steer, now, workType) : undefined;
   // Role exceptions are opt-in: an explicit launch choice or a steer route Joel ruled, never a policy or fleet default.

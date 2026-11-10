@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { decodeFleetSteer, roleDefaults, steerChoice, steerHold, WORK_TYPE } from "./domain.ts";
+import { decodeFleetSteer, roleDefaults, rosterIgnoredKeys, steerChoice, steerHold, WORK_TYPE } from "./domain.ts";
 import type { FleetSteer, Policy, Role, Roster } from "./domain.ts";
 import { InputError } from "./errors.ts";
 
@@ -30,10 +30,14 @@ export const launchDefaults = (args: { home: string; now: number; action: string
   const hold = applies ? steerHold((read ?? (yield* readFleetSteer(args.home))).steer, args.now, defaults.model, args.workType, args.critical === true) : null;
   if (hold) return yield* new InputError({ message: hold });
   const reason = args.model !== undefined ? "explicit model" : args.policy?.roles?.worker?.model !== undefined ? "project policy" : choice?.model ? choice.note : args.roster?.roles.worker?.model !== undefined ? "roster default" : "ROLE_DEFAULTS";
-  return { defaults, review: choice?.review === true, notes: applies ? [
+  const ignored = rosterIgnoredKeys(args.roster, args.policy, args.role);
+  const rosterNote = ignored.length
+    ? [`⚠ roster ${args.role} ${ignored.join(", ")} not applied: Muster sends these only from project policy (project_update policy.roles.${args.role})${args.role === "worker" ? " or a lane's workerTools (lane_open)" : ""}`]
+    : [];
+  return { defaults, review: choice?.review === true, notes: [...rosterNote, ...(applies ? [
     ...(!pinned && !choice?.model ? [read?.note ?? choice!.note] : []),
     ...(pinned && args.workType !== undefined ? [`work type ${args.workType}: route not used; ${reason} wins`] : []),
     `worker model: ${defaults.model}${choice?.route !== undefined ? ` (${defaults.thinking})` : ""} from ${reason}`,
     ...(choice?.review ? [`review: route ${choice.route} wants the owner to review the packet before packet_land`] : []),
-  ] : [] };
+  ] : [])] };
 });

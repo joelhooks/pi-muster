@@ -826,7 +826,7 @@ export default function muster(host: ExtensionAPI) {
       compactAt: Type.Optional(Type.Union([Type.Integer(), Type.Null()], { description: "null turns compaction off" })),
       noSkills: Type.Optional(Type.Boolean()),
       skills: Type.Optional(Type.Array(Type.String({ description: "Skill name or absolute path" }))),
-      tools: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()], { description: "Opt-in direct tools, passed as Pi --tools (include codemode to reach the rest); null clears. Takes effect at the next launch, restore or restart" })),
+      tools: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()], { description: "Opt-in direct tools, passed as Pi --tools. Unlisted tools become unreachable, codemode included (list ratking, packet_report and the rest a role needs); for codemode-only access set env PI_CODEMODE_MODE=only instead. null clears. Takes effect at the next launch, restore or restart" })),
       env: Type.Optional(Type.Record(Type.String(), Type.String(), { description: "Env added to the role's rows at launch, restore and restart; {} clears" })),
       appendSystemPrompt: Type.Optional(Type.Array(Type.String({ description: "Absolute path" }), { description: "System-prompt files added to the role's rows; [] clears" })),
     }),
