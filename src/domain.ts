@@ -517,7 +517,11 @@ export const RolePolicy = Schema.Struct({
   compactAt: Schema.optionalKey(Schema.NullOr(Schema.Number.check(Schema.isInt()))),
   noSkills: Schema.optionalKey(Schema.Boolean),
   skills: Schema.optionalKey(Schema.Array(Schema.String)),
-  /** Opt-in direct tools, emitted as Pi `--tools`; everything else stays reachable through codemode. null or absent: Pi's default registry. */
+  /**
+   * Opt-in direct tools, emitted as Pi `--tools`. An unlisted tool is gone, codemode included: lean-loadout probed
+   * 2026-11-10 and `tools.ratking` did not exist inside codemode. To keep the rest behind codemode, leave this unset
+   * and set env PI_CODEMODE_MODE=only with PI_CODEMODE_DECLARE. null or absent: Pi's default registry.
+   */
   tools: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.String))),
   env: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
   appendSystemPrompt: Schema.optionalKey(Schema.Array(Schema.String)),
