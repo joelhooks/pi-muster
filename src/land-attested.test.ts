@@ -131,17 +131,35 @@ describe("owner-attested landing", () => {
     expect((await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "rejected", landedAs: s.id, attested: true, evidence }))).message).toContain("attested is only supported for committed packets");
   });
 
-  it("uses an explicit lane base, marks superseded packets, and decodes old packets without a marker", async () => {
+  // front-desk, 2026-11-10: an attested landing stamped a separate sibling packet with a landedAs that never held it.
+  it("uses an explicit lane base, leaves an unproven superseded packet open, and decodes old packets without a marker", async () => {
     const s = await fixture(); const landedAs = squash(s);
     sh(s.origin, "branch", "release", landedAs); sh(s.origin, "checkout", "-q", "main~1"); sh(s.origin, "branch", "-f", "main", "HEAD");
     const old = (await runWith(s.h, load(s.dir))).packets[0]!;
     expect(old).not.toHaveProperty("attested");
     const earlier = { ...old, id: "earlier-packet" };
     await runWith(s.h, mutate(s.dir, project => Effect.succeed([{ ...project, lanes: project.lanes.map(lane => lane.slug === "probe" ? { ...lane, base: "release" } : lane), packets: [earlier, { ...old, supersedes: earlier.id }] }, undefined] as const)));
-    await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs, attested: true, evidence }));
+    const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs, attested: true, evidence }));
+    const [first, second] = (await runWith(s.h, load(s.dir))).packets;
+    expect(second).toMatchObject({ state: "committed", attested: true, landedAs });
+    expect(second?.evidence).toContain("owner-attested: landed inside");
+    expect(first).toMatchObject({ state: old.state, landedAs: null });
+    expect(landed.note).toContain(`left earlier-pack ${old.state}: its commit is not proven inside ${s.id.slice(0, 12)}`);
+  });
+
+  it("marks a superseded packet whose commit the landed packet builds on", async () => {
+    const s = await fixture();
+    writeFileSync(join(s.row.cwd, "work"), "one\ntwo\n"); sh(s.row.cwd, "commit", "-qam", "follow-up");
+    const next = sh(s.row.cwd, "rev-parse", "HEAD").trim();
+    await runWith(s.h, packetReport({ dir: s.dir, agent: s.row.name, owner: s.row.owner, cwd: s.row.cwd, commit: next, summary: "follow-up", checks: [] }));
+    sh(s.origin, "fetch", "-q", s.row.cwd, next); sh(s.origin, "merge", "--squash", next); sh(s.origin, "commit", "-qm", "squash both");
+    const landedAs = sh(s.origin, "rev-parse", "HEAD").trim();
+    sh(s.dir, "fetch", "-q", s.row.cwd, next);
+    const landed = await runWith(s.h, packetLand(s.dir, { id: next, outcome: "committed", landedAs, attested: true, evidence }));
     const packets = (await runWith(s.h, load(s.dir))).packets;
-    expect(packets.every(packet => packet.state === "committed" && packet.attested && packet.landedAs === landedAs)).toBe(true);
-    expect(packets[0]?.evidence).toContain("owner-attested: landed inside");
+    expect(packets.find(packet => packet.id === next)).toMatchObject({ supersedes: s.id, state: "committed", landedAs });
+    expect(packets.find(packet => packet.id === s.id)).toMatchObject({ state: "committed", attested: true, landedAs });
+    expect(landed.note).not.toContain("left ");
   });
 
   it("proves a landing on the default branch when the lane base is a sha", async () => {

@@ -4484,6 +4484,10 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (!outcome) return yield* input("outcome is required unless correcting a landing");
     let landedAs: string | null = null;
     let note = "";
+    // front-desk, 2026-11-10: a worker's next report supersedes its open packet even when the two are separate changes,
+    // so an attested landing stamped a sibling with a landedAs that never held its commit. Under attestation an earlier
+    // packet takes the landing only when the source proves its commit is an ancestor of the landed packet's commit.
+    let attestedChain: ReadonlySet<string> | null = null;
     let gate: PacketGate | null = null;
     let gateRan = false;
     const recording = packet.kind === "artifact" || (!row.clone && !params.landedAs);
@@ -4522,6 +4526,17 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       if (!proof.ok) return yield* new GuardFailed({ guard: "landed-as", message: notOnBase(landedAs, landing, source) });
       evidence = `owner-attested: landed inside ${landedAs}; ${evidence}`;
       note = ["recorded an owner-attested landing", proof.note].filter(Boolean).join("; ");
+      const contained = new Set<string>();
+      const walked = new Set([packet.id]);
+      for (let link = packet.supersedes; link && !walked.has(link);) {
+        walked.add(link);
+        const earlier = project.packets.find(candidate => candidate.id === link);
+        if (!earlier) break;
+        if (packet.kind === "commit" && earlier.kind === "commit"
+          && (yield* git.run("git", ["merge-base", "--is-ancestor", "--end-of-options", earlier.id, packet.id], { cwd: source })).code === 0) contained.add(earlier.id);
+        link = earlier.supersedes;
+      }
+      attestedChain = contained;
     } else if (outcome === "committed") {
       if (packet.kind === "commit" && !params.landedAs) {
         const cloneExists = row.machine === "local" ? existsSync(row.cwd) && statSync(row.cwd).isDirectory() : yield* Effect.gen(function* () {
@@ -4629,7 +4644,9 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
             if (seen.has(supersedes)) return yield* input("packet supersedes chain contains a cycle");
             seen.add(supersedes);
             const earlier = yield* findPacket(updated, supersedes);
-            if (!TERMINAL_PACKET_STATES.includes(earlier.state)) {
+            if (!TERMINAL_PACKET_STATES.includes(earlier.state) && attestedChain && !attestedChain.has(earlier.id)) {
+              note += `; left ${earlier.id.slice(0, 12)} ${earlier.state}: its commit is not proven inside ${latest.id.slice(0, 12)}, so land it with its own landedAs`;
+            } else if (!TERMINAL_PACKET_STATES.includes(earlier.state)) {
               updated = (yield* recordPacketOutcome(updated, { ...earlier, ...(params.attested ? { attested: true } : {}) }, "committed", landedAs, params.attested ? `${evidence}; landed with ${latest.id}` : `landed with ${latest.id}`, iso(env))).project;
             }
             supersedes = earlier.supersedes;
