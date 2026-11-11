@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, lstatSync, readFileSync } from "node:fs";
+import { closeSync, createReadStream, lstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { Effect } from "effect";
 import { decodeRestartDistillPolicy, decodeRestartDistillReceipt, decodeRestartToolEntry, type Policy, type RestartDistillPolicy, type Role } from "./domain.ts";
@@ -9,6 +9,29 @@ import { forEachJsonlLine } from "./restart-snapshot.ts";
 import { MusterEnv, must, Proc } from "./runtime.ts";
 
 export const RESTART_DISTILL_TIMEOUT_MS = 600_000;
+
+/** The id in a journal's session header, from its first line only: a parent can be gigabytes. */
+export const sessionHeaderId = (file: string): string | null => {
+  const fd = openSync(file, "r");
+  try {
+    const chunks: Buffer[] = [];
+    for (let read = 0; read < 1024 * 1024;) {
+      const buffer = Buffer.alloc(64 * 1024);
+      const n = readSync(fd, buffer, 0, buffer.length, read);
+      if (n === 0) break;
+      const end = buffer.subarray(0, n).indexOf(10);
+      chunks.push(buffer.subarray(0, end === -1 ? n : end));
+      if (end !== -1) break;
+      read += n;
+    }
+    const header = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { type?: unknown; id?: unknown };
+    return header.type === "session" && typeof header.id === "string" && header.id ? header.id : null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+};
 const SETTLE_MS = 2_000;
 type DistillResult = { parentSessionFile: string; note?: string; detail?: string; extensions?: readonly string[] };
 
@@ -116,6 +139,10 @@ export const restartDistill = (input: {
     const child = yield* inspect(() => lstatSync(receipt.child));
     if (!child.isFile() || child.size === 0 || child.nlink !== 1 || (child.dev === parent.dev && child.ino === parent.ino)) return fallback("child is not a non-empty independent regular file");
     if (child.size !== receipt.childBytes) return fallback("receipt child size mismatch");
+    // MacLeod, 2026-11-11: front-desk's first pivot came up under a fork name. The child's header had a fresh id, and
+    // pi-ratking keeps the row's Rat King name only when RATKING_SUCCEEDS (the old session id) names the fork parent's.
+    const parentId = sessionHeaderId(input.snapshot);
+    if (!parentId || sessionHeaderId(receipt.child) !== parentId) return fallback("child session id differs from the parent's; the successor would lose its Rat King name");
     return { parentSessionFile: resolve(receipt.child), detail: `distilled ${receipt.parentBytes} -> ${receipt.childBytes}`, ...(policy.extensions?.length ? { extensions: policy.extensions } : {}) } satisfies DistillResult;
   }).pipe(Effect.catch(error => Effect.succeed(fallback(error.message))));
 };

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { decodePolicy, decodeRestartDistillReceipt, mergePolicy } from "./domain.ts";
-import { effectiveDistill, fleetDistill, restartDistill, RESTART_DISTILL_TIMEOUT_MS } from "./restart-distill.ts";
+import { effectiveDistill, fleetDistill, restartDistill, RESTART_DISTILL_TIMEOUT_MS, sessionHeaderId } from "./restart-distill.ts";
 import { liveProc } from "./runtime.ts";
 import { harness, runWith } from "./test-support.ts";
 
@@ -18,6 +18,7 @@ if (mode === 'timeout') { setInterval(() => {}, 1000); return; }
 if (mode === 'json') { console.log('not json'); return; }
 const lines = bytes.toString().trim().split('\\n');
 const kept = lines.filter((line, i) => i === 0 || line.includes('pi-until-') || line.includes('thinking_level_change'));
+if (mode === 'newid') { const h = JSON.parse(kept[0]); h.id = 'fresh-' + h.id; kept[0] = JSON.stringify(h); }
 const output = kept.join('\\n') + '\\n';
 if (mode === 'directory') fs.mkdirSync(child);
 else if (mode === 'symlink') fs.symlinkSync(parent, child);
@@ -148,5 +149,24 @@ describe("fleet distill file", () => {
     expect(effectiveDistill(decodePolicy({}), fleet)).toBe(fleet);
     expect(effectiveDistill(decodePolicy({ distill: null }), fleet)).toBeNull();
     expect(effectiveDistill(decodePolicy({ distill: { command: ["/own"] } }), fleet)).toEqual({ command: ["/own"] });
+  });
+});
+
+describe("distilled child session id", () => {
+  // MacLeod, 2026-11-11: front-desk's first pivot came up under a fork name, because the child's header had a fresh id.
+  it("refuses a child whose header id differs from the snapshot's, and forks the snapshot", async () => {
+    const s = setup("newid");
+    const result = await s.run({});
+    expect(result.parentSessionFile).toBe(s.input.snapshot);
+    expect(result.note).toContain("child session id differs");
+    s.unchanged();
+  });
+  it("reads the id from the first line only", () => {
+    const h = harness();
+    const file = join(h.root, "header.jsonl");
+    writeFileSync(file, `${JSON.stringify({ type: "session", id: "abc" })}\n${"x".repeat(3 * 1024 * 1024)}`);
+    expect(sessionHeaderId(file)).toBe("abc");
+    writeFileSync(file, `${JSON.stringify({ type: "message", id: "abc" })}\n`);
+    expect(sessionHeaderId(file)).toBeNull();
   });
 });
