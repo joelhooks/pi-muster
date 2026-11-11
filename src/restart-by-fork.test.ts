@@ -85,8 +85,9 @@ if (mode === 'exit') process.exit(7);
 if (mode === 'timeout') { setInterval(() => {}, 1000); return; }
 if (mode === 'json') { console.log('bad json'); return; }
 const lines = bytes.toString().trim().split('\\n');
-const kept = lines.filter((line, i) => i === 0 || line.includes('thinking_level_change'));
+const kept = lines.filter((line, i) => i === 0 || line.includes('thinking_level_change') || line.includes('"role":"system"'));
 kept.push(JSON.stringify({type: 'custom', customType: 'pi-until-started', data: {receipt: {id: 'childOnly', label: 'child watch', kind: 'recurring'}}}));
+if (mode === 'newid') { const h = JSON.parse(kept[0]); h.id = 'fresh-' + h.id; kept[0] = JSON.stringify(h); }
 const output = kept.join('\\n') + '\\n';
 if (mode !== 'missing') fs.writeFileSync(child, output, {flag: 'wx'});
 console.log(JSON.stringify({pivotAllowed: mode !== 'pivot', parentBytes: bytes.length, childBytes: mode === 'cut' ? bytes.length : Buffer.byteLength(output), child, parentSha256: crypto.createHash('sha256').update(bytes).digest('hex')}));`);
@@ -111,6 +112,12 @@ console.log(JSON.stringify({pivotAllowed: mode !== 'pivot', parentBytes: bytes.l
     const kept = await fallback.run(agentLaunch(fallback.dir, { action: "restart", name: "worker" }));
     expect(kept.argv.join(" ")).not.toContain("session-ref");
     expect(kept.row.profile.extensions).not.toContain("/srv/distill/session-ref.ts");
+  });
+  it("keeps the row's Rat King succession when the distiller hands back a child with a fresh session id", async () => {
+    const s = await configured("newid");
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(result.argv[result.argv.indexOf("--fork") + 1]).toContain("/restart-");
+    expect(result.notes.join("\\n")).toContain("child session id differs");
   });
   it("defaults the fleet file to 500 MiB, and a project's distill: null opts out", async () => {
     const s = await configured("ok", "desk", false, "fleet", { minMb: undefined });
