@@ -605,8 +605,11 @@ export const RestartDistillPolicy = Schema.Struct({
   command: Schema.Array(Schema.String.check(Schema.isMinLength(1))).check(Schema.isMinLength(1)),
   minMb: Schema.optionalKey(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0))),
   minCut: Schema.optionalKey(Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(1))),
+  /** Absolute extension paths a distilled successor loads (the distiller's session_ref), only when it forks the child. */
+  extensions: Schema.optionalKey(Schema.Array(Path.check(Schema.isPattern(/^\//u, { message: "distill extensions must be absolute paths" })))),
 });
 export type RestartDistillPolicy = typeof RestartDistillPolicy.Type;
+export const decodeRestartDistillPolicy = Schema.decodeUnknownSync(RestartDistillPolicy);
 export const decodeRestartDistillReceipt = Schema.decodeUnknownSync(Schema.Struct({
   pivotAllowed: Schema.Boolean,
   parentBytes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0)),

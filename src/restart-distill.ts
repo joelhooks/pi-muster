@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { createReadStream, lstatSync } from "node:fs";
-import { resolve } from "node:path";
+import { createReadStream, lstatSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Effect } from "effect";
-import { decodeRestartDistillReceipt, decodeRestartToolEntry, type RestartDistillPolicy, type Role } from "./domain.ts";
+import { decodeRestartDistillPolicy, decodeRestartDistillReceipt, decodeRestartToolEntry, type Policy, type RestartDistillPolicy, type Role } from "./domain.ts";
 import { InputError } from "./errors.ts";
 import { agentGet } from "./herdr.ts";
 import { forEachJsonlLine } from "./restart-snapshot.ts";
@@ -10,7 +10,33 @@ import { MusterEnv, must, Proc } from "./runtime.ts";
 
 export const RESTART_DISTILL_TIMEOUT_MS = 600_000;
 const SETTLE_MS = 2_000;
-type DistillResult = { parentSessionFile: string; note?: string; detail?: string };
+type DistillResult = { parentSessionFile: string; note?: string; detail?: string; extensions?: readonly string[] };
+
+/**
+ * Joel, 2026-11-11: "so lets fix it and remove dupes and other bullshit and gove it a clean hostory". drovr-desk-3 died at
+ * 2.47 GB, 2.45 GB of it parent history each fork copied. One fleet file turns distill on for every project that does not
+ * set policy.distill: the flip is a file write after a proven pivot, not a code change. No file: off, as before.
+ */
+export const FLEET_DISTILL_MIN_MB = 500;
+export const fleetDistillPath = (home: string, env: Readonly<Record<string, string | undefined>> = process.env) =>
+  env.MUSTER_DISTILL_CONFIG?.trim() || join(home, ".config/muster/distill.json");
+
+/** The fleet distiller, or null with a note when its file is unreadable or undecodable. A missing file is plain off. */
+export function fleetDistill(home: string, env: Readonly<Record<string, string | undefined>> = process.env): { policy: RestartDistillPolicy | null; note?: string } {
+  const path = fleetDistillPath(home, env);
+  let raw: string;
+  try { raw = readFileSync(path, "utf8"); } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT" ? { policy: null } : { policy: null, note: `fleet distill off: ${path} unreadable` };
+  }
+  try { return { policy: { minMb: FLEET_DISTILL_MIN_MB, ...decodeRestartDistillPolicy(JSON.parse(raw)) } }; } catch (error) {
+    return { policy: null, note: `fleet distill off: ${path} does not decode (${error instanceof Error ? error.message.split("\n")[0] : String(error)})` };
+  }
+}
+
+/** A project's own policy.distill wins, null included (that project opts out); otherwise the fleet file. */
+export function effectiveDistill(policy: Policy | undefined, fleet: RestartDistillPolicy | null): RestartDistillPolicy | null {
+  return policy !== undefined && "distill" in policy && policy.distill !== undefined ? policy.distill : fleet;
+}
 
 /** Herdr idle alone cannot prove that a persisted tool call has its result. Unknown/broken journals skip safely.
  * Conservative across branches: an unresolved historical call also keeps the full snapshot. */
@@ -90,6 +116,6 @@ export const restartDistill = (input: {
     const child = yield* inspect(() => lstatSync(receipt.child));
     if (!child.isFile() || child.size === 0 || child.nlink !== 1 || (child.dev === parent.dev && child.ino === parent.ino)) return fallback("child is not a non-empty independent regular file");
     if (child.size !== receipt.childBytes) return fallback("receipt child size mismatch");
-    return { parentSessionFile: resolve(receipt.child), detail: `distilled ${receipt.parentBytes} -> ${receipt.childBytes}` } satisfies DistillResult;
+    return { parentSessionFile: resolve(receipt.child), detail: `distilled ${receipt.parentBytes} -> ${receipt.childBytes}`, ...(policy.extensions?.length ? { extensions: policy.extensions } : {}) } satisfies DistillResult;
   }).pipe(Effect.catch(error => Effect.succeed(fallback(error.message))));
 };

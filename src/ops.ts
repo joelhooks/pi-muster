@@ -58,7 +58,7 @@ import {
 } from "./herdr.ts";
 import type { PaneInfo, Proof } from "./herdr.ts";
 import { untilJournalLines } from "./restart-snapshot.ts";
-import { restartDistill } from "./restart-distill.ts";
+import { effectiveDistill, fleetDistill, restartDistill } from "./restart-distill.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
@@ -2266,6 +2266,9 @@ const forkParent = (project: Project, params: AgentLaunchInput) => Effect.gen(fu
     state: "running", delivery: "none", restarts: 0, restore: null, createdAt: at, updatedAt: at });
 });
 
+const withDistillExtensions = (profile: LaunchProfile, extensions: readonly string[] | undefined): LaunchProfile =>
+  extensions?.length ? { ...profile, extensions: [...new Set([...profile.extensions, ...extensions])] } : profile;
+
 const warmForkSource = (dir: string, parent: AgentRow | null, at: string | undefined) =>
   at === undefined ? Effect.succeed(parent?.sessionFile ?? null) : Effect.try({
     try: () => {
@@ -2883,11 +2886,16 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // The fork starts at the thinking level it launches with; the snapshot records it (Pi would not).
   if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile!, snapshot, profile.thinking ?? ""], { cwd: old.cwd });
   else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot, profile.thinking ?? undefined), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
-  const distilled = yield* restartDistill({ policy: project.policy?.distill, role: old.role, remote, self,
+  const fleet = fleetDistill(env.home);
+  if (fleet.note) notes.push(fleet.note);
+  const distilled = yield* restartDistill({ policy: effectiveDistill(project.policy, fleet.policy), role: old.role, remote, self,
     paneId: pane.pane_id, sessionFile: old.sessionFile!, snapshot,
     childOut: join(snapshotDir, `distilled-${row.sessionId}.jsonl`), cwd: old.cwd });
   const forkSource = distilled.parentSessionFile;
   if (distilled.note) notes.push(distilled.note);
+  // A distilled child's stubs resolve through the distiller's session_ref, so its successor and every later restart load it.
+  const forkProfile = withDistillExtensions(profile, distilled.extensions);
+  row = { ...row, profile: withDistillExtensions(row.profile, distilled.extensions) };
   // pi-until persists live watches only when Pi quits or reloads, so a fork cannot carry them. Name them instead.
   const watchLines = remote
     ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, forkSource], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))
@@ -2898,7 +2906,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   const inherited = yield* inheritedStartEntries(forkSource);
   const gate = join(launchDir, `restart-${row.sessionId}.ready`);
   environment.MUSTER_RESTART_GATE = gate;
-  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: forkSource, profile, musterExtension: launchProject.musterExtension, prompt });
+  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: forkSource, profile: forkProfile, musterExtension: launchProject.musterExtension, prompt });
   const receipt = env.createId();
   const wrap = machine?.wrap.map(arg => arg.replaceAll("{name}", old.name)) ?? [];
   const script = yield* writeLaunchFile(launchDir, `#!/bin/sh\nset -e\n${shellPrelude(old.cwd, environment, environment.PATH === undefined ? bin : undefined)}${piReceiptSuffix(receipt)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
