@@ -85,7 +85,7 @@ if (mode === 'exit') process.exit(7);
 if (mode === 'timeout') { setInterval(() => {}, 1000); return; }
 if (mode === 'json') { console.log('bad json'); return; }
 const lines = bytes.toString().trim().split('\\n');
-const kept = lines.filter((line, i) => i === 0 || line.includes('thinking_level_change'));
+const kept = lines.filter((line, i) => i === 0 || line.includes('thinking_level_change') || line.includes('"role":"system"'));
 kept.push(JSON.stringify({type: 'custom', customType: 'pi-until-started', data: {receipt: {id: 'childOnly', label: 'child watch', kind: 'recurring'}}}));
 if (mode === 'newid') { const h = JSON.parse(kept[0]); h.id = 'fresh-' + h.id; kept[0] = JSON.stringify(h); }
 const output = kept.join('\\n') + '\\n';

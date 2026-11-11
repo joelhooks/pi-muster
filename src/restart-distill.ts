@@ -80,11 +80,37 @@ export function restartToolsSettled(file: string): boolean {
 }
 
 const inspect = <A>(read: () => A) => Effect.try({ try: read, catch: error => new InputError({ message: String(error) }) });
-const sha256 = (file: string) => Effect.tryPromise({
+const SYSTEM_MARK = Buffer.from('"role":"system"');
+const isSystemMessage = (line: Buffer) => {
+  if (line.indexOf(SYSTEM_MARK) === -1) return false;
+  try {
+    const entry = JSON.parse(line.toString("utf8")) as { type?: unknown; message?: { role?: unknown } };
+    return entry.type === "message" && entry.message?.role === "system";
+  } catch {
+    return false;
+  }
+};
+/**
+ * One streamed pass: the sha256 and the count of system-role messages. Pi 1.5 rebuilds a resumed session's active
+ * tools from those messages (toolsAdded, toolsRemoved); front-desk's distilled child kept 0 of 280, and its next
+ * restart came up without bash, read, edit or write (2026-11-11).
+ */
+export const digestJournal = (file: string) => Effect.tryPromise({
   try: async () => {
     const hash = createHash("sha256");
-    for await (const chunk of createReadStream(file)) hash.update(chunk);
-    return hash.digest("hex");
+    let systemMessages = 0;
+    let carry = Buffer.alloc(0);
+    for await (const chunk of createReadStream(file) as AsyncIterable<Buffer>) {
+      hash.update(chunk);
+      let buffer = carry.length ? Buffer.concat([carry, chunk]) : chunk;
+      for (let end = buffer.indexOf(10); end !== -1; end = buffer.indexOf(10)) {
+        if (isSystemMessage(buffer.subarray(0, end))) systemMessages++;
+        buffer = buffer.subarray(end + 1);
+      }
+      carry = Buffer.from(buffer);
+    }
+    if (carry.length && isSystemMessage(carry)) systemMessages++;
+    return { sha256: hash.digest("hex"), systemMessages };
   },
   catch: error => new InputError({ message: String(error) }),
 });
@@ -121,7 +147,8 @@ export const restartDistill = (input: {
       const second = yield* agentGet(input.paneId);
       if (second.agent_status !== "idle" || second.launch_pending || second.state_change_seq !== first.state_change_seq || !(yield* inspect(() => restartToolsSettled(input.sessionFile)))) return fallback("not settled idle (second read or tool call in flight)");
     }
-    const parentSha256 = yield* sha256(input.snapshot);
+    const parentDigest = yield* digestJournal(input.snapshot);
+    const parentSha256 = parentDigest.sha256;
     const proc = yield* Proc;
     const found = yield* proc.run("sh", ["-c", "command -v muster-heavy"], { cwd: input.cwd, timeoutMs: 5_000 }).pipe(Effect.orElseSucceed(() => ({ code: 1, stdout: "", stderr: "" })));
     const heavy = found.code === 0 ? found.stdout.trim() : "";
@@ -143,6 +170,9 @@ export const restartDistill = (input: {
     // pi-ratking keeps the row's Rat King name only when RATKING_SUCCEEDS (the old session id) names the fork parent's.
     const parentId = sessionHeaderId(input.snapshot);
     if (!parentId || sessionHeaderId(receipt.child) !== parentId) return fallback("child session id differs from the parent's; the successor would lose its Rat King name");
+    // MacLeod, 2026-11-11: the distiller keeps every system message in order, so any difference is a lost tool loadout.
+    const childSystem = (yield* digestJournal(receipt.child)).systemMessages;
+    if (childSystem !== parentDigest.systemMessages) return fallback(`child keeps ${childSystem} of ${parentDigest.systemMessages} system messages; a resumed successor would rebuild its tools from the rest`);
     return { parentSessionFile: resolve(receipt.child), detail: `distilled ${receipt.parentBytes} -> ${receipt.childBytes}`, ...(policy.extensions?.length ? { extensions: policy.extensions } : {}) } satisfies DistillResult;
   }).pipe(Effect.catch(error => Effect.succeed(fallback(error.message))));
 };
