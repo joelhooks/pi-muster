@@ -847,9 +847,10 @@ export default function muster(host: ExtensionAPI) {
       policy: Type.Optional(
         Type.Object({
           distill: Type.Optional(Type.Union([Type.Null(), Type.Object({
-            command: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: "Opt-in restart distiller argv; snapshot and child output paths are appended. Absent/null: off." }),
-            minMb: Type.Optional(Type.Number({ minimum: 0, description: "Minimum snapshot MiB; default 64" })),
+            command: Type.Array(Type.String({ minLength: 1 }), { minItems: 1, description: "Restart and standing-fork distiller argv; snapshot and child output paths are appended. Absent: the fleet file ~/.config/muster/distill.json, if any. null: off for this project." }),
+            minMb: Type.Optional(Type.Number({ minimum: 0, description: "Minimum snapshot MiB; default 64 here, 500 from the fleet file" })),
             minCut: Type.Optional(Type.Number({ minimum: 0, maximum: 1, description: "Minimum fraction removed; default 0.5" })),
+            extensions: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { description: "Absolute extension paths (the distiller's session_ref) a successor loads only when it forks the distilled child" })),
           })])),
           deployLevel: Type.Optional(Type.Integer({ minimum: 0, maximum: 3, description: "Set fallback deploy permission on the 0 locked to 3 jfdi scale." })),
           comms: Type.Optional(StringEnum(["intercom", "network", "ratking"] as const)),
