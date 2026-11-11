@@ -58,7 +58,7 @@ import {
 } from "./herdr.ts";
 import type { PaneInfo, Proof } from "./herdr.ts";
 import { untilJournalLines } from "./restart-snapshot.ts";
-import { restartDistill } from "./restart-distill.ts";
+import { effectiveDistill, fleetDistill, restartDistill } from "./restart-distill.ts";
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
@@ -2266,6 +2266,34 @@ const forkParent = (project: Project, params: AgentLaunchInput) => Effect.gen(fu
     state: "running", delivery: "none", restarts: 0, restore: null, createdAt: at, updatedAt: at });
 });
 
+const withDistillExtensions = (profile: LaunchProfile, extensions: readonly string[] | undefined): LaunchProfile =>
+  extensions?.length ? { ...profile, extensions: [...new Set([...profile.extensions, ...extensions])] } : profile;
+
+/** Distill a standing fork's parent when the effective policy says so; otherwise the parent journal, untouched. */
+const distillFork = (project: Project, parent: AgentRow, source: string, role: Role, name: string) =>
+  Effect.gen(function* () {
+    const env = yield* MusterEnv;
+    const fleet = fleetDistill(env.home);
+    const notes = fleet.note ? [fleet.note] : [];
+    const policy = effectiveDistill(project.policy, fleet.policy);
+    if (!policy || !["desk", "hawk", "boss"].includes(role)) return { source, notes } as { source: string; notes: string[]; extensions?: readonly string[] };
+    if (parent.machine !== "local") return { source, notes: [...notes, "distill skipped: local rows only"] };
+    const snapshotDir = join(env.home, ".local/state/muster/restart-snapshots");
+    const stamp = `${name}-${randomUUID().slice(0, 8)}`;
+    const snapshot = join(snapshotDir, `fork-${stamp}.jsonl`);
+    const copied = yield* Effect.try({ try: () => { mkdirSync(snapshotDir, { recursive: true }); snapshotRestartSession(source, snapshot, undefined); return true; },
+      catch: error => new InputError({ message: String(error) }) }).pipe(Effect.catch(error => Effect.succeed(error.message)));
+    if (copied !== true) return { source, notes: [...notes, `distill skipped: fork snapshot failed (${copied})`] };
+    const distilled = yield* restartDistill({ policy, role, remote: false, self: false, paneId: parent.pane?.paneId ?? "", sessionFile: parent.sessionFile ?? source,
+      snapshot, childOut: join(snapshotDir, `distilled-fork-${stamp}.jsonl`), cwd: parent.cwd });
+    if (distilled.parentSessionFile === snapshot) {
+      // No descendant points into this copy, so it is scratch: drop it and fork the parent as before.
+      yield* Effect.sync(() => { try { unlinkSync(snapshot); } catch { /* already gone */ } });
+      return { source, notes: [...notes, ...(distilled.note ? [distilled.note] : [])] };
+    }
+    return { source: distilled.parentSessionFile, notes: [...notes, `fork ${distilled.detail ?? "distilled"}`], ...(distilled.extensions ? { extensions: distilled.extensions } : {}) };
+  });
+
 const warmForkSource = (dir: string, parent: AgentRow | null, at: string | undefined) =>
   at === undefined ? Effect.succeed(parent?.sessionFile ?? null) : Effect.try({
     try: () => {
@@ -2883,11 +2911,16 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // The fork starts at the thinking level it launches with; the snapshot records it (Pi would not).
   if (remote) yield* must("node", ["--input-type=module", "-e", snapshotScript, old.sessionFile!, snapshot, profile.thinking ?? ""], { cwd: old.cwd });
   else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot, profile.thinking ?? undefined), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
-  const distilled = yield* restartDistill({ policy: project.policy?.distill, role: old.role, remote, self,
+  const fleet = fleetDistill(env.home);
+  if (fleet.note) notes.push(fleet.note);
+  const distilled = yield* restartDistill({ policy: effectiveDistill(project.policy, fleet.policy), role: old.role, remote, self,
     paneId: pane.pane_id, sessionFile: old.sessionFile!, snapshot,
     childOut: join(snapshotDir, `distilled-${row.sessionId}.jsonl`), cwd: old.cwd });
   const forkSource = distilled.parentSessionFile;
   if (distilled.note) notes.push(distilled.note);
+  // A distilled child's stubs resolve through the distiller's session_ref, so its successor and every later restart load it.
+  const forkProfile = withDistillExtensions(profile, distilled.extensions);
+  row = { ...row, profile: withDistillExtensions(row.profile, distilled.extensions) };
   // pi-until persists live watches only when Pi quits or reloads, so a fork cannot carry them. Name them instead.
   const watchLines = remote
     ? yield* must("node", ["-e", UNTIL_LINES_SCRIPT, forkSource], { cwd: old.cwd, timeoutMs: 10_000 }).pipe(Effect.catch(() => Effect.succeed("")))
@@ -2898,7 +2931,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   const inherited = yield* inheritedStartEntries(forkSource);
   const gate = join(launchDir, `restart-${row.sessionId}.ready`);
   environment.MUSTER_RESTART_GATE = gate;
-  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: forkSource, profile, musterExtension: launchProject.musterExtension, prompt });
+  const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: forkSource, profile: forkProfile, musterExtension: launchProject.musterExtension, prompt });
   const receipt = env.createId();
   const wrap = machine?.wrap.map(arg => arg.replaceAll("{name}", old.name)) ?? [];
   const script = yield* writeLaunchFile(launchDir, `#!/bin/sh\nset -e\n${shellPrelude(old.cwd, environment, environment.PATH === undefined ? bin : undefined)}${piReceiptSuffix(receipt)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
@@ -3378,10 +3411,17 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
       }
       const parent = params.action === "fork" ? yield* forkParent(project, params) : null;
       if (params.action === "fork" && !parent?.sessionFile) return yield* input(`fork needs --from a row with a session file`);
-      const parentSessionFile = yield* warmForkSource(dir, parent, params.at);
+      const warmSource = yield* warmForkSource(dir, parent, params.at);
       const role = side ? "desk" : params.role ?? parent?.role ?? existing?.role;
       const laneSlug = side?.lane ?? params.lane ?? parent?.lane ?? existing?.lane;
       if (!role || !laneSlug) return yield* input("a new agent needs role and lane");
+      // A fork copies its parent's whole history, as restart did (drovr-desk-3, 2.47 GB, 2026-11-11). A standing fork
+      // takes the same distill path: a snapshot, the distiller, the receipt checks; any doubt forks the parent as before.
+      const forked = params.action === "fork" && parent && warmSource
+        ? yield* distillFork(project, parent, warmSource, role, name)
+        : { source: warmSource, notes: [] as string[], extensions: undefined as readonly string[] | undefined };
+      skillNotes.push(...forked.notes);
+      const parentSessionFile = forked.source;
       const lane = yield* findLane(project, laneSlug);
       if (lane.state !== "open") return yield* new GuardFailed({ guard: "lane-open", message: `lane ${laneSlug} is ${lane.state}; new work goes only to an open lane` });
       const label = params.label ?? parent?.profile.label ?? existing?.profile.label;
@@ -3437,7 +3477,7 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
           catch: (cause) => new InputError({ message: `skill discovery: ${String(cause)}` }),
         })
         : { paths: [], notes: [], hidden: [] };
-      const profile: LaunchProfile = yield* roleLaunchProfile({ ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) }, project, role, lane.slug);
+      const profile: LaunchProfile = withDistillExtensions(yield* roleLaunchProfile({ ...requestedProfile, skills: resolved.paths, appendSystemPrompt: withHiddenSkills(requestedProfile.appendSystemPrompt, resolved.hidden) }, project, role, lane.slug), forked.extensions);
       skillNotes.push(...resolved.notes);
       const now = iso(env);
       const liveOwner = yield* liveSelfName;

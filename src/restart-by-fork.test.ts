@@ -71,7 +71,7 @@ async function setup(remote = false, role: "worker" | "desk" = "worker", cloneOr
 }
 
 describe("distilled restart integration", () => {
-  async function configured(mode = "ok", role: "desk" | "worker" = "desk", remote = false) {
+  async function configured(mode = "ok", role: "desk" | "worker" = "desk", remote = false, where: "project" | "fleet" = "project", fleet: Record<string, unknown> = {}) {
     const s = await setup(remote, role);
     const file = s.launch.row.sessionFile!;
     for (let i = 0; i < 12; i++) appendFileSync(file, JSON.stringify({ type: "message", id: `pad${i}`, parentId: null, message: { role: "user", content: [{ type: "text", text: "padding".repeat(200) }] } }) + "\n");
@@ -90,9 +90,62 @@ kept.push(JSON.stringify({type: 'custom', customType: 'pi-until-started', data: 
 const output = kept.join('\\n') + '\\n';
 if (mode !== 'missing') fs.writeFileSync(child, output, {flag: 'wx'});
 console.log(JSON.stringify({pivotAllowed: mode !== 'pivot', parentBytes: bytes.length, childBytes: mode === 'cut' ? bytes.length : Buffer.byteLength(output), child, parentSha256: crypto.createHash('sha256').update(bytes).digest('hex')}));`);
-    await s.run(projectUpdate(s.dir, { policy: { distill: { command: [process.execPath, script, mode], minMb: mode === "small" ? 64 : 0 } } }));
+    const policy = { command: [process.execPath, script, mode], minMb: mode === "small" ? 64 : 0 };
+    if (where === "project") await s.run(projectUpdate(s.dir, { policy: { distill: policy } }));
+    else {
+      mkdirSync(join(s.h.home, ".config/muster"), { recursive: true });
+      writeFileSync(join(s.h.home, ".config/muster/distill.json"), JSON.stringify({ ...policy, ...fleet }));
+    }
     return { ...s, oldBytes: readFileSync(file, "utf8"), file };
   }
+  // Joel, 2026-11-11: "so lets fix it and remove dupes and other bullshit and gove it a clean hostory". One fleet file
+  // turns distill on for every project without its own policy.distill; the child's session_ref loads with it.
+  it("applies the fleet distill file to a project without its own policy, and loads its extensions only on the child", async () => {
+    const s = await configured("ok", "desk", false, "fleet", { extensions: ["/srv/distill/session-ref.ts"] });
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(result.argv[result.argv.indexOf("--fork") + 1]).toContain("/distilled-");
+    expect(result.argv.join(" ")).toContain("-e /srv/distill/session-ref.ts");
+    expect(result.row.profile.extensions).toContain("/srv/distill/session-ref.ts");
+    expect(readFileSync(s.file, "utf8")).toBe(s.oldBytes);
+    const fallback = await configured("pivot", "desk", false, "fleet", { extensions: ["/srv/distill/session-ref.ts"] });
+    const kept = await fallback.run(agentLaunch(fallback.dir, { action: "restart", name: "worker" }));
+    expect(kept.argv.join(" ")).not.toContain("session-ref");
+    expect(kept.row.profile.extensions).not.toContain("/srv/distill/session-ref.ts");
+  });
+  it("defaults the fleet file to 500 MiB, and a project's distill: null opts out", async () => {
+    const s = await configured("ok", "desk", false, "fleet", { minMb: undefined });
+    const small = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(small.argv[small.argv.indexOf("--fork") + 1]).toContain("/restart-");
+    expect(small.notes.join("\n")).toContain("< 500 MiB");
+    const off = await configured("ok", "desk", false, "fleet");
+    await off.run(projectUpdate(off.dir, { policy: { distill: null } }));
+    const result = await off.run(agentLaunch(off.dir, { action: "restart", name: "worker" }));
+    expect(result.argv[result.argv.indexOf("--fork") + 1]).toContain("/restart-");
+    expect(result.notes.some(n => n.startsWith("distill skipped:"))).toBe(false);
+  });
+  it("says why a broken fleet file is off, and restarts as before", async () => {
+    const s = await configured("ok", "desk", false, "fleet");
+    writeFileSync(join(s.h.home, ".config/muster/distill.json"), "{ not json");
+    const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));
+    expect(result.argv[result.argv.indexOf("--fork") + 1]).toContain("/restart-");
+    expect(result.notes.join("\n")).toContain("fleet distill off:");
+  });
+  it("distills a standing fork's parent the same way, and never a worker fork's", async () => {
+    const s = await configured("ok", "desk", false, "fleet", { extensions: ["/srv/distill/session-ref.ts"] });
+    const fork = await s.run(agentLaunch(s.dir, { action: "fork", name: "side", from: "worker", role: "desk", lane: "work", label: "side", slot: "split" }));
+    const source = fork.argv[fork.argv.indexOf("--fork") + 1]!;
+    expect(source).toContain("/distilled-fork-side-");
+    expect(fork.row.profile.extensions).toContain("/srv/distill/session-ref.ts");
+    expect(readFileSync(s.file, "utf8")).toBe(s.oldBytes);
+    const worker = await s.run(agentLaunch(s.dir, { action: "fork", name: "copy", from: "worker", role: "worker", lane: "work", label: "copy", slot: "split" }));
+    expect(worker.argv[worker.argv.indexOf("--fork") + 1]).toBe(s.file);
+    const failed = await configured("pivot", "desk", false, "fleet");
+    const plain = await failed.run(agentLaunch(failed.dir, { action: "fork", name: "side", from: "worker", role: "desk", lane: "work", label: "side", slot: "split" }));
+    expect(plain.argv[plain.argv.indexOf("--fork") + 1]).toBe(failed.file);
+    expect(plain.notes.join("\n")).toContain("pivotAllowed false");
+    const { readdirSync } = await import("node:fs");
+    expect(readdirSync(join(failed.h.home, ".local/state/muster/restart-snapshots")).filter(f => f.startsWith("fork-") && f.endsWith(".jsonl"))).toEqual([]);
+  });
   it("forks the child, records byte detail, and proves the child's smaller first-turn/watch boundary", async () => {
     const s = await configured();
     const result = await s.run(agentLaunch(s.dir, { action: "restart", name: "worker" }));

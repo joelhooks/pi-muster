@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 import { decodePolicy, decodeRestartDistillReceipt, mergePolicy } from "./domain.ts";
-import { restartDistill, RESTART_DISTILL_TIMEOUT_MS } from "./restart-distill.ts";
+import { effectiveDistill, fleetDistill, restartDistill, RESTART_DISTILL_TIMEOUT_MS } from "./restart-distill.ts";
 import { liveProc } from "./runtime.ts";
 import { harness, runWith } from "./test-support.ts";
 
@@ -127,5 +127,26 @@ describe("restart distill", () => {
     for (const distill of [{ command: [] }, { command: [""] }, { command: ["x"], minMb: -1 }, { command: ["x"], minCut: 1.1 }]) expect(() => decodePolicy({ distill })).toThrow();
     expect(() => decodeRestartDistillReceipt({ pivotAllowed: true })).toThrow();
     expect(existsSync(s.input.childOut)).toBe(false);
+  });
+});
+
+describe("fleet distill file", () => {
+  it("is off without a file, defaults minMb to 500, keeps an explicit one, and names a bad file", () => {
+    const h = harness();
+    expect(fleetDistill(h.home, {})).toEqual({ policy: null });
+    const path = join(h.root, "distill.json");
+    writeFileSync(path, JSON.stringify({ command: ["/bin/distill"] }));
+    expect(fleetDistill(h.home, { MUSTER_DISTILL_CONFIG: path }).policy).toEqual({ command: ["/bin/distill"], minMb: 500 });
+    writeFileSync(path, JSON.stringify({ command: ["/bin/distill"], minMb: 64, extensions: ["/srv/ref.ts"] }));
+    expect(fleetDistill(h.home, { MUSTER_DISTILL_CONFIG: path }).policy).toEqual({ command: ["/bin/distill"], minMb: 64, extensions: ["/srv/ref.ts"] });
+    writeFileSync(path, JSON.stringify({ command: ["/bin/distill"], extensions: ["ref.ts"] }));
+    expect(fleetDistill(h.home, { MUSTER_DISTILL_CONFIG: path })).toMatchObject({ policy: null, note: expect.stringContaining("does not decode") });
+  });
+  it("lets a project's own distill, null included, win over the fleet file", () => {
+    const fleet = { command: ["/bin/distill"], minMb: 500 };
+    expect(effectiveDistill(undefined, fleet)).toBe(fleet);
+    expect(effectiveDistill(decodePolicy({}), fleet)).toBe(fleet);
+    expect(effectiveDistill(decodePolicy({ distill: null }), fleet)).toBeNull();
+    expect(effectiveDistill(decodePolicy({ distill: { command: ["/own"] } }), fleet)).toEqual({ command: ["/own"] });
   });
 });
