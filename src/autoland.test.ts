@@ -48,6 +48,20 @@ function github(f: Awaited<ReturnType<typeof fixture>>, response: unknown, fail 
 }
 
 describe("autoland evidence", () => {
+  // rats-nest, 2026-11-13: every project_status logged "autoland: fetch origin/v0.6.3 failed" for a lane that starts from a tag.
+  it("skips a lane that starts from a tag, quietly, with no fetch", async () => {
+    const f = await fixture();
+    sh(f.origin, "tag", "v0.6.3"); sh(f.dir, "fetch", "-q", "--tags", "origin");
+    for (const base of ["v0.6.3", "refs/tags/v0.6.3"]) {
+      const project = { ...f.project, lanes: f.project.lanes.map(lane => ({ ...lane, base })) };
+      const calls: string[] = [];
+      f.h.proc = { run: (cmd, args, opts) => { calls.push(`${cmd} ${args.join(" ")}`); return liveProc.run(cmd, args, opts); } };
+      const notes: string[] = [];
+      expect(await runWith(f.h, findLanding(project, f.packet, { notes }))).toBeNull();
+      expect(notes).toEqual([]);
+      expect(calls.some(call => call.startsWith("git fetch"))).toBe(false);
+    }
+  });
   it("fetches a real origin and finds an ancestor without changing the worktree", async () => {
     const f = await fixture();
     sh(f.origin, "fetch", "-q", f.row.cwd, f.packet.id); sh(f.origin, "merge", "--ff-only", "FETCH_HEAD");

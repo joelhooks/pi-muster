@@ -4470,6 +4470,24 @@ const proveOnBase = (run: ProcShape["run"], source: string, landedAs: string, ba
  */
 const branchBase = (laneBase: string | null | undefined) => laneBase && /^[a-f0-9]{7,64}$/.test(laneBase) ? null : laneBase;
 
+/**
+ * rats-nest, 2026-11-13: lane celld-063 starts from upstream's tag v0.6.3. A tag is a clone base, never a branch a packet
+ * lands on: fetching refs/heads/v0.6.3 failed, so every landing refused "against stale base refs". The tag, or null.
+ */
+export const tagBase = (run: ProcShape["run"], source: string, laneBase: string | null | undefined) => Effect.gen(function* () {
+  if (!laneBase || /^[a-f0-9]{7,64}$/.test(laneBase)) return null;
+  if (laneBase.startsWith("refs/tags/")) return laneBase.slice("refs/tags/".length);
+  if (laneBase.startsWith("refs/") || laneBase.includes("/")) return null;
+  const has = (ref: string) => run("git", ["show-ref", "--verify", "--quiet", ref], { cwd: source }).pipe(Effect.map(result => result.code === 0), Effect.orElseSucceed(() => false));
+  if (!(yield* has(`refs/tags/${laneBase}`))) return null;
+  return (yield* has(`refs/heads/${laneBase}`)) || (yield* has(`refs/remotes/origin/${laneBase}`)) ? null : laneBase;
+});
+
+const tagRefusal = (lane: Lane | undefined, tag: string, source: string, landedAs: string) =>
+  `lane ${lane?.slug ?? "?"} starts from the tag ${tag}: a clone base, not a branch a packet lands on. ` +
+  `Name the branch it lands on: lane_open({ slug: "${lane?.slug ?? "<lane>"}", base: "<remote>/<branch>" }), or base "refs/heads/<branch>" for a branch that never pushes, then call packet_land again. ` +
+  `Debug: git -C ${source} for-each-ref --contains ${landedAs}`;
+
 const notOnBase = (landedAs: string, base: LandingBase, source: string) =>
   !base.hasRemote ? `${landedAs} is not on base ${base.branch} in ${source}`
     : `${landedAs} is not on base ${base.remote}/${base.branch}, nor on local ${base.branch} in ${source}; ` +
@@ -4548,6 +4566,8 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
       const source = machine ? mapPath(sourceOf(project, lane, row), machine) : sourceOf(project, lane, row);
       const git = machine ? sshProc(row.machine, machine, proc, env.home) : proc;
       const laneBase = branchBase(lane?.base);
+      const tag = yield* tagBase(git.run, source, laneBase);
+      if (tag) return yield* new GuardFailed({ guard: "landed-as", message: tagRefusal(lane, tag, source, params.landedAs ?? "<landedAs>") });
       const landing = yield* landingBase(source, laneBase).pipe(Effect.provideService(Proc, git));
       const { remote, branch: base, hasRemote } = landing;
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* git.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`attested landing requires a base branch, not ${base}`);
@@ -4641,6 +4661,8 @@ export const packetLand = (dir: string, params: PacketLandInput) =>
     if (outcome === "committed" && !params.attested && !recording && project.mode !== "rift-merge") {
       if (!landedAs) return yield* input(`mode ${project.mode} requires landedAs on the lane base branch`);
       const source = sourceOf(project, lane, row);
+      const tag = yield* tagBase(proc.run, source, branchBase(lane?.base));
+      if (tag) return yield* new GuardFailed({ guard: "landed-as", message: tagRefusal(lane, tag, source, landedAs) });
       const landing = yield* landingBase(source, branchBase(lane?.base));
       const { remote, branch: base, hasRemote } = landing;
       if (/^[a-f0-9]{40,64}$/.test(base) || (yield* proc.run("git", ["check-ref-format", `refs/heads/${base}`], { cwd: source })).code !== 0) return yield* input(`landing requires a base branch, not ${base}`);
