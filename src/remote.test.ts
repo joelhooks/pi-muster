@@ -282,9 +282,20 @@ describe("machine boundary", () => {
     await expect(Effect.runPromise(sshProc("remote", config(), { run: refused }, "/").run("node", ["-e", "1"], { cwd: "/", timeoutMs: 1000 }))).rejects.toThrow("SSH failed");
     expect(refused).toHaveBeenCalledTimes(1);
   });
-  it("names mux failures only", () => {
-    expect(muxFailure("mux_client_request_session: read from master failed: Broken pipe")).toBe(true);
+  it("names pre-session mux failures only", () => {
+    expect(muxFailure("mm_receive_fd: no message header")).toBe(true);
+    expect(muxFailure("Control socket connect(/tmp/cm): Connection refused")).toBe(true);
+    expect(muxFailure("mux_client_request_session: session request failed: Session open refused by peer")).toBe(true);
+    expect(muxFailure("mux_client_read_packet: read header failed: Broken pipe")).toBe(false);
+    expect(muxFailure("mux_client_request_session: read from master failed: Broken pipe")).toBe(false);
     expect(muxFailure("ssh: connect to host remote port 22: Connection refused")).toBe(false);
+  });
+  it("never retries a mux failure that may have run the command", async () => {
+    for (const result of [{ code: 255, stdout: "", stderr: "mux_client_read_packet: read header failed: Broken pipe" }, { code: 255, stdout: "partial", stderr: "mm_send_fd: sendmsg(0): Message too long" }]) {
+      const run = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed(result));
+      await expect(Effect.runPromise(sshProc("remote", config(), { run }, "/").run("node", ["-e", "1"], { cwd: "/", timeoutMs: 1000 }))).rejects.toThrow("SSH failed");
+      expect(run).toHaveBeenCalledTimes(1);
+    }
   });
   // Bravestarr, 2026-10-11: a remote restart's binding push ran ssh inside onRemote's ssh: `cd /Users/alice` on remote1.
   it("wrapping an ssh-wrapped runner again makes one ssh, not ssh inside ssh", async () => {

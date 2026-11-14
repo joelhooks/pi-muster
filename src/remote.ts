@@ -268,8 +268,10 @@ export const defaultCloneMachine = Effect.gen(function* () {
   return names[0];
 });
 
-/** stderr from ssh's connection multiplexing: the shared master failed before the remote command started. */
-export const muxFailure = (stderr: string) => /\bmm_send_fd\b|\bmm_receive_fd\b|\bmux_client_[a-z_]+\b|\bControlSocket\b|control socket|Control socket connect/.test(stderr);
+/** A mux error from before the shared master started a session: fd passing, the control socket connect, or the session request.
+ * Agent graph desk, 2026-11-14: `read header failed` and `read from master failed` can come after the remote command ran, so they
+ * never match. Output on stdout means something ran; that never retries either. */
+export const muxFailure = (stderr: string, stdout = "") => stdout === "" && /\bmm_send_fd\b|\bmm_receive_fd\b|Control ?socket connect|session request failed/i.test(stderr);
 
 /** The local runner under an ssh-wrapped one, so wrapping again never nests ssh inside ssh. */
 const localRunner = new WeakMap<ProcShape, ProcShape>();
@@ -284,9 +286,9 @@ export function sshProc(name: string, machine: MachineConfig, outer: ProcShape, 
     const script = `cd ${shellQuote(options.cwd)} && exec env ${Object.entries(env).map(([k,v]) => `${k}=${shellQuote(v)}`).join(" ")} ${[command, ...args].map(shellQuote).join(" ")}`;
     const attempt = (solo: boolean) => runner.run("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", ...(solo ? ["-o", "ControlPath=none"] : []), "--", machine.ssh, script], { cwd: localCwd, timeoutMs: Math.min(options.timeoutMs ?? 30_000, 300_000), ...(options.input === undefined ? {} : { input: options.input }) });
     // Fleet desk, 2026-11-14: a live shared master intermittently refused fds (`mm_send_fd: sendmsg(0): Message too long`)
-    // and failed closes and restarts. Mux errors happen before the master runs anything, so one solo retry cannot repeat work.
+    // and failed closes and restarts. Only pre-session mux errors retry, once, on a solo connection, so no command runs twice.
     return attempt(false).pipe(
-      Effect.flatMap(result => result.code === 255 && muxFailure(result.stderr) ? attempt(true) : Effect.succeed(result)),
+      Effect.flatMap(result => result.code === 255 && muxFailure(result.stderr, result.stdout) ? attempt(true) : Effect.succeed(result)),
       Effect.mapError(error => new ProcError({ ...error, command: `ssh ${name}`, message: `machine ${name}: ${error.message}` })),
       Effect.flatMap(result => result.code === 255 ? Effect.fail(new ProcError({ command: `ssh ${name}`, code: result.code, stderr: result.stderr, message: `machine ${name}: SSH failed: ${result.stderr.slice(-500)}` })) : Effect.succeed(result)),
     );
