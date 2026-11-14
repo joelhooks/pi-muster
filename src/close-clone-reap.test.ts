@@ -336,12 +336,13 @@ it("retires the closed row's Rat King name through the fleet mailbox shim, and o
   expect(closed.notes).toContain(`Rat King name reap/${f.row.name} retired: sends to it now fail Retired`);
   writeFileSync(shim, "echo 'Error: reserved name' >&2; exit 3\n");
   const again = await f.close();
-  expect(again.notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 3: Error: reserved name)`);
+  // Tin-Tin, #91 review: a failure that isn't a definite answer is retried, not dropped.
+  expect(again.notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 3: Error: reserved name); project_status retries after 06:02:00Z`);
   // Tin-Tin, 2026-10-13: the real CLI logs to stdout; a never-issued name is nothing to retire.
   writeFileSync(shim, "echo '[19:22:42.010] ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (NameNotFound)'; echo '    at operatorCall (retire.ts:54:21)'; exit 1\n");
   expect((await f.close()).notes).toContain(`Rat King name reap/${f.row.name} was never issued (a launch that failed before its Pi started); nothing to retire`);
   writeFileSync(shim, "echo '[19:22:42.010] ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (Forbidden)'; exit 1\n");
-  expect((await f.close()).notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 1: ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (Forbidden))`);
+  expect((await f.close()).notes).toContain(`Rat King name reap/${f.row.name} not retired (exit 1: ERROR (#2): CliError: Issuer refused sh.mschf.ratking.identity.retireName (Forbidden)); project_status retries after 06:02:00Z`);
 });
 
 // Tin-Tin, #36 review: a rowless Switchboard owner with no recorded name is found through its subscription, as owner mail does.

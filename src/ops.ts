@@ -2194,7 +2194,7 @@ export const laneClose = (dir: string, slug: string, params: { discard?: boolean
       }),
     );
     const latest = yield* load(dir);
-    const mailboxNotes = yield* retireClosedStandingNames(latest, slug);
+    const mailboxNotes = yield* retireClosedStandingNames(dir, latest, slug);
     yield* publishTokens(latest);
     return { lane: closed, closed: true, pending: [] as string[], paneNote: [paneNote, ...mailboxNotes].join("; ") };
   });
@@ -3403,7 +3403,8 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
         const note = yield* retireRatkingName(project, existing, "unretire");
         if (note) skillNotes.push(note);
       }
-      row = { ...existing, profile: { ...restoredProfile, skills: restoredSkills.paths, appendSystemPrompt: withHiddenSkills(restoredProfile.appendSystemPrompt, restoredSkills.hidden) }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
+      const { retirePending: _unretired, ...unmarked } = existing;
+      row = { ...unmarked, profile: { ...restoredProfile, skills: restoredSkills.paths, appendSystemPrompt: withHiddenSkills(restoredProfile.appendSystemPrompt, restoredSkills.hidden) }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
     } else {
       const relaunchable = existing?.state === "planned" || existing?.state === "failed" || (existing?.state === "interrupted" && !existing.sessionFile);
       if (existing && !relaunchable) {
@@ -3727,9 +3728,34 @@ const publishProjectRole = (project: Project, row: AgentRow) => Effect.gen(funct
 /** Finished workers and final lane/project closes retire names. Parked standing roles keep queued mail.
  * Restore takes the same name back. A missing shim or refusal is a note, never a failed close.
  */
-const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "unretire" = "retire") => Effect.gen(function* () {
+const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "unretire" = "retire") =>
+  retireNameOutcome(project, row, verb).pipe(Effect.map(outcome => outcome.note));
+
+/** When a LeaseLive refusal says the lease ends, as an ISO time; the mailbox prints `until HH:MM:SSZ`. Pure. */
+export const leaseLiveUntil = (output: string, nowMs: number): string | null => {
+  const match = /until (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z|\d\d:\d\d:\d\d(?:\.\d+)?Z)/.exec(output)?.[1];
+  if (!match) return null;
+  if (match.includes("T")) return Number.isFinite(Date.parse(match)) ? new Date(Date.parse(match)).toISOString() : null;
+  let at = Date.parse(`${new Date(nowMs).toISOString().slice(0, 10)}T${match}`);
+  if (!Number.isFinite(at)) return null;
+  // A lease ends after now: a time well before now is tomorrow's (a refusal just before midnight UTC).
+  if (at < nowMs - 60 * 60_000) at += 24 * 60 * 60_000;
+  return new Date(at).toISOString();
+};
+
+/** A lease the mailbox did not date is assumed to last a reader's usual five minutes, plus a margin. */
+const LEASE_FALLBACK_MS = 6 * 60_000;
+/** Retries after the reported expiry; a lease still renewing after this many is a live reader, not a dead Pi. */
+const RETIRE_TRIES = 6;
+/** A retire that failed for another reason (transport, a mailbox error) tries again this soon. */
+const RETRY_SOON_MS = 2 * 60_000;
+
+const retireNameOutcome = (project: Project, row: AgentRow, verb: "retire" | "unretire" = "retire") => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  if (project.policy?.comms && project.policy.comms !== "ratking") return null;
+  const plainNote = (note: string | null) => ({ note, retryAt: null as string | null, leaseLive: false });
+  // Tin-Tin, #91 review: only a definite answer ends a retire; a mailbox blip retries soon instead of leaving the name live.
+  const retrySoon = (note: string) => ({ note, retryAt: verb === "retire" ? new Date(env.now().getTime() + RETRY_SOON_MS).toISOString() : null, leaseLive: false });
+  if (project.policy?.comms && project.policy.comms !== "ratking") return plainNote(null);
   const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
   // Joel, 2026-10-30 ("fix", projects not rows): once the project is a role name, mail to a closed row forwards to it.
   // Tin-Tin, #60 review: a role still aimed at the closing row would forward its mail back to itself, so use the owner.
@@ -3746,7 +3772,7 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   const successor = role ?? (owner && owner !== name ? owner : null);
   const done = verb === "retire" ? `retired: sends to it now fail Retired${successor ? `, naming ${successor}` : ""}` : "unretired: it takes mail again";
   const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
-  if (!existsSync(shim)) return `Rat King name ${name} not ${verb}d: no ${shim}`;
+  if (!existsSync(shim)) return plainNote(`Rat King name ${name} not ${verb}d: no ${shim}`);
   const proc = yield* Proc;
   const run = (args: readonly string[]) => proc.run("sh", [shim, verb, "--name", name, ...args], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
   let result = yield* run(successor ? ["--successor", successor] : []);
@@ -3755,15 +3781,20 @@ const retireRatkingName = (project: Project, row: AgentRow, verb: "retire" | "un
   // A refused successor must not cost the retire: retry without one and say so, rather than point mail at a bad name.
   if (successor && !leaseLive && (result._tag === "Failure" || result.success.code !== 0)) {
     const plain = yield* run([]);
-    if (plain._tag === "Success" && plain.success.code === 0) return `Rat King name ${name} retired without a successor (--successor ${successor} refused): sends to it now fail Retired`;
+    if (plain._tag === "Success" && plain.success.code === 0) return plainNote(`Rat King name ${name} retired without a successor (--successor ${successor} refused): sends to it now fail Retired`);
     result = plain;
   }
-  if (result._tag === "Failure") return `Rat King name ${name} not ${verb}d: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`;
-  if (result.success.code === 0) return `Rat King name ${name} ${done}`;
+  if (result._tag === "Failure") return retrySoon(`Rat King name ${name} not ${verb}d: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`);
+  if (result.success.code === 0) return plainNote(`Rat King name ${name} ${done}`);
   // Tin-Tin, 2026-10-13: the mailbox CLI logs its CliError to stdout, so stderr alone read "exit 1: no stderr".
   const said = cliErrorLine(`${result.success.stderr}\n${result.success.stdout}`);
-  if (/\(NameNotFound\)/.test(said ?? "")) return `Rat King name ${name} was never issued (a launch that failed before its Pi started); nothing to ${verb}`;
-  return `Rat King name ${name} not ${verb}d (exit ${result.success.code}: ${said ?? "no output"})`;
+  if (/\(NameNotFound\)/.test(said ?? "")) return plainNote(`Rat King name ${name} was never issued (a launch that failed before its Pi started); nothing to ${verb}`);
+  const note = `Rat King name ${name} not ${verb}d (exit ${result.success.code}: ${said ?? "no output"})`;
+  if (verb !== "retire") return plainNote(note);
+  if (!leaseLive) return retrySoon(note);
+  const nowMs = env.now().getTime();
+  const leaseUntil = leaseLiveUntil(`${result.success.stderr}\n${result.success.stdout}`, nowMs) ?? new Date(nowMs + LEASE_FALLBACK_MS).toISOString();
+  return { note, retryAt: retryAfter(leaseUntil), leaseLive: true };
 });
 /** The first line that names an error in CLI output, stack frames dropped; null when none does. */
 export const cliErrorLine = (output: string) => {
@@ -3795,12 +3826,64 @@ const keepStandingName = (project: Project, row: AgentRow) => {
   return `Rat King name ${name} kept: mail queues until restore. For a permanent close: sh ~/.config/muster/fleet-mailbox.sh retire --name ${name}`;
 };
 
-const retireClosedStandingNames = (project: Project, lane?: string) => Effect.gen(function* () {
+const retireClosedStandingNames = (dir: string, project: Project, lane?: string) => Effect.gen(function* () {
   const notes: string[] = [];
   for (const row of project.agents) {
     if (row.state !== "closed" || !standingRole(row) || (lane !== undefined && row.lane !== lane)) continue;
-    const note = yield* retireRatkingName(project, row);
+    const note = yield* retireOrMark(dir, project, row);
     if (note) notes.push(note);
+  }
+  return notes;
+});
+
+/**
+ * rats-nest, 2026-11-14: a killed Pi's lease outlives its pane by about five minutes, so a retire straight after close
+ * met LeaseLive and the name stayed live for good (3,769 closed rows in a 4,329-name directory). Keep the refusal on the
+ * closed row; project_status retries it once the lease ends. The marker moves only for the same closed session.
+ */
+const setRetirePending = (dir: string, row: AgentRow, pending: AgentRow["retirePending"]) => mutate(dir, current => Effect.sync(() => {
+  const latest = current.agents.find(agent => agent.name === row.name);
+  if (!latest || latest.state !== "closed" || latest.sessionId !== row.sessionId) return [current, false] as const;
+  const { retirePending: _previous, ...rest } = latest;
+  return [withRow(current, pending ? { ...rest, retirePending: pending } : rest), true] as const;
+}));
+
+const retryAfter = (leaseUntil: string) => new Date(Date.parse(leaseUntil) + 15_000).toISOString();
+
+/** Retire a closed row's name; a live lease leaves a pending retire that project_status picks up. */
+const retireOrMark = (dir: string, project: Project, row: AgentRow) => Effect.gen(function* () {
+  const outcome = yield* retireNameOutcome(project, row);
+  const tries = (row.retirePending?.tries ?? 0) + 1;
+  const after = outcome.retryAt;
+  if (!after) {
+    if (row.retirePending) yield* setRetirePending(dir, row, undefined);
+    return outcome.note;
+  }
+  if (tries >= RETIRE_TRIES) {
+    yield* setRetirePending(dir, row, undefined);
+    return outcome.leaseLive
+      ? `${outcome.note}; still held after ${tries} tries, so a reader is renewing it: find it, or retire by hand once it stops`
+      : `${outcome.note}; still failing after ${tries} tries: retire by hand`;
+  }
+  const marked = yield* setRetirePending(dir, row, { after, tries });
+  return marked ? `${outcome.note}; project_status retries after ${after.slice(11, 19)}Z${outcome.leaseLive ? ", when the lease has ended" : ""}` : outcome.note;
+});
+
+/** project_status: retry each closed row's pending retire whose lease has ended. */
+const retryPendingRetires = (dir: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const project = yield* load(dir);
+  const notes: string[] = [];
+  const due = (row: AgentRow | undefined): row is AgentRow =>
+    row?.state === "closed" && !!row.retirePending && Date.parse(row.retirePending.after) <= env.now().getTime();
+  for (const listed of project.agents) {
+    if (!due(listed)) continue;
+    // Tin-Tin, #91 review: a restore between the first load and this retire would lose its name; read the row again.
+    const fresh = yield* load(dir);
+    const row = fresh.agents.find(agent => agent.name === listed.name);
+    if (!due(row) || row.sessionId !== listed.sessionId) continue;
+    const note = yield* retireOrMark(dir, fresh, row);
+    if (note) notes.push(`retry: ${note}`);
   }
   return notes;
 });
@@ -3808,7 +3891,7 @@ const retireClosedStandingNames = (project: Project, lane?: string) => Effect.ge
 export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir, params).pipe(
   Effect.flatMap(result => result.row.state !== "closed" ? Effect.succeed(result) : Effect.gen(function* () {
     const project = yield* load(dir);
-    const nameNote = standingRole(result.row) ? keepStandingName(project, result.row) : yield* retireRatkingName(project, result.row);
+    const nameNote = standingRole(result.row) ? keepStandingName(project, result.row) : yield* retireOrMark(dir, project, result.row);
     const notes = [nameNote, yield* dropReaderHeartbeat(project, result.row)].filter((note): note is string => !!note);
     return notes.length ? { ...result, notes: [...result.notes, ...notes] } : result;
   })));
@@ -5167,6 +5250,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     }
 
     const autolandNotes: string[] = [];
+    if (act) autolandNotes.push(...yield* retryPendingRetires(dir));
     if (act && !endSession) {
       const snapshot = yield* load(dir);
       const candidates = snapshot.packets.filter(packet => autolandEligible(packet) &&
@@ -5378,7 +5462,7 @@ export const projectReview = (dir: string, params: ReviewInput) =>
         return [next, next] as const;
       }),
     );
-    const mailboxNotes = decision === "archive" && reviewed.state === "archived" ? yield* retireClosedStandingNames(reviewed) : [];
+    const mailboxNotes = decision === "archive" && reviewed.state === "archived" ? yield* retireClosedStandingNames(dir, reviewed) : [];
     const archivedLanes = reviewed.lanes.filter((lane) => lane.archived && !before.lanes.find((prior) => prior.slug === lane.slug)?.archived).map((lane) => lane.slug);
     const tokens = yield* publishTokens(reviewed);
     const brain = yield* writeBrain(reviewed);
