@@ -202,7 +202,7 @@ describe("packet evidence integration", () => {
     expect(text).toContain("run nothing");
     expect(text).not.toContain(s.row.sessionFile!);
     expect(s.verified.note).toContain('agent_launch role:"judge"');
-    expect(s.verified.note).toContain("prompt naming only that file");
+    expect(s.verified.note).toContain(`brief:"${s.verified.reviewFile}" and no prompt`);
   });
   it("keeps the brief in private owner state without adding files to the project Brain", async () => {
     const s = await fixture();

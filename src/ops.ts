@@ -4272,7 +4272,7 @@ export const packetVerify = (dir: string, id: string) =>
     return { packet: verified, checks, reviewFile, note: [
       branch && row.clone ? `updated clone.branch to ${branch} (was ${row.clone.branch})` : null,
       snapshotResult.note,
-      reviewFile ? `Blind review brief: ${reviewFile}. Run agent_launch role:"judge" with a prompt naming only that file.` : null,
+      reviewFile ? `Blind review brief: ${reviewFile}. Run agent_launch role:"judge" with brief:"${reviewFile}" and no prompt; brief copies it to a remote judge's machine, a prompt path does not.` : null,
     ].filter(Boolean).join("\n") || null };
   });
 

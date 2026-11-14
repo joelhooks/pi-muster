@@ -28,7 +28,7 @@ const context = { cwd: "/p", sessionManager: { getSessionId: () => "test-session
 describe("attested packet tool rendering", () => {
   it("renders the blind review file and judge instruction in verify output", async () => {
     const packet = Schema.decodeUnknownSync(Packet)({ id: "abc", kind: "commit", lane: "test", agent: "worker", artifact: null, report: "/p/report.svx", checks: [], state: "verified", verification: null, landedAs: null, reportedAt: "t", updatedAt: "t" });
-    const note = 'Blind review brief: /p/abc-review.md. Run agent_launch role:"judge" with a prompt naming only that file.';
+    const note = 'Blind review brief: /p/abc-review.md. Run agent_launch role:"judge" with brief:"/p/abc-review.md" and no prompt.';
     vi.spyOn(ops, "packetVerify").mockReturnValue(Effect.succeed({ packet, checks: [], reviewFile: "/p/abc-review.md", note }));
     const result = await tool("packet_verify").execute("id", { id: "abc" }, undefined, undefined, context as never);
     expect(result.content).toContainEqual({ type: "text", text: `Packet abc verified.\n${note}` });
