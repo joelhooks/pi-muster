@@ -18,7 +18,7 @@ const EVENTS: LaneEvent[] = [
   { type: "OPEN_FAILED", prior: "proposed" }, { type: "OPEN_FAILED", prior: "draining" }, { type: "OPEN_FAILED", prior: "closed" },
 ];
 
-const at = (value: S) => laneMachine.resolveState({ value, context: {} });
+const at = (value: S) => laneMachine.resolveState({ value });
 const next = (from: S, event: LaneEvent) => transition(laneMachine, at(from), event)[0].value as S;
 
 describe("lane machine model", () => {

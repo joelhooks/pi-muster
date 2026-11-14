@@ -1,5 +1,5 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { createActor, createMachine } from "xstate";
+import { createActor, createMachine, types } from "xstate";
 import type { DeskItem } from "./domain.ts";
 import { formatAge, KIND_GLYPH, openCount } from "./switchboard.ts";
 import type { InboxGroup } from "./switchboard.ts";
@@ -84,11 +84,14 @@ export function renderActivity(groups: readonly InboxGroup[], activity: Activity
 
 // Lifecycle: hidden owns no clock; visible schedules one bucket boundary;
 // focus loss pauses it until input restores focus. No idle animation.
-const clockMachine = createMachine({ initial: "hidden", states: {
-  hidden: { on: { SHOW: "visible" } },
-  visible: { on: { HIDE: "hidden", BLUR: "paused" } },
-  paused: { on: { HIDE: "hidden", FOCUS: "visible" } },
-} });
+const clockMachine = createMachine({
+  schemas: { events: { SHOW: types<void>(), HIDE: types<void>(), BLUR: types<void>(), FOCUS: types<void>() } },
+  initial: "hidden", states: {
+    hidden: { on: { SHOW: { target: "visible" } } },
+    visible: { on: { HIDE: { target: "hidden" }, BLUR: { target: "paused" } } },
+    paused: { on: { HIDE: { target: "hidden" }, FOCUS: { target: "visible" } } },
+  },
+});
 export class ActivityClock {
   private actor = createActor(clockMachine).start();
   private timer: ReturnType<typeof setTimeout> | undefined;
