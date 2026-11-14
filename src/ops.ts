@@ -3747,10 +3747,14 @@ export const leaseLiveUntil = (output: string, nowMs: number): string | null => 
 const LEASE_FALLBACK_MS = 6 * 60_000;
 /** Retries after the reported expiry; a lease still renewing after this many is a live reader, not a dead Pi. */
 const RETIRE_TRIES = 6;
+/** A retire that failed for another reason (transport, a mailbox error) tries again this soon. */
+const RETRY_SOON_MS = 2 * 60_000;
 
 const retireNameOutcome = (project: Project, row: AgentRow, verb: "retire" | "unretire" = "retire") => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  const plainNote = (note: string | null) => ({ note, leaseUntil: null });
+  const plainNote = (note: string | null) => ({ note, retryAt: null as string | null, leaseLive: false });
+  // Tin-Tin, #91 review: only a definite answer ends a retire; a mailbox blip retries soon instead of leaving the name live.
+  const retrySoon = (note: string) => ({ note, retryAt: verb === "retire" ? new Date(env.now().getTime() + RETRY_SOON_MS).toISOString() : null, leaseLive: false });
   if (project.policy?.comms && project.policy.comms !== "ratking") return plainNote(null);
   const name = row.restore?.env.RATKING_NAME ?? `${project.slug}/${row.name}`;
   // Joel, 2026-10-30 ("fix", projects not rows): once the project is a role name, mail to a closed row forwards to it.
@@ -3780,16 +3784,17 @@ const retireNameOutcome = (project: Project, row: AgentRow, verb: "retire" | "un
     if (plain._tag === "Success" && plain.success.code === 0) return plainNote(`Rat King name ${name} retired without a successor (--successor ${successor} refused): sends to it now fail Retired`);
     result = plain;
   }
-  if (result._tag === "Failure") return plainNote(`Rat King name ${name} not ${verb}d: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`);
+  if (result._tag === "Failure") return retrySoon(`Rat King name ${name} not ${verb}d: ${result.failure.message.split("\n")[0]?.slice(0, 160)}`);
   if (result.success.code === 0) return plainNote(`Rat King name ${name} ${done}`);
   // Tin-Tin, 2026-10-13: the mailbox CLI logs its CliError to stdout, so stderr alone read "exit 1: no stderr".
   const said = cliErrorLine(`${result.success.stderr}\n${result.success.stdout}`);
   if (/\(NameNotFound\)/.test(said ?? "")) return plainNote(`Rat King name ${name} was never issued (a launch that failed before its Pi started); nothing to ${verb}`);
   const note = `Rat King name ${name} not ${verb}d (exit ${result.success.code}: ${said ?? "no output"})`;
-  if (!leaseLive || verb !== "retire") return plainNote(note);
+  if (verb !== "retire") return plainNote(note);
+  if (!leaseLive) return retrySoon(note);
   const nowMs = env.now().getTime();
   const leaseUntil = leaseLiveUntil(`${result.success.stderr}\n${result.success.stdout}`, nowMs) ?? new Date(nowMs + LEASE_FALLBACK_MS).toISOString();
-  return { note, leaseUntil };
+  return { note, retryAt: retryAfter(leaseUntil), leaseLive: true };
 });
 /** The first line that names an error in CLI output, stack frames dropped; null when none does. */
 export const cliErrorLine = (output: string) => {
@@ -3849,17 +3854,19 @@ const retryAfter = (leaseUntil: string) => new Date(Date.parse(leaseUntil) + 15_
 const retireOrMark = (dir: string, project: Project, row: AgentRow) => Effect.gen(function* () {
   const outcome = yield* retireNameOutcome(project, row);
   const tries = (row.retirePending?.tries ?? 0) + 1;
-  if (!outcome.leaseUntil) {
+  const after = outcome.retryAt;
+  if (!after) {
     if (row.retirePending) yield* setRetirePending(dir, row, undefined);
     return outcome.note;
   }
-  const after = retryAfter(outcome.leaseUntil);
   if (tries >= RETIRE_TRIES) {
     yield* setRetirePending(dir, row, undefined);
-    return `${outcome.note}; still held after ${tries} tries, so a reader is renewing it: find it, or retire by hand once it stops`;
+    return outcome.leaseLive
+      ? `${outcome.note}; still held after ${tries} tries, so a reader is renewing it: find it, or retire by hand once it stops`
+      : `${outcome.note}; still failing after ${tries} tries: retire by hand`;
   }
   const marked = yield* setRetirePending(dir, row, { after, tries });
-  return marked ? `${outcome.note}; project_status retries after ${after.slice(11, 19)}Z, when the lease has ended` : outcome.note;
+  return marked ? `${outcome.note}; project_status retries after ${after.slice(11, 19)}Z${outcome.leaseLive ? ", when the lease has ended" : ""}` : outcome.note;
 });
 
 /** project_status: retry each closed row's pending retire whose lease has ended. */
@@ -3867,9 +3874,15 @@ const retryPendingRetires = (dir: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const project = yield* load(dir);
   const notes: string[] = [];
-  for (const row of project.agents) {
-    if (row.state !== "closed" || !row.retirePending || Date.parse(row.retirePending.after) > env.now().getTime()) continue;
-    const note = yield* retireOrMark(dir, project, row);
+  const due = (row: AgentRow | undefined): row is AgentRow =>
+    row?.state === "closed" && !!row.retirePending && Date.parse(row.retirePending.after) <= env.now().getTime();
+  for (const listed of project.agents) {
+    if (!due(listed)) continue;
+    // Tin-Tin, #91 review: a restore between the first load and this retire would lose its name; read the row again.
+    const fresh = yield* load(dir);
+    const row = fresh.agents.find(agent => agent.name === listed.name);
+    if (!due(row) || row.sessionId !== listed.sessionId) continue;
+    const note = yield* retireOrMark(dir, fresh, row);
     if (note) notes.push(`retry: ${note}`);
   }
   return notes;

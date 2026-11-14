@@ -14,7 +14,8 @@ async function setup() {
   const log = join(h.root, "mailbox-args");
   const live = join(h.root, "lease-live");
   mkdirSync(join(shim, ".."), { recursive: true });
-  writeFileSync(shim, `printf '%s\\n' "$*" >> "${log}"\ncase "$*" in\nretire*) if [ -e "${live}" ]; then echo "CliError: LeaseLive: probe/worker is held by a live reader until $(cat "${live}"); nothing was retired."; exit 1; fi ;;\nesac\nexit 0\n`);
+  const broken = join(h.root, "mailbox-down");
+  writeFileSync(shim, `printf '%s\\n' "$*" >> "${log}"\ncase "$*" in\nretire*) if [ -e "${broken}" ]; then echo "CliError: fetch failed"; exit 1; fi; if [ -e "${live}" ]; then echo "CliError: LeaseLive: probe/worker is held by a live reader until $(cat "${live}"); nothing was retired."; exit 1; fi ;;\nesac\nexit 0\n`);
   await runWith(h, projectOpen({ dir, slug: "probe", outcome: "o", reviewTrigger: "r", nextAction: "n", space: "w1", ephemeral: true, desk: true, musterExtension: "/m", deskExtension: null }));
   await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "probe" }));
   await runWith(h, agentLaunchForeground(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", cwd: dir }));
@@ -23,7 +24,8 @@ async function setup() {
   const row = async () => (await runWith(h, load(dir))).agents.find(agent => agent.name === "worker")!;
   const status = () => runWith(h, projectStatus(dir, { act: true }));
   const at = (time: string) => { h.now = new Date(`2026-09-29T${time}Z`); };
-  return { h, dir, retires, lease, row, status, at };
+  const down = (on: boolean) => on ? writeFileSync(broken, "") : rmSync(broken, { force: true });
+  return { h, dir, retires, lease, row, status, at, down };
 }
 
 describe("a retire refused for a live lease", () => {
@@ -71,6 +73,21 @@ describe("a retire refused for a live lease", () => {
     expect(last.notes.some(note => note.includes("still held after 6 tries"))).toBe(true);
     expect((await s.row()).retirePending).toBeUndefined();
     expect(s.retires()).toHaveLength(6);
+  }, 30_000);
+
+  // Tin-Tin, #91 review: a mailbox blip cleared the mark and left the name live, the same bug by another route.
+  it("keeps the mark through a mailbox failure, retrying two minutes later", async () => {
+    const s = await setup();
+    s.lease("06:05:00Z");
+    await runWith(s.h, agentClose(s.dir, { name: "worker" }));
+    s.at("06:05:20"); s.lease(null); s.down(true);
+    const failed = await s.status();
+    expect((await s.row()).retirePending).toEqual({ after: "2026-09-29T06:07:20.000Z", tries: 2 });
+    expect(failed.notes.some(note => note.includes("fetch failed") && note.endsWith("retries after 06:07:20Z"))).toBe(true);
+    s.at("06:07:30"); s.down(false);
+    await s.status();
+    expect((await s.row()).retirePending).toBeUndefined();
+    expect(s.retires()).toHaveLength(3);
   }, 30_000);
 
   it("a second agent_close on the closed row retries now and clears the mark", async () => {
