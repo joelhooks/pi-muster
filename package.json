@@ -1,7 +1,7 @@
 {
   "name": "@joelhooks/pi-muster",
   "version": "0.1.0",
-  "description": "Muster \ud83d\udc11 \u2014 the project manager for Herdr project spaces: projects, lanes, packets, agents, and the desk, on top of Bellwether.",
+  "description": "Muster 🐑 — the project manager for Herdr project spaces: projects, lanes, packets, agents, and the desk, on top of Bellwether.",
   "type": "module",
   "keywords": [
     "pi-package",
