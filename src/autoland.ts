@@ -50,6 +50,11 @@ export const findLanding = (project: Project, packet: Packet, options: { notes?:
       (symbolic.code === 0 ? symbolic.stdout.trim().replace(/^refs\/remotes\/origin\//, "") : "main");
     // A lane starting from a sha is not a landing branch.
     if (SHA.test(base) || (yield* run("git", ["check-ref-format", `refs/heads/${base}`])).code !== 0) return null;
+    // rats-nest, 2026-11-13: a lane that starts from a tag (celld-063, v0.6.3) has no landing branch to fetch; skip quietly.
+    if (lane?.base?.startsWith("refs/tags/")) return null;
+    if ((yield* run("git", ["show-ref", "--verify", "--quiet", `refs/tags/${base}`])).code === 0
+      && (yield* run("git", ["show-ref", "--verify", "--quiet", `refs/heads/${base}`])).code !== 0
+      && (yield* run("git", ["show-ref", "--verify", "--quiet", `refs/remotes/origin/${base}`])).code !== 0) return null;
     if (options.fetch !== false) {
       const fetched = yield* run("git", ["fetch", "--no-tags", "--", "origin", `+refs/heads/${base}:refs/remotes/origin/${base}`]);
       if (fetched.code !== 0) { options.notes?.push(`autoland: fetch origin/${base} failed; not using stale refs`); return null; }

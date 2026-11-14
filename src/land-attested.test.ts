@@ -69,6 +69,29 @@ describe("owner-attested landing", () => {
     expect(sh(s.dir, "rev-parse", "refs/remotes/walgit/central/landing").trim()).toBe(s.id);
   });
 
+  // rats-nest, 2026-11-13: lane celld-063 starts from upstream's tag v0.6.3, so every landing fetched refs/heads/v0.6.3
+  // and refused "against stale base refs". A tag base names the fix; the branch the lane lands on then proves it.
+  it("refuses a tag lane base with the fix, and lands once the lane names its branch", async () => {
+    const s = await fixture(); await runWith(s.h, packetVerify(s.dir, s.id));
+    sh(s.origin, "tag", "v0.6.3"); sh(s.dir, "fetch", "-q", "--tags", "origin");
+    sh(s.dir, "fetch", "-q", s.row.cwd, s.id); sh(s.dir, "branch", "ratking-063", s.id);
+    for (const base of ["v0.6.3", "refs/tags/v0.6.3"]) {
+      await runWith(s.h, laneOpen(s.dir, { slug: "probe", base }));
+      // rift-merge's own land merges the clone branch and never fetches the base; pr-merge proves on it.
+      for (const [mode, attested] of [["rift-merge", true], ["pr-merge", false]] as const) {
+        await runWith(s.h, projectOpen({ dir: s.dir, mode }));
+        const err = await failWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested, evidence }));
+        expect(err.message).toContain("lane probe starts from the tag v0.6.3: a clone base, not a branch a packet lands on");
+        expect(err.message).toContain(`base: "<remote>/<branch>"`);
+        expect(err.message).not.toContain("stale base refs");
+      }
+    }
+    await runWith(s.h, projectOpen({ dir: s.dir, mode: "rift-merge" }));
+    await runWith(s.h, laneOpen(s.dir, { slug: "probe", base: "refs/heads/ratking-063" }));
+    const landed = await runWith(s.h, packetLand(s.dir, { id: s.id, outcome: "committed", landedAs: s.id, attested: true, evidence }));
+    expect(landed.packet).toMatchObject({ state: "committed", landedAs: s.id, attested: true });
+  });
+
   // imp, 2026-10-26: a local-only repo keeps an origin it never pushes, so a landing on its own main was refused.
   it("proves a landing on the source checkout's own base branch when origin never got it, and says so", async () => {
     const s = await fixture(); await runWith(s.h, packetVerify(s.dir, s.id));
