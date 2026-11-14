@@ -308,6 +308,11 @@ export const AgentRow = Schema.Struct({
   delivery: Delivery,
   restarts: Schema.Number,
   restore: Schema.NullOr(RestoreCommand),
+  /**
+   * rats-nest, 2026-11-14: a closed row whose Rat King retire met a live lease (a killed Pi's lease outlives its pane
+   * by about five minutes). project_status retries the retire once `after` passes; restore drops it.
+   */
+  retirePending: Schema.optionalKey(Schema.Struct({ after: Iso, tries: Schema.Number })),
   createdAt: Iso,
   updatedAt: Iso,
 });
