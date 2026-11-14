@@ -13,7 +13,7 @@ const EVENTS: ProjectEvent[] = [
   { type: "ARCHIVE", openLanes: 0 }, { type: "ARCHIVE", openLanes: 2 },
 ];
 
-const at = (value: S) => projectMachine.resolveState({ value, context: {} });
+const at = (value: S) => projectMachine.resolveState({ value });
 const next = (from: S, event: ProjectEvent) => transition(projectMachine, at(from), event)[0].value as S;
 
 describe("project machine model", () => {

@@ -10,7 +10,7 @@ type S = (typeof STATES)[number];
 type E = { type: "SENT" | "ANSWER" | "RESOLVE" | "UPDATE" };
 const EVENTS: E[] = [{ type: "SENT" }, { type: "ANSWER" }, { type: "RESOLVE" }, { type: "UPDATE" }];
 
-const at = (value: S) => deskPhoneMachine.resolveState({ value, context: {} });
+const at = (value: S) => deskPhoneMachine.resolveState({ value });
 const next = (from: S, event: E) => transition(deskPhoneMachine, at(from), event)[0].value as S;
 const accepted = (from: S) => EVENTS.filter(event => at(from).can(event)).map(event => event.type);
 const ok = (from: S, event: E, to: S) => Exit.isSuccess(Effect.runSyncExit(stepDeskPhone(from, event, to)));

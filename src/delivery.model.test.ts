@@ -10,7 +10,7 @@ type S = (typeof STATES)[number];
 type E = { type: "landed" | "deployed" | "proven" | "waived" };
 const EVENTS: E[] = [{ type: "landed" }, { type: "deployed" }, { type: "proven" }, { type: "waived" }];
 
-const at = (value: S) => deliveryMachine.resolveState({ value, context: {} });
+const at = (value: S) => deliveryMachine.resolveState({ value });
 const next = (from: S, event: E) => transition(deliveryMachine, at(from), event)[0].value as S;
 const accepted = (from: S) => EVENTS.filter(event => at(from).can(event)).map(event => event.type);
 

@@ -15,7 +15,7 @@ const EVENTS: AgentEvent[] = [
   { type: "REWORK" }, { type: "LAND" }, { type: "PANE_GONE" }, { type: "RESTORE" }, { type: "CLOSE" }, { type: "FAIL" },
 ];
 
-const at = (value: S) => agentMachine.resolveState({ value, context: {} });
+const at = (value: S) => agentMachine.resolveState({ value });
 const next = (from: S, event: AgentEvent) => transition(agentMachine, at(from), event)[0].value as S;
 const accepted = (from: S) => EVENTS.filter(event => at(from).can(event));
 const paths = () => getShortestPaths(agentMachine, { events: EVENTS });

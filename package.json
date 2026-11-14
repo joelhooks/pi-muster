@@ -1,7 +1,7 @@
 {
   "name": "@joelhooks/pi-muster",
   "version": "0.1.0",
-  "description": "Muster 🐑 — the project manager for Herdr project spaces: projects, lanes, packets, agents, and the desk, on top of Bellwether.",
+  "description": "Muster \ud83d\udc11 \u2014 the project manager for Herdr project spaces: projects, lanes, packets, agents, and the desk, on top of Bellwether.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -158,11 +158,11 @@
     "@hpke/core": "1.9.0",
     "@ipld/dag-cbor": "10.0.2",
     "@joelhooks/pi-bellwether": "github:joelhooks/pi-bellwether#af41815ae849fab4c41bb72c0289af9bb23b7d0e",
-    "effect": "4.0.5",
+    "effect": "4.1.4",
     "tsx": "^4.23.15",
-    "xstate": "5.32.5"
+    "xstate": "6.0.0-beta.1"
   },
   "overrides": {
-    "effect": "4.0.5"
+    "effect": "4.1.4"
   }
 }
