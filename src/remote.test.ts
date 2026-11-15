@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { Effect } from "effect";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { decodeMachines, decodeProject, type MachineConfig } from "./domain.ts";
-import { remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource, herdrSocketFor } from "./remote.ts";
+import { muxFailure, remotePullReceipt, remoteBindingPath, stderrClass, sidecarRoots, sidecarRootsScript, mapPath, mapWorkerPath, machinesPath, machineConfig, sshProc, remoteClient, prerequisites, withMachineLaunchLock, readyForRemoteLaunch, syncRemoteBrief, cleanupRemoteBrief, transferredBriefSource, herdrSocketFor } from "./remote.ts";
 import { Comms, Herdr, MusterEnv, Proc, liveProc, noEmitPaneClose, type EnvShape, type ProcShape } from "./runtime.ts";
 import { projectUpdate, agentLaunchForeground as agentLaunch, agentLaunch as queuedAgentLaunch, runLaunchJob, agentClose, packetReport, packetVerify, packetLand, projectOpen, laneOpen, projectStatus, ingestRemotePackets, sessionChain } from "./ops.ts";
 import { FakeHerdr, forkHarness, harness, makeRepo, sh, type Harness } from "./test-support.ts";
@@ -268,6 +268,34 @@ describe("machine boundary", () => {
     expect(run.mock.calls[0]?.[2]).toMatchObject({ timeoutMs: 300000 });
     expect(run.mock.calls[0]?.[1]).toContain("BatchMode=yes");
     expect(String(run.mock.calls[0]?.[1].at(-1))).toContain("'\\''");
+  });
+  it("retries once on a solo connection when the shared master refuses, and not on other SSH failures", async () => {
+    const results = [{ code: 255, stdout: "", stderr: "mm_send_fd: sendmsg(0): Message too long" }, { code: 0, stdout: "ok", stderr: "" }];
+    const run = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed(results.shift()!));
+    const out = await Effect.runPromise(sshProc("remote", config(), { run }, "/").run("node", ["-e", "1"], { cwd: "/", timeoutMs: 1000, input: "x" }));
+    expect(out.stdout).toBe("ok");
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls[0]?.[1]).not.toContain("ControlPath=none");
+    expect(run.mock.calls[1]?.[1]).toContain("ControlPath=none");
+    expect(run.mock.calls[1]?.[2]).toMatchObject({ input: "x" });
+    const refused = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed({ code: 255, stdout: "", stderr: "Permission denied (publickey)." }));
+    await expect(Effect.runPromise(sshProc("remote", config(), { run: refused }, "/").run("node", ["-e", "1"], { cwd: "/", timeoutMs: 1000 }))).rejects.toThrow("SSH failed");
+    expect(refused).toHaveBeenCalledTimes(1);
+  });
+  it("names pre-session mux failures only", () => {
+    expect(muxFailure("mm_receive_fd: no message header")).toBe(true);
+    expect(muxFailure("Control socket connect(/tmp/cm): Connection refused")).toBe(true);
+    expect(muxFailure("mux_client_request_session: session request failed: Session open refused by peer")).toBe(true);
+    expect(muxFailure("mux_client_read_packet: read header failed: Broken pipe")).toBe(false);
+    expect(muxFailure("mux_client_request_session: read from master failed: Broken pipe")).toBe(false);
+    expect(muxFailure("ssh: connect to host remote port 22: Connection refused")).toBe(false);
+  });
+  it("never retries a mux failure that may have run the command", async () => {
+    for (const result of [{ code: 255, stdout: "", stderr: "mux_client_read_packet: read header failed: Broken pipe" }, { code: 255, stdout: "partial", stderr: "mm_send_fd: sendmsg(0): Message too long" }]) {
+      const run = vi.fn((_command: string, _args: readonly string[], _options: import("./runtime.ts").ProcOptions) => Effect.succeed(result));
+      await expect(Effect.runPromise(sshProc("remote", config(), { run }, "/").run("node", ["-e", "1"], { cwd: "/", timeoutMs: 1000 }))).rejects.toThrow("SSH failed");
+      expect(run).toHaveBeenCalledTimes(1);
+    }
   });
   // Bravestarr, 2026-10-11: a remote restart's binding push ran ssh inside onRemote's ssh: `cd /Users/alice` on remote1.
   it("wrapping an ssh-wrapped runner again makes one ssh, not ssh inside ssh", async () => {
