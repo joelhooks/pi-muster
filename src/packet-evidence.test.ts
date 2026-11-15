@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { Packet } from "./domain.ts";
-import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
+import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, REVIEW_END, REVIEW_LIMITS, reviewBrief, staleEvidence } from "./packet-evidence.ts";
+
+// The edge cases below were sized for the original 60 KiB brief; they pin those limits to keep testing the same edges.
+const SMALL = { total: 60 * 1024, brief: 12 * 1024, report: 12 * 1024 };
 import { agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetReport, packetVerify, projectOpen } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
@@ -61,7 +64,7 @@ describe("packet evidence decisions", () => {
     expect(blindReviewNote(201, "/findings.md")).toBeNull();
   });
   it("caps UTF-8 review inputs with a visible cut", () => {
-    const brief = reviewBrief({ packet: "hash", report: "report", diff: "é".repeat(100_000) });
+    const brief = reviewBrief({ packet: "hash", report: "report", diff: "é".repeat(100_000) }, SMALL);
     expect(Buffer.byteLength(brief)).toBeLessThanOrEqual(60 * 1024);
     expect(brief).not.toContain("�");
     expect(brief).toContain("[cut:");
@@ -72,7 +75,7 @@ describe("packet evidence decisions", () => {
 describe("blind review diff budget", () => {
   const patch = (path: string, content = "+new\n-old\n") =>
     `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n${content}`;
-  const render = (diff: string, extra = {}) => reviewBrief({ packet: "hash", report: "report", diff, ...extra });
+  const render = (diff: string, extra = {}) => reviewBrief({ packet: "hash", report: "report", diff, ...extra }, SMALL);
 
   it("puts source ahead of 80 KiB of receipts and inventories their full counts", () => {
     const receipt = patch(".brain/data/receipts.jsonl", "+receipt\n".repeat(10_240));
@@ -112,7 +115,7 @@ describe("blind review diff budget", () => {
     const paths = [".brain/data/a.ts", "package-lock.json", "docs/guide.md", "tests/worker.ts", "src/a.test.ts", "lib/main.py", "src/z.ts", "src/clock.ts", "generated/a.ts", "config.json", "README.md"];
     const text = render(paths.map(path => patch(path)).join(""));
     const expected = ["lib/main.py", "src/z.ts", "src/clock.ts", "tests/worker.ts", "src/a.test.ts", "docs/guide.md", "README.md", ".brain/data/a.ts", "package-lock.json", "generated/a.ts", "config.json"].map(path => patch(path)).join("");
-    expect(text.split("## Packet diff\n\n")[1]).toBe(expected + "\n");
+    expect(text.split("## Packet diff\n\n")[1]).toBe(expected + "\n" + REVIEW_END);
     expect(text).not.toContain("[cut:");
     expect(text).not.toContain("Not shown");
   });
@@ -160,7 +163,7 @@ describe("blind review diff budget", () => {
     const data = [".brain/data/package.json", "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "generated/package.json", "dist/tsconfig.json", "vendor/biome.json", "events.jsonl", "data.json"];
     const configs = ["package.json", "tsconfig.json", "tsconfig.build.json", ".oxlintrc.json", "biome.json", ".eslintrc.json", ".eslintrc.strict.json", "nested/jsconfig.json", ".prettierrc.json", "deno.json", "typedoc.json", "turbo.json", "lerna.json", "nx.json"];
     const text = render([...data, ...configs].map(path => patch(path)).join(""));
-    expect(text.split("## Packet diff\n\n")[1]).toBe([...configs, ...data].map(path => patch(path)).join("") + "\n");
+    expect(text.split("## Packet diff\n\n")[1]).toBe([...configs, ...data].map(path => patch(path)).join("") + "\n" + REVIEW_END);
   });
 
   it("keeps every earlier skip reserved when later files consume nearly all available space", () => {
@@ -184,6 +187,30 @@ describe("blind review diff budget", () => {
     const text = render(Array.from({ length: 2_000 }, (_, i) => patch(`data/receipt-${i}.json`, "+receipt\n".repeat(20))).join(""));
     expect(Buffer.byteLength(text)).toBeLessThanOrEqual(60 * 1024);
     expect(text).toContain("[cut: Not shown inventory exceeds review budget]");
+  });
+});
+
+describe("blind review default limits", () => {
+  const patch = (path: string, content: string) =>
+    `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n@@ -1 +1 @@\n${content}`;
+  it("keeps a 36-file, 2,100-line packet and a 40 KiB report whole, and ends with the end line", () => {
+    const diff = Array.from({ length: 36 }, (_, i) => patch(`src/tenant/file-${i}.ts`, `+${"x".repeat(60)} line\n`.repeat(60))).join("");
+    const report = "finding 🙂 ".repeat(4_000);
+    const text = reviewBrief({ packet: "hash", report, diff });
+    expect(Buffer.byteLength(diff)).toBeGreaterThan(60 * 1024);
+    expect(text).toContain(diff);
+    expect(text).toContain(report);
+    expect(text).not.toContain("[cut:");
+    expect(text).not.toContain("Not shown");
+    expect(text.endsWith(REVIEW_END)).toBe(true);
+    expect(text).toContain('until you reach the line "## End of review brief"');
+  });
+  it("still bounds a runaway diff at the default ceiling and inventories what it left out", () => {
+    const text = reviewBrief({ packet: "hash", report: "r", diff: patch("src/a.ts", "+a\n") + patch("generated/huge.ts", "+g\n".repeat(600_000)) });
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(REVIEW_LIMITS.total);
+    expect(text).toContain("diff --git a/src/a.ts");
+    expect(text).toContain('"generated/huge.ts": +600000 -0');
+    expect(text.endsWith(REVIEW_END)).toBe(true);
   });
 });
 

@@ -116,23 +116,34 @@ function reviewDiff(diff: string, budget: number): string {
 }
 
 /** Only explicit report, brief and diff inputs; no session or pane context. */
-export function reviewBrief(input: { packet: string; briefPath?: string; brief?: string; report: string; diff: string }): string {
+/** Review brief byte limits. ratstack desk, 2026-11-15: a 36-file, 2,100-line packet cut at 60 KiB and a 12 KiB report
+ * left its judge unable to confirm half the fixes, so the defaults hold an ordinary large packet whole. The cap stays
+ * only as a ceiling for runaway generated diffs; source still ranks first and every unshown file is inventoried.
+ * Agent graph desk: 512 KiB (about 130k tokens) keeps a whole brief under a judge's compaction, which would drop
+ * parts of it with no marker. */
+export const REVIEW_LIMITS = { total: 512 * 1024, brief: 12 * 1024, report: 128 * 1024 } as const;
+export type ReviewLimits = { readonly total: number; readonly brief: number; readonly report: number };
+/** The last line of every brief, so a judge whose reader pages long files knows when it has read all of it. */
+export const REVIEW_END = "## End of review brief\n";
+const kib = (bytes: number) => `${Math.round(bytes / 1024)} KiB`;
+
+export function reviewBrief(input: { packet: string; briefPath?: string; brief?: string; report: string; diff: string }, limits: ReviewLimits = REVIEW_LIMITS): string {
   const text = `# Blind review: ${cappedSection(input.packet, 1024, "[cut]")}
 
-Read only this file and run nothing. The report's checks describe what already ran. Number findings. Answer each question with either observed evidence naming a command, path or line, or "not checked".
+Read only this file and run nothing. It can be longer than one read: keep reading from where the last read stopped until you reach the line "## End of review brief". The report's checks describe what already ran. Number findings. Answer each question with either observed evidence naming a command, path or line, or "not checked".
 
 1. What did the change touch that no reported check covers?
 2. What could still be wrong while every check passes?
 3. What was not tested?
 
-${cappedSection(`## Lane brief${input.briefPath ? `: ${input.briefPath}` : ""}\n\n${input.brief ?? "No lane brief recorded."}`, 12 * 1024, "\n[cut: lane brief capped at 12 KiB]\n")}
+${cappedSection(`## Lane brief${input.briefPath ? `: ${input.briefPath}` : ""}\n\n${input.brief ?? "No lane brief recorded."}`, limits.brief, `\n[cut: lane brief capped at ${kib(limits.brief)}]\n`)}
 
 ## Packet report
 
-${cappedSection(input.report, 12 * 1024, "\n[cut: packet report capped at 12 KiB]\n")}
+${cappedSection(input.report, limits.report, `\n[cut: packet report capped at ${kib(limits.report)}]\n`)}
 
 ## Packet diff
 
 `;
-  return text + reviewDiff(input.diff, 60 * 1024 - Buffer.byteLength(text) - 1) + "\n";
+  return text + reviewDiff(input.diff, limits.total - Buffer.byteLength(text) - 1 - Buffer.byteLength(REVIEW_END)) + "\n" + REVIEW_END;
 }
