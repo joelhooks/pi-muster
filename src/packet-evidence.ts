@@ -118,8 +118,10 @@ function reviewDiff(diff: string, budget: number): string {
 /** Only explicit report, brief and diff inputs; no session or pane context. */
 /** Review brief byte limits. ratstack desk, 2026-11-15: a 36-file, 2,100-line packet cut at 60 KiB and a 12 KiB report
  * left its judge unable to confirm half the fixes, so the defaults hold an ordinary large packet whole. The cap stays
- * only as a ceiling for runaway generated diffs; source still ranks first and every unshown file is inventoried. */
-export const REVIEW_LIMITS = { total: 1024 * 1024, brief: 12 * 1024, report: 128 * 1024 } as const;
+ * only as a ceiling for runaway generated diffs; source still ranks first and every unshown file is inventoried.
+ * Agent graph desk: 512 KiB (about 130k tokens) keeps a whole brief under a judge's compaction, which would drop
+ * parts of it with no marker. */
+export const REVIEW_LIMITS = { total: 512 * 1024, brief: 12 * 1024, report: 128 * 1024 } as const;
 export type ReviewLimits = { readonly total: number; readonly brief: number; readonly report: number };
 /** The last line of every brief, so a judge whose reader pages long files knows when it has read all of it. */
 export const REVIEW_END = "## End of review brief\n";
