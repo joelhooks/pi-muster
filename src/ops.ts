@@ -718,6 +718,10 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
 export const baseRemoteFetch = (localSource: string, base: string | null | undefined) => Effect.gen(function* () {
   const match = base ? /^([\w.-]+)\/(.+)$/.exec(base) : null;
   if (!match) return null;
+  // ratstack desk, 2026-11-15: a row whose clone.source was recorded as the remote machine's own path has no checkout
+  // here; git spawned in that missing cwd (spawn git ENOENT) and aborted close before it saw the clone was gone. With no
+  // local checkout there is no URL to lend, so the row's host keeps its own fetch.
+  if (!existsSync(localSource)) return null;
   const proc = yield* Proc;
   const url = yield* proc.run("git", ["remote", "get-url", "--", match[1]!], { cwd: localSource, timeoutMs: 10_000 });
   return url.code === 0 && url.stdout.trim() ? { remote: match[1]!, branch: match[2]!, url: url.stdout.trim() } : null;
