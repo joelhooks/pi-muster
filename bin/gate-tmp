@@ -8,6 +8,10 @@
 # Switchboard, 2026-10-18: a RAM disk keeps every page a gate ever wrote; deleting files frees none. The disk held
 # 16 GB for 3.7 days while using 158 MB. The last release detaches it, and the next claim recreates it (about a
 # second). Every detach and recreate is logged with its timing, so a burst that keeps recreating it shows up.
+#
+# rats-nest desk, 2026-11-16: the disk was HFS+, which stores mtimes to the second, so tests that order files by
+# mtime tied and flipped on it while passing on /tmp. It is APFS now, with /tmp's nanosecond times. An HFS+ disk
+# left from older code is rebuilt the first time it is idle.
 set -u
 
 volume_name=gate-tmp
@@ -50,22 +54,38 @@ mounted_device() {
   mount | awk -v r="$root" '$2 == "on" && $3 == r { print $1 }'
 }
 
-is_ram_device() {
+# The file system type of the mount at root: apfs, hfs, ...
+mounted_fs() {
+  mount | awk -v r="$root" '$2 == "on" && $3 == r { fs = $4; sub(/^\(/, "", fs); sub(/[,)].*$/, "", fs); print fs }'
+}
+
+listed_ram() {
   hdiutil info | awk -v d="$1" '
     /^image-path/ { ram = ($3 ~ /^ram:\/\//) }
     $1 == d && ram { found = 1 }
     END { exit found ? 0 : 1 }'
 }
 
+# The ram:// device under a mounted device. An APFS volume sits on a synthesized container, so follow its
+# physical store to the attached image.
+ram_store() {
+  if listed_ram "$1"; then echo "$1"; return 0; fi
+  store=$(diskutil info "$1" 2>/dev/null | awk -F': *' '/APFS Physical Store/ { s = $2; sub(/[ \t]+$/, "", s); print "/dev/" s; exit }')
+  [ -n "$store" ] && listed_ram "$store" && echo "$store"
+}
+
+is_ram_device() { ram_store "$1" >/dev/null; }
+
 create_disk() {
   dev=$(hdiutil attach -nobrowse -nomount "ram://$sectors" | awk 'NR == 1 { print $1 }') || return 1
   [ -n "$dev" ] || return 1
-  if newfs_hfs -v "$volume_name" "$dev" >/dev/null &&
-    diskutil mount "$dev" >/dev/null &&
+  # diskutil apfs create builds a container and its volume on the device and mounts it at /Volumes/<name>.
+  if diskutil apfs create "$dev" "$volume_name" >/dev/null &&
+    vol=$(mounted_device) && [ -n "$vol" ] &&
     mkdir -p "$root/.fseventsd" &&
     touch "$root/.fseventsd/no_log" &&
-    diskutil unmount "$dev" >/dev/null &&
-    diskutil mount "$dev" >/dev/null; then
+    diskutil unmount "$vol" >/dev/null &&
+    diskutil mount "$vol" >/dev/null; then
     return 0
   fi
   hdiutil detach "$dev" >/dev/null 2>&1
@@ -105,9 +125,22 @@ ensure() {
     note "recreate dev=$dev ms=$(( $(ms) - started ))"
   fi
   is_ram_device "$dev" || { fail "$root is mounted from $dev, which is not a RAM disk"; return 1; }
+  sweep_dead_runs || return 1
+  fs=$(mounted_fs)
+  if [ "$fs" != apfs ] && ! live_runs; then
+    store=$(ram_store "$dev")
+    started=$(ms)
+    if hdiutil detach "$store" >/dev/null 2>&1; then
+      create_disk || { note "apfs rebuild failed (was $fs)"; fail "could not rebuild the RAM disk at $root as APFS"; return 1; }
+      dev=$(mounted_device)
+      note "rebuilt as apfs (was $fs) dev=$dev ms=$(( $(ms) - started ))"
+      is_ram_device "$dev" || { fail "$root is mounted from $dev, which is not a RAM disk"; return 1; }
+    else
+      note "apfs rebuild deferred: $store busy (was $fs)"
+    fi
+  fi
   [ -e "$root/.fseventsd/no_log" ] || touch "$root/.fseventsd/no_log" 2>/dev/null
   mdutil -s "$root" 2>/dev/null | grep -q "Indexing disabled" || mdutil -i off "$root" >/dev/null 2>&1
-  sweep_dead_runs || return 1
   echo "$root"
 }
 
@@ -137,7 +170,7 @@ detach_if_idle() {
   ram_root || return 0
   sweep_dead_runs || return 0
   live_runs && return 0
-  dev=$(mounted_device)
+  dev=$(ram_store "$(mounted_device)") || return 0
   started=$(ms)
   if hdiutil detach "$dev" >/dev/null 2>&1; then
     note "detach dev=$dev ms=$(( $(ms) - started ))"
