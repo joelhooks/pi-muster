@@ -50,20 +50,27 @@ describe("gate-tmp sweep", () => {
 
 // Switchboard, 2026-10-18: the RAM disk held 16 GB for 3.7 days while using 158 MB; its pages are never freed until detach.
 describe("gate-tmp claim and release", () => {
-  function disk(options: { mounted?: boolean; busy?: boolean; holders?: string } = {}) {
+  function disk(options: { mounted?: boolean; busy?: boolean; holders?: string; fs?: string; volumeDev?: string } = {}) {
     const { root } = fixture();
     const volume = join(root, "volume");
     mkdirSync(volume);
     const state = join(root, "mounted");
     if (options.mounted !== false) writeFileSync(state, "");
+    const fsFile = join(root, "fs");
+    writeFileSync(fsFile, options.fs ?? "apfs");
+    const volumeDev = options.volumeDev ?? "/dev/disk99";
     const calls = join(root, "calls");
     const bin = join(root, "bin");
     mkdirSync(bin);
     const tools: Record<string, string> = {
       lsof: options.holders === undefined ? "exit 1" : `printf '${options.holders}'`,
       uname: "echo Darwin", hostname: "echo Flagg", mdutil: "echo 'Indexing disabled'", newfs_hfs: "exit 0",
-      mount: `[ -e '${state}' ] && echo '/dev/disk99 on ${volume} (hfs)'; exit 0`,
-      diskutil: `echo "diskutil $*" >> '${calls}'; case "$1" in mount) touch '${state}' ;; unmount) rm -f '${state}' ;; esac`,
+      mount: `[ -e '${state}' ] && echo "${volumeDev} on ${volume} ($(cat '${fsFile}'), local)"; exit 0`,
+      diskutil: `echo "diskutil $*" >> '${calls}'; case "$1" in
+        mount) touch '${state}' ;; unmount) rm -f '${state}' ;;
+        apfs) printf apfs > '${fsFile}'; touch '${state}' ;;
+        info) [ "$2" = '${volumeDev}' ] && [ '${volumeDev}' != /dev/disk99 ] && echo '   APFS Physical Store:       disk99   ' ;;
+      esac`,
       hdiutil: `echo "hdiutil $*" >> '${calls}'; case "$1" in
         info) printf 'image-path : ram://123\n/dev/disk99\n' ;;
         attach) echo /dev/disk99 ;;
@@ -121,6 +128,51 @@ describe("gate-tmp claim and release", () => {
     d.tool("lsof", "exit 1");
     d.gate("release", d.gate("claim", String(process.pid)).stdout.trim());
     expect(d.logged()).toContain("held by unknown");
+  });
+  it("builds a recreated disk as APFS, so file times keep nanoseconds like /tmp", () => {
+    const d = disk({ mounted: false });
+    expect(d.gate("claim", String(process.pid)).status).toBe(0);
+    expect(d.called()).toContain("diskutil apfs create /dev/disk99 gate-tmp");
+    expect(d.called()).not.toContain("newfs_hfs");
+  });
+  it("rebuilds an idle HFS+ disk as APFS and logs it", () => {
+    const d = disk({ fs: "hfs" });
+    const claimed = d.gate("claim", String(process.pid));
+    expect(claimed.status, claimed.stderr).toBe(0);
+    expect(d.called()).toMatch(/hdiutil detach \/dev\/disk99[\s\S]*diskutil apfs create \/dev\/disk99 gate-tmp/);
+    expect(d.logged()).toMatch(/rebuilt as apfs \(was hfs\) dev=\/dev\/disk99 ms=\d+/);
+    expect(readFileSync(join(d.root, "fs"), "utf8")).toBe("apfs");
+  });
+  it("keeps an HFS+ disk that a live run still uses, and rebuilds it once idle", () => {
+    const d = disk({ fs: "hfs" });
+    mkdirSync(join(d.volume, `run-${process.pid}-live`));
+    const claimed = d.gate("claim", String(process.pid));
+    expect(claimed.status, claimed.stderr).toBe(0);
+    expect(d.called()).not.toContain("detach");
+    expect(existsSync(join(d.volume, `run-${process.pid}-live`))).toBe(true);
+  });
+  it("defers the rebuild when the HFS+ disk is busy, keeping it usable", () => {
+    const d = disk({ fs: "hfs", busy: true });
+    const claimed = d.gate("claim", String(process.pid));
+    expect(claimed.status, claimed.stderr).toBe(0);
+    expect(d.logged()).toContain("apfs rebuild deferred: /dev/disk99 busy (was hfs)");
+    expect(d.called()).not.toContain("apfs create");
+  });
+  it("never rebuilds when the mount type does not parse", () => {
+    const d = disk({ fs: "" });
+    const claimed = d.gate("claim", String(process.pid));
+    expect(claimed.status, claimed.stderr).toBe(0);
+    expect(d.called()).not.toContain("detach");
+    expect(d.called()).not.toContain("apfs create");
+    expect(d.logged()).toContain("fs unknown at");
+  });
+  it("follows an APFS volume to its RAM store for the RAM check and the detach", () => {
+    const d = disk({ volumeDev: "/dev/disk100s1" });
+    const claimed = d.gate("claim", String(process.pid));
+    expect(claimed.status, claimed.stderr).toBe(0);
+    expect(d.gate("release", claimed.stdout.trim()).status).toBe(0);
+    expect(d.called()).toContain("hdiutil detach /dev/disk99");
+    expect(d.called()).not.toContain("detach /dev/disk100s1");
   });
   it("takes over a lock whose holder died, and refuses a release outside the volume", () => {
     const d = disk();
