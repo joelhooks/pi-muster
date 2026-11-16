@@ -127,7 +127,13 @@ ensure() {
   is_ram_device "$dev" || { fail "$root is mounted from $dev, which is not a RAM disk"; return 1; }
   sweep_dead_runs || return 1
   fs=$(mounted_fs)
-  if [ "$fs" != apfs ] && ! live_runs; then
+  # Agent graph desk: only a known older type rebuilds. An unparsed mount line must not rebuild a good disk every claim.
+  case "$fs" in
+    hfs|msdos|exfat) rebuild=yes ;;
+    apfs) rebuild= ;;
+    *) rebuild=; note "fs unknown at $root (${fs:-empty}); not rebuilding" ;;
+  esac
+  if [ -n "$rebuild" ] && ! live_runs; then
     store=$(ram_store "$dev")
     started=$(ms)
     if hdiutil detach "$store" >/dev/null 2>&1; then

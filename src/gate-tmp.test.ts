@@ -158,6 +158,14 @@ describe("gate-tmp claim and release", () => {
     expect(d.logged()).toContain("apfs rebuild deferred: /dev/disk99 busy (was hfs)");
     expect(d.called()).not.toContain("apfs create");
   });
+  it("never rebuilds when the mount type does not parse", () => {
+    const d = disk({ fs: "" });
+    const claimed = d.gate("claim", String(process.pid));
+    expect(claimed.status, claimed.stderr).toBe(0);
+    expect(d.called()).not.toContain("detach");
+    expect(d.called()).not.toContain("apfs create");
+    expect(d.logged()).toContain("fs unknown at");
+  });
   it("follows an APFS volume to its RAM store for the RAM check and the detach", () => {
     const d = disk({ volumeDev: "/dev/disk100s1" });
     const claimed = d.gate("claim", String(process.pid));
