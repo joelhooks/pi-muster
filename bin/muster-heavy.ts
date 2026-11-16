@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
 import { homedir, hostname, platform } from "node:os";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { finishJob, heavyReport, heavySnapshot, heavyStatus, registerJob, refreshJob, jobsPath, type HeavyOptions } from "../src/heavy-lock.ts";
@@ -15,6 +15,30 @@ function ignoredLine(args: readonly string[], options: HeavyOptions) {
   if (options.window !== undefined) names.add("MUSTER_DEPLOY_WINDOW");
   if (options.grant !== undefined) names.add("MUSTER_HEAVY_GRANT");
   if (names.size) console.error(`muster-heavy: ignored legacy admission settings: ${[...names].join(", ")}`);
+}
+
+const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+
+/** fleet desk, 2026-11-16: `op` starts a long-lived daemon under TMPDIR. Run inside a gate, it landed on the RAM disk,
+ * outlived the run and kept the disk from ever detaching (ten such daemons since 11-15). This shim, first on the gate's
+ * PATH, runs the real `op` with the PATH and TMPDIR the gate inherited, so its daemon lives where op would put it. */
+export function opShim(path: string, tmpdir: string | undefined): string {
+  return [
+    "#!/bin/sh",
+    "# muster-heavy: keep op's long-lived daemon off the gate RAM disk.",
+    `PATH=${shellQuote(path)}; export PATH`,
+    tmpdir === undefined ? "unset TMPDIR" : `TMPDIR=${shellQuote(tmpdir)}; export TMPDIR`,
+    'exec op "$@"',
+    "",
+  ].join("\n");
+}
+
+/** The child environment for a gate run: TMPDIR on the run dir, and an op shim first on PATH. */
+export function gateEnv(dir: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const shims = join(dir, ".muster-bin");
+  mkdirSync(shims, { recursive: true });
+  writeFileSync(join(shims, "op"), opShim(env.PATH ?? "/usr/bin:/bin", env.TMPDIR), { mode: 0o755 });
+  return { ...env, TMPDIR: `${dir}/`, PATH: `${shims}:${env.PATH ?? "/usr/bin:/bin"}` };
 }
 
 /** Only Flagg macOS jobs use RAM. An explicit ensure executable supports probes;
@@ -129,7 +153,7 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   try {
     child = spawn("/usr/bin/time", [...format, "-o", accountingPath, "--", ...command], {
       stdio: "inherit", detached: true,
-      ...(gateTmp && { env: { ...process.env, TMPDIR: `${gateTmp.dir}/` } }),
+      ...(gateTmp && { env: gateEnv(gateTmp.dir, process.env) }),
     });
   } catch (error) {
     console.error(`muster-heavy: ${error instanceof Error ? error.message : String(error)}`);

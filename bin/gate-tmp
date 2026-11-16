@@ -187,6 +187,16 @@ detach_if_idle() {
   fi
 }
 
+# fleet desk, 2026-11-16: a process a gate left behind with its cwd in the run (an op daemon) outlives the run and keeps
+# the disk from detaching. Stop only processes whose cwd is inside the run being released, and log each one.
+stop_run_holders() {
+  lsof -a -d cwd +D "$1" -Fpc 2>/dev/null | awk '/^p/ { pid = substr($0, 2) } /^c/ { print pid, substr($0, 2) }' |
+    while read -r pid cmd; do
+      [ -n "$pid" ] && [ "$pid" != "$$" ] || continue
+      if ${GATE_TMP_KILL:-kill} "$pid" 2>/dev/null; then note "stopped $cmd:$pid left in ${1##*/}"; fi
+    done
+}
+
 release() {
   dir=${1:-}
   case "$dir" in
@@ -194,7 +204,7 @@ release() {
     *) fail "refusing release outside $root: $dir"; return 2 ;;
   esac
   take_lock || return 1
-  if ram_root && [ -d "$dir" ] && [ ! -L "$dir" ]; then rm -rf -- "$dir"; fi
+  if ram_root && [ -d "$dir" ] && [ ! -L "$dir" ]; then stop_run_holders "$dir"; rm -rf -- "$dir"; fi
   detach_if_idle
   drop_lock
 }

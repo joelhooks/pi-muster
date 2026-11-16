@@ -4,7 +4,7 @@ import { hostname, platform, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readJobs } from "./heavy-lock.ts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { claimGateTmp } from "../bin/muster-heavy.ts";
+import { claimGateTmp, gateEnv, opShim } from "../bin/muster-heavy.ts";
 
 const homes: string[] = [];
 const flagg = { platform: "darwin" as const, name: "Flagg" };
@@ -50,7 +50,7 @@ describe("gate-tmp sweep", () => {
 
 // Switchboard, 2026-10-18: the RAM disk held 16 GB for 3.7 days while using 158 MB; its pages are never freed until detach.
 describe("gate-tmp claim and release", () => {
-  function disk(options: { mounted?: boolean; busy?: boolean; holders?: string; fs?: string; volumeDev?: string } = {}) {
+  function disk(options: { mounted?: boolean; busy?: boolean; holders?: string; runHolders?: string; fs?: string; volumeDev?: string } = {}) {
     const { root } = fixture();
     const volume = join(root, "volume");
     mkdirSync(volume);
@@ -63,7 +63,9 @@ describe("gate-tmp claim and release", () => {
     const bin = join(root, "bin");
     mkdirSync(bin);
     const tools: Record<string, string> = {
-      lsof: options.holders === undefined ? "exit 1" : `printf '${options.holders}'`,
+      // `-a -d cwd +D <run>` asks for processes left in a run; anything else is the detach's holder query.
+      lsof: `case "$1" in -a) ${options.runHolders === undefined ? "exit 1" : `printf '${options.runHolders}'`} ;; *) ${options.holders === undefined ? "exit 1" : `printf '${options.holders}'`} ;; esac`,
+      fakekill: `echo "kill $*" >> '${calls}'`,
       uname: "echo Darwin", hostname: "echo Flagg", mdutil: "echo 'Indexing disabled'", newfs_hfs: "exit 0",
       mount: `[ -e '${state}' ] && echo "${volumeDev} on ${volume} ($(cat '${fsFile}'), local)"; exit 0`,
       diskutil: `echo "diskutil $*" >> '${calls}'; case "$1" in
@@ -80,7 +82,7 @@ describe("gate-tmp claim and release", () => {
     for (const [name, body] of Object.entries(tools)) writeFileSync(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
     const script = join(root, "gate-tmp");
     writeFileSync(script, readFileSync("bin/gate-tmp", "utf8").replace('root=/Volumes/$volume_name', `root='${volume}'`));
-    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GATE_TMP_LOCK: join(root, "lock"), GATE_TMP_LOG: join(root, "log") };
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GATE_TMP_LOCK: join(root, "lock"), GATE_TMP_LOG: join(root, "log"), GATE_TMP_KILL: join(bin, "fakekill") };
     const gate = (...args: string[]) => spawnSync("sh", [script, ...args], { encoding: "utf8", env });
     const called = () => existsSync(calls) ? readFileSync(calls, "utf8") : "";
     const logged = () => existsSync(join(root, "log")) ? readFileSync(join(root, "log"), "utf8") : "";
@@ -174,6 +176,21 @@ describe("gate-tmp claim and release", () => {
     expect(d.called()).toContain("hdiutil detach /dev/disk99");
     expect(d.called()).not.toContain("detach /dev/disk100s1");
   });
+  it("stops processes left in the run being released, and logs each by pid and command", () => {
+    const d = disk({ runHolders: "p4242\\ncop\\np4343\\ncnode\\n" });
+    const dir = d.gate("claim", String(process.pid)).stdout.trim();
+    expect(d.gate("release", dir).status).toBe(0);
+    expect(d.called()).toContain("kill 4242");
+    expect(d.called()).toContain("kill 4343");
+    expect(d.logged()).toMatch(/stopped op:4242 left in run-\d+-/);
+    expect(d.logged()).toMatch(/stopped node:4343 left in run-\d+-/);
+  });
+  it("stops nothing when no process is left in the run", () => {
+    const d = disk({ holders: "p2350\\ncop\\n", busy: true });
+    const dir = d.gate("claim", String(process.pid)).stdout.trim();
+    expect(d.gate("release", dir).status).toBe(0);
+    expect(d.called()).not.toContain("kill ");
+  });
   it("takes over a lock whose holder died, and refuses a release outside the volume", () => {
     const d = disk();
     mkdirSync(join(d.root, "lock"));
@@ -185,6 +202,35 @@ describe("gate-tmp claim and release", () => {
     expect(outside.status).toBe(2);
     expect(outside.stderr).toContain("refusing release outside");
     expect(existsSync(d.root)).toBe(true);
+  });
+});
+
+describe("op shim", () => {
+  it("runs the real op with the inherited PATH and TMPDIR, quoting both", () => {
+    const shim = opShim("/opt/homebrew/bin:/it's here", "/var/folders/x/T/");
+    expect(shim).toContain("PATH='/opt/homebrew/bin:/it'\\''s here'; export PATH");
+    expect(shim).toContain("TMPDIR='/var/folders/x/T/'; export TMPDIR");
+    expect(shim).toContain('exec op "$@"');
+    expect(opShim("/usr/bin", undefined)).toContain("unset TMPDIR");
+  });
+  it("puts the shim first on the gate PATH and keeps TMPDIR on the run", () => {
+    const { root } = fixture();
+    const dir = join(root, "run-1-x");
+    mkdirSync(dir);
+    const env = gateEnv(dir, { PATH: "/usr/bin:/bin", TMPDIR: "/inherited/" });
+    expect(env.TMPDIR).toBe(`${dir}/`);
+    expect(env.PATH).toBe(`${dir}/.muster-bin:/usr/bin:/bin`);
+    expect(readFileSync(join(dir, ".muster-bin", "op"), "utf8")).toContain("TMPDIR='/inherited/'");
+  });
+  it("hands a real child the inherited TMPDIR when it calls op", () => {
+    const { root } = fixture();
+    const dir = join(root, "run-2-x");
+    const fakeBin = join(root, "real");
+    mkdirSync(dir); mkdirSync(fakeBin);
+    writeFileSync(join(fakeBin, "op"), '#!/bin/sh\necho "op TMPDIR=$TMPDIR args=$*"\n', { mode: 0o755 });
+    const env = gateEnv(dir, { PATH: `${fakeBin}:/usr/bin:/bin`, TMPDIR: "/inherited/" });
+    const out = spawnSync("sh", ["-c", 'echo "child TMPDIR=$TMPDIR"; op read x'], { encoding: "utf8", env });
+    expect(out.stdout).toBe(`child TMPDIR=${dir}/\nop TMPDIR=/inherited/ args=read x\n`);
   });
 });
 
