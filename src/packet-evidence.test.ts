@@ -11,7 +11,7 @@ import { agentLaunchForeground as agentLaunch, laneOpen, packetLand, packetRepor
 import { load, mutate } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
 
-async function fixture(lines = 1) {
+async function fixture(lines = 1, stale = false) {
   const h = harness();
   const dir = makeRepo(join(h.root, "repo"));
   writeFileSync(join(dir, "shared"), Array.from({ length: 30 }, (_, i) => `line ${i}\n`).join(""));
@@ -19,10 +19,17 @@ async function fixture(lines = 1) {
   await runWith(h, projectOpen({ dir, slug: "probe", outcome: "test", reviewTrigger: "weekly", nextAction: "test", space: "w1", ephemeral: true, mode: "rift-merge" }));
   await runWith(h, laneOpen(dir, { slug: "probe", label: "probe", goal: "test", base: "refs/heads/main" }));
   const brief = join(h.root, "brief.md"); writeFileSync(brief, "Change shared and work.\n");
+  // stale: main gains foreign files before the clone, then falls back behind the clone base, as an unfetched remote ref lags.
+  const beforeForeign = sh(dir, "rev-parse", "main").trim();
+  if (stale) {
+    for (const name of ["foreign-a", "foreign-b", "foreign-c"]) writeFileSync(join(dir, name), `${name}\n`);
+    sh(dir, "add", "foreign-a", "foreign-b", "foreign-c"); sh(dir, "commit", "-qm", "foreign work already on the base");
+  }
   const { row } = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "probe", label: "worker", clone: true, brief }));
   writeFileSync(join(row.cwd, "shared"), readFileSync(join(row.cwd, "shared"), "utf8").replace("line 0", "worker line 0"));
   writeFileSync(join(row.cwd, "work"), "new\n".repeat(lines)); sh(row.cwd, "add", "shared", "work"); sh(row.cwd, "commit", "-qm", "work");
   const id = sh(row.cwd, "rev-parse", "HEAD").trim();
+  if (stale) sh(dir, "update-ref", "refs/heads/main", beforeForeign);
   await runWith(h, packetReport({ dir, agent: row.name, owner: row.owner, cwd: row.cwd, commit: id, summary: "shared work", checks: [{ name: "fixture check", outcome: "pass" }] }));
   const base = sh(dir, "rev-parse", "main").trim();
   const brainBeforeVerify = readdirSync(join(dir, ".brain"), { recursive: true }).sort();
@@ -230,6 +237,13 @@ describe("packet evidence integration", () => {
     expect(text).not.toContain(s.row.sessionFile!);
     expect(s.verified.note).toContain('agent_launch role:"judge"');
     expect(s.verified.note).toContain(`brief:"${s.verified.reviewFile}" and no prompt`);
+  });
+  it("diffs from the clone base when the source's lane base lags behind it", async () => {
+    const s = await fixture(1, true);
+    expect(s.verified.packet.verification).toMatchObject({ paths: ["shared", "work"] });
+    const text = readFileSync(s.verified.reviewFile!, "utf8");
+    expect(text).toContain("diff --git a/work b/work");
+    expect(text).not.toContain("foreign-a");
   });
   it("keeps the brief in private owner state without adding files to the project Brain", async () => {
     const s = await fixture();

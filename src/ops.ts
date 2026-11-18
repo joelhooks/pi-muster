@@ -4185,10 +4185,20 @@ const packetEvidenceDiff = (project: Project, lane: Lane | undefined, row: Agent
     const source = machine ? mapPath(sourceOf(project, lane, row), machine) : repo.source;
     yield* git("fetch", "-q", "--", source, comparisonBase);
   }
-  const mergeBase = (yield* git("merge-base", comparisonBase, packet.id)).trim();
+  const mergeBase = yield* nearestBase(run, cwd, (yield* git("merge-base", comparisonBase, packet.id)).trim(), row.clone?.base?.sha, packet.id);
   const paths = (yield* git("diff", "--no-renames", "--name-only", "-z", mergeBase, packet.id, "--")).split("\0").filter(Boolean);
   const diff = yield* git("diff", "--no-ext-diff", "--no-textconv", mergeBase, packet.id, "--");
   return { ...repo, paths, diff };
+});
+
+/** ratstack desk, 2026-11-18: the source's copy of the lane base (an unfetched remote-tracking ref) can sit behind the base the
+ * worker's clone started from. Diffing from that older merge-base put about 100 foreign files into a 5-file packet's review, and
+ * the judge rejected it as out of scope. Use the clone base when it lies between that merge-base and the packet; otherwise the
+ * merge-base stands (a worker that merged a newer base in still diffs from the newer one). */
+const nearestBase = (run: ProcShape, cwd: string, mergeBase: string, cloneBase: string | null | undefined, packetId: string) => Effect.gen(function* () {
+  if (!cloneBase || cloneBase === mergeBase) return mergeBase;
+  const ancestor = (a: string, b: string) => run.run("git", ["merge-base", "--is-ancestor", a, b], { cwd }).pipe(Effect.map(result => result.code === 0));
+  return (yield* ancestor(cloneBase, packetId)) && (yield* ancestor(mergeBase, cloneBase)) ? cloneBase : mergeBase;
 });
 
 /** Landing alarms never reopen a worker clone, including owner-attested landings. */
@@ -4196,7 +4206,7 @@ const packetEvidenceLines = (project: Project, lane: Lane | undefined, row: Agen
   const repo = yield* packetEvidenceRepo(project, lane, row);
   const git = (...args: string[]) => must("git", args, { cwd: repo.source }).pipe(Effect.provideService(Proc, repo.run));
   const base = packet.verification?.baseSha ?? row.clone?.base?.sha ?? `${packet.id}^`;
-  const mergeBase = (yield* git("merge-base", base, packet.id)).trim();
+  const mergeBase = yield* nearestBase(repo.run, repo.source, (yield* git("merge-base", base, packet.id)).trim(), row.clone?.base?.sha, packet.id);
   return changedLines(yield* git("diff", "--no-ext-diff", "--no-textconv", "--numstat", mergeBase, packet.id, "--"));
 });
 
