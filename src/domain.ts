@@ -227,6 +227,8 @@ const RemotePath = Schema.String.check(Schema.isPattern(/^\/[^\x00-\x1f\x7f]*$/)
 export const MachineConfig = Schema.Struct({
   herdr: Schema.String,
   maxPanes: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0))),
+  /** Opt-in for the headless wake command; absent denies wake. */
+  wake: Schema.optionalKey(Schema.Boolean),
   ssh: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_][A-Za-z0-9_.@-]*$/)),
   paths: Schema.Record(RemotePath, RemotePath),
   musterExtension: RemotePath,
@@ -243,6 +245,18 @@ export const MachineConfig = Schema.Struct({
 });
 export type MachineConfig = typeof MachineConfig.Type;
 export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
+
+export const decodeWakeIdentity = Schema.decodeUnknownSync(Schema.Struct({
+  command: Schema.Literal("whoami"), ok: Schema.Literal(true), name: Schema.String,
+  lease: Schema.NullOr(Schema.Struct({ expiresAt: Iso, live: Schema.Boolean })),
+}));
+export const decodeWakeReceipt = Schema.decodeUnknownSync(Schema.Struct({
+  result: Schema.Literals(["restored", "alreadyLive", "refused", "failed"]),
+  name: Schema.NullOr(Schema.String), project: Schema.NullOr(Schema.String), row: Schema.NullOr(Schema.String),
+  machine: Schema.NullOr(Schema.String), session: Schema.NullOr(Schema.String), pane: Schema.NullOr(Schema.String),
+  reason: Schema.NullOr(Schema.String), messageId: Schema.NullOr(Schema.String),
+  ready: Schema.Boolean, receiptSaved: Schema.Boolean, permanent: Schema.NullOr(Schema.Boolean),
+}));
 
 export const AgentLaunchRequest = Schema.Struct({
   action: Schema.Literals(["launch", "fork", "restore", "adopt", "restart"]),

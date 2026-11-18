@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 
 import { Context, Effect } from "effect";
 import type { HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
@@ -119,15 +119,25 @@ export class Comms extends Context.Service<Comms, CommsShape>()("muster/Comms") 
 
 const MAX_BUFFER = 16 * 1024 * 1024;
 
-export const liveProc: ProcShape = {
-  run: (command, args, options) =>
-    Effect.callback<ProcResult, ProcError>((resume) => {
+// Give SSH a chance to tear down cleanly, then reap even a child that ignores TERM.
+export const stopChild = async (child: ChildProcess, closed: Promise<void>) => {
+  if (child.exitCode !== null || child.signalCode !== null) return closed;
+  child.kill("SIGTERM");
+  const escalate = setTimeout(() => child.kill("SIGKILL"), 500);
+  try { await closed; } finally { clearTimeout(escalate); }
+};
+
+export const makeLiveProc = (): ProcShape => ({
+  run: (command, args, options) => {
+    const timeout = options.timeoutMs ?? 120_000;
+    return Effect.acquireUseRelease(Effect.sync(() => {
+      let complete!: (result: Effect.Effect<ProcResult, ProcError>) => void;
+      const result = new Promise<Effect.Effect<ProcResult, ProcError>>(resolve => { complete = resolve; });
       const child = execFile(
         command,
         [...args],
         {
           cwd: options.cwd,
-          timeout: options.timeoutMs ?? 120_000,
           maxBuffer: MAX_BUFFER,
           env: { ...process.env, ...options.env },
           encoding: "utf8",
@@ -135,27 +145,40 @@ export const liveProc: ProcShape = {
         (error, stdout, stderr) => {
           const err = error as (NodeJS.ErrnoException & { killed?: boolean; code?: number | string }) | null;
           if (err && (typeof err.code === "string" || err.killed)) {
-            resume(
+            complete(
               Effect.fail(
                 new ProcError({
                   command: [command, ...args].join(" "),
                   code: null,
                   stderr: String(stderr ?? ""),
-                  message: err.killed ? `timed out after ${options.timeoutMs ?? 120_000}ms` : err.message,
+                  message: err.message,
                 }),
               ),
             );
             return;
           }
-          resume(Effect.succeed({ code: err ? Number(err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) }));
+          complete(Effect.succeed({ code: err ? Number(err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr) }));
         },
       );
       if (options.input !== undefined) child.stdin?.end(options.input);
-      return Effect.sync(() => {
-        child.kill("SIGTERM");
+      else child.stdin?.end();
+      const reaped = new Promise<void>(resolve => {
+        child.once("exit", () => resolve());
+        child.once("error", () => { if (child.pid === undefined) resolve(); });
       });
-    }),
-};
+      return { child, result, reaped };
+    }), started => Effect.promise(() => started.result).pipe(Effect.flatten,
+      Effect.timeoutOrElse({ duration: timeout, orElse: () => Effect.fail(new ProcError({
+        command: [command, ...args].join(" "), code: null, stderr: "", message: `timed out after ${timeout}ms`,
+      })) })), started => Effect.promise(async () => {
+        await stopChild(started.child, started.reaped);
+        // A grandchild may inherit a pipe. It must not delay cleanup of the reaped child.
+        started.child.stdout?.destroy();
+        started.child.stderr?.destroy();
+      }));
+  },
+});
+export const liveProc = makeLiveProc();
 
 /** Runs a command and fails on a nonzero exit. */
 export const must = (command: string, args: readonly string[], options: ProcOptions) =>

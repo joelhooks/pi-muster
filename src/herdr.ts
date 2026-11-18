@@ -66,6 +66,8 @@ export const workspaceRename = (workspaceId: string, label: string) =>
 export const workspaceCreate = (label: string, cwd: string) =>
   call({ method: "workspace.create", params: { cwd, focus: false, label, env: {} } });
 
+export const tabList = (workspaceId: string) => call({ method: "tab.list", params: { workspace_id: workspaceId } }).pipe(Effect.map(result => result.tabs));
+
 export const tabCreate = (workspaceId: string, cwd: string, label: string) =>
   call({ method: "tab.create", params: { workspace_id: workspaceId, cwd, focus: false, label, env: {} } });
 

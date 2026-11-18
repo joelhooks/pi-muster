@@ -1,0 +1,17 @@
+#!/bin/sh
+# Resolve npm's bin symlink before resolving the package-owned TypeScript loader.
+bootstrap_failed() {
+  printf '%s\n' '{"result":"failed","name":null,"project":null,"row":null,"machine":null,"session":null,"pane":null,"reason":"muster-restore loader unavailable","messageId":null,"ready":false,"receiptSaved":false,"permanent":null}'
+  exit 1
+}
+script=$0
+while [ -L "$script" ]; do
+  dir=$(CDPATH= cd -- "$(dirname -- "$script")" && pwd) || bootstrap_failed
+  target=$(readlink "$script") || bootstrap_failed
+  case "$target" in
+    /*) script=$target ;;
+    *) script=$dir/$target ;;
+  esac
+done
+dir=$(CDPATH= cd -P -- "$(dirname -- "$script")" && pwd -P) || bootstrap_failed
+exec node "$dir/muster-restore-main.mjs" "$@"
