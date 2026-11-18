@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
 import { homedir, hostname, platform } from "node:os";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { accessSync, constants, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { finishJob, heavyReport, heavySnapshot, heavyStatus, registerJob, refreshJob, jobsPath, type HeavyOptions } from "../src/heavy-lock.ts";
 
@@ -11,7 +11,7 @@ const legacyValueFlags = new Set(["--wait", "--grant", "--slots", "--min-free-gb
 const legacyFlags = new Set(["--exclusive", "--reap", "--list"]);
 function ignoredLine(args: readonly string[], options: HeavyOptions) {
   const names = new Set(args.filter(arg => legacyValueFlags.has(arg) || legacyFlags.has(arg) || arg === "grant"));
-  for (const key of Object.keys(process.env)) if ((key.startsWith("MUSTER_HEAVY_") || ["MUSTER_DEPLOY_WINDOW", "MUSTER_DEPLOY_CAP_MIN", "MUSTER_EXCLUSIVE_CAP_MIN"].includes(key)) && key !== "MUSTER_HEAVY_GATE_TMP" && process.env[key] !== undefined) names.add(key);
+  for (const key of Object.keys(process.env)) if ((key.startsWith("MUSTER_HEAVY_") || ["MUSTER_DEPLOY_WINDOW", "MUSTER_DEPLOY_CAP_MIN", "MUSTER_EXCLUSIVE_CAP_MIN"].includes(key)) && !["MUSTER_HEAVY_GATE_TMP", "MUSTER_HEAVY_TIME"].includes(key) && process.env[key] !== undefined) names.add(key);
   if (options.window !== undefined) names.add("MUSTER_DEPLOY_WINDOW");
   if (options.grant !== undefined) names.add("MUSTER_HEAVY_GRANT");
   if (names.size) console.error(`muster-heavy: ignored legacy admission settings: ${[...names].join(", ")}`);
@@ -150,13 +150,16 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   // from an intentional exit 143. Its %x is the child exit field (zero on signal).
   const accountingPath = join(jobsPath(options.home), `${job.id}.time`);
   const format = platform() === "linux" ? ["-f", "real %e\nuser %U\nsys %S\nexit %x"] : ["-p"];
-  // A minimal Linux install (Sloat, 2026-11-18) has no /usr/bin/time, and every heavy job failed with ENOENT.
-  // CPU accounting is telemetry: run the command without it rather than refuse the job.
+  // Minimal Linux installs may not have /usr/bin/time. Keep running with sampled CPU if unavailable.
   const timeBin = process.env.MUSTER_HEAVY_TIME || "/usr/bin/time";
-  const timed = existsSync(timeBin);
-  if (!timed) console.error(`muster-heavy: ${timeBin} not found; running without CPU accounting`);
+  const candidates = timeBin.includes("/") ? [resolve(timeBin)] : (process.env.PATH ?? "/usr/bin:/bin").split(delimiter).map(dir => resolve(dir, timeBin));
+  const timed = candidates.find(path => {
+    try { accessSync(path, constants.X_OK); return statSync(path).isFile(); }
+    catch { return false; }
+  });
+  if (!timed) console.error(`muster-heavy: ${timeBin} unavailable; running with sampled CPU only`);
   try {
-    child = spawn(timed ? timeBin : command[0]!, timed ? [...format, "-o", accountingPath, "--", ...command] : command.slice(1), {
+    child = spawn(timed ?? command[0]!, timed ? [...format, "-o", accountingPath, "--", ...command] : command.slice(1), {
       stdio: "inherit", detached: true,
       ...(gateTmp && { env: gateEnv(gateTmp.dir, process.env) }),
     });

@@ -167,7 +167,9 @@ export function finishJob(options: HeavyOptions, job: HeavyJob, exit: number | n
   if (current.state !== "running") return current;
   const snapshot = heavyJobMachine.resolveState({ value: current.state });
   const [next] = transition(heavyJobMachine, snapshot, { type: exit === null ? "LOSE" : "FINISH" });
-  const facts = { ...withSample(current, sampleJobs(options, now)), ...(cpuSeconds !== undefined ? { cpuSeconds } : {}), wallMs: Math.max(0, now - Date.parse(current.startedAt)), finishedAt: new Date(now).toISOString() };
+  const sampled = withSample(current, sampleJobs(options, now));
+  const facts = { ...sampled, cpuSeconds: cpuSeconds ?? sampled.cpuSeconds, cpuSource: cpuSeconds !== undefined ? "time" : "sampled",
+    wallMs: Math.max(0, now - Date.parse(current.startedAt)), finishedAt: new Date(now).toISOString() };
   const finished = decodeHeavyJob(next.matches("lost") ? { ...facts, state: "lost", exit: null, lost: true } : { ...facts, state: "finished", exit });
   atomicJSON(jobPath(options.home, job.id), finished);
   return finished;
@@ -222,16 +224,17 @@ export function parseSince(value: string): number {
 export function heavyReport(options: HeavyOptions, since = "24h", now = (options.now ?? Date.now)()) {
   const cutoff = now - parseSince(since);
   liveJobs(options, now); // Status/report are the recovery pass for vanished wrappers.
-  const jobs = readJobs(options.home).filter(job => job.state !== "running" && Date.parse(job.startedAt) >= cutoff);
+  const jobs = readJobs(options.home).filter(job => job.state !== "running").filter(job => Date.parse(job.startedAt) >= cutoff);
+  type ReportCpuSource = NonNullable<(typeof jobs)[number]["cpuSource"]> | "unknown";
   const group = (key: "repo" | "command") => {
-    const groups = new Map<string, { count: number; wallMs: number; cpuSeconds: number; peakRssKB: number; lost: number }>();
+    const groups = new Map<string, { count: number; wallMs: number; cpuSeconds: number; cpuSources: Set<ReportCpuSource>; peakRssKB: number; lost: number }>();
     for (const job of jobs) {
-      if (job.state === "running") continue;
-      const row = groups.get(job[key]) ?? { count: 0, wallMs: 0, cpuSeconds: 0, peakRssKB: 0, lost: 0 };
+      const row = groups.get(job[key]) ?? { count: 0, wallMs: 0, cpuSeconds: 0, cpuSources: new Set<ReportCpuSource>(), peakRssKB: 0, lost: 0 };
       row.count++; row.wallMs += job.wallMs; row.cpuSeconds += job.cpuSeconds; row.peakRssKB = Math.max(row.peakRssKB, job.peakRssKB); row.lost += job.state === "lost" ? 1 : 0;
+      row.cpuSources.add(job.cpuSource ?? "unknown");
       groups.set(job[key], row);
     }
-    return Array.from(groups, ([name, metrics]) => ({ [key]: name, ...metrics }));
+    return Array.from(groups, ([name, { cpuSources, ...metrics }]) => ({ [key]: name, ...metrics, cpuSources: [...cpuSources].sort() }));
   };
   return { since, repos: group("repo"), commands: group("command"), jobs };
 }
