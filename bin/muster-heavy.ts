@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync, spawn } from "node:child_process";
 import { homedir, hostname, platform } from "node:os";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { finishJob, heavyReport, heavySnapshot, heavyStatus, registerJob, refreshJob, jobsPath, type HeavyOptions } from "../src/heavy-lock.ts";
@@ -150,8 +150,13 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   // from an intentional exit 143. Its %x is the child exit field (zero on signal).
   const accountingPath = join(jobsPath(options.home), `${job.id}.time`);
   const format = platform() === "linux" ? ["-f", "real %e\nuser %U\nsys %S\nexit %x"] : ["-p"];
+  // A minimal Linux install (Sloat, 2026-11-18) has no /usr/bin/time, and every heavy job failed with ENOENT.
+  // CPU accounting is telemetry: run the command without it rather than refuse the job.
+  const timeBin = process.env.MUSTER_HEAVY_TIME || "/usr/bin/time";
+  const timed = existsSync(timeBin);
+  if (!timed) console.error(`muster-heavy: ${timeBin} not found; running without CPU accounting`);
   try {
-    child = spawn("/usr/bin/time", [...format, "-o", accountingPath, "--", ...command], {
+    child = spawn(timed ? timeBin : command[0]!, timed ? [...format, "-o", accountingPath, "--", ...command] : command.slice(1), {
       stdio: "inherit", detached: true,
       ...(gateTmp && { env: gateEnv(gateTmp.dir, process.env) }),
     });
@@ -163,6 +168,7 @@ export async function runHeavy(args: string[], options: HeavyOptions) {
   telemetry(() => refreshJob(options, job));
   timer = setInterval(() => telemetry(() => refreshJob(options, job)), 5000);
   child.on("close", (code, signal) => {
+    if (!timed) { finish(signal ? 128 : code ?? 1); return; }
     let accounting = "";
     telemetry(() => { accounting = readFileSync(accountingPath, "utf8"); rmSync(accountingPath, { force: true }); });
     const match = /real\s+([\d.]+)\nuser\s+([\d.]+)\nsys\s+([\d.]+)(?:\nexit (\d+))?\n?$/.exec(accounting);

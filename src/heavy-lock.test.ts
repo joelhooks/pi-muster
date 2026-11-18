@@ -14,6 +14,13 @@ function cli(home: string, args: string[], env: Record<string, string> = {}) {
 }
 
 describe("job registry", () => {
+  it("runs the command without CPU accounting when time is missing", () => {
+    const { home } = setup();
+    const ok = cli(home, ["--", "sh", "-c", "echo ran; exit 3"], { MUSTER_HEAVY_TIME: join(home, "no-time") });
+    expect(ok.status).toBe(3);
+    expect(ok.stdout).toContain("ran");
+    expect(ok.stderr).toContain("not found; running without CPU accounting");
+  });
   it("records one atomic job with full command and terminal metrics", () => {
     const options = setup();
     const command = `sh -c fc-run123 ${"long-argument ".repeat(100)}`;
