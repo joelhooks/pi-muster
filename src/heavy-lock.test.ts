@@ -14,12 +14,19 @@ function cli(home: string, args: string[], env: Record<string, string> = {}) {
 }
 
 describe("job registry", () => {
-  it("runs the command without CPU accounting when time is missing", () => {
+  it("runs the command with sampled CPU when time is missing and marks report totals", () => {
     const { home } = setup();
     const ok = cli(home, ["--", "sh", "-c", "echo ran; exit 3"], { MUSTER_HEAVY_TIME: join(home, "no-time") });
     expect(ok.status).toBe(3);
     expect(ok.stdout).toContain("ran");
-    expect(ok.stderr).toContain("not found; running without CPU accounting");
+    expect(ok.stderr).toContain("unavailable; running with sampled CPU only");
+    expect(ok.stderr).not.toContain("ignored legacy admission settings");
+    expect(readJobs(home)[0]).toMatchObject({ state: "finished", exit: 3, cpuSource: "sampled" });
+    const report = cli(home, ["report"]);
+    expect(report.status, report.stderr).toBe(0);
+    const rows = report.stdout.trim().split("\n").map(line => JSON.parse(line));
+    expect(rows).toHaveLength(2);
+    for (const row of rows) expect(row).toMatchObject({ cpuSeconds: expect.any(Number), cpuSources: ["sampled"] });
   });
   it("records one atomic job with full command and terminal metrics", () => {
     const options = setup();
@@ -27,8 +34,26 @@ describe("job registry", () => {
     const job = registerJob({ ...options, now: () => 10000 }, command);
     expect(job).toMatchObject({ host: hostname(), pid: process.pid, cwd: process.cwd(), command, state: "running", startedAt: "1970-01-01T00:00:10.000Z" });
     expect(readdirSync(jobsPath(options.home))).toEqual([`${job.id}.json`]);
-    expect(finishJob(options, job, 7, 12000, 1.23)).toMatchObject({ state: "finished", exit: 7, wallMs: 2000, cpuSeconds: 1.23 });
-    expect(finishJob(options, job, null, 13000).state).toBe("finished");
+    expect(finishJob(options, job, 7, 12000, 1.23)).toMatchObject({ state: "finished", exit: 7, wallMs: 2000, cpuSeconds: 1.23, cpuSource: "time" });
+    expect(finishJob(options, job, null, 13000)).toMatchObject({ state: "finished", cpuSource: "time" });
+  });
+  it.each([
+    { accounted: undefined, cpuSeconds: 2.5, cpuSource: "sampled" },
+    { accounted: 0, cpuSeconds: 0, cpuSource: "time" },
+  ])("persists $cpuSource CPU (accounted: $accounted)", ({ accounted, cpuSeconds, cpuSource }) => {
+    const options = { ...setup(), now: () => 10000 };
+    const job = registerJob(options, "sample me");
+    sampleJobs(options, 10000, () => `${job.pid} 1 50 100 00:02.50`);
+    finishJob(options, job, 0, 11000, accounted);
+    expect(readJobs(options.home)[0]).toMatchObject({ state: "finished", cpuSeconds, cpuSource });
+  });
+  it("decodes a legacy finished record without assuming a CPU source", () => {
+    const { home } = setup();
+    const job = registerJob({ home }, "old");
+    const legacy = { ...job, state: "finished", exit: 0, wallMs: 2000, finishedAt: new Date().toISOString(), cpuSeconds: 1.25 };
+    writeFileSync(join(jobsPath(home), `${job.id}.json`), JSON.stringify(legacy));
+    expect(readJobs(home)).toEqual([legacy]);
+    expect(() => decodeHeavyJob({ ...legacy, cpuSource: "guessed" })).toThrow();
   });
   it("preserves a claimed tmpdir through registration and terminal decoding", () => {
     const options = setup();
@@ -50,7 +75,7 @@ describe("job registry", () => {
     const foreign = registerJob(options, "foreign", process.cwd(), 2147483646);
     writeFileSync(join(jobsPath(options.home), `${foreign.id}.json`), JSON.stringify({ ...foreign, host: "foreign-host" }));
     const snapshot = heavySnapshot(options);
-    expect(readJobs(options.home).find(row => row.id === job.id)).toMatchObject({ state: "lost", exit: null, lost: true });
+    expect(readJobs(options.home).find(row => row.id === job.id)).toMatchObject({ state: "lost", exit: null, lost: true, cpuSource: "sampled" });
     expect(snapshot.jobs.map(row => row.id)).toEqual([foreign.id]);
     expect(snapshot.holders[0]?.stale).toBe(false);
   });
@@ -142,13 +167,21 @@ describe("batched process telemetry", () => {
 
 describe("cost report", () => {
   it("groups count, wall, CPU and maximum RSS per repo and command within --since", () => {
-    const options = setup();
+    const options = { ...setup(), now: () => 10000 };
     const old = registerJob({ ...options, now: () => 1000 }, "old"); finishJob(options, old, 0, 2000, 9);
-    for (let i = 0; i < 2; i++) { const job = registerJob({ ...options, now: () => 10000 }, "same"); finishJob(options, job, i, 11000, 2); }
+    const timed = registerJob(options, "same");
+    const sampled = registerJob(options, "same");
+    const legacy = registerJob(options, "same");
+    sampleJobs(options, 10000, () => `${sampled.pid} 1 50 100 00:03.00`);
+    finishJob(options, timed, 0, 11000, 2);
+    finishJob(options, sampled, 0, 11000);
+    writeFileSync(join(jobsPath(options.home), `${legacy.id}.json`), JSON.stringify({
+      ...legacy, state: "finished", exit: 0, wallMs: 1000, finishedAt: new Date(11000).toISOString(), cpuSeconds: 1,
+    }));
     const report = heavyReport(options, "5s", 12000);
-    expect(report.repos).toHaveLength(1);
-    expect(report.repos[0]).toMatchObject({ count: 2, wallMs: 2000, cpuSeconds: 4, lost: 0 });
-    expect(report.commands).toEqual([expect.objectContaining({ command: "same", count: 2, cpuSeconds: 4 })]);
+    const metrics = { count: 3, wallMs: 3000, cpuSeconds: 6, cpuSources: ["sampled", "time", "unknown"], peakRssKB: 100, lost: 0 };
+    expect(report.repos).toEqual([expect.objectContaining(metrics)]);
+    expect(report.commands).toEqual([expect.objectContaining({ command: "same", ...metrics })]);
     expect(parseSince("24h")).toBe(86400000); expect(() => parseSince("potato")).toThrow();
   });
 });
@@ -170,13 +203,16 @@ describe("register-and-run CLI", () => {
   it("records CPU-seconds even for a job shorter than the sampling interval", () => {
     const { home } = setup();
     // Spin on the child's own CPU time: a wall-clock spin gets less CPU on a busy gate host.
-    const result = cli(home, ["--", process.execPath, "-e", "const t=Date.now()+5000; while(process.cpuUsage().user<80000&&Date.now()<t){}"]);
+    const result = cli(home, ["--", process.execPath, "-e", "const t=Date.now()+5000; while(process.cpuUsage().user<80000&&Date.now()<t){}"], { MUSTER_HEAVY_TIME: "time", PATH: "/usr/bin:/bin" });
     expect(result.status, result.stderr).toBe(0);
     const job = readJobs(home)[0]!;
     expect(job.cpuSeconds).toBeGreaterThan(0.05);
-    expect(job.state).toBe("finished");
+    expect(job).toMatchObject({ state: "finished", cpuSource: "time" });
     const report = cli(home, ["report", "--since", "24h", "--json"]);
-    expect(JSON.parse(report.stdout).jobs[0].cpuSeconds).toBe(job.cpuSeconds);
+    expect(report.status, report.stderr).toBe(0);
+    const data = JSON.parse(report.stdout);
+    expect(data.jobs[0]).toMatchObject({ cpuSeconds: job.cpuSeconds, cpuSource: "time" });
+    expect(data.commands[0]).toMatchObject({ cpuSeconds: job.cpuSeconds, cpuSources: ["time"] });
   }, 25000);
   it.each([
     { command: ["sh", "-c", "exit 143"], exit: 143 },

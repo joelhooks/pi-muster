@@ -23,10 +23,16 @@ const JobFacts = {
   cpuPercent: Schema.Number, rssKB: Schema.Number, peakRssKB: Schema.Number,
   cpuSeconds: Schema.Number, sampledAt: Schema.NullOr(Schema.Number),
 };
+const TerminalJobFacts = {
+  ...JobFacts,
+  // Legacy records have no provenance; don't infer it from the CPU value.
+  cpuSource: Schema.optionalKey(Schema.Literals(["time", "sampled"])),
+  wallMs: Schema.Number, finishedAt: Schema.String,
+};
 export const HeavyJob = Schema.Union([
   Schema.Struct({ ...JobFacts, state: Schema.Literal("running") }),
-  Schema.Struct({ ...JobFacts, state: Schema.Literal("finished"), exit: Schema.Number, wallMs: Schema.Number, finishedAt: Schema.String }),
-  Schema.Struct({ ...JobFacts, state: Schema.Literal("lost"), exit: Schema.Null, lost: Schema.Literal(true), wallMs: Schema.Number, finishedAt: Schema.String }),
+  Schema.Struct({ ...TerminalJobFacts, state: Schema.Literal("finished"), exit: Schema.Number }),
+  Schema.Struct({ ...TerminalJobFacts, state: Schema.Literal("lost"), exit: Schema.Null, lost: Schema.Literal(true) }),
 ]);
 export type HeavyJob = typeof HeavyJob.Type;
 export const decodeHeavyJob = Schema.decodeUnknownSync(HeavyJob);
