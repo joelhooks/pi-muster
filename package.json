@@ -31,6 +31,7 @@
     "muster-heavy": "./bin/muster-heavy.ts",
     "muster-digest": "./bin/muster-digest.ts",
     "muster-launch": "./bin/muster-launch",
+    "muster-restore": "./bin/muster-restore",
     "muster-close-after": "./bin/muster-close-after"
   },
   "files": [
@@ -42,6 +43,13 @@
     "bin/muster-heavy.ts",
     "bin/muster-launch.ts",
     "bin/muster-launch",
+    "bin/muster-restore",
+    "bin/muster-restore.ts",
+    "bin/muster-restore-ssh.mjs",
+    "bin/muster-restore-main.mjs",
+    "bin/muster-restore-args.mjs",
+    "bin/muster-restore-args.d.mts",
+    "src/wake-restore.ts",
     "bin/muster-close-after.ts",
     "bin/muster-close-after",
     "bin/muster-digest.ts",

@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync, renameSync, utimesSync, statSync, chmodSync, unlinkSync, rmdirSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { HerdrApiError } from "@joelhooks/pi-bellwether/herdr-client";
-import { sessionDirFor } from "./argv.ts";
+import { sessionDirFor, shellQuote } from "./argv.ts";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
@@ -19,6 +19,10 @@ import { agentRewind } from "./rewind.ts";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { deliverOwnerItem, ownerItem } from "./owner-queue.ts";
 import { fakeRatking } from "./ratking-fake.ts";
+import { createHash } from "node:crypto";
+import { exitCode } from "../bin/muster-restore-args.mjs";
+import { registryPath } from "./registry.ts";
+import { wakeReceiptDir, wakeRestore } from "./wake-restore.ts";
 
 const config = (patch: Partial<MachineConfig> = {}): MachineConfig => decodeMachines({ remote: { herdr: "remote", ssh: "remote", paths: {}, musterExtension: "/remote/muster", workerWorktree: "/remote/worker-worktree.sh", env: { CUDA_VISIBLE_DEVICES: "", MUSTER_FLEET_COMPUTE: "off" }, wrap: [], ...patch } }).remote!;
 beforeEach(() => { vi.stubEnv("MUSTER_FLEET_COMPUTE", "off"); vi.stubEnv("MUSTER_MACHINE", ""); });
@@ -96,6 +100,47 @@ async function launchedFork() {
   h.herdr.seq = template.h.herdr.seq;
   const s = setup({ h, dir, remote });
   return { s, launched: { row: (await s.run(load(dir))).agents.find(row => row.name === "remote-w")! } };
+}
+
+async function wakeFixture() {
+  const { s, launched: { row } } = await launchedFork();
+  const registry = registryPath(s.h.home);
+  mkdirSync(join(registry, ".."), { recursive: true });
+  writeFileSync(registry, `${JSON.stringify({ slug: "probe", dir: s.dir, spaceId: "w1" })}\n`);
+  let observedName = "probe/remote-w";
+  const configure = (wake?: boolean, alias?: string, herdr = "remote") => {
+    observedName = alias ?? "probe/remote-w";
+    s.setMachines({ remote: config({ ...(wake === undefined ? {} : { wake }), herdr, workerWorktree: s.h.workerWorktree,
+      env: { MUSTER_FLEET_COMPUTE: "off", ...(alias ? { RATKING_NAME: alias, MUSTER_OWNER: "ordinary-launch-owner-override" } : {}) } }) });
+  };
+  configure(true);
+  const identity = (lease: object | null = null) => ({ command: "whoami", ok: true, name: observedName, did: "did:example:row", key: { held: lease !== null, source: "test-directory-key" }, lease });
+  let reportedIdentity: unknown;
+  let healthCalls = 0, probeCalls = 0, probeFails = false;
+  const commands: string[] = [];
+  const original = s.proc.run;
+  vi.spyOn(s.proc, "run").mockImplementation((command, args, opts) => {
+    if (args[1] === "whoami") {
+      healthCalls++;
+      expect(command).toBe(process.execPath);
+      expect(args.slice(1)).toEqual(["whoami", "--json"]);
+      expect(opts.env?.RATKING_NAME).toBe(observedName);
+      return Effect.succeed({ code: 0, stderr: "", stdout: JSON.stringify(reportedIdentity ?? identity()) });
+    }
+    if (command === "ssh") commands.push(args.at(-1)!);
+    if (command === "ssh" && args.at(-1)?.endsWith("'pane' 'list'")) {
+      probeCalls++;
+      expect(args).toContain("ControlPath=none");
+      if (probeFails) return Effect.succeed({ code: 255, stderr: "private error", stdout: "" });
+      const { panes } = s.remote.handle("pane.list", {}) as { panes: Array<Record<string, unknown>> };
+      return Effect.succeed({ code: 0, stderr: "", stdout: JSON.stringify({ id: "cli:pane:list", type: "response", result: { panes: panes.map(pane => ({ terminal_title: "example", terminal_title_stripped: "example", ...pane, scroll: { max_offset_from_bottom: 0, offset_from_bottom: 0, viewport_rows: 29 } })) } }) });
+    }
+    return original(command, args, opts);
+  });
+  const runWake = (messageId: string | null = "wake-one", patch: Partial<Parameters<typeof wakeRestore>[0]> = {}, deadlineMs?: number, onInput?: Parameters<typeof wakeRestore>[2], graceMs?: number) =>
+    s.run(wakeRestore({ name: "probe/remote-w", reason: null, minutes: 15, dryRun: false, messageId, ...patch }, deadlineMs, onInput, graceMs)
+      .pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: "headless-restore" })));
+  return { s, row, runWake, configure, identity, commands, setIdentity: (value?: unknown) => { reportedIdentity = value; }, setProbeFails: (value: boolean) => { probeFails = value; }, healthCalls: () => healthCalls, probeCalls: () => probeCalls };
 }
 
 // Execute the cleanup probe through the SSH fake, with private proc/cgroup and command fixtures.
@@ -667,6 +712,349 @@ describe("remote owner operations", () => {
     expect(result.row.state).toBe("running"); expect(result.row.owner).toBe(row.owner);
     expect(result.notes.join("\n")).toContain("gone; interrupted before restore");
     expect(result.row.events?.some(event => event.type === "PANE_GONE")).toBe(true);
+  });
+  it("refuses unknown and unconfigured wake rows without talking to Herdr or Rat King", async () => {
+    const f = await wakeFixture();
+    const count = f.s.remote.calls.length;
+    const unknown = await f.runWake("unknown", { name: "probe/missing" });
+    expect(unknown).toMatchObject({ result: "refused", reason: "unknown name", row: null, permanent: false, receiptSaved: false });
+    expect(exitCode(unknown)).toBe(2);
+    f.configure();
+    expect(await f.runWake()).toMatchObject({ result: "refused", reason: "row machine is remote", permanent: false, receiptSaved: false });
+    expect(f.s.remote.calls).toHaveLength(count);
+    expect(f.healthCalls()).toBe(0);
+    f.configure(true);
+    expect(await f.runWake()).toMatchObject({ result: "alreadyLive" });
+    expect(await f.runWake("unknown")).toMatchObject({ result: "alreadyLive" });
+  });
+  it("refuses closed and retired wake rows and non-open lanes", async () => {
+    const { s, runWake } = await wakeFixture();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, retirePending: { after: s.h.now.toISOString(), tries: 1 } })) }, null] as const)));
+    expect(await runWake("retired")).toMatchObject({ result: "refused", reason: "row retirement is pending", permanent: true, receiptSaved: true });
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(({ retirePending: _, ...r }) => r) }, null] as const)));
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, lanes: p.lanes.map(l => ({ ...l, state: "proposed" as const })) }, null] as const)));
+    expect(await runWake("parked")).toMatchObject({ result: "refused", reason: "lane work is proposed", permanent: false, receiptSaved: false });
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, state: "closed" as const })) }, null] as const)));
+    expect(await runWake("closed")).toMatchObject({ result: "refused", reason: "row is closed", permanent: true, receiptSaved: true });
+    expect(await runWake("retired")).toMatchObject({ result: "refused", reason: "row retirement is pending", permanent: true, receiptSaved: true });
+  });
+  it("caches no-session-file refusals tied to the registered row", async () => {
+    const { s, runWake } = await wakeFixture();
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, sessionFile: null })) }, null] as const)));
+    expect(await runWake(null, { dryRun: true })).toMatchObject({ result: "refused", permanent: true, receiptSaved: false });
+    const receipt = await runWake();
+    expect(receipt).toMatchObject({ result: "refused", reason: "row has no session file to restore", permanent: true, receiptSaved: true });
+    expect(await runWake()).toEqual(receipt);
+  });
+  it("a live session in an unbound pane prevents a wake spawn", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    const live = s.remote.panes.get(row.pane!.paneId)!;
+    s.remote.panes.delete(live.pane_id);
+    const moved = s.remote.addPane(live.workspace_id, live.tab_id, live.cwd);
+    Object.assign(moved, { agent: live.agent, agent_session: live.agent_session });
+    const before = s.remote.launcherScripts.length;
+    const receipt = await runWake();
+    expect(receipt).toMatchObject({ result: "alreadyLive", pane: moved.pane_id });
+    expect(exitCode(receipt)).toBe(0);
+    expect(s.remote.launcherScripts).toHaveLength(before);
+  });
+  it("a live bound pane vetoes wake even before the original session path is visible", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    const bound = s.remote.panes.get(row.pane!.paneId)!;
+    delete bound.agent_session;
+    const count = s.remote.launcherScripts.length;
+    expect(await runWake()).toMatchObject({ result: "alreadyLive", pane: bound.pane_id });
+    expect(s.remote.launcherScripts).toHaveLength(count);
+  });
+  it.each(["fresh", "missing"])("never types into an agent-less bound pane with a %s journal", async journal => {
+    const { s, row, runWake } = await wakeFixture();
+    const pane = s.remote.panes.get(row.pane!.paneId)!;
+    delete pane.agent;
+    delete pane.agent_session;
+    if (journal === "missing") unlinkSync(row.sessionFile!);
+    else utimesSync(row.sessionFile!, new Date(), new Date());
+    const before = s.remote.calls.filter(c => c.method === "pane.send_input").length;
+    expect(await runWake()).toMatchObject({ result: "failed", reason: "bound pane may host a live Pi", receiptSaved: false });
+    expect(s.remote.calls.filter(c => c.method === "pane.send_input")).toHaveLength(before);
+    const status = await s.run(projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: row.owner })));
+    expect(JSON.stringify(status)).toContain("headless wake (local receipt): failed: bound pane may host a live Pi");
+  });
+  it.each([{ terminal_title: "π desk" }, { agent_status: "working" as const }])("refuses reuse with a Herdr Pi signal even without an agent: %j", async evidence => {
+    const { s, row, runWake } = await wakeFixture();
+    const pane = s.remote.panes.get(row.pane!.paneId)!;
+    delete pane.agent;
+    delete pane.agent_session;
+    Object.assign(pane, evidence);
+    utimesSync(row.sessionFile!, new Date(), new Date(Date.now() - 130_000));
+    const count = s.remote.launcherScripts.length;
+    expect(await runWake()).toMatchObject({ result: "failed", reason: "bound pane may host a live Pi", receiptSaved: false });
+    expect(s.remote.launcherScripts).toHaveLength(count);
+  });
+  it("quotes configured Herdr and the remote Node journal path on the launch SSH route", async () => {
+    const f = await wakeFixture();
+    const { s, row } = f;
+    const cli = "/opt/custom tool/herdr";
+    f.configure(true, undefined, cli);
+    const pane = s.remote.panes.get(row.pane!.paneId)!;
+    delete pane.agent;
+    delete pane.agent_session;
+    const file = join(s.h.root, "desk's journal.jsonl");
+    writeFileSync(file, "{}\n");
+    utimesSync(file, new Date(), new Date(Date.now() - 130_000));
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, sessionFile: file })) }, null] as const)));
+    expect(await f.runWake(null, { dryRun: true })).toMatchObject({ result: "restored" });
+    expect(f.commands).toContainEqual(expect.stringContaining(`${shellQuote(cli)} 'pane' 'list'`));
+    expect(f.commands).toContainEqual(expect.stringMatching(/'node' '--input-type=module' '-e'.*statSync/));
+    expect(f.commands.some(command => command.includes("statSync") && command.endsWith(shellQuote(file)))).toBe(true);
+  });
+  it("rechecks journal freshness after reservation and immediately before typing into a bound pane", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    const pane = s.remote.panes.get(row.pane!.paneId)!;
+    delete pane.agent;
+    delete pane.agent_session;
+    utimesSync(row.sessionFile!, new Date(), new Date(Date.now() - 130_000));
+    let touched = false;
+    s.setBefore((command, args) => {
+      if (!touched && command === "ssh" && args.at(-1)?.includes("muster-prerequisites")) {
+        touched = true;
+        utimesSync(row.sessionFile!, new Date(), new Date());
+      }
+    });
+    const before = s.remote.calls.filter(c => c.method === "pane.send_input").length;
+    expect(await runWake()).toMatchObject({ result: "failed", reason: "bound pane may host a live Pi" });
+    expect(touched).toBe(true);
+    expect(s.remote.calls.filter(c => c.method === "pane.send_input")).toHaveLength(before);
+  });
+  it("a live lease is alreadyLive without Herdr; failures and live probes can retry the same ID", async () => {
+    const f = await wakeFixture();
+    const count = f.s.remote.calls.length;
+    f.setIdentity(f.identity({ expiresAt: new Date(f.s.h.now.getTime() + 60_000).toISOString(), generation: 77, harness: "pi", live: true, session: "held-session" }));
+    expect(await f.runWake()).toMatchObject({ result: "alreadyLive", reason: "Rat King lease is live" });
+    f.setIdentity({ ok: true, stdout: "private-token" });
+    const failed = await f.runWake();
+    expect(failed).toMatchObject({ result: "failed", reason: "bound pane may host a live Pi" });
+    expect(exitCode(failed)).toBe(1);
+    expect(JSON.stringify(failed)).not.toContain("private-token");
+    expect(f.s.remote.calls).toHaveLength(count);
+    f.setIdentity();
+    f.setProbeFails(true);
+    expect(await f.runWake()).toMatchObject({ result: "failed", reason: "bound pane may host a live Pi" });
+    expect(f.s.remote.calls).toHaveLength(count);
+    f.setProbeFails(false);
+    expect(await f.runWake()).toMatchObject({ result: "alreadyLive", reason: "Herdr pane or session is live" });
+  });
+  it("a no-ID dry run can prove a gone pane without writing a receipt, catalog, or launch lock", async () => {
+    const f = await wakeFixture();
+    f.s.remote.panes.delete(f.row.pane!.paneId);
+    const path = projectPath(f.s.dir);
+    const before = readFileSync(path, "utf8");
+    const locks = join(f.s.h.home, ".config/muster/launch-locks");
+    const ticket = readFileSync(join(locks, "remote.counter"), "utf8");
+    const count = f.s.remote.launcherScripts.length;
+    expect(await f.runWake(null, { dryRun: true })).toMatchObject({ result: "restored", messageId: null, pane: null });
+    expect(f.probeCalls()).toBe(1);
+    expect(existsSync(wakeReceiptDir(f.s.h.home))).toBe(false);
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(readFileSync(join(locks, "remote.counter"), "utf8")).toBe(ticket);
+    expect(f.s.remote.launcherScripts).toHaveLength(count);
+  });
+  it("wakes in the existing lane tab under the recorded owner; replays the 0600 receipt and never saves drain env", async () => {
+    const f = await wakeFixture();
+    const { s, row } = f;
+    f.configure(true, "probe/normal-alias");
+    const old = s.remote.panes.get(row.pane!.paneId)!;
+    delete old.agent;
+    delete old.agent_session;
+    utimesSync(row.sessionFile!, new Date(), new Date(Date.now() - 130_000));
+    const splits = s.remote.calls.filter(call => call.method === "pane.split").length;
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, owner: "recorded-owner" })) }, null] as const)));
+    const count = s.remote.launcherScripts.length;
+    // runWake supplies headless-restore to the CLI; the reserved launch rejects unless its env session is recorded-owner.
+    const receipt = await f.runWake("restore-this", { minutes: 23, reason: "incoming mail" });
+    expect(receipt).toMatchObject({ result: "restored", reason: "wake restore-this: incoming mail", session: row.sessionId, ready: true, receiptSaved: true, permanent: null });
+    expect(exitCode(receipt)).toBe(0);
+    const restored = (await s.run(load(s.dir))).agents[0]!;
+    expect(receipt.pane).toBe(old.pane_id);
+    expect(s.remote.calls.filter(call => call.method === "pane.split")).toHaveLength(splits);
+    expect(restored).toMatchObject({ state: "running", owner: "recorded-owner", pane: { tabId: old.tab_id, paneId: old.pane_id } });
+    expect(restored.events).toContainEqual(expect.objectContaining({ type: "WAKE_RESTORE", detail: receipt.reason }));
+    expect(restored.profile.env.RATKING_EXIT_WHEN_DRAINED).toBeUndefined();
+    expect(restored.restore?.env.RATKING_EXIT_WHEN_DRAINED).toBeUndefined();
+    expect(restored.restore?.env.MUSTER_OWNER).toBe(restored.owner); // Catalog normalizes every restore descriptor.
+    expect(restored.restore?.env.RATKING_NAME).toBe("probe/normal-alias");
+    expect(s.remote.launcherScripts.at(-1)).toContain("export RATKING_EXIT_WHEN_DRAINED='23'");
+    expect(s.remote.launcherScripts.at(-1)).toContain("export MUSTER_OWNER='recorded-owner'");
+    expect(s.remote.launcherScripts.at(-1)).toContain("export RATKING_NAME='probe/normal-alias'");
+    const status = await s.run(projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: "recorded-owner" })));
+    expect(JSON.stringify(status)).toContain("headless wake (local receipt): wake restore-this: incoming mail");
+    const root = wakeReceiptDir(s.h.home), file = join(root, `${createHash("sha256").update("restore-this").digest("hex")}.json`);
+    expect(statSync(root).mode & 0o777).toBe(0o700);
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(receipt);
+    const probes = f.healthCalls();
+    const lockCounter = join(root, ".locks", createHash("sha256").update("restore-this").digest("hex"), "wake.counter");
+    const counterBefore = readFileSync(lockCounter, "utf8");
+    expect(await f.runWake("restore-this", { name: "different/row" })).toEqual(receipt);
+    expect(f.healthCalls()).toBe(probes);
+    expect(readFileSync(lockCounter, "utf8")).toBe(counterBefore);
+    expect(s.remote.launcherScripts).toHaveLength(count + 1);
+    s.remote.panes.delete(restored.pane!.paneId);
+    await s.run(agentLaunch(s.dir, { action: "restore", name: row.name }));
+    expect(s.remote.launcherScripts.at(-1)).not.toContain("RATKING_EXIT_WHEN_DRAINED");
+    expect(s.remote.launcherScripts.at(-1)).toContain("export MUSTER_OWNER='ordinary-launch-owner-override'");
+    expect(s.remote.launcherScripts.at(-1)).toContain("export RATKING_NAME='probe/normal-alias'");
+  });
+  it("splits from the lane's surviving pane when the bound pane disappeared after drain exit", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    const old = s.remote.panes.get(row.pane!.paneId)!;
+    const sibling = s.remote.addPane(old.workspace_id, old.tab_id, old.cwd);
+    s.remote.panes.delete(old.pane_id);
+    s.remote.calls.length = 0;
+    const receipt = await runWake();
+    expect(receipt).toMatchObject({ result: "restored", ready: true });
+    expect(receipt.pane).not.toBe(old.pane_id);
+    expect(s.remote.calls).toContainEqual(expect.objectContaining({ method: "pane.split", params: expect.objectContaining({ target_pane_id: sibling.pane_id }) }));
+    expect(s.remote.calls.filter(call => call.method === "pane.send_input").map(call => call.params.pane_id)).toEqual([receipt.pane]);
+  });
+  it("moves a self-owned row and its launch notice to the actual restored session", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    const actual = "restored-owner-session";
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, owner: r.sessionId })) }, null] as const)));
+    s.remote.panes.delete(row.pane!.paneId);
+    const original = s.remote.handle.bind(s.remote);
+    const handle = vi.spyOn(s.remote, "handle").mockImplementation((method, params) => {
+      const result = original(method, params);
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh ")) {
+        const pane = s.remote.panes.get(String(params.pane_id))!;
+        const file = row.sessionFile!.replace(`_${row.sessionId}.jsonl`, `_${actual}.jsonl`);
+        writeFileSync(file, `${JSON.stringify({ type: "session", id: actual, cwd: pane.cwd })}\n`);
+        pane.agent_session = { source: "pi", agent: "pi", kind: "path", value: file };
+      }
+      return result;
+    });
+    try {
+      expect(await runWake()).toMatchObject({ result: "restored", session: actual, ready: true });
+      const restored = (await s.run(load(s.dir))).agents[0]!;
+      expect(restored).toMatchObject({ owner: actual, sessionId: actual, restore: { env: { MUSTER_OWNER: actual } } });
+      const status = await s.run(projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: actual })));
+      expect(JSON.stringify(status)).toContain("headless wake (local receipt): wake wake-one");
+    } finally { handle.mockRestore(); }
+  });
+  it("reports restored if saving the successful receipt fails", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    s.remote.panes.delete(row.pane!.paneId);
+    const path = join(wakeReceiptDir(s.h.home), `${createHash("sha256").update("save-fails").digest("hex")}.json`);
+    const original = s.remote.handle.bind(s.remote);
+    const handle = vi.spyOn(s.remote, "handle").mockImplementation((method, params) => {
+      if (method === "pane.send_input" && String(params.text).startsWith("exec sh ")) mkdirSync(path);
+      return original(method, params);
+    });
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(await runWake("save-fails")).toMatchObject({ result: "restored", ready: true, receiptSaved: false });
+      expect(stderr).toHaveBeenCalledWith("muster-restore: could not save wake receipt");
+      expect(readdirSync(wakeReceiptDir(s.h.home)).some(name => name.endsWith(".tmp"))).toBe(false);
+    } finally { handle.mockRestore(); stderr.mockRestore(); }
+  });
+  it("treats an overall deadline as retryable and logs failure to write the owner notice", async () => {
+    const f = await wakeFixture();
+    const { s } = f;
+    writeFileSync(join(s.h.home, ".local/state/muster/launches"), "not a directory");
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const hang = vi.spyOn(s.proc, "run").mockImplementationOnce(() => Effect.never);
+    try {
+      const receipt = await f.runWake("timeout", {}, 40);
+      expect(receipt).toMatchObject({ result: "failed", reason: "deadline", receiptSaved: false });
+      expect(exitCode(receipt)).toBe(1);
+      expect(stderr).toHaveBeenCalledWith("muster-restore: could not write owner wake notice");
+      expect(await f.runWake("timeout")).toMatchObject({ result: "alreadyLive" });
+    } finally { hang.mockRestore(); stderr.mockRestore(); }
+  });
+  it("reports restored without readiness when the deadline expires after sending launch input", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    s.remote.panes.delete(row.pane!.paneId);
+    s.remote.startSessions = false;
+    let issued = false;
+    Object.assign(s.env, { sleep: () => issued ? Effect.never : Effect.void });
+    const receipt = await runWake("after-input", {}, 2000, () => { issued = true; }, 50);
+    expect(issued).toBe(true);
+    expect(receipt).toMatchObject({ result: "restored", ready: false, receiptSaved: true });
+    expect(exitCode(receipt)).toBe(0);
+    const catalog = await s.run(load(s.dir));
+    expect(catalog.agents[0]).toMatchObject({ state: "restoring" });
+    expect(catalog.agents[0]?.events).not.toContainEqual(expect.objectContaining({ type: "LAUNCH_FAILED" }));
+    expect(await runWake("after-input")).toEqual(receipt);
+  });
+  it("concurrent wakes share same-ID receipts and reserve the row across different IDs", async () => {
+    const { s, row, runWake } = await wakeFixture();
+    Object.assign(s.env, { sleep: (ms: number) => Effect.sleep(ms) });
+    s.remote.panes.delete(row.pane!.paneId);
+    const before = s.remote.launcherScripts.length;
+    let entered!: () => void, release!: () => void;
+    const reached = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let didHold = false;
+    s.setBefore((command, args) => {
+      if (!didHold && command === "ssh" && args.at(-1)?.includes("muster-prerequisites")) {
+        didHold = true;
+        entered();
+        return held;
+      }
+    });
+    const first = runWake("concurrent-first");
+    await Promise.race([reached, first.then(() => { throw new Error("first wake did not reach its reserved launch"); })]);
+    const replay = runWake("concurrent-first");
+    try {
+      expect(await runWake("concurrent-second")).toMatchObject({ result: "failed", reason: "a launch already holds this row's reservation" });
+      expect(s.remote.launcherScripts).toHaveLength(before);
+    } finally { release(); }
+    const finished = await first;
+    expect(finished).toMatchObject({ result: "restored" });
+    expect(await replay).toEqual(finished);
+    expect(existsSync(join(wakeReceiptDir(s.h.home), `${createHash("sha256").update("concurrent-second").digest("hex")}.json`))).toBe(false);
+    expect(await runWake("concurrent-second")).toMatchObject({ result: "alreadyLive", receiptSaved: false });
+    expect(s.remote.launcherScripts).toHaveLength(before + 1);
+  });
+  it("repairs the owned receipt directory, refuses corrupt receipts, and does not probe or spawn for them", async () => {
+    const f = await wakeFixture();
+    const root = wakeReceiptDir(f.s.h.home);
+    mkdirSync(root, { recursive: true, mode: 0o755 });
+    const path = join(root, `${createHash("sha256").update("corrupt").digest("hex")}.json`);
+    writeFileSync(path, "private corrupt bytes", { mode: 0o600 });
+    expect(await f.runWake("corrupt")).toMatchObject({ result: "failed", reason: "wake receipt is unreadable or corrupt" });
+    expect(statSync(root).mode & 0o777).toBe(0o700);
+    expect(f.healthCalls()).toBe(0);
+  });
+  it("a same-ID waiter that times out reports wake in progress without launching or storing a result", async () => {
+    const f = await wakeFixture();
+    const id = "in-progress", hash = createHash("sha256").update(id).digest("hex");
+    const root = wakeReceiptDir(f.s.h.home), lock = join(root, ".locks", hash);
+    const queue = join(lock, "wake.queue");
+    mkdirSync(queue, { recursive: true });
+    writeFileSync(join(queue, "0000000000000001"), String(process.pid));
+    writeFileSync(join(lock, "wake.counter"), "1");
+    const busy = await f.runWake(id);
+    expect(busy).toMatchObject({ result: "failed", reason: "wake in progress", permanent: null });
+    expect(exitCode(busy)).toBe(1);
+    expect(readdirSync(queue)).toEqual(["0000000000000001"]);
+    expect(existsSync(join(root, `${hash}.json`))).toBe(false);
+    expect(f.healthCalls()).toBe(0);
+  });
+  it("wakes ignore a harmless catalog touch but retry the same ID if the lane changes before launch", async () => {
+    const f = await wakeFixture();
+    const { s, row } = f;
+    s.remote.panes.delete(row.pane!.paneId);
+    let flip = true;
+    const changeLane = (state: "open" | "proposed") => s.run(mutate(s.dir, p => Effect.succeed([{ ...p, lanes: p.lanes.map(l => ({ ...l, state })),
+      agents: p.agents.map(r => ({ ...r, updatedAt: new Date(Date.parse(r.updatedAt) + 1).toISOString() })) }, null] as const)));
+    s.setBefore((command, args) => command === "ssh" && args.at(-1)?.includes("muster-prerequisites") ? changeLane(flip ? "proposed" : "open").then(() => {}) : undefined);
+    const count = s.remote.launcherScripts.length;
+    expect(await f.runWake()).toMatchObject({ result: "failed", reason: "row or lane changed during wake; probe again" });
+    expect(s.remote.launcherScripts).toHaveLength(count);
+    flip = false;
+    await changeLane("open");
+    expect(await f.runWake()).toMatchObject({ result: "restored" });
+    expect(s.remote.launcherScripts).toHaveLength(count + 1);
   });
   it("keeps remote-only skill paths across restore instead of rediscovering them locally", async () => {
     const s = setup(); await s.open();

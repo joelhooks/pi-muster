@@ -1,13 +1,14 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Effect, Schema } from "effect";
 import { createHerdrClient, type HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
 import { AgentName, Slug, SessionId, decodeAgentRow, decodeOwnerItem, decodeAgentName, decodeMachines, type MachineConfig, type OwnerItem, type AgentRow, type Project } from "./domain.ts";
 import { ProcError, InputError } from "./errors.ts";
-import { Herdr, MusterEnv, Proc, type ProcShape } from "./runtime.ts";
+import { Herdr, MusterEnv, Proc, stopChild, type ProcShape } from "./runtime.ts";
 import { NAME_SHIM, shellQuote } from "./argv.ts";
 
 const decodeNoteEnvelope = Schema.decodeUnknownSync(Schema.Struct({ project: Slug, machine: AgentName, agent: AgentName, lane: Slug, owner: SessionId, item: Schema.Unknown, sendFailed: Schema.optionalKey(Schema.String) }));
@@ -105,10 +106,10 @@ process.stdout.write(String(written));`;
 });
 
 /** Serializes capacity reservations across registered projects on this owner machine. */
-export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.Effect<A, E, R>, note: (text: string) => void = () => {}, timeoutMs = 300_000) => Effect.gen(function* () {
+export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.Effect<A, E, R>, note: (text: string) => void = () => {}, timeoutMs = 300_000, lockRoot?: string, timedOut?: () => InputError) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const safeName = yield* Effect.try({ try: () => decodeAgentName(name), catch: error => new InputError({ message: `invalid machine name: ${String(error)}` }) });
-  const parent = join(env.home, ".config/muster/launch-locks");
+  const parent = lockRoot ?? join(env.home, ".config/muster/launch-locks");
   const lock = join(parent, safeName);
   // Allocate monotonically increasing tickets under a short filesystem mutex.
   // Waiting state: allocating -> queued -> held -> released; timeout never steals a lock.
@@ -126,7 +127,7 @@ export const withMachineLaunchLock = <A, E, R>(name: string, operation: Effect.E
   let head: string | undefined;
   const progress = (first: string | undefined) => { if (first !== head) { head = first; moved = env.now().getTime(); stuck = 0; } };
   const pause = Effect.gen(function* () {
-    if (Math.max(stuck, env.now().getTime() - moved) >= timeoutMs) return yield* new InputError({ message: `machine ${name}: FIFO launch lock timed out: the queue head ${head ?? "(allocator)"} has not moved for ${timeoutMs} ms at ${lock}; inspect the holder and stale tickets before retrying` });
+    if (Math.max(stuck, env.now().getTime() - moved) >= timeoutMs) return yield* (timedOut?.() ?? new InputError({ message: `machine ${name}: FIFO launch lock timed out: the queue head ${head ?? "(allocator)"} has not moved for ${timeoutMs} ms at ${lock}; inspect the holder and stale tickets before retrying` }));
     yield* env.sleep(100);
     stuck += 100;
     waited += 100;
@@ -278,17 +279,17 @@ const localRunner = new WeakMap<ProcShape, ProcShape>();
 
 /** SSH has one quoted shell argument; remote user data never becomes local argv. Inside `onRemote` the ambient Proc is
  * already an sshProc; a nested call (a remote restart's binding push) wraps the local runner beneath it instead. */
-export function sshProc(name: string, machine: MachineConfig, outer: ProcShape, localCwd: string): ProcShape {
+export function sshProc(name: string, machine: MachineConfig, outer: ProcShape, localCwd: string, direct = false): ProcShape {
   const runner = localRunner.get(outer) ?? outer;
   // A Pi already on that machine (a remote owner such as a remote1 lane boss) runs in place: a host cannot ssh to itself.
   const proc: ProcShape = process.env.MUSTER_MACHINE === name ? { run: (command, args, options) => runner.run(command, args, { ...options, env: { ...machine.env, ...options.env } }) } : { run: (command, args, options) => {
     const env = { ...machine.env, ...options.env };
     const script = `cd ${shellQuote(options.cwd)} && exec env ${Object.entries(env).map(([k,v]) => `${k}=${shellQuote(v)}`).join(" ")} ${[command, ...args].map(shellQuote).join(" ")}`;
-    const attempt = (solo: boolean) => runner.run("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", ...(solo ? ["-o", "ControlPath=none"] : []), "--", machine.ssh, script], { cwd: localCwd, timeoutMs: Math.min(options.timeoutMs ?? 30_000, 300_000), ...(options.input === undefined ? {} : { input: options.input }) });
+    const attempt = (solo: boolean) => runner.run("ssh", ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", ...(solo ? ["-o", "ControlPath=none"] : []), ...(direct ? ["-o", "ClearAllForwardings=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no"] : []), "--", machine.ssh, script], { cwd: localCwd, timeoutMs: Math.min(options.timeoutMs ?? 30_000, 300_000), ...(options.input === undefined ? {} : { input: options.input }) });
     // Fleet desk, 2026-11-14: a live shared master intermittently refused fds (`mm_send_fd: sendmsg(0): Message too long`)
     // and failed closes and restarts. Only pre-session mux errors retry, once, on a solo connection, so no command runs twice.
-    return attempt(false).pipe(
-      Effect.flatMap(result => result.code === 255 && muxFailure(result.stderr, result.stdout) ? attempt(true) : Effect.succeed(result)),
+    return attempt(direct).pipe(
+      Effect.flatMap(result => !direct && result.code === 255 && muxFailure(result.stderr, result.stdout) ? attempt(true) : Effect.succeed(result)),
       Effect.mapError(error => new ProcError({ ...error, command: `ssh ${name}`, message: `machine ${name}: ${error.message}` })),
       Effect.flatMap(result => result.code === 255 ? Effect.fail(new ProcError({ command: `ssh ${name}`, code: result.code, stderr: result.stderr, message: `machine ${name}: SSH failed: ${result.stderr.slice(-500)}` })) : Effect.succeed(result)),
     );
@@ -321,18 +322,44 @@ export const remoteClient = (name: string, machine: MachineConfig) => Effect.gen
   return createHerdrClient({ socketPath: socket });
 }).pipe(Effect.mapError(error => new ProcError({ command: `ssh forward ${name}`, code: error._tag === "ProcError" ? error.code : null, stderr: error._tag === "ProcError" ? error.stderr : "", message: `machine ${name}: ${error.message}` })));
 
-export const onRemote = <A, E, R>(name: string, machine: MachineConfig, effect: Effect.Effect<A, E, R>) => Effect.gen(function* () {
+// The headless caller must not leave a persistent forward. Other callers keep reusing the shared master.
+const withWakeForward = <A, E, R>(name: string, machine: MachineConfig, use: (client: HerdrClient) => Effect.Effect<A, E, R>) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  if (env.remoteHerdr) return yield* use(yield* env.remoteHerdr(name, machine));
+  const remoteSocket = machine.socket ?? herdrSocketFor((machine.env.HOME ?? (yield* remoteNode(name, machine, "process.stdout.write(process.env.HOME ?? '')")).trim()));
+  if (!isAbsolute(remoteSocket)) return yield* new InputError({ message: "remote Herdr socket is not absolute" });
+  const acquire = Effect.try({ try: () => mkdtempSync(join(tmpdir(), "mwr-")), catch: () => new InputError({ message: "could not allocate private Herdr forward" }) });
+  const socket = (root: string) => join(root, "sock");
+  return yield* Effect.acquireUseRelease(acquire, root => Effect.gen(function* () {
+    const child = spawn("ssh", ["-N", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ExitOnForwardFailure=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no", "-o", "ControlPath=none", "-o", "ForkAfterAuthentication=no", "-L", `${socket(root)}:${remoteSocket}`, "--", machine.ssh], { cwd: env.home, stdio: "ignore" });
+    let exited = false;
+    const done = new Promise<void>(resolve => { child.once("error", () => {}); child.once("close", () => { exited = true; resolve(); }); });
+    return yield* Effect.acquireUseRelease(Effect.succeed(child), () => Effect.gen(function* () {
+      for (let waited = 0; !exited && waited < 15_000; waited += 50) {
+        if (existsSync(socket(root))) return yield* use(createHerdrClient({ socketPath: socket(root) }));
+        yield* Effect.sleep(50);
+      }
+      return yield* new InputError({ message: "could not open scoped Herdr forward" });
+    }), child => Effect.promise(() => stopChild(child, done)));
+  }), root => Effect.sync(() => {
+    try { unlinkSync(socket(root)); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.error("muster-restore: could not unlink its private forward socket"); }
+    try { rmdirSync(root); } catch { console.error("muster-restore: could not clean its private forward directory"); }
+  }));
+});
+
+export const onRemote = <A, E, R>(name: string, machine: MachineConfig, effect: Effect.Effect<A, E, R>, wake = false) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const runner = yield* Proc;
-  const client: HerdrClient = yield* remoteClient(name, machine);
-  return yield* effect.pipe(Effect.provideService(Herdr, client), Effect.provideService(Proc, sshProc(name, machine, runner, env.home)), Effect.mapError(error => new ProcError({ command: `remote ${name}`, code: null, stderr: "", message: `machine ${name}: ${String(error)}` })));
+  const use = (client: HerdrClient) => effect.pipe(Effect.provideService(Herdr, client), Effect.provideService(Proc, sshProc(name, machine, runner, env.home, wake)), Effect.mapError(error => new ProcError({ command: `remote ${name}`, code: null, stderr: "", message: `machine ${name}: ${String(error)}` })));
+  if (wake) return yield* withWakeForward(name, machine, use);
+  return yield* use(yield* remoteClient(name, machine));
 });
 
 /** Small read-only probes run in one bounded SSH process. JSON is decoded by the caller's domain schema. */
-export const remoteNode = (name: string, machine: MachineConfig, script: string, args: readonly string[] = [], timeoutMs = 30_000) => Effect.gen(function* () {
+export const remoteNode = (name: string, machine: MachineConfig, script: string, args: readonly string[] = [], timeoutMs = 30_000, direct = false) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const runner = yield* Proc;
-  const result = yield* sshProc(name, machine, runner, env.home).run("node", ["--input-type=module", "-e", script, ...args], { cwd: "/", timeoutMs });
+  const result = yield* sshProc(name, machine, runner, env.home, direct).run("node", ["--input-type=module", "-e", script, ...args], { cwd: "/", timeoutMs });
   if (result.code !== 0) return yield* new ProcError({ command: `node on ${name}`, code: result.code, stderr: result.stderr, message: `machine ${name}: ${result.stderr.slice(-1000)}` });
   return result.stdout;
 });
