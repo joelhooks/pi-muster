@@ -25,6 +25,7 @@ export interface FakePane {
   label?: string;
   agent?: string;
   agent_status?: "idle" | "working" | "blocked" | "done" | "unknown";
+  terminal_title?: string;
   name?: string | null;
   agent_session?: { source: string; agent: string; kind: string; value: string };
 }
@@ -96,6 +97,7 @@ export class FakeHerdr {
       agent_status: pane.agent_status ?? (pane.agent ? this.agentStatus : "unknown"),
       revision: 1,
       ...(pane.label ? { label: pane.label } : {}),
+      ...(pane.terminal_title ? { terminal_title: pane.terminal_title } : {}),
       ...(pane.agent ? { agent: pane.agent } : {}),
       ...(pane.agent_session ? { agent_session: pane.agent_session } : {}),
     };
@@ -136,6 +138,9 @@ export class FakeHerdr {
         const root = this.addPane(id, tab, String(params.cwd));
         return { type: "workspace_created", workspace: { workspace_id: id }, tab: { tab_id: tab }, root_pane: this.paneInfo(root) };
       }
+      case "tab.list":
+        return { type: "tab_list", tabs: [...this.tabs.values()].filter(tab => !params.workspace_id || tab.workspace_id === params.workspace_id)
+          .map((tab, i) => ({ ...tab, number: i + 1, focused: false, pane_count: [...this.panes.values()].filter(pane => pane.tab_id === tab.tab_id).length, agent_status: "idle" })) };
       case "tab.create": {
         const ws = String(params.workspace_id);
         // Real Herdr refuses a tab in a workspace that no longer exists (a closed space, or a reboot).
