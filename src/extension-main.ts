@@ -6,7 +6,7 @@ import { load, projectPath } from "./store.ts";
 import { turnLog } from "./turn-wake.ts";
 import { registerPiPrompt } from "./pi-prompt.ts";
 import { deskWriteId, watchEntries, withDeskWrites } from "./desk-local.ts";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -250,6 +250,7 @@ export default function muster(host: ExtensionAPI) {
       Layer.succeed(Proc)(liveProc),
       Layer.succeed(MusterEnv)({
         home: homedir(),
+        wakeConfigHome: userInfo().homedir,
         now: () => new Date(),
         sessionId: ctx.sessionManager.getSessionId(),
         paneId: env.HERDR_PANE_ID,
@@ -685,7 +686,8 @@ export default function muster(host: ExtensionAPI) {
       slot: Type.Optional(StringEnum(["root", "split"] as const)),
       session: Type.Optional(Type.String({ description: "adopt with pane: bind this unrelated live Pi session (the pane's journal header must carry it) to a row that is not live; needs reason. Then restart the row to give that Pi the row's environment and Rat King name." })),
       reason: Type.Optional(Type.String({ description: "adopt with session, or restart with takeover: why, recorded on the row" })),
-      takeover: Type.Optional(Type.Boolean({ description: "restart only: restart a row another owner session launched. The row keeps its owner; the reason is recorded on it and the owner is told. Needs reason" })),
+      takeover: Type.Optional(Type.Boolean({ description: "restart only: restart a row another owner session launched. The row keeps its owner; the reason is recorded on it and the owner is told. Needs reason. Sleep takeover is Switchboard-only." })),
+      sleepMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440, description: "restart only: opt an eligible idle desk into sleep on its own host, with this many drained minutes before exit and after each mail wake" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const { project, ...rest } = params;

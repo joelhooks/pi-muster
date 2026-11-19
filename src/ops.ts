@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { turnLog, turnUnsupported } from "./turn-wake.ts";
+import { deskWakeConfigRefusal, deskWakeRefusal, DRAIN_ENV, MIN_DESK_IDLE_MS, readSleepDrain, UNREADABLE_SLEEP_JOURNAL, WAKE_PROMPT, sleepJournal, sleepRefusals, wakeNoticeText } from "./desk-sleep.ts";
 import { WAKE_MODEL_ERROR } from "../bin/muster-restore-args.mjs";
 import { spawn } from "node:child_process";
 import { appendFileSync, chmodSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -67,7 +68,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
-import { savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
+import { localWakeRefusal, savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
 import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, codemodeNote, laneLaunchPolicy, badToolNames, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId, decodeWakeIdentity } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
@@ -227,7 +228,8 @@ const remoteAgentEnv = (project: Project, row: AgentRow, machine: import("./doma
   ...agentEnv(project, row), ...machine.env, ...remoteCommsEnvironment(project, machine),
 });
 
-const remoteLaunch = (dir: string, catalog: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string, jobId?: string, wake?: { reason: string; minutes: number; onInput: (row: AgentRow) => void }) => {
+interface WakeLaunch { reason: string; minutes: number; onInput: (row: AgentRow) => void; localSnapshot?: AgentRow; chargeLocalAttempt?: Effect.Effect<void, WakeRestoreStop> }
+const remoteLaunch = (dir: string, catalog: Project, params: Omit<AgentLaunchInput, "action"> & { action: LaunchKind | "adopt" }, nameOfMachine: string, jobId?: string, wake?: WakeLaunch) => {
   const lockNotes: string[] = [];
   const key = launchReservationKey(catalog.dir, params.name);
   // The machine lock covers only this count and, below, pane allocation. The probe, clone and Pi start run outside it;
@@ -416,13 +418,13 @@ const remoteLaunch = (dir: string, catalog: Project, params: Omit<AgentLaunchInp
       if (note) restoreNotes.push(note);
     }
     const now = iso(env);
-    let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
+    let row: AgentRow = restoreSleepMode({ name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
       profile: remoteProfile, owner: params.action === "restore" && existing ? existing.owner : env.sessionId,
       ...(params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId, liveOwner)), sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
       brief: syncedBrief?.brief ?? existing?.brief ?? null,
       state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
-      restore: null, ...(wake ? { events: [...(existing?.events ?? []), { type: "WAKE_RESTORE", at: now, detail: wake.reason }] }
-        : existing?.events ? { events: existing.events } : {}), createdAt: existing?.createdAt ?? now, updatedAt: now };
+      restore: null, ...(existing?.sleep ? { sleep: existing.sleep } : {}), ...(wake ? { events: [...(existing?.events ?? []), { type: "WAKE_RESTORE", at: now, detail: wake.reason }] }
+        : existing?.events ? { events: existing.events } : {}), createdAt: existing?.createdAt ?? now, updatedAt: now }, wake);
     const promptDir = (yield* git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")
       .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
     yield* must("mkdir", ["-p", scratch], { cwd, timeoutMs: 10_000 });
@@ -431,7 +433,7 @@ const remoteLaunch = (dir: string, catalog: Project, params: Omit<AgentLaunchInp
     // A retried or restored row inherits the last attempt's scratch note; replace it, never stack another.
     row = { ...row, profile: { ...row.profile, appendSystemPrompt: [...row.profile.appendSystemPrompt.filter(path => !isScratchNote(path, promptDir)), contextFile] } };
     const launchProfile = extensionsFor({ ...project, musterExtension: machine.musterExtension, deskExtension: project.deskExtension ? mapPath(project.deskExtension, machine) : null }, row);
-    const message = params.action === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, promptDir);
+    const message = wake ? { prompt: WAKE_PROMPT, expected: undefined } : params.action === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, promptDir);
     cloneNotes.push(scratchNote);
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(params.action === "fork" ? parentSessionFile : params.action === "restore" ? sessionFile : existing?.cwd === cwd ? existing.sessionFile : null) : 1;
     const argv = buildArgv({ kind: params.action === "adopt" ? "launch" : params.action, sessionId: row.sessionId, sessionFile, parentSessionFile, profile: launchProfile, musterExtension: machine.musterExtension, ...message });
@@ -510,7 +512,7 @@ const remoteLaunch = (dir: string, catalog: Project, params: Omit<AgentLaunchInp
       const launchLog = (yield* must("mktemp", [join(logDir, `launch-${name}-XXXXXXXX`)], { cwd, timeoutMs: 10_000 })).trim();
       const piReceiptId = env.createId();
       if (!wake) yield* guardLaunchShell(binding.paneId);
-      const spawnEnv = wake ? { ...agentEnvironment, MUSTER_OWNER: row.owner, RATKING_EXIT_WHEN_DRAINED: String(wake.minutes) } : agentEnvironment;
+      const spawnEnv = wake ? { ...agentEnvironment, MUSTER_OWNER: row.owner, [DRAIN_ENV]: String(row.sleep?.minutes ?? wake.minutes) } : agentEnvironment;
       const script = yield* writeLaunchFile(logDir, `#!/bin/sh\nset -e\n${shellPrelude(cwd, spawnEnv)}${piReceiptSuffix(piReceiptId)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")} 2> ${shellQuote(launchLog)}`);
       // The pane never shows Pi's start line (stderr goes to launchLog) and the session file is on the remote, so read both.
       // A file that existed before this start (restore, a relaunch of the same row) is not evidence: only a new one is.
@@ -1038,7 +1040,7 @@ const remoteClose = (dir: string, project: Project, row: AgentRow, params: Agent
     const latest = yield* findRow(current, row.name);
     yield* requireOwner(latest, env.sessionId, params.takeover, project.slug);
     if (latest.sessionId !== row.sessionId || latest.pane?.terminalId !== row.pane?.terminalId) return yield* input("remote row changed during close; re-read it");
-    const next = { ...latest, restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
+    const next = { ...withoutSleep(latest), restore, pane: null, state: latest.state === "closed" ? latest.state : yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), updatedAt: iso(env) };
     return [withRow(current, next), next] as const;
   }));
   // #37 live proof, 2026-10-26: an orphan left in the scope also runs inside the clone, so worker-worktree refused to
@@ -1257,12 +1259,12 @@ const restoreSessionHolder = (row: AgentRow, panes: readonly PaneInfo[]) => pane
 
 /** Catalog-only recovery. A live session anywhere on this machine vetoes interruption. */
 const recoverGoneRestore = (row: AgentRow, snapshot?: readonly PaneInfo[], shell?: PaneInfo | null) => Effect.gen(function* () {
-  if (!row.pane || !PANE_GONE_STATES.includes(row.state)) return row;
+  if (!row.pane || row.state === "asleep" || !PANE_GONE_STATES.includes(row.state)) return row;
   if (snapshot ? snapshot.some(pane => pane.terminal_id === row.pane!.terminalId && pane !== shell) : yield* locatePane(row.pane)) return row;
   if (restoreSessionHolder(row, snapshot ?? (yield* paneList()))) return row;
   const env = yield* MusterEnv;
   const detail = `restore: pane ${row.pane.paneId} ${shell ? "no longer hosts Pi" : "gone"}; interrupted before restore`;
-  return { ...row, pane: null, state: yield* stepAgent(row.name, row.state, { type: "PANE_GONE" }),
+  return { ...restoreSleepMode(row), pane: null, state: yield* stepAgent(row.name, row.state, { type: "PANE_GONE" }),
     events: [...(row.events ?? []), { type: "PANE_GONE", at: iso(env), detail }], updatedAt: iso(env) };
 });
 const recoverRestoreOnMachine = (row: AgentRow) => Effect.gen(function* () {
@@ -1277,21 +1279,9 @@ export class WakeRestoreStop extends Schema.TaggedError<WakeRestoreStop>()("Wake
 const boundWakeUncertain = () => new WakeRestoreStop({ result: "failed", message: "bound pane may host a live Pi" });
 const decodeWakePanes = Schema.decodeUnknownSync(Schema.Struct({ result: Schema.Struct({ panes: Schema.Array(PaneInfoSchema) }) }));
 
-/** Read-only admission, also repeated under the existing remote launch reservation. */
-export const inspectWakeRestore = (project: Project, row: AgentRow) => Effect.gen(function* () {
+const liveWakeLease = (project: Project, row: AgentRow, machine: import("./domain.ts").MachineConfig | null) => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  const runner = yield* Proc;
-  const refuse = (message: string, permanent = false) => new WakeRestoreStop({ result: "refused", message, permanent });
-  if (row.state === "closed") return yield* refuse("row is closed", true);
-  if (row.retirePending) return yield* refuse("row retirement is pending", true);
-  if (!row.sessionFile) return yield* refuse("row has no session file to restore", true);
-  const machine = yield* machineConfig(row.machine).pipe(Effect.orElseSucceed(() => null));
-  if (row.machine === "local" || machine?.wake !== true) return yield* refuse(`machine ${row.machine} is not wake-enabled`);
-  const lane = project.lanes.find(lane => lane.slug === row.lane);
-  if (lane?.state !== "open") return yield* refuse(`lane ${row.lane} is ${lane?.state ?? "missing"}`, false);
-  const placed = placeAgent(project.slug, project.policy, "restore", undefined, row.machine, undefined);
-  if ("refusal" in placed) return yield* refuse("project policy refuses restore on this machine");
-  const name = remoteAgentEnv(project, row, machine).RATKING_NAME;
+  const name = (machine ? remoteAgentEnv(project, row, machine) : agentEnv(project, row)).RATKING_NAME;
   const unavailable = row.pane ? boundWakeUncertain() : new WakeRestoreStop({ result: "failed", message: "could not read Rat King identity and lease" });
   if (!name) return yield* unavailable;
   const identity = yield* must(process.execPath, [ratkingCliPath(process.env, env.home), "whoami", "--json"], { cwd: project.dir, timeoutMs: 30_000, env: { RATKING_NAME: name } }).pipe(
@@ -1300,29 +1290,74 @@ export const inspectWakeRestore = (project: Project, row: AgentRow) => Effect.ge
   );
   const expiry = identity.lease ? Date.parse(identity.lease.expiresAt) : null;
   if (identity.name !== name || (expiry !== null && !Number.isFinite(expiry))) return yield* unavailable;
-  if (identity.lease?.live === true && expiry !== null && expiry > env.now().getTime()) return yield* new WakeRestoreStop({
+  return identity.lease?.live === true && expiry !== null && expiry > env.now().getTime();
+});
+
+const wakeSessionHolder = (row: AgentRow, panes: readonly PaneInfo[]) => restoreSessionHolder(row, panes) ??
+  panes.find(pane => pane.agent_session?.agent === "pi" && pane.agent_session.kind === "id" && pane.agent_session.value === row.sessionId);
+const boundWakePi = (pane?: PaneInfo) => pane && (pane.agent === "pi" || pane.agent_session?.agent === "pi") ? pane : undefined;
+
+/** Probe liveness before admitting a wake. A real first probe may record a proven local drain. */
+export const inspectWakeRestore = (project: Project, row: AgentRow, reconcile?: { act: boolean }) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const runner = yield* Proc;
+  const refuse = (message: string, permanent = false) => new WakeRestoreStop({ result: "refused", message, permanent });
+  if (row.state === "closed") return yield* refuse("row is closed", true);
+  if (row.retirePending) return yield* refuse("row retirement is pending", true);
+  if (!row.sessionFile) return yield* refuse("row has no session file to restore", true);
+  const local = row.machine === "local";
+  const machine = local ? null : yield* machineConfig(row.machine).pipe(Effect.orElseSucceed(() => null));
+  const configRefusal = local ? deskWakeConfigRefusal(row, env) : machine?.wake === true ? null : `machine ${row.machine} is not wake-enabled`;
+  if (configRefusal) return yield* refuse(configRefusal);
+  if (local && row.role !== "desk") return yield* refuse("local wake requires an asleep desk");
+  if (local && project.state === "archived") return yield* refuse("project is archived");
+  const lane = project.lanes.find(lane => lane.slug === row.lane);
+  if (lane?.state !== "open") return yield* refuse(`lane ${row.lane} is ${lane?.state ?? "missing"}`, false);
+  const placed = placeAgent(project.slug, project.policy, "restore", undefined, row.machine, undefined);
+  if ("refusal" in placed) return yield* refuse("project policy refuses restore on this machine");
+  const lease = yield* liveWakeLease(project, row, machine).pipe(Effect.result);
+  if (!local && lease._tag === "Failure") return yield* lease.failure;
+  if (lease._tag === "Success" && lease.success) return yield* new WakeRestoreStop({
     result: "alreadyLive", message: "Rat King lease is live",
   });
   // A missing lease is not proof that Pi is gone. Read Herdr in-place over a one-shot SSH call, not a persistent forward.
   const unknownPane = row.pane ? boundWakeUncertain() : new WakeRestoreStop({ result: "failed", message: "could not verify Herdr liveness" });
-  const direct = sshProc(row.machine, machine, runner, env.home, true);
-  // Existing launch uses a socket forward. Keep intercom aliases valid and honor an absolute CLI override.
-  const checked = yield* direct.run(isAbsolute(machine.herdr) ? machine.herdr : "herdr", ["pane", "list"], {
-    cwd: "/", timeoutMs: 15_000, ...(machine.socket ? { env: { HERDR_SOCKET_PATH: machine.socket, HERDR_CLIENT_SOCKET_PATH: machine.socket } } : {}),
-  }).pipe(Effect.mapError(() => unknownPane));
-  if (checked.code !== 0) return yield* unknownPane;
-  const { result: { panes } } = yield* Effect.try({ try: () => decodeWakePanes(JSON.parse(checked.stdout)), catch: () => unknownPane });
-  const bound = row.pane && panes.find(pane => pane.terminal_id === row.pane!.terminalId);
-  const live = restoreSessionHolder(row, panes) ?? (bound && (bound.agent === "pi" || bound.agent_session?.agent === "pi") ? bound : null);
+  const panes = machine ? yield* Effect.gen(function* () {
+    const direct = sshProc(row.machine, machine, runner, env.home, true);
+    const checked = yield* direct.run(isAbsolute(machine.herdr) ? machine.herdr : "herdr", ["pane", "list"], {
+      cwd: "/", timeoutMs: 15_000, ...(machine.socket ? { env: { HERDR_SOCKET_PATH: machine.socket, HERDR_CLIENT_SOCKET_PATH: machine.socket } } : {}),
+    }).pipe(Effect.mapError(() => unknownPane));
+    if (checked.code !== 0) return yield* unknownPane;
+    return (yield* Effect.try({ try: () => decodeWakePanes(JSON.parse(checked.stdout)), catch: () => unknownPane })).result.panes;
+  }) : yield* paneList().pipe(Effect.mapError(() => unknownPane));
+  const bound = panes.find(pane => pane.terminal_id === row.pane?.terminalId);
+  const live = wakeSessionHolder(row, panes) ?? boundWakePi(bound);
   if (live) return yield* new WakeRestoreStop({ result: "alreadyLive", message: "Herdr pane or session is live", pane: live.pane_id });
+  if (lease._tag === "Failure") return yield* lease.failure;
+  const eligible = local && reconcile ? yield* reconcileLocalDeskSleep(project.dir, row, reconcile.act, panes).pipe(
+    Effect.mapError(error => new WakeRestoreStop({ result: "failed", message: error.message })),
+  ) : row;
+  if (local) {
+    if (eligible.state !== "asleep" || !eligible.sleep) return yield* refuse("local wake requires an asleep desk");
+    const journal = readSleepDrain(eligible);
+    if (journal.kind === "missing") return yield* refuse("session journal is missing");
+    if (journal.kind === "unreadable") return yield* new WakeRestoreStop({ result: "failed", message: UNREADABLE_SLEEP_JOURNAL });
+  }
   if (bound) {
     if (!row.pane?.openedByMuster) return yield* refuse("bound shell was not opened by Muster");
+    if (local && (bound.workspace_id !== project.spaceId || bound.tab_id !== lane.tabId)) return yield* boundWakeUncertain();
     if (hostsPi(bound) || suspectWakeShell(bound) || !isAbsolute(row.sessionFile)) return yield* boundWakeUncertain();
     // Use the remote clock with the remote mtime: skew between hosts must not certify a stale journal.
-    const journal = yield* remoteNode(row.machine, machine, "import {statSync} from 'node:fs'; const s=statSync(process.argv[1]); process.stdout.write(s.isFile() && Date.now()-s.mtimeMs >= 120000 ? 'stale' : 'fresh');", [row.sessionFile], 10_000, true).pipe(Effect.mapError(boundWakeUncertain));
+    const file = row.sessionFile;
+    const journal = machine
+      ? yield* remoteNode(row.machine, machine, "import {statSync} from 'node:fs'; const s=statSync(process.argv[1]); process.stdout.write(s.isFile() && Date.now()-s.mtimeMs >= 120000 ? 'stale' : 'fresh');", [file], 10_000, true).pipe(Effect.mapError(boundWakeUncertain))
+      : yield* Effect.try({ try: () => {
+        const stat = statSync(file);
+        return stat.isFile() && env.now().getTime() - stat.mtimeMs >= 120_000 ? "stale" : "fresh";
+      }, catch: boundWakeUncertain });
     if (journal !== "stale") return yield* boundWakeUncertain();
   }
-  const recovered = yield* recoverGoneRestore(row, panes, bound);
+  const recovered = yield* recoverGoneRestore(eligible, panes, bound);
   yield* stepAgent(row.name, recovered.state, { type: "RESTORE" }).pipe(Effect.mapError(() => refuse(`row is ${recovered.state}`, false)));
   return { row: recovered, shell: bound ?? null };
 });
@@ -1578,6 +1613,13 @@ const advance = (row: AgentRow, events: readonly AgentEvent[]) =>
   });
 
 /** Apply events to a row inside a locked mutation, only if the row is still in the state the caller read. */
+const withoutSleep = ({ sleep: _, ...row }: AgentRow): AgentRow => row;
+const restoreSleepMode = (row: AgentRow, wake?: WakeLaunch): AgentRow => {
+  if (!wake) return withoutSleep(row);
+  if (!row.sleep) return row;
+  const { wakeBlock: _block, journalReadFailures: _failures, ...sleep } = row.sleep;
+  return { ...row, sleep };
+};
 const patchRow = (dir: string, name: string, expected: AgentRow["state"] | null, events: readonly AgentEvent[], patch: Partial<AgentRow> = {}) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -1594,7 +1636,7 @@ const patchRow = (dir: string, name: string, expected: AgentRow["state"] | null,
           });
         }
         const state = yield* advance(row, events);
-        const next: AgentRow = { ...row, ...patch, state, updatedAt: iso(env) };
+        const next: AgentRow = { ...(state === "interrupted" || state === "closed" ? withoutSleep(row) : row), ...patch, state, updatedAt: iso(env) };
         return [withRow(project, next), next] as const;
       }),
     );
@@ -1629,7 +1671,7 @@ export const publishTokens = (project: Project, live: LiveCounts = {}) =>
     const turns = turnLog().snapshot();
     const tokens = deriveTokens(project, desk, live, turns);
     // A stuck warning rides $agents and comes only from the owner's pass, so it always publishes.
-    const keepAgents = !live.stuck && lacksTurnEvidence(project, turns, env.sessionId);
+    const keepAgents = !live.stuck && !project.agents.some(row => row.state === "asleep" || row.sleep) && lacksTurnEvidence(project, turns, env.sessionId);
     const shown = `now=${tokens.now ?? "-"} progress=${tokens.progress ?? "-"} agents=${keepAgents ? "(kept: no turn records in this process)" : tokens.agents ?? "-"} needs=${tokens.needs ?? "-"}`;
     if (project.sidebar === "off") return `sidebar off (shared space); would publish ${shown}`;
     const { agents, ...rest } = tokens;
@@ -2410,6 +2452,7 @@ export interface AgentLaunchInput {
   readonly reason?: string | undefined;
   /** restart: act on a row another owner launched; moves only that row, needs reason. */
   readonly takeover?: boolean | undefined;
+  readonly sleepMinutes?: number | undefined;
 }
 
 /** Keep warm selection independent of side-desk fork topology. */
@@ -2895,7 +2938,7 @@ export const UNTIL_LINES_SCRIPT = "const fs=require('node:fs');const read=p=>{tr
 
 /** pi-until watches a journal started and never finished, one short line each. A cancel writes no
  * receipt, so a listed watch may already be gone: the successor checks before re-arming. */
-export function openUntilWatches(journal: string, now = Date.now()): string[] {
+export function openUntilWatches(journal: string, now = Date.now(), all = false): string[] {
   const open = new Map<string, { label: string; line: string }>();
   const finished = new Set<string>();
   // A fork copies its ancestors' entries with their own timestamps, and pi-until carries no watch across a fork, so a
@@ -2907,7 +2950,7 @@ export function openUntilWatches(journal: string, now = Date.now()): string[] {
   const describe = (id: string, label: unknown, kind: unknown, interval: unknown, quickRef?: unknown) =>
     `${id} "${String(label ?? "").slice(0, 80)}" (${String(kind ?? "until")}${typeof interval === "number" ? `, every ${Math.round(interval / 1000)} s` : ""}${typeof quickRef === "string" && quickRef ? `; ${quickRef.slice(0, 120)}` : ""})`;
   for (const line of journal.split("\n")) {
-    if (!line.includes("\"pi-until-") && !line.includes('"event":"finished"')) continue;
+    if (!line.includes("\"pi-until-") && !line.includes('"event":"finished"') && !line.includes('"type":"session"')) continue;
     let entry: { type?: unknown; customType?: unknown; data?: Record<string, unknown>; event?: unknown; id?: unknown; timestamp?: unknown };
     try { entry = JSON.parse(line); } catch { continue; }
     if (entry.type === "session" && Number.isNaN(sessionStart) && typeof entry.timestamp === "string") { sessionStart = Date.parse(entry.timestamp); continue; }
@@ -2932,6 +2975,7 @@ export function openUntilWatches(journal: string, now = Date.now()): string[] {
     } else if (entry.customType === "pi-until-finished" && typeof data.id === "string") open.delete(data.id);
   }
   for (const id of finished) open.delete(id);
+  if (all) return [...open.values()].map(watch => watch.line);
   // One line per label, the latest: re-arming a repeat twice would page twice.
   const byLabel = new Map<string, string>();
   for (const { label, line } of open.values()) { byLabel.delete(label); byLabel.set(label, line); }
@@ -3000,7 +3044,7 @@ export const restartLockName = (project: string, row: string) =>
 /** `takeover` restarts a row another owner launched (Switchboard, 2026-11-03: Node CVE restart waves across every desk).
  * Only that row moves to the caller; its reason is recorded on the row and the previous owner is told. A self-restart
  * ignores it: the session already owns its own row. The per-row restart lock refuses a takeover while the row restarts itself. */
-const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env" | "compactAt" | "noSkills"> & { takeover?: { reason: string } } = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
+const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: Pick<AgentLaunchInput, "model" | "thinking" | "extensions" | "env" | "compactAt" | "noSkills" | "sleepMinutes"> & { takeover?: { reason: string } } = {}) => withMachineLaunchLock(restartLockName(project.slug, old.name), Effect.gen(function* () {
   const env = yield* MusterEnv;
   const self = old.sessionId === env.sessionId;
   const takeover = !self && overrides.takeover !== undefined;
@@ -3012,6 +3056,13 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   if (self && matches.length > 1 && env.paneId !== pane?.pane_id) return yield* input("duplicate session: this unbound pane must /fork before restarting the row");
   if (!pane) return yield* input("restart refused: no unique live pane proves the catalog session; duplicate sessions must /fork");
   const recorded = old;
+  const sleeping = overrides.sleepMinutes !== undefined;
+  if (sleeping) {
+    if (matches.length !== 1) return yield* input("sleep refused: desk has duplicate live panes");
+    if (old.machine !== "local") return yield* input("sleep must run against the desk's local catalog on its own host");
+    if (!self && !old.pane?.openedByMuster) return yield* input("sleep needs a Muster-opened pane for an owner-side restart");
+    yield* requireSleepEligible(project, old, pane, overrides.env?.HOME);
+  }
   const oldPane = adoptionBinding(old, pane);
   // Herdr's live journal is authoritative even when its filename moved.
   old = { ...old, sessionFile: pane.agent_session!.value };
@@ -3051,7 +3102,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   const loadsFrom = machine?.musterExtension ?? project.musterExtension ?? env.musterRoot;
   const sha = (yield* git(loadsFrom, "rev-parse", "HEAD").pipe(Effect.catch(() => git(env.musterRoot, "rev-parse", "HEAD")))).trim();
   if (loadsFrom !== (machine?.musterExtension ?? env.musterRoot)) notes.push(`the replacement loads pi-muster from ${loadsFrom} at ${sha.slice(0, 7)}, not this owner's checkout`);
-  let row: AgentRow = { ...old, profile: selected.profile, sessionId: `${mintSessionId(old.name, env.now())}-${randomUUID().slice(0, 8)}`, sessionFile: null, parentSessionFile: old.sessionFile, pane: null };
+  let row: AgentRow = { ...old, ...(overrides.sleepMinutes !== undefined ? { sleep: { minutes: overrides.sleepMinutes, since: iso(env), by: env.sessionId } } : {}), profile: selected.profile, sessionId: `${mintSessionId(old.name, env.now())}-${randomUUID().slice(0, 8)}`, sessionFile: null, parentSessionFile: old.sessionFile, pane: null };
   if (row.owner === old.sessionId) row = { ...row, owner: row.sessionId };
   if (takenFrom !== undefined) {
     // fleet desk, 2026-11-07: moving the owner here leaked 24 rows to the wave runner in the 11-04 CVE wave, and every
@@ -3064,6 +3115,10 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // provisional → proven → rebound → activated. Failed provisional forks never
   // acquire the identity lease. Network work is submitted only after activation.
   const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}) };
+  if (sleeping) {
+    const refusal = deskWakeConfigRefusal(row, env);
+    if (refusal) return yield* input(sleepWakeRefusal(refusal));
+  }
   // Ernestine, 2026-10-17: since rat-king 0b233bf a fork answering to its parent's name is renamed, and drovr's restarted
   // desk came up as drovr/drovr-desk-2-drovr-desk. A restart is a successor, not a sibling: pi-ratking (3b5dbc9) lets
   // RATKING_NAME stand when RATKING_SUCCEEDS names the parent session. Restart only; a fork or side desk never sets it.
@@ -3089,7 +3144,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   else yield* Effect.try({ try: () => snapshotRestartSession(old.sessionFile!, snapshot, profile.thinking ?? undefined), catch: error => new InputError({ message: `restart snapshot: ${String(error)}` }) });
   const fleet = fleetDistill(env.home);
   if (fleet.note) notes.push(fleet.note);
-  const distilled = yield* restartDistill({ policy: effectiveDistill(project.policy, fleet.policy), role: old.role, remote, self,
+  const distilled = sleeping ? { parentSessionFile: snapshot, extensions: [] as string[], note: undefined, detail: undefined } : yield* restartDistill({ policy: effectiveDistill(project.policy, fleet.policy), role: old.role, remote, self,
     paneId: pane.pane_id, sessionFile: old.sessionFile!, snapshot,
     childOut: join(snapshotDir, `distilled-${row.sessionId}.jsonl`), cwd: old.cwd });
   const forkSource = distilled.parentSessionFile;
@@ -3103,14 +3158,15 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
     : yield* Effect.sync(() => [untilJournalText(forkSource), untilFinishedLines(readOrEmpty(untilTelemetryPath(env.home)))].join("\n"));
   const watches = openUntilWatches(watchLines);
   if (watches.length) notes.push(`pi-until watches not carried into the fork (re-arm in the successor): ${watches.join("; ")}`);
-  const prompt = `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.${watches.length ? ` Your parent session's pi-until watches did not carry across this fork; re-arm the ones still needed: ${watches.join("; ")}.` : ""}`;
+  const prompt = sleeping ? "Muster restarted this desk in sleep mode. Acknowledge in one line and wait for Rat King mail. Do not start watches or launch work just to acknowledge this restart." : `You continue ${old.name} after a restart onto ${sha}. Re-read your brief${old.brief ? ` at ${old.brief}` : " (none recorded)"} and owner inbox before continuing. Do not mutate the catalog or launch work until your row points at your new session; the old owner is committing the handover.${watches.length ? ` Your parent session's pi-until watches did not carry across this fork; re-arm the ones still needed: ${watches.join("; ")}.` : ""}`;
   const inherited = yield* inheritedStartEntries(forkSource);
   const gate = join(launchDir, `restart-${row.sessionId}.ready`);
   environment.MUSTER_RESTART_GATE = gate;
   const argv = buildArgv({ kind: "fork", sessionId: row.sessionId, sessionFile: null, parentSessionFile: forkSource, profile: forkProfile, musterExtension: launchProject.musterExtension, prompt });
   const receipt = env.createId();
   const wrap = machine?.wrap.map(arg => arg.replaceAll("{name}", old.name)) ?? [];
-  const script = yield* writeLaunchFile(launchDir, `#!/bin/sh\nset -e\n${shellPrelude(old.cwd, environment, environment.PATH === undefined ? bin : undefined)}${piReceiptSuffix(receipt)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
+  const spawnEnv = row.sleep ? { ...environment, [DRAIN_ENV]: String(row.sleep.minutes) } : environment;
+  const script = yield* writeLaunchFile(launchDir, `#!/bin/sh\nset -e\n${shellPrelude(old.cwd, spawnEnv, environment.PATH === undefined ? bin : undefined)}${piReceiptSuffix(receipt)}\nexec ${[...wrap, "pi", ...argv].map(shellQuote).join(" ")}`);
   // A desk replacement is also a split in its own tab, never a fresh desk tab.
   // The root binding transfers with the row so closing the old root cannot strand the lane.
   let phase: "provisional" | "rebound" = "provisional";
@@ -3118,14 +3174,14 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
     paneSplit(pane.pane_id, "right", old.cwd),
     fresh => Effect.gen(function* () {
       const binding: PaneBinding = { paneId: fresh.pane_id, terminalId: fresh.terminal_id, tabId: fresh.tab_id, openedByMuster: true };
-      yield* guardLaunchShell(binding.paneId);
+      yield* guardLaunchShell(binding.paneId, sleeping ? binding.terminalId : undefined);
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
       const wait = yield* waitForSession(binding.paneId, null, remote ? undefined : () => findSessionFile(row.cwd, row.sessionId, env.home), `exec sh ${shellQuote(script)}`);
       if (wait.state !== "ready") return yield* input(`restart failed before rebind: discovery timeout: replacement session ${wait.state}; old agent untouched; inspect the replacement launch before retrying`);
       const id = sessionIdFromFile(wait.sessionFile);
       if (!id || id === old.sessionId || wait.sessionFile === old.sessionFile) return yield* input("restart failed before rebind: wrong boundary: replacement did not prove a new session; old agent untouched");
       let proof: Proof = yield* proveStartedPrompt(wait.sessionFile, prompt, inherited, prompt, false, true, paneWorking(binding.paneId));
-      if (proof.state === "unproven" && proof.failureKind === "missing_prompt") {
+      if (!sleeping && proof.state === "unproven" && proof.failureKind === "missing_prompt") {
         // Pi catches and drops an argv prompt if a session_start hook already
         // opened a turn. Retry only a genuinely absent user, then recheck the
         // ORIGINAL boundary so a real intervening reply still refuses.
@@ -3144,7 +3200,8 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (loadout.note) notes.push(loadout.note);
       if (loadout.failure) return yield* input(`restart failed before rebind: ${loadout.failure}; old agent untouched. Fix ${toolListSource(project, old)}, then restart again`);
       row = { ...row, state, sessionId: id, sessionFile: wait.sessionFile, pane: binding, restarts: old.restarts + 1, delivery: "proven", updatedAt: iso(env),
-        events: [...(row.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}${distilled.detail ? `; ${distilled.detail}` : ""}` }],
+        events: [...(row.events ?? []), { type: "RESTARTED", at: iso(env), detail: `${old.sessionId} -> ${id} onto ${sha}${distilled.detail ? `; ${distilled.detail}` : ""}` },
+          ...(sleeping ? [{ type: "SLEEP", at: iso(env), detail: `drain window ${row.sleep?.minutes} min; opted in by ${env.sessionId}` }] : [])],
         restore: { cwd: old.cwd, argv: buildArgv({ kind: "restore", sessionId: id, sessionFile: wait.sessionFile, parentSessionFile: null, profile, musterExtension: launchProject.musterExtension }), env: withoutSuccession(environment) } };
       const stillOld = yield* locatePane(oldPane);
       if (!stillOld || !paneProvesSession(stillOld, old)) return yield* input("old Pi changed during restart; rebind refused");
@@ -3152,6 +3209,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
         const latest = yield* findRow(current, old.name);
         if (latest.sessionId !== old.sessionId || latest.sessionFile !== recorded.sessionFile || latest.owner !== old.owner || latest.state !== old.state || latest.pane?.terminalId !== recorded.pane?.terminalId) return yield* input("row changed during restart; old agent untouched, retry");
         if (!self) yield* requireOwner(latest, env.sessionId, takeover, project.slug, false);
+        if (sleeping) yield* requireSleepEligible(current, latest, stillOld, environment.HOME);
         yield* guardPaneBinding(current, latest, binding);
         const next = withRow(current, row);
         const agents = next.agents.map(other => other.owner === old.sessionId ? { ...other, owner: id, restore: other.restore ? { ...other.restore, env: { ...other.restore.env, MUSTER_OWNER: id } } : null, updatedAt: iso(env) } : other);
@@ -3169,7 +3227,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       phase = "rebound";
       // Rows this session owns in other registered catalogs move too, before any mail can name the old owner.
       notes.push(...yield* moveOwnedRows(dir, old.sessionId, id));
-      if (takenFrom !== undefined) notes.push(yield* tellTakenOwner(project, old, takenFrom, overrides.takeover!.reason));
+      if (!sleeping && takenFrom !== undefined) notes.push(yield* tellTakenOwner(project, old, takenFrom, overrides.takeover!.reason));
 
       // Activation is host-local, including remote hosts without the owner's catalog.
       // Never roll back a committed catalog or claim the old agent is untouched here.
@@ -3192,10 +3250,14 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
       if (self) notes.push(`Replacement proven and rebound. End this turn now; the old session must quit after agent_end, not reload or restart in place. An operator message that reaches this session from now on is carried verbatim to the replacement pane; do not answer it or ask for it again here.${oldPane.openedByMuster ? "" : ` ${adoptedSelfNote(oldPane)}`}`);
       else {
         // A resumed pane proves identity, not permission to type or close it.
-        notes.push(oldPane.openedByMuster
+        const idle = !sleeping || (yield* locatePane(oldPane).pipe(Effect.map(latest => !latest ||
+          (paneProvesSession(latest, old) && ["idle", "done"].includes(latest.agent_status ?? "") &&
+            (sessionMtimeMs(old.sessionFile!) ?? Infinity) < env.now().getTime() - MIN_DESK_IDLE_MS)), Effect.orElseSucceed(() => false)));
+        notes.push(!idle ? `sleep handover: old pane ${oldPane.paneId}/${oldPane.terminalId} became active or uncertain; left it open, inspect before closing` : oldPane.openedByMuster
           ? yield* closeRestartShell(dir, oldPane, false, old.machine).pipe(Effect.catch(error => Effect.succeed(`old pane close failed: ${error.message}; close only ${oldPane.paneId}/${oldPane.terminalId}`)))
           : adoptedSelfNote(oldPane));
         notes.push(yield* renameRestart(binding, old.name));
+        if (sleeping && takenFrom !== undefined) notes.push(yield* tellTakenOwner(project, old, takenFrom, overrides.takeover!.reason));
       }
       yield* paneRename(binding.paneId, row.profile.label).pipe(Effect.catch(() => Effect.void));
       return { row, argv, readiness: proof.state === "proven" ? "proven" : "rebound; delivery unproven", proof, sessionIdMatched: argv.includes(id), notes, ...(self ? { endSession: { oldPane, replacementPane: binding, name: old.name } } : {}) };
@@ -3226,8 +3288,139 @@ const readLaunchJobs = (home: string): LaunchJob[] => {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter(file => file.endsWith(".json")).map(file => readLaunchJob(home, file.slice(0, -5)));
 };
-/** A day of launch results whose mail did not go out, for the owner that launched them. */
+const sleepWakeRefusal = (reason: string) => reason === "machine local is not wake-enabled"
+  ? 'sleep refused: local wake is not enabled; set {"local":true} in ~/.config/muster/wake.json'
+  : `sleep refused: ${reason}`;
+const requireSleepEligible = (project: Project, row: AgentRow, pane: PaneInfo, launchHome?: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const refusal = deskWakeConfigRefusal(row, env) ?? (launchHome === undefined ? null : localWakeRefusal(env.home, env.wakeConfigHome, launchHome));
+  if (refusal) return yield* input(sleepWakeRefusal(refusal));
+  const now = env.now().getTime();
+  const evidence = yield* Effect.try({ try: () => {
+    if (!row.sessionFile || pane.agent_session?.value !== row.sessionFile) throw new Error("catalog session journal does not match the pane");
+    const journal = sleepJournal(row.sessionFile, row.sessionId);
+    let telemetry = "";
+    try { telemetry = readFileSync(untilTelemetryPath(env.home, { ...process.env, ...row.profile.policy?.env, ...row.profile.env }), "utf8"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    return { journal, telemetry, jobs: readLaunchJobs(env.home), registry: readRegistry(env.home) };
+  }, catch: () => input("sleep refused: could not read session journal, watch telemetry, launch jobs or project registry") });
+  const catalogs = [project];
+  for (const entry of evidence.registry.values()) if (entry.dir !== project.dir) catalogs.push(yield* load(entry.dir));
+  const packets: string[] = [], launches: string[] = [];
+  for (const catalog of catalogs) {
+    const owned = new Set(catalog.agents.filter(other => other.owner === row.sessionId || (catalog.dir === project.dir && other.name === row.name)).map(other => other.name));
+    for (const packet of catalog.packets) if (owned.has(packet.agent) && !TERMINAL_PACKET_STATES.includes(packet.state)) packets.push(`${catalog.slug}/${packet.id}`);
+    for (const other of catalog.agents) if (owned.has(other.name) && ["launching", "restoring"].includes(other.state)) launches.push(`${catalog.slug}/${other.name}`);
+    for (const job of evidence.jobs) if (job.project === catalog.slug && (job.owner === row.sessionId || owned.has(job.name)) && ["queued", "running"].includes(job.state)) launches.push(`${catalog.slug}/${job.name} (${job.id})`);
+  }
+  const fresh = yield* paneGet(pane.pane_id);
+  const reasons = sleepRefusals({
+    desk: row.role === "desk",
+    open: project.state !== "archived" && project.lanes.some(lane => lane.slug === row.lane && lane.state === "open") && ["running", "silent", "nudged", "restarted"].includes(row.state),
+    idleMs: now - evidence.journal.mtimeMs,
+    paneStatus: fresh?.terminal_id === pane.terminal_id && paneProvesSession(fresh, row) ? fresh.agent_status ?? null : null,
+    packets, launches, watches: [...openUntilWatches(`${evidence.journal.until}\n${untilFinishedLines(evidence.telemetry)}`, now, true), ...evidence.journal.watches],
+  });
+  if (evidence.registry.get(project.slug)?.dir !== project.dir) reasons.push("project is not registered for wake on this host");
+  if (reasons.length) return yield* input(`sleep refused: ${reasons.join("; ")}`);
+  if (sessionMtimeMs(row.sessionFile!) !== evidence.journal.mtimeMs) return yield* input("sleep refused: session journal changed during eligibility check");
+});
+
+const sameSleepRow = (latest: AgentRow | undefined, snapshot: AgentRow) => latest !== undefined &&
+  latest.state === snapshot.state && latest.owner === snapshot.owner && latest.machine === snapshot.machine && latest.role === snapshot.role &&
+  latest.sessionId === snapshot.sessionId && latest.sessionFile === snapshot.sessionFile && latest.lane === snapshot.lane &&
+  JSON.stringify(latest.pane) === JSON.stringify(snapshot.pane) && JSON.stringify(latest.sleep) === JSON.stringify(snapshot.sleep) &&
+  latest.updatedAt === snapshot.updatedAt && !latest.retirePending;
+
+const drainableDeskState = (row: AgentRow) => ["running", "silent", "nudged", "restarted", "restoring"].includes(row.state);
+
+/** A gone pane alone is a crash, not proof of sleep. Keep the binding for the wake shell guard. */
+const reconcileLocalDeskSleep = (dir: string, row: AgentRow, act: boolean, snapshot?: readonly PaneInfo[], drainedAt?: number) => Effect.gen(function* () {
+  if (!row.sleep || row.machine !== "local" || row.role !== "desk" || !row.sessionFile || !drainableDeskState(row)) return row;
+  const panes = snapshot ?? (yield* paneList());
+  const bound = panes.find(pane => pane.terminal_id === row.pane?.terminalId);
+  if (wakeSessionHolder(row, panes) || (bound && (hostsPi(bound) || suspectWakeShell(bound)))) return row;
+  const journal = drainedAt === undefined ? readSleepDrain(row) : { kind: "read" as const, drainedAt };
+  if (journal.kind !== "read") return yield* input("sleep journal unavailable; rechecking next pass");
+  const drained = journal.drainedAt;
+  const resumedAt = row.events?.filter(event => event.type === "WAKE_RESTORE" || event.type === "SLEEP" || event.type === "SLEEP_RESUMED" || event.type === "RESTARTED").at(-1)?.at ?? row.sleep.since;
+  if (drained <= Date.parse(resumedAt)) return row;
+  const env = yield* MusterEnv;
+  const asleep: AgentRow = { ...row, state: yield* stepAgent(row.name, row.state, { type: "DRAINED" }), updatedAt: iso(env) };
+  if (!act) return asleep;
+  return yield* mutate(dir, current => Effect.gen(function* () {
+    const latest = yield* findRow(current, row.name);
+    if (!sameSleepRow(latest, row)) return yield* input("desk changed during sleep reconciliation; recheck next pass");
+    return [withRow(current, asleep), asleep] as const;
+  }));
+});
+
+/** Record manual resumption without directing any input to its pane. */
+const resumedByLease = "live Rat King lease; waiting for Herdr session evidence";
+const reconcileResumedDesk = (project: Project, row: AgentRow, panes: readonly PaneInfo[], act: boolean) => Effect.gen(function* () {
+  if (row.machine !== "local" || !row.sleep || (row.state !== "asleep" && !drainableDeskState(row))) return null;
+  const exact = wakeSessionHolder(row, panes);
+  const bound = panes.find(pane => pane.terminal_id === row.pane?.terminalId);
+  // An explicitly different session on the old terminal is not this desk resuming.
+  const pane = exact ?? (bound?.agent_session ? undefined : boundWakePi(bound));
+  const lease = pane ? false : yield* liveWakeLease(project, row, null).pipe(Effect.orElseSucceed(() => null));
+  if (row.state !== "asleep") return !pane && lease === true ? { row, action: resumedByLease } : null;
+  if (!pane && lease !== true) return { row, action: null };
+  const action = pane ? `sleep ended: live Pi in ${pane.pane_id}` : resumedByLease;
+  const env = yield* MusterEnv;
+  const state = yield* stepAgent(row.name, row.state, { type: "ADOPT" });
+  const { wakeBlock: _block, journalReadFailures: _failures, ...sleep } = row.sleep;
+  const next: AgentRow = { ...row, sleep, state, updatedAt: iso(env),
+    events: [...(row.events ?? []), { type: "SLEEP_RESUMED", at: iso(env), detail: action }],
+  };
+  const resumed = act ? yield* mutate(project.dir, current => Effect.gen(function* () {
+    const latest = yield* findRow(current, row.name);
+    if (!sameSleepRow(latest, row)) return [current, latest] as const;
+    const adopted = exact && !adoptionHolder(current, latest, exact) ? { ...next, pane: adoptionBinding(latest, exact) } : next;
+    return [withRow(current, adopted), adopted] as const;
+  })) : next;
+  return { row: resumed, action };
+});
+
+const checkDeskSleepStatus = (project: Project, row: AgentRow, panes: readonly PaneInfo[], act: boolean) => Effect.gen(function* () {
+  const resumed = yield* reconcileResumedDesk(project, row, panes, act);
+  if (resumed && resumed.row.state !== "asleep") return { ...resumed, hold: true };
+  if (!row.sleep || row.machine !== "local" || row.role !== "desk" || (row.state !== "asleep" && !drainableDeskState(row))) return { row, action: null, hold: false };
+  const env = yield* MusterEnv;
+  const save = (before: AgentRow, next: AgentRow) => act ? mutate(project.dir, current => Effect.gen(function* () {
+    const latest = yield* findRow(current, before.name);
+    if (!sameSleepRow(latest, before)) return [current, latest] as const;
+    return [withRow(current, next), next] as const;
+  })) : Effect.succeed(next);
+  const bound = panes.find(pane => pane.terminal_id === row.pane?.terminalId);
+  const live = wakeSessionHolder(row, panes) || (bound && (hostsPi(bound) || suspectWakeShell(bound)));
+  const journal = live && row.state !== "asleep" ? null : readSleepDrain(row);
+  const { journalReadFailures, wakeBlock, ...sleep } = row.sleep;
+  const failures = journal?.kind === "unreadable" && !bound && row.state !== "asleep" ? (journalReadFailures ?? 0) + 1 : 0;
+  if (!live && ((journal?.kind === "missing" && (!bound || row.state === "asleep")) || failures >= 3)) {
+    const action = journal?.kind === "missing" ? "session journal is missing: interrupted" : "session journal unreadable for 3 owner passes: interrupted";
+    const at = iso(env);
+    const next = { ...withoutSleep(row), pane: null, state: yield* stepAgent(row.name, row.state, { type: "PANE_GONE" }), updatedAt: at,
+      events: [...(row.events ?? []), { type: "PANE_GONE", at, detail: action }] };
+    return { row: yield* save(row, next), action, hold: true };
+  }
+  const drained = journal?.kind === "read" ? yield* reconcileLocalDeskSleep(project.dir, row, act, panes, journal.drainedAt) : row;
+  if (drained.state === "asleep") {
+    const blocked = deskWakeRefusal(project, drained, env) ?? (journal?.kind === "unreadable" ? UNREADABLE_SLEEP_JOURNAL : journal?.kind === "missing" ? "session journal is missing" : null);
+    const changed = blocked !== (wakeBlock ?? null);
+    const action = changed && blocked ? `alarm: sleeping desk cannot be woken: ${blocked}` : null;
+    if (!changed && !journalReadFailures) return { row: drained, action, hold: true };
+    const at = iso(env);
+    const next = { ...drained, sleep: { ...sleep, ...(blocked ? { wakeBlock: blocked } : {}) }, updatedAt: at,
+      ...(changed && (blocked || wakeBlock) ? { events: [...(drained.events ?? []), { type: blocked ? "SLEEP_WAKE_BLOCKED" : "SLEEP_WAKE_AVAILABLE", at, detail: blocked ?? "local wake available again" }] } : {}) };
+    return { row: yield* save(drained, next), action, hold: true };
+  }
+  const updated = failures !== (journalReadFailures ?? 0) ? yield* save(drained, { ...drained, sleep: { ...sleep, ...(failures ? { journalReadFailures: failures } : {}) }, updatedAt: iso(env) }) : drained;
+  return { row: updated, action: journal && journal.kind !== "read" ? "sleep journal unavailable; rechecking next pass" : null, hold: journal !== null && journal.kind !== "read" };
+});
+
 const LOCAL_WAKE_NOTE = "headless wake (local receipt): ";
+/** A day of launch results whose mail did not go out, for the owner that launched them. */
 export const undeliveredLaunchNotes = (jobs: readonly LaunchJob[], project: string, owner: string, now: number) =>
   jobs.filter(job => job.project === project && job.owner === owner && job.outcome && job.undelivered && now - Date.parse(job.startedAt) < 86_400_000)
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
@@ -3242,6 +3435,7 @@ const findLaunchJob = (jobs: readonly LaunchJob[], project: string, row: AgentRo
 /** Fast admission only. No process/model/pane probes run in the caller's turn. */
 export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(function* () {
   const params = yield* decodeWith(decodeAgentLaunchRequest, raw);
+  if (params.sleepMinutes !== undefined && params.action !== "restart") return yield* input("sleepMinutes requires action: restart");
   if (params.action === "adopt" || params.action === "restart") return yield* agentLaunchForeground(dir, params);
   const env = yield* MusterEnv;
   const roster = (yield* loadRoster).roster;
@@ -3314,7 +3508,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
       request: parent && !project.agents.includes(parent) && parent.sessionFile ? { ...params, from: parent.sessionFile } : params };
     // Switchboard, 2026-10-28: the reservation carried no ownerName, so a rowless owner's launch receipt had no name to mail.
     const reservedOwnerName = params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId, yield* liveSelfName);
-    const reserved: AgentRow = { ...existing, ...reservedOwnerName, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
+    const reserved: AgentRow = { ...(existing ? restoreSleepMode(existing) : {}), ...reservedOwnerName, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
       cwd: machine === "local" ? cwd : mapPath(cwd, yield* machineConfig(machine)), clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: launchJob.sessionId,
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
       owner: params.action === "restore" && existing ? existing.owner : env.sessionId, brief, state, delivery: "none",
@@ -3442,27 +3636,37 @@ export const runLaunchJob = (dir: string, id: string) => Effect.gen(function* ()
   return { kind, title, body };
 });
 
-/** Headless restore reuses remote launch without publishing a new role or sending owner mail. */
-export const restoreWakeRow = (project: Project, row: AgentRow, reason: string, minutes: number, onInput: (row: AgentRow) => void) => Effect.gen(function* () {
-  const request = { action: "restore" as const, name: row.name, reason };
-  return yield* remoteLaunch(project.dir, project, request, row.machine, undefined, { reason, minutes, onInput });
+/** Headless restore uses normal placement and launch, but has no caller overrides or role publication. */
+export const restoreWakeRow = (project: Project, row: AgentRow, reason: string, minutes: number, onInput: (row: AgentRow) => void, chargeLocalAttempt?: Effect.Effect<void, WakeRestoreStop>) => Effect.gen(function* () {
+  const request = { action: "restore" as const, name: row.name };
+  const wake = { reason, minutes, onInput };
+  if (row.machine !== "local") return yield* remoteLaunch(project.dir, project, request, row.machine, undefined, wake);
+  const key = launchReservationKey(project.dir, row.name);
+  const admission = withMachineLaunchLock("local", Effect.gen(function* () {
+    if ((yield* liveLaunchReservations("local")).has(key)) return yield* new WakeRestoreStop({ result: "failed", message: "a launch already holds this row's reservation" });
+    return yield* reserveLaunch("local", key);
+  }));
+  return yield* withMachineLaunchLock(restartLockName(project.slug, row.name),
+    Effect.acquireUseRelease(admission, () => launchForeground(project.dir, request, undefined, { ...wake, localSnapshot: row, ...(chargeLocalAttempt ? { chargeLocalAttempt } : {}) }), release => release));
 });
 
-export const noticeWakeRestore = (project: Project, row: AgentRow, reason: string, success: boolean, ready: boolean) => Effect.gen(function* () {
+export const noticeWakeRestore = (project: Project, row: AgentRow, messageId: string | null, result: "failed" | "restored") => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  const request = { action: "restore" as const, name: row.name, reason };
+  const text = wakeNoticeText(`${project.slug}/${row.name}`, messageId, result);
+  const success = result === "restored";
+  const request = { action: "restore" as const, name: row.name };
   const id = randomUUID();
   const log = join(env.home, ".local/state/muster/launches", `${id}.log`);
   const running = yield* stepLaunchJob(id, "queued", { type: "RUN" });
   const state = yield* stepLaunchJob(id, running, { type: success ? "SUCCEED" : "FAIL" });
   const job: LaunchJob = { id, project: project.slug, name: row.name, sessionId: row.sessionId,
     pid: process.pid, log, startedAt: iso(env), state, priorState: row.state, owner: row.owner, request,
-    outcome: success ? "action" : "blocked", undelivered: `${LOCAL_WAKE_NOTE}${success ? reason : `failed: ${reason}`}` };
+    outcome: success ? "action" : "blocked", undelivered: `${LOCAL_WAKE_NOTE}${text}` };
   // Keep the wake on the existing local status feed; no new owner queue or Rat King write.
   yield* Effect.try({
     try: () => {
       mkdirSync(dirname(log), { recursive: true, mode: 0o700 });
-      writeFileSync(log, `${reason}\nsession ${row.sessionId} · pane ${row.pane?.paneId ?? "unknown"} · ready ${ready}\n`, { mode: 0o600, flag: "wx" });
+      writeFileSync(log, `${text}\n`, { mode: 0o600, flag: "wx" });
     },
     catch: () => new InputError({ message: "wake launch log unavailable" }),
   }).pipe(Effect.andThen(writeLaunchJob(env.home, job)));
@@ -3475,7 +3679,7 @@ export const agentLaunchForeground = (dir: string, params: AgentLaunchInput, job
     return note ? { ...result, notes: [...result.notes, note] } : result;
   })));
 
-const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string) =>
+const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string, wake?: WakeLaunch) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
     if (params.at !== undefined && params.action !== "fork") return yield* input("at is only valid with action fork");
@@ -3485,6 +3689,7 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
     const jobRow = job ? catalog.agents.find(row => row.name === name && row.sessionId === job.sessionId) : undefined;
     if (job && (!jobRow || jobRow.state === "closed" || job.outcome || job.project !== catalog.slug)) return yield* input("launch job is stale or already finished");
     const project = jobRow && job ? { ...catalog, agents: catalog.agents.map(row => row === jobRow ? { ...row, state: job.priorState } : row) } : catalog;
+    if (params.sleepMinutes !== undefined && params.action !== "restart") return yield* input("sleepMinutes requires action: restart");
     if (params.action !== "restart") yield* guardSideDesk(project, env.sessionId, "agent_launch");
     if (params.takeover && params.action !== "restart") return yield* input("takeover applies to restart only; agent_close and packet_land take their own, and project_status takeover moves a whole project");
     const previous = project.agents.find(row => row.name === (params.action === "fork" ? params.from : params.name));
@@ -3502,7 +3707,9 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
       // Harm: a takeover without a why leaves the previous owner and the row history unable to say who moved it or why.
       if (params.takeover && !reason) return yield* input("restart with takeover needs a reason; it is recorded on the row and sent to the previous owner");
       const row = yield* findRow(project, name);
-      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt, noSkills: params.noSkills, ...(params.takeover ? { takeover: { reason: reason! } } : {}) });
+      if (params.sleepMinutes !== undefined && params.takeover && row.owner !== env.sessionId && process.env.MUSTER_SWITCHBOARD !== "1" && (yield* liveSelfName) !== "switchboard") return yield* input("sleep takeover is reserved for Switchboard");
+      if (params.sleepMinutes !== undefined && machine !== "local") return yield* input("sleep must run against the desk's local catalog on its own host");
+      const restart = restartByFork(dir, project, row, { model: params.model, thinking: params.thinking, extensions: params.extensions, env: params.env, compactAt: params.compactAt, noSkills: params.noSkills, sleepMinutes: params.sleepMinutes, ...(params.takeover ? { takeover: { reason: reason! } } : {}) });
       return machine === "local" ? yield* restart : yield* onRemote(machine, yield* machineConfig(machine), restart);
     }
     if (params.action === "adopt") {
@@ -3557,11 +3764,20 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
       });
       return machine === "local" ? yield* adopt : yield* onRemote(machine, yield* machineConfig(machine), adopt);
     }
-    if (machine !== "local") return yield* remoteLaunch(dir, project, { ...params, action: params.action }, machine, jobId);
+    if (machine !== "local") {
+      if (wake) return yield* new WakeRestoreStop({ result: "failed", message: "row moved during local wake" });
+      return yield* remoteLaunch(dir, project, { ...params, action: params.action }, machine, jobId);
+    }
     if (params.side && params.action !== "fork") return yield* input("side: true requires action: fork or adopt");
     const side = params.side ? yield* sideParent(project, params.from, env.sessionId) : null;
     let existing = project.agents.find((agent) => agent.name === name);
-    if (params.action === "restore" && existing) {
+    const wakeSnapshot = wake ? existing : undefined;
+    const wakeChanged = () => new WakeRestoreStop({ result: "failed", message: "row or lane changed during local wake; probe again" });
+    const wakeShell = wake ? yield* Effect.gen(function* () {
+      if (!wakeSnapshot || !wake.localSnapshot || !sameSleepRow(wakeSnapshot, wake.localSnapshot) || wakeSnapshot.owner !== env.sessionId) return yield* wakeChanged();
+      return (yield* inspectWakeRestore(project, wakeSnapshot)).shell;
+    }) : null;
+    if (!wake && params.action === "restore" && existing) {
       const recovered = yield* recoverGoneRestore(existing);
       existing = recovered !== existing
         ? yield* patchRow(dir, name, existing.state, [{ type: "PANE_GONE" }], { pane: null, events: recovered.events ?? [] })
@@ -3581,7 +3797,8 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
       const sessionFile = existing.sessionFile ?? findSessionFile(existing.cwd, existing.sessionId, env.home);
       if (!sessionFile) return yield* new GuardFailed({ guard: "session", message: `row ${name} has no session file to restore; use launch` });
       // Harm: two Pis appending to one session file. Bastion, 2026-10-28: close left a Pi Muster did not open running on it.
-      const holder = restoreSessionHolder({ ...existing, sessionFile }, yield* paneList());
+      const panes = yield* paneList();
+      const holder = existing.state === "asleep" ? wakeSessionHolder({ ...existing, sessionFile }, panes) : restoreSessionHolder({ ...existing, sessionFile }, panes);
       if (holder) return yield* new GuardFailed({ guard: "session", message: `row ${name}'s session still runs in pane ${holder.pane_id}; restoring would put two Pis on one session file. Quit that Pi (/quit in the pane), then restore without pane` });
       for (const prompt of params.appendSystemPrompt ?? []) yield* guardDurable(project, "append-system-prompt", prompt);
       // Overrides apply and persist on every local restore, as on the remote path. Slim drops stored skills unless new ones are named.
@@ -3609,7 +3826,10 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
         if (note) skillNotes.push(note);
       }
       const { retirePending: _unretired, ...unmarked } = existing;
-      row = { ...unmarked, profile: { ...restoredProfile, skills: restoredSkills.paths, appendSystemPrompt: withHiddenSkills(restoredProfile.appendSystemPrompt, restoredSkills.hidden) }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
+      row = { ...restoreSleepMode(unmarked, wake), ...(wake ? {
+        pane: wakeShell ? unmarked.pane : null,
+        events: [...(unmarked.events ?? []), { type: "WAKE_RESTORE", at: iso(env), detail: wake.reason }],
+      } : {}), profile: { ...restoredProfile, skills: restoredSkills.paths, appendSystemPrompt: withHiddenSkills(restoredProfile.appendSystemPrompt, restoredSkills.hidden) }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
     } else {
       const relaunchable = existing?.state === "planned" || existing?.state === "failed" || (existing?.state === "interrupted" && !existing.sessionFile);
       if (existing && !relaunchable) {
@@ -3723,7 +3943,7 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
     if (modelNote) skillNotes.push(modelNote);
     const kind: LaunchKind = params.action;
     const launchProfile = extensionsFor(project, row);
-    const message = kind === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, join(env.home, ".pi/agent"));
+    const message = wake ? { prompt: WAKE_PROMPT, expected: undefined } : kind === "restore" && params.prompt === undefined && params.brief === undefined ? { expected: undefined } : yield* startPrompt(row, params.prompt, join(env.home, ".pi/agent"));
     const inheritedEntries = message.expected ? yield* inheritedStartEntries(kind === "fork" ? row.parentSessionFile : kind === "restore" ? row.sessionFile : existing?.cwd === row.cwd ? existing.sessionFile ?? findSessionFile(row.cwd, row.sessionId, env.home) : null) : 1;
     const argv = buildArgv({
       kind,
@@ -3736,6 +3956,10 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
     });
     const succeeds = kind === "restore" ? resumeSuccession(row.sessionFile) : null;
     const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...(succeeds ? { RATKING_SUCCEEDS: succeeds } : {}) };
+    if (wake) {
+      const refusal = deskWakeConfigRefusal(row, env);
+      if (refusal) return yield* new WakeRestoreStop({ result: "refused", message: refusal });
+    }
     const musterBin = join(env.musterRoot, "bin");
     // A profile PATH is typed literally. Otherwise only the prepend is typed: a ~1 KB
     // owner PATH overflows the pane's input line and leaves the quote open.
@@ -3744,14 +3968,27 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
     }
     const pathPrepend = agentEnvironment.PATH === undefined ? musterBin : undefined;
     const piReceiptId = env.createId();
-    yield* mutate(dir, (current) => Effect.gen(function* () {
+    const prepareLocal = mutate(dir, (current) => Effect.gen(function* () {
       const previous = current.agents.find(agent => agent.name === row.name);
+      if (wake && (!wakeSnapshot || current.agents.filter(agent => agent.name === row.name).length !== 1 ||
+          current.slug !== project.slug || !sameSleepRow(previous, wakeSnapshot) || current.lanes.find(lane => lane.slug === row.lane)?.state !== "open")) return yield* wakeChanged();
       if (jobId && previous?.state === "closed") return yield* input("launch row was closed while preparing the job");
-
+      // The job projects its prior state for RESTORE, but its durable reservation is launching.
+      if (!wake && existing?.state === "asleep" && (!sameSleepRow(previous, jobRow ?? existing) || (jobRow && jobRow.state !== "launching"))) {
+        return yield* Effect.fail(markBeforeTyping(jobId)(input("asleep desk changed while preparing manual restore; retry")));
+      }
       return [withRow(current, row), row] as const;
     }));
-
-    const failLaunch = () => patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void));
+    let typed = false;
+    const rollbackWake = () => wakeSnapshot && !typed ? mutate(dir, current => Effect.gen(function* () {
+      const latest = current.agents.find(agent => agent.name === name);
+      const event = row.events?.at(-1);
+      if (!latest || latest.state !== "restoring" || latest.sessionId !== row.sessionId || !event || JSON.stringify(event) !== JSON.stringify(latest.events?.at(-1))) return [current, undefined] as const;
+      const state = yield* stepAgent(name, latest.state, { type: "DRAINED" });
+      return [withRow(current, { ...wakeSnapshot, state }), undefined] as const;
+    })).pipe(Effect.catch(() => Effect.void)) : Effect.void;
+    const failLaunch = () => wake ? rollbackWake() : patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }]).pipe(Effect.catch(() => Effect.void));
+    const launchLocal = Effect.gen(function* () {
     let lane = yield* findLane(project, row.lane);
     // Closing the agent that held an open lane's root pane closes that pane; launch and restore reopen it.
     if ((params.action === "restore" || params.action === "launch") && !params.pane && !(row.pane && (yield* locatePane(row.pane))) && lane.state === "open" && (!lane.root || !(yield* locatePane(lane.root)))) {
@@ -3759,7 +3996,8 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
       lane = reopened.lane;
       skillNotes.push(`${params.action}: lane ${lane.slug} reopened; ${reopened.note ?? `opened tab ${lane.tabId} pane ${lane.root?.paneId}`}`);
     }
-    const picked = yield* pickPane(project, lane, row, params).pipe(Effect.tapError(failLaunch));
+    const picked = yield* pickPane(project, lane, row, wake && !wakeShell ? { ...params, slot: "split" } : params).pipe(Effect.tapError(failLaunch));
+    if (wakeShell && (picked.paneId !== wakeShell.pane_id || picked.terminalId !== wakeShell.terminal_id)) return yield* boundWakeUncertain();
     // Claim and release stale bindings together, before sending anything to the shell.
     const binding = yield* mutate(dir, (current) => Effect.gen(function* () {
       yield* guardPaneBinding(current, row, picked);
@@ -3770,10 +4008,24 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
         : stale.includes(other) ? { ...other, pane: null, updatedAt: iso(env) } : other);
       return [{ ...current, agents }, binding] as const;
     })).pipe(Effect.tapError(failLaunch));
-    let typed = false;
     const launched = yield* Effect.gen(function* () {
-      yield* guardLaunchShell(binding.paneId);
-      const script = yield* writeLaunchFile(join(env.home, ".pi/agent"), `#!/bin/sh\nset -e\n${shellPrelude(row.cwd, agentEnvironment, pathPrepend)}${piReceiptSuffix(piReceiptId)}\nexec ${["pi", ...argv].map(shellQuote).join(" ")}`);
+      const spawnEnv = wake && row.sleep ? { ...agentEnvironment, [DRAIN_ENV]: String(row.sleep.minutes) } : agentEnvironment;
+      const script = yield* writeLaunchFile(join(env.home, ".pi/agent"), `#!/bin/sh\nset -e\n${shellPrelude(row.cwd, spawnEnv, pathPrepend)}${piReceiptSuffix(piReceiptId)}\nexec ${["pi", ...argv].map(shellQuote).join(" ")}`);
+      if (wake && wakeSnapshot) {
+        const checked = yield* inspectWakeRestore(project, wakeSnapshot);
+        if ((checked.shell?.terminal_id ?? null) !== (wakeShell?.terminal_id ?? null)) return yield* boundWakeUncertain();
+        const latest = yield* load(dir);
+        const prepared = latest.agents.find(agent => agent.name === row.name);
+        if (!prepared || prepared.state !== "restoring" || prepared.sessionId !== row.sessionId || prepared.owner !== row.owner ||
+            prepared.pane?.terminalId !== binding.terminalId || JSON.stringify(prepared.events?.at(-1)) !== JSON.stringify(row.events?.at(-1)) ||
+            latest.lanes.find(lane => lane.slug === row.lane)?.state !== "open") return yield* wakeChanged();
+      }
+      yield* guardLaunchShell(binding.paneId, wake || existing?.state === "asleep" ? binding.terminalId : undefined);
+      if (wake?.chargeLocalAttempt) yield* wake.chargeLocalAttempt;
+      if (wake) {
+        wake.onInput({ ...row, pane: binding });
+        typed = true; // Herdr may accept input even if the request times out.
+      }
       yield* paneRun(binding.paneId, `exec sh ${shellQuote(script)}`);
       typed = true;
 
@@ -3788,6 +4040,7 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
           yield* patchRow(dir, row.name, row.state, [{ type: "LAUNCH_FAILED" }], {
             delivery: "unproven", events: [...(row.events ?? []), { type: "MODEL_ERROR", at: iso(env), detail: issue.line }],
           });
+          if (wake) return yield* new WakeRestoreStop({ result: "failed", message: WAKE_MODEL_ERROR, pane: binding.paneId });
           return yield* new GuardFailed({ guard: "model-proof", message: `pane ${binding.paneId}: delivery: unproven (model error: ${issue.line})` });
         }
         return yield* new GuardFailed({
@@ -3822,7 +4075,7 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
     let running = yield* patchRow(dir, row.name, row.state, launched.pending ? [] : [{ type: "STARTED" }], {
       ...(launched.pending ? { delivery: "none" as const } : {}),
       pane: launched.binding,
-      sessionFile: launched.sessionFile,
+      sessionFile: wake ? launched.sessionFile ?? row.sessionFile : launched.sessionFile,
       sessionId: actualId ?? row.sessionId,
       ...(params.action === "restore" && existing?.owner === existing?.sessionId ? { owner: actualId ?? row.sessionId } : {}),
       restore,
@@ -3854,6 +4107,8 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string)
       sessionIdMatched: actualId === null ? null : actualId === row.sessionId,
       notes: [...skillNotes, tokens],
     };
+    });
+    return yield* prepareLocal.pipe(Effect.andThen(launchLocal), Effect.tapError(rollbackWake), Effect.onInterrupt(rollbackWake));
   });
 
 export interface AgentCloseInput {
@@ -4093,13 +4348,19 @@ const retryPendingRetires = (dir: string) => Effect.gen(function* () {
   return notes;
 });
 
-export const agentClose = (dir: string, params: AgentCloseInput) => closeRow(dir, params).pipe(
+export const agentClose = (dir: string, params: AgentCloseInput) => Effect.gen(function* () {
+  const project = yield* load(dir);
+  const row = project.agents.find(agent => agent.name === params.name);
+  // A close can remove the same bound shell a headless wake is about to use.
+  const close = closeRow(dir, params).pipe(
   Effect.flatMap(result => result.row.state !== "closed" ? Effect.succeed(result) : Effect.gen(function* () {
     const project = yield* load(dir);
     const nameNote = standingRole(result.row) ? keepStandingName(project, result.row) : yield* retireOrMark(dir, project, result.row);
     const notes = [nameNote, yield* dropReaderHeartbeat(project, result.row)].filter((note): note is string => !!note);
     return notes.length ? { ...result, notes: [...result.notes, ...notes] } : result;
   })));
+  return yield* row?.machine === "local" && row.sleep ? withMachineLaunchLock(restartLockName(project.slug, row.name), close) : close;
+});
 
 /** States whose Pi may still be running its pi-until watches: a row that reported or landed keeps its Pi until closed. */
 const WATCH_LIVE_STATES: readonly string[] = ["running", "silent", "nudged", "restarted", "reported", "verified", "landed"];
@@ -4198,7 +4459,7 @@ const closeRow = (dir: string, params: AgentCloseInput) =>
       if (latest.sessionId !== row.sessionId || latest.cwd !== row.cwd || latest.pane?.terminalId !== row.pane?.terminalId) {
         return yield* new GuardFailed({ guard: "close-binding", message: `${row.name} changed session or pane during close; re-read its row before closing the replacement` });
       }
-      const next: AgentRow = { ...latest, state: yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), pane: null, sessionFile, restore, updatedAt: iso(env) };
+      const next: AgentRow = { ...withoutSleep(latest), state: yield* stepAgent(latest.name, latest.state, { type: "CLOSE" }), pane: null, sessionFile, restore, updatedAt: iso(env) };
       return [withRow(current, next), next] as const;
     }));
 
@@ -5044,10 +5305,27 @@ export const deskPost = (dir: string, params: DeskPostInput) =>
     }
     appendDesk(path, record);
     const nudge = yield* nudgeSwitchboards(project.slug, record);
+    const wakeNote = yield* nudgeSleepingDesk(project, record.id);
     const open = openDeskItems(readDesk(path));
-    const tokens = yield* publishTokens(project);
-    return { record, open: open.length, path, notes: [tokens, ...nudge] };
+    const tokens = yield* publishTokens(wakeNote ? yield* load(dir) : project);
+    return { record, open: open.length, path, notes: [tokens, ...nudge, ...(wakeNote ? [wakeNote] : [])] };
   });
+
+const nudgeSleepingDesk = (project: Project, id: string) => Effect.gen(function* () {
+  // Only the project's main desk receives a queue nudge, never a side desk.
+  const desks = project.agents.filter(row => row.role === "desk" && !row.side && row.state !== "closed");
+  if (desks.length !== 1) return null;
+  const desk = yield* reconcileLocalDeskSleep(project.dir, desks[0]!, true);
+  if (desk.state !== "asleep") return null;
+  const env = yield* MusterEnv;
+  const refusal = deskWakeRefusal(project, desk, env) ?? (readRegistry(env.home).get(project.slug)?.dir !== project.dir ? "project is not registered for wake on this host" : null);
+  if (refusal) return `sleeping desk not nudged: ${desk.name}: ${refusal}; queue item is saved`;
+  const admission = yield* inspectWakeRestore(project, desk).pipe(Effect.result);
+  if (admission._tag === "Failure") return `sleeping desk not nudged: ${desk.name}: ${admission.failure.message}; queue item is saved`;
+  const comms = yield* Comms;
+  const result = yield* comms.send(`${project.slug}/${desk.name}`, `A desk queue item was posted: ${project.slug}#${id}. Read the desk queue.`, { wake: true });
+  return result.status === "delivered" || result.status === "accepted" ? `sleeping desk nudged: ${desk.name}` : `sleeping desk nudge ${result.status}: ${result.detail ?? "see Rat King"}`;
+}).pipe(Effect.catchCause(() => Effect.succeed("sleeping desk nudge unavailable; queue item is saved")));
 
 // ---------- project_status ----------
 
@@ -5102,14 +5380,14 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     if (act || params.takeover) yield* guardSideDesk(yield* load(dir), env.sessionId, "project_status act/takeover");
     const handoverNotes: string[] = [];
     const liveOwner = params.takeover ? yield* liveSelfName : undefined;
-    const project = params.takeover
+    let project = params.takeover
       ? yield* mutate(dir, (current) => Effect.sync(() => {
           const next = { ...current, agents: current.agents.map((row) =>
             row.state === "closed" ? row : ownerSynced({ ...withoutOwnerName(row), ...launchOwnerName(env.home, dir, env.sessionId, liveOwner), owner: env.sessionId, updatedAt: iso(env) })) };
           return [next, next] as const;
         }))
       : yield* load(dir);
-    if (act) yield* backfillOwnerNames(dir);
+    if (act && (yield* backfillOwnerNames(dir))) project = yield* load(dir);
     if (act) {
       const owned = (yield* load(dir)).agents.filter(row => row.machine !== "local" && row.state !== "closed" && row.owner === env.sessionId && !ingestion.failedMachines.has(row.machine));
       if (owned.length) {
@@ -5155,7 +5433,16 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     const launchJobs = yield* Effect.try({ try: () => readLaunchJobs(env.home), catch: error => new InputError({ message: `launch sidecar: ${String(error)}` }) });
     recoveryNotes.push(...undeliveredLaunchNotes(launchJobs, project.slug, env.sessionId, env.now().getTime()));
     const reapSources: ReapSources = new Map();
-    for (const row of project.agents) {
+    for (const snapshot of project.agents) {
+      const sleep = yield* checkDeskSleepStatus(project, snapshot, panes, act).pipe(Effect.catch(error =>
+        Effect.succeed({ row: snapshot, action: error.message, hold: true })));
+      const { row } = sleep;
+      if (sleep.hold || row.state === "asleep") {
+        const { action } = sleep;
+        const pane = row.state !== "asleep" && row.pane ? byTerminal.get(row.pane.terminalId)?.pane_id ?? null : null;
+        lines.push({ name: row.name, role: row.role, lane: row.lane, state: row.state, pane, silentMin: null, cache: null, cost: null, intercom: "unknown", action });
+        continue;
+      }
       if (row.state === "closed") {
         if (!row.clone || latestCloneEvent(row)?.type === "CLONE_REMOVED") continue;
         const present = yield* clonePresent(row).pipe(Effect.catch(error => Effect.sync(() => {
@@ -5576,7 +5863,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
   // A restart handoff can end the operational pass early; the tracer still
   // prints every non-closed row without performing the remaining actions.
   const boardAgents: readonly AgentLine[] = [...agents, ...project.agents
-    .filter(row => row.state !== "closed" && traces.has(row.name) && !agents.some(agent => agent.name === row.name))
+    .filter(row => row.state !== "closed" && (row.state === "asleep" || traces.has(row.name)) && !agents.some(agent => agent.name === row.name))
     .map(row => ({ name: row.name, role: row.role, lane: row.lane, state: row.state, pane: row.pane?.paneId ?? null,
       silentMin: null, cache: null, cost: null, intercom: "unknown" as const, action: null }))];
   const parents = boardAgents.filter(agent => !rows.get(agent.name)?.side);
@@ -5600,6 +5887,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
       (agent) => {
         const row = rows.get(agent.name);
         const name = row?.side ? `  ${row.profile.label.split(" ")[0]} ${agent.name} ↳ ${row.side.parent}` : agent.name;
+        if (agent.state === "asleep") return `- ${name} ${agent.role}/${agent.lane} asleep`;
         return `- ${name} ${agent.role}/${agent.lane} ${agent.state}${traces.has(agent.name) ? ` task=${traces.get(agent.name)!.derived} liveness=${traces.get(agent.name)!.liveness}` : ""} pane=${agent.pane ?? "-"} quiet=${agent.silentMin ?? "?"}m cache=${agent.cache ?? "?"} cost=${agent.cost ? `${k(agent.cost.cost)} (last ${k(agent.cost.lastTurnCost ?? 0)}, ctx ${k(agent.cost.contextTokens ?? 0)}, ${agent.cost.turns} turns)` : "?"} mail=${agent.intercom}${agent.sessionId ? `@${agent.sessionId.slice(0, 8)}` : ""}${agent.action ? ` · ${agent.action}` : ""}${agent.identity ? ` · identity: ${agent.identity}` : ""}${agent.capability ? ` · capability: ${agent.capability}` : ""}${agent.recovery ? ` · recovery: ${agent.recovery}` : ""}${row && turnUnsupported(row) ? ` · ${turnUnsupported(row)}` : ""}`;
       },
     ),

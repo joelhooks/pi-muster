@@ -50,7 +50,7 @@ describe("pure task status", () => {
 
   it("maps every stored state explicitly", () => {
     expect(Object.keys(STORED_TASK_STATUS).sort()).toEqual([...AgentState.literals].sort());
-    expect(STORED_TASK_STATUS).toEqual({ planned: "drafted", launching: "drafted", running: "working", silent: "working", nudged: "working", restarted: "working", reported: "reported", verified: "reported", landed: "landed", interrupted: "working", restoring: "working", failed: "working", closed: null });
+    expect(STORED_TASK_STATUS).toEqual({ planned: "drafted", launching: "drafted", running: "working", silent: "working", nudged: "working", restarted: "working", reported: "reported", verified: "reported", landed: "landed", interrupted: "working", asleep: null, restoring: "working", failed: "working", closed: null });
   });
 });
 
@@ -148,7 +148,8 @@ describe("read-only task tracer", () => {
     h.herdr.panes.delete(row.pane!.paneId);
     const before = readFileSync(projectPath(dir), "utf8");
     const first = await runWith(h, projectStatus(dir, { act: false }));
-    for (const state of states.filter(state => state !== "closed")) expect(first.board).toContain(`worker/task ${state} task=drafted liveness=quiet`);
+    for (const state of states.filter(state => state !== "closed" && state !== "asleep")) expect(first.board).toContain(`worker/task ${state} task=drafted liveness=quiet`);
+    expect(first.board).toContain("- row_asleep worker/task asleep\n");
     expect(first.board).not.toContain("- row_closed worker/task");
     expect(readFileSync(projectPath(dir), "utf8")).toBe(before);
     const path = join(h.home, ".local/state/muster/task-status-trace.jsonl");

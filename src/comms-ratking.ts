@@ -247,10 +247,12 @@ export function RatkingComms(options: {
     mode: () => Effect.succeed("ratking"),
     status: () => ratkingStatus(options.events, `muster-status-${options.createId()}`),
     sendRecord: (to, record, opts) => send({ to, record, encrypt: opts?.encrypt ?? true }),
-    send: (to, message) => target(to).pipe(
+    send: (to, message, delivery) => target(to).pipe(
       Effect.flatMap(({ name, session }) => {
         const author = options.sender();
         if (!author) return Effect.succeed<CommsDelivery>({ status: "failed", detail: "NOT DELIVERED: sender session missing (ratking)" });
+        // The mailbox never wakes a reader for data or quiet mail. A queue nudge is one plain `to:` message.
+        if (delivery?.wake) return ratkingSend(options.events, options.createId, { to: name, kind: "message", body: message, summary: "Desk queue item waiting" }, options.timeoutMs);
         return send({ to: name, kind: RATKING_SEND_KIND, body: JSON.stringify({ type: "message", recipient: session, author, body: message }) });
       }),
       Effect.catch(error => Effect.succeed(failed(error)))),

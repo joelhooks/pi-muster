@@ -166,6 +166,7 @@ export const AgentState = Schema.Literals([
   "landed",
   "closed",
   "interrupted",
+  "asleep",
   "restoring",
   "failed",
 ]);
@@ -251,6 +252,15 @@ export const MachineConfig = Schema.Struct({
 });
 export type MachineConfig = typeof MachineConfig.Type;
 export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
+export const decodeLocalWake = Schema.decodeUnknownSync(Schema.Struct({ local: Schema.optionalKey(Schema.Boolean) }));
+
+export const decodeSleepJournalEntry = Schema.decodeUnknownSync(Schema.Struct({
+  type: Schema.String, id: Schema.optional(Schema.String), timestamp: Schema.optional(Schema.String),
+  customType: Schema.optional(Schema.String), data: Schema.optional(Schema.Unknown),
+}));
+export const decodeReaderExit = Schema.decodeUnknownSync(Schema.Struct({ reason: Schema.String }));
+export const decodeSleepWatch = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String, label: Schema.optional(Schema.String) }));
+export const decodeWakeAttempts = Schema.decodeUnknownSync(Schema.Array(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
 
 export const decodeWakeIdentity = Schema.decodeUnknownSync(Schema.Struct({
   command: Schema.Literal("whoami"), ok: Schema.Literal(true), name: Schema.String,
@@ -280,6 +290,7 @@ export const AgentLaunchRequest = Schema.Struct({
   // Harm (2026-11-03): these were missing, so the decode stripped them and restart takeover and adopt-with-session
   // reached the handler without their flag or reason. Every field the tool schema offers must be listed here.
   session: Schema.optional(Schema.String), reason: Schema.optional(Schema.String), takeover: Schema.optional(Schema.Boolean),
+  sleepMinutes: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1440))),
 });
 export const decodeAgentLaunchRequest = Schema.decodeUnknownSync(AgentLaunchRequest);
 export const LaunchJobState = Schema.Literals(["queued", "running", "succeeded", "failed"]);
@@ -325,6 +336,12 @@ export const AgentRow = Schema.Struct({
   ownerName: Schema.optionalKey(Schema.String),
   brief: Schema.NullOr(Path),
   state: AgentState,
+  sleep: Schema.optional(Schema.Struct({
+    minutes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1440)),
+    since: Iso, by: Schema.String,
+    journalReadFailures: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThan(3))),
+    wakeBlock: Schema.optionalKey(Schema.String),
+  })),
   delivery: Delivery,
   restarts: Schema.Number,
   restore: Schema.NullOr(RestoreCommand),
