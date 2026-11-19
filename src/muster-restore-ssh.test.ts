@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Effect } from "effect";
 import { expect, it, vi } from "vitest";
-import { parseRestoreArgs, validateOriginalCommand, WAKE_MODEL_ERROR } from "../bin/muster-restore-args.mjs";
+import { parseRestoreArgs, validateOriginalCommand, WAKE_MODEL_ERROR, wakePath } from "../bin/muster-restore-args.mjs";
 import { profileFor } from "./argv.ts";
 import { decodeAgentRow, decodeMachines } from "./domain.ts";
 import { paneList } from "./herdr.ts";
@@ -74,6 +74,20 @@ it("the real bin reports a catalog read failure on one line with exit 1 and no r
   expect(JSON.parse(stdout)).toMatchObject({ result: "failed", name: "project/desk", messageId: null });
   expect(stdout).not.toContain("malformed-private-content");
   expect(readOne(wrapper({ ...process.env, HOME: home, PATH: "/nonexistent", SSH_ORIGINAL_COMMAND: "muster-restore --name project/desk --dry-run" }), 1)).toMatchObject({ result: "failed" });
+});
+
+it("puts this Node and ~/.local/bin first on the child PATH, ahead of the PATH sshd passed", () => {
+  // Live probe, 2026-11-19: sshd's PATH lacked ~/.local/bin, so `ratking whoami` could not reach the secrets CLI.
+  expect(wakePath({ HOME: "/home/u", PATH: "/usr/bin:/bin:relative" }, "/opt/node/bin/node").split(":")).toEqual(
+    ["/opt/node/bin", "/home/u/.local/bin", "/usr/bin", "/bin", "/usr/local/bin", "/opt/homebrew/bin", "/usr/sbin", "/sbin"]);
+  expect(wakePath({}, "/n/node").split(":")[1]).toBe("/usr/local/bin");
+  const { root, home } = harness();
+  const seen = join(root, "child-path.txt");
+  const preload = join(root, "record-path.cjs");
+  writeFileSync(preload, `if (process.argv[1]?.endsWith("/muster-restore-main.mjs")) { require("node:fs").writeFileSync(${JSON.stringify(seen)}, process.env.PATH); process.exit(17); }\n`);
+  readOne(wrapper({ HOME: home, PATH: "/caller/controlled", NODE_OPTIONS: `--require=${preload}`, SSH_ORIGINAL_COMMAND: "muster-restore --name project/desk --dry-run" }), 1);
+  expect(readFileSync(seen, "utf8")).toBe(wakePath({ HOME: home, PATH: "/caller/controlled" }, process.execPath));
+  expect(readFileSync(seen, "utf8").split(":").slice(0, 2)).toEqual([dirname(process.execPath), `${home}/.local/bin`]);
 });
 
 it("refuses an unset original command; replaces a silently dying child with one failed receipt", () => {

@@ -27,6 +27,7 @@ export const WAKE_MODEL_ERROR: "Pi reported a model error";
 export const WAKE_READINESS_GRACE_MS: number;
 export const WAKE_WRAPPER_TERM_GRACE_MS: number;
 export function wakeDeadlineMs(env?: NodeJS.ProcessEnv): number;
+export function wakePath(env: NodeJS.ProcessEnv, execPath: string): string;
 export function receiptLine(receipt: RestoreReceipt): string;
 export function parseRestoreArgs(argv: readonly string[], forced?: boolean): Refusal | Parsed;
 export function validateOriginalCommand(command: string): Refusal | (Parsed & { argv: string[] });
