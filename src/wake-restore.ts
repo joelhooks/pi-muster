@@ -40,7 +40,8 @@ export const wakeRestore = (request: RestoreRequest, deadlineMs = wakeDeadlineMs
     notice.target = found;
     const { project, row } = found;
     const base = { ...failed(""), project: slug, row: rowName, machine: row.machine, session: row.sessionId };
-    const reason = `wake${messageId ? ` ${messageId}` : ""}${requestedReason ? `: ${requestedReason}` : ""}`;
+    // Bastion, 2026-11-19: the waker's reason is untrusted caller text; label it wherever it lands.
+    const reason = `wake${messageId ? ` ${messageId}` : ""}${requestedReason ? ` (waker-supplied reason: ${requestedReason})` : ""}`;
     return yield* Effect.gen(function* () {
       yield* inspectWakeRestore(project, row);
       if (dryRun) return answer({ ...base, result: "restored", reason });
