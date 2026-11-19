@@ -6,13 +6,13 @@ import { transition } from "xstate";
 import { LIVE_STATES, PANE_GONE_STATES, PROCESS_STATES, agentMachine, stepAgent } from "./machines.ts";
 import type { AgentEvent } from "./machines.ts";
 
-const STATES = ["planned", "launching", "running", "silent", "nudged", "restarted", "reported", "verified", "landed", "interrupted", "restoring", "failed", "closed"] as const;
+const STATES = ["planned", "launching", "running", "silent", "nudged", "restarted", "reported", "verified", "landed", "interrupted", "asleep", "restoring", "failed", "closed"] as const;
 type S = (typeof STATES)[number];
 
 const EVENTS: AgentEvent[] = [
   { type: "QUEUE_RESTORE" }, { type: "LAUNCH" }, { type: "STARTED" }, { type: "ADOPT" }, { type: "LAUNCH_FAILED" }, { type: "SILENT" },
   { type: "NUDGE" }, { type: "RESTART" }, { type: "RESTARTED" }, { type: "ACTIVE" }, { type: "REPORT", paneLive: true }, { type: "VERIFY" },
-  { type: "REWORK" }, { type: "LAND" }, { type: "PANE_GONE" }, { type: "RESTORE" }, { type: "CLOSE" }, { type: "FAIL" },
+  { type: "REWORK" }, { type: "LAND" }, { type: "PANE_GONE" }, { type: "DRAINED" }, { type: "RESTORE" }, { type: "CLOSE" }, { type: "FAIL" },
 ];
 
 const at = (value: S) => agentMachine.resolveState({ value });

@@ -32,7 +32,7 @@ export function deriveTaskStatus(facts: TaskFacts): TaskStatus {
 export const STORED_TASK_STATUS: Readonly<Record<AgentRow["state"], TaskStatus | null>> = {
   planned: "drafted", launching: "drafted", running: "working", silent: "working",
   nudged: "working", restarted: "working", reported: "reported", verified: "reported",
-  landed: "landed", interrupted: "working", restoring: "working", failed: "working", closed: null,
+  landed: "landed", interrupted: "working", asleep: null, restoring: "working", failed: "working", closed: null,
 };
 
 export interface TaskTrace {
@@ -207,7 +207,7 @@ export const traceProjectTasks = (project: Project, panes: readonly PaneInfo[], 
   const traces = new Map<string, TaskTrace>();
   const remotePanes = new Map<string, readonly PaneInfo[]>();
   for (const row of project.agents) {
-    if (row.state === "closed") continue;
+    if (row.state === "closed" || row.state === "asleep") continue;
     const source = sourceOf(project, project.lanes.find(lane => lane.slug === row.lane), row);
     const result = yield* Effect.gen(function* () {
       if (row.machine === "local") return yield* probeTask(project, row, panes, proc, source,

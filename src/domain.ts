@@ -166,6 +166,7 @@ export const AgentState = Schema.Literals([
   "landed",
   "closed",
   "interrupted",
+  "asleep",
   "restoring",
   "failed",
 ]);
@@ -250,7 +251,14 @@ export const MachineConfig = Schema.Struct({
   providerMap: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
 });
 export type MachineConfig = typeof MachineConfig.Type;
-export const decodeMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
+const decodeRemoteMachines = Schema.decodeUnknownSync(Schema.Record(AgentName, MachineConfig));
+export const decodeMachines = (value: unknown) => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return decodeRemoteMachines(value);
+  const { localWake: _local, ...remote } = value as Record<string, unknown>;
+  return decodeRemoteMachines(remote);
+};
+export const decodeLocalWake = Schema.decodeUnknownSync(Schema.Struct({ localWake: Schema.optionalKey(Schema.Boolean) }));
+export const decodeWakeAttempts = Schema.decodeUnknownSync(Schema.Array(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))));
 
 export const decodeWakeIdentity = Schema.decodeUnknownSync(Schema.Struct({
   command: Schema.Literal("whoami"), ok: Schema.Literal(true), name: Schema.String,
@@ -280,6 +288,7 @@ export const AgentLaunchRequest = Schema.Struct({
   // Harm (2026-11-03): these were missing, so the decode stripped them and restart takeover and adopt-with-session
   // reached the handler without their flag or reason. Every field the tool schema offers must be listed here.
   session: Schema.optional(Schema.String), reason: Schema.optional(Schema.String), takeover: Schema.optional(Schema.Boolean),
+  sleepMinutes: Schema.optional(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1440))),
 });
 export const decodeAgentLaunchRequest = Schema.decodeUnknownSync(AgentLaunchRequest);
 export const LaunchJobState = Schema.Literals(["queued", "running", "succeeded", "failed"]);
@@ -325,6 +334,7 @@ export const AgentRow = Schema.Struct({
   ownerName: Schema.optionalKey(Schema.String),
   brief: Schema.NullOr(Path),
   state: AgentState,
+  sleep: Schema.optional(Schema.Struct({ minutes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1440)), since: Iso, by: Schema.String })),
   delivery: Delivery,
   restarts: Schema.Number,
   restore: Schema.NullOr(RestoreCommand),

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { fstatSync, writeSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { emptyReceipt, exitCode, parseRestoreArgs, receiptLine, type RestoreReceipt } from "./muster-restore-args.mjs";
@@ -24,7 +24,7 @@ if (!parsed.ok) {
     // its own SSH forward before returning, and Proc waits for each child to exit.
     const layer = Layer.mergeAll(
       Layer.succeed(Herdr)(createHerdrClient()), Layer.succeed(Proc)(makeLiveProc()), Layer.succeed(Comms)(RatkingMissing),
-      Layer.succeed(MusterEnv)({ home: homedir(), sessionId: "headless-restore", paneId: undefined,
+      Layer.succeed(MusterEnv)({ home: homedir(), wakeConfigHome: userInfo().homedir, sessionId: "headless-restore", paneId: undefined,
         musterRoot: resolve(dirname(fileURLToPath(import.meta.url)), ".."),
         workerWorktree: process.env.MUSTER_WORKER_WORKTREE ?? "worker-worktree",
         now: () => new Date(), createId: randomUUID, sleep: ms => Effect.sleep(ms), emitPaneClose: noEmitPaneClose }),
