@@ -1,12 +1,14 @@
 import { spawn } from "node:child_process";
 import { writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { emptyReceipt, exitCode, receiptLine, validateOriginalCommand, wakeDeadlineMs, WAKE_MODEL_ERROR, WAKE_READINESS_GRACE_MS, WAKE_WRAPPER_TERM_GRACE_MS } from "./muster-restore-args.mjs";
+import { emptyReceipt, exitCode, receiptLine, validateOriginalCommand, wakeDeadlineMs, wakePath, WAKE_MODEL_ERROR, WAKE_READINESS_GRACE_MS, WAKE_WRAPPER_TERM_GRACE_MS } from "./muster-restore-args.mjs";
 
 const command = validateOriginalCommand(process.env.SSH_ORIGINAL_COMMAND ?? "");
 
 function runChild({ request, argv }) {
-  const env = { ...process.env, MUSTER_WAKE_PROGRESS: "1" };
+  // Live probe, 2026-11-19: sshd's forced-command PATH lacks ~/.local/bin, so `ratking whoami` could not reach the
+  // secret store and every wake failed safe. The child gets a fixed PATH, not one the caller controls.
+  const env = { ...process.env, PATH: wakePath(process.env, process.execPath), MUSTER_WAKE_PROGRESS: "1" };
   delete env.SSH_ORIGINAL_COMMAND;
   const fallback = emptyReceipt("failed", "muster-restore exited without a valid receipt", request.name, request.messageId);
   const keys = Object.keys(fallback);

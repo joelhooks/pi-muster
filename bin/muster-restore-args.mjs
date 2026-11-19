@@ -65,3 +65,13 @@ export function validateOriginalCommand(command) {
   const parsed = parseRestoreArgs(argv, true);
   return parsed.ok ? { ...parsed, argv } : parsed;
 }
+
+/** The forced command's child PATH: this Node's directory and the user's ~/.local/bin (the secrets CLI) first, then
+ * the PATH sshd set (the client cannot set it under a forced command), then the usual system dirs. No duplicates. */
+export const wakePath = (env, execPath) => {
+  const home = env.HOME || "";
+  const nodeDir = execPath.slice(0, execPath.lastIndexOf("/")) || "/";
+  const dirs = [nodeDir, ...(home ? [`${home}/.local/bin`] : []), ...(env.PATH || "").split(":"),
+    "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+  return [...new Set(dirs.filter(dir => dir.startsWith("/")))].join(":");
+};
