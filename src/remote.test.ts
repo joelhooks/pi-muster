@@ -871,7 +871,7 @@ describe("remote owner operations", () => {
     const count = s.remote.launcherScripts.length;
     // runWake supplies headless-restore to the CLI; the reserved launch rejects unless its env session is recorded-owner.
     const receipt = await f.runWake("restore-this", { minutes: 23, reason: "incoming mail" });
-    expect(receipt).toMatchObject({ result: "restored", reason: "wake restore-this: incoming mail", session: row.sessionId, ready: true, receiptSaved: true, permanent: null });
+    expect(receipt).toMatchObject({ result: "restored", reason: "wake restore-this (waker-supplied reason: incoming mail)", session: row.sessionId, ready: true, receiptSaved: true, permanent: null });
     expect(exitCode(receipt)).toBe(0);
     const restored = (await s.run(load(s.dir))).agents[0]!;
     expect(receipt.pane).toBe(old.pane_id);
@@ -886,7 +886,7 @@ describe("remote owner operations", () => {
     expect(s.remote.launcherScripts.at(-1)).toContain("export MUSTER_OWNER='recorded-owner'");
     expect(s.remote.launcherScripts.at(-1)).toContain("export RATKING_NAME='probe/normal-alias'");
     const status = await s.run(projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: "recorded-owner" })));
-    expect(JSON.stringify(status)).toContain("headless wake (local receipt): wake restore-this: incoming mail");
+    expect(JSON.stringify(status)).toContain("headless wake (local receipt): wake restore-this (waker-supplied reason: incoming mail)");
     const root = wakeReceiptDir(s.h.home), file = join(root, `${createHash("sha256").update("restore-this").digest("hex")}.json`);
     expect(statSync(root).mode & 0o777).toBe(0o700);
     expect(statSync(file).mode & 0o777).toBe(0o600);
