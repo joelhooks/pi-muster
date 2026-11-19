@@ -727,6 +727,18 @@ describe("remote owner operations", () => {
     expect(await f.runWake()).toMatchObject({ result: "alreadyLive" });
     expect(await f.runWake("unknown")).toMatchObject({ result: "alreadyLive" });
   });
+  it("refuses an open, not-live local row before anything runs, even when remote wake is on", async () => {
+    // Bastion, 2026-11-19: the forced command can only ever restore remote rows on a wake-enabled machine.
+    const f = await wakeFixture();
+    f.configure(true);
+    await f.s.run(mutate(f.s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, machine: "local", pane: null })) }, null] as const)));
+    const count = f.s.remote.calls.length;
+    const receipt = await f.runWake("local-row");
+    expect(receipt).toMatchObject({ result: "refused", machine: "local", reason: "machine local is not wake-enabled", permanent: false, receiptSaved: false });
+    expect(exitCode(receipt)).toBe(2);
+    expect(f.s.remote.calls).toHaveLength(count);
+    expect(f.healthCalls()).toBe(0);
+  });
   it("refuses closed and retired wake rows and non-open lanes", async () => {
     const { s, runWake } = await wakeFixture();
     await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(r => ({ ...r, retirePending: { after: s.h.now.toISOString(), tries: 1 } })) }, null] as const)));
