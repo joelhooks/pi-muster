@@ -23,6 +23,8 @@ it.each([
   `${prefix} --name other/desk`, `${prefix} --reason ${"a".repeat(121)}`,
   `${prefix} --exit-when-drained 0`, `${prefix} --exit-when-drained 1441`, `${prefix} --exit-when-drained 1.5`,
   `${prefix} --exit-when-drained`, `${prefix} --dry-run --dry-run`, `${prefix} --test`,
+  `${prefix} --machines /tmp/caller.json`, `${prefix} --config /tmp/caller.json`,
+  `MUSTER_MACHINES_PATH=/tmp/caller.json ${prefix}`, `HOME=/tmp ${prefix}`, `env HOME=/tmp ${prefix}`,
   "muster-restore --name x/y", "muster-restore --message-id id", "muster-restore --name x/y/z --dry-run",
   "muster-restore --name x/Y --dry-run", "muster-restore --name x/y --message-id a.b", `echo ${prefix}`,
 ])("refuses invalid argv: %j", command => {
@@ -49,7 +51,7 @@ const executable = (name: string) => fileURLToPath(new URL(`../bin/${name}`, imp
 const wrapper = (env: NodeJS.ProcessEnv) => spawnSync(process.execPath, [executable("muster-restore-ssh.mjs")], { env, encoding: "utf8", timeout: 8_000 });
 const readOne = (run: ReturnType<typeof wrapper>, status: number) => {
   expect(run.error).toBeUndefined();
-  expect(run.status).toBe(status);
+  expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(status);
   expect(run.stdout.split("\n")).toHaveLength(2);
   return JSON.parse(run.stdout);
 };
@@ -155,7 +157,12 @@ it("the real bin exits and emits one line with captured-shaped Rat King and remo
     setInterval(() => {}, 500);
     const children = require('node:child_process');
     const original = children.execFile;
-    children.execFile = (...args) => { console.log('fixture proc log'); return original(...args); };
+    children.execFile = (...args) => {
+      console.log('fixture proc log');
+      // The child prepends Node's directory; on system Node it may contain the real ssh.
+      if (args[0] === 'ssh') args[0] = ${JSON.stringify(join(bin, "ssh"))};
+      return original(...args);
+    };
     require('node:module').syncBuiltinESMExports();
   }\n`);
   writeFileSync(rk, `if (process.argv.slice(2).join(' ') !== 'whoami --json') process.exit(17);

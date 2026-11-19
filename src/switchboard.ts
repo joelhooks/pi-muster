@@ -122,7 +122,7 @@ type DeskCatalog = { readonly agents: readonly Pick<Project["agents"][number], "
 
 export function deadDesk(project: DeskCatalog | undefined, sessions: readonly string[] | undefined): boolean | undefined {
   if (sessions === undefined) return undefined;
-  return !project?.agents.some((agent) => (agent.role === "desk" && PROCESS_STATES.includes(agent.state) && sessions.includes(agent.sessionId)) || sessions.includes(agent.owner));
+  return !project?.agents.some((agent) => (agent.role === "desk" && (agent.state === "asleep" || (PROCESS_STATES.includes(agent.state) && sessions.includes(agent.sessionId)))) || sessions.includes(agent.owner));
 }
 
 const rank = (item: InboxItem) => KIND_RANK[item.kind];

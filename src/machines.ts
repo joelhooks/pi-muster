@@ -59,6 +59,7 @@ export type AgentEvent =
   | { type: "REWORK" }
   | { type: "LAND" }
   | { type: "PANE_GONE" }
+  | { type: "DRAINED" }
   | { type: "RESTORE" }
   | { type: "CLOSE" }
   | { type: "FAIL" };
@@ -71,6 +72,7 @@ const WORKING = {
   RESTARTED: to("running"),
   REPORT: to("reported"),
   PANE_GONE: to("interrupted"),
+  DRAINED: to("asleep"),
   FAIL: to("failed"),
   CLOSE: to("closed"),
 } as const;
@@ -81,7 +83,7 @@ const reportWhilePaneLive = ({ event }: { event: AgentEvent }) =>
 
 export const agentMachine = createMachine({
   schemas: { events: eventSchemas<AgentEvent>("QUEUE_RESTORE", "LAUNCH", "STARTED", "ADOPT", "LAUNCH_FAILED", "SILENT", "NUDGE", "RESTART",
-    "RESTARTED", "ACTIVE", "REPORT", "VERIFY", "REWORK", "LAND", "PANE_GONE", "RESTORE", "CLOSE", "FAIL") },
+    "RESTARTED", "ACTIVE", "REPORT", "VERIFY", "REWORK", "LAND", "PANE_GONE", "DRAINED", "RESTORE", "CLOSE", "FAIL") },
   id: "agent",
   initial: "planned",
   states: {
@@ -95,7 +97,8 @@ export const agentMachine = createMachine({
     verified: { on: { REPORT: reportWhilePaneLive, LAND: to("landed"), PANE_GONE: to("interrupted"), RESTARTED: to("running"), REWORK: to("running"), ...CLOSABLE } },
     landed: { on: { REPORT: reportWhilePaneLive, PANE_GONE: to("interrupted"), RESTARTED: to("running"), REWORK: to("running"), ...CLOSABLE } },
     interrupted: { on: { QUEUE_RESTORE: to("launching"), ADOPT: to("running"), LAUNCH: to("launching"), RESTORE: to("restoring"), ...CLOSABLE } },
-    restoring: { on: { STARTED: to("running"), LAUNCH_FAILED: to("failed"), PANE_GONE: to("interrupted") } },
+    asleep: { on: { QUEUE_RESTORE: to("launching"), RESTORE: to("restoring"), ADOPT: to("running"), ...CLOSABLE } },
+    restoring: { on: { STARTED: to("running"), LAUNCH_FAILED: to("failed"), PANE_GONE: to("interrupted"), DRAINED: to("asleep") } },
     failed: { on: { QUEUE_RESTORE: to("launching"), LAUNCH: to("launching"), RESTORE: to("restoring"), ADOPT: to("running"), ...CLOSABLE } },
     closed: { on: { QUEUE_RESTORE: to("launching"), RESTORE: to("restoring") } },
   },
@@ -238,4 +241,4 @@ export const PROCESS_STATES: readonly AgentState[] = ["launching", "running", "s
 /** States where a row still holds a pane or a claim on work. */
 /** States whose pane death a restore may record: a reported row can die mid-merge with work in its clone. */
 export const PANE_GONE_STATES: readonly AgentState[] = [...PROCESS_STATES, "reported", "verified", "landed"];
-export const LIVE_STATES: readonly AgentState[] = [...PROCESS_STATES, "reported", "verified", "landed", "interrupted", "failed"];
+export const LIVE_STATES: readonly AgentState[] = [...PROCESS_STATES, "reported", "verified", "landed", "interrupted", "asleep", "failed"];

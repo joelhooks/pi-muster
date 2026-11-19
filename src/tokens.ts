@@ -239,9 +239,11 @@ export function deriveTokens(project: Project, desk: readonly DeskItem[], live: 
   const now = project.state === "archived" || !headline ? null : clip(headline);
 
   const agentParts: string[] = live.stuck ? [`⚠️ ${live.stuck} stuck`] : [];
+  const asleep = project.agents.filter(row => row.state === "asleep").length;
+  if (asleep) agentParts.push(`${asleep} asleep`);
   const turnCounts = { working: 0, blocked: 0, idle: 0, gone: 0 };
   const fallback = project.agents.filter(row => {
-    if (row.state === "closed") return false;
+    if (row.state === "closed" || row.state === "asleep") return false;
     const record = turns.get(`${project.slug}/${row.name}`);
     if (!record || !sessionChain(row).includes(record.session)) return true;
     const bucket = record.state === "crashed" ? "gone" : record.state === "done" ? "idle" : record.state;

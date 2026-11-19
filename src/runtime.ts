@@ -71,6 +71,8 @@ export interface EnvShape {
   /** Optional test seam; absent uses the live OS sample at wait time. */
   readonly startupLoad?: () => { readonly load: number; readonly cpus: number };
   readonly emitPaneClose: EmitPaneClose;
+  /** OS account home used by the headless command to fence host-local authorization. */
+  readonly wakeConfigHome?: string;
   /** Injection seams; live config and forwards are resolved only by tools. */
   readonly machines?: unknown;
   readonly remoteHerdr?: (name: string, machine: import("./domain.ts").MachineConfig) => Effect.Effect<HerdrClient, ProcError>;
@@ -108,7 +110,7 @@ export interface CommsShape {
   readonly status?: () => Effect.Effect<ReturnType<typeof import("./domain.ts").decodeRatkingStatus> | undefined>;
   readonly mode?: () => Effect.Effect<"intercom" | "network" | "ratking", CommsError>;
   readonly postOwner?: (to: string, item: import("./domain.ts").OwnerItem) => Effect.Effect<CommsDelivery>;
-  readonly send: (to: CommsTarget, message: string) => Effect.Effect<CommsDelivery>;
+  readonly send: (to: CommsTarget, message: string, options?: { readonly wake: true }) => Effect.Effect<CommsDelivery>;
   readonly ask: (to: CommsTarget, message: string, options: { readonly timeoutMs: number }) => Effect.Effect<CommsDelivery, CommsError>;
   readonly reply: (id: string, message: string) => Effect.Effect<CommsDelivery, CommsError>;
   readonly wake: (to: CommsTarget) => Effect.Effect<{ readonly woke: boolean; readonly reason?: string }, CommsError>;

@@ -6,7 +6,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Effect, Schema } from "effect";
 import { createHerdrClient, type HerdrClient } from "@joelhooks/pi-bellwether/herdr-client";
-import { AgentName, Slug, SessionId, decodeAgentRow, decodeOwnerItem, decodeAgentName, decodeMachines, type MachineConfig, type OwnerItem, type AgentRow, type Project } from "./domain.ts";
+import { AgentName, Slug, SessionId, decodeAgentRow, decodeOwnerItem, decodeAgentName, decodeLocalWake, decodeMachines, type MachineConfig, type OwnerItem, type AgentRow, type Project } from "./domain.ts";
 import { ProcError, InputError } from "./errors.ts";
 import { Herdr, MusterEnv, Proc, stopChild, type ProcShape } from "./runtime.ts";
 import { NAME_SHIM, shellQuote } from "./argv.ts";
@@ -215,6 +215,15 @@ export const reserveLaunch = (machine: string, key: string) => Effect.gen(functi
 });
 
 export const machinesPath = (home: string) => join(home, ".config/muster/machines.json");
+
+export const wakeConfigPath = (home: string) => join(home, ".config/muster/wake.json");
+
+// Headless authorization deliberately ignores MusterEnv.machines and all config-path overrides.
+export const localWakeEnabled = (home: string, accountHome = home) => {
+  if (home !== accountHome) return false;
+  try { return decodeLocalWake(JSON.parse(readFileSync(wakeConfigPath(accountHome), "utf8"))).local === true; }
+  catch { return false; }
+};
 export const mapPath = (path: string, machine: MachineConfig): string => {
   const prefix = Object.keys(machine.paths).sort((a, b) => b.length - a.length).find(p => path === p || path.startsWith(`${p}/`));
   return prefix ? `${machine.paths[prefix]}${path.slice(prefix.length)}` : path;
