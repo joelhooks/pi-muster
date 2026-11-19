@@ -336,7 +336,12 @@ export const AgentRow = Schema.Struct({
   ownerName: Schema.optionalKey(Schema.String),
   brief: Schema.NullOr(Path),
   state: AgentState,
-  sleep: Schema.optional(Schema.Struct({ minutes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1440)), since: Iso, by: Schema.String })),
+  sleep: Schema.optional(Schema.Struct({
+    minutes: Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThanOrEqualTo(1440)),
+    since: Iso, by: Schema.String,
+    journalReadFailures: Schema.optionalKey(Schema.Number.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1), Schema.isLessThan(3))),
+    wakeBlock: Schema.optionalKey(Schema.String),
+  })),
   delivery: Delivery,
   restarts: Schema.Number,
   restore: Schema.NullOr(RestoreCommand),

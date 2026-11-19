@@ -7,11 +7,12 @@ import { decodeWakeAttempts, decodeWakeReceipt, type AgentRow, type Project } fr
 import { InputError } from "./errors.ts";
 import { inspectWakeRestore, noticeWakeRestore, restoreWakeRow, WakeRestoreStop } from "./ops.ts";
 import { readRegistry } from "./registry.ts";
-import { localWakeEnabled, withMachineLaunchLock } from "./remote.ts";
+import { localWakeRefusal, withMachineLaunchLock } from "./remote.ts";
 import { MusterEnv, Proc } from "./runtime.ts";
 import { LAUNCHER_NAME, ownerName, registeredCatalogs, rowRatkingName, subscribedSwitchboards } from "./comms-ratking.ts";
 import { launchOwnerRatkingName, ratkingCliPath } from "./launch-mail.ts";
 import { load } from "./store.ts";
+import { wakeNoticeText } from "./desk-sleep.ts";
 
 export const wakeReceiptDir = (home: string) => join(home, ".local/state/muster/wake-receipts");
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -35,7 +36,8 @@ const recentAttempts = (path: string, now: number) => {
   } catch (error) { if (missing(error)) return []; throw error; }
 };
 
-const quietWakeCopy = (project: Project, row: AgentRow, result: RestoreReceipt, label: string) => Effect.gen(function* () {
+const WAKE_COOLDOWN_MS = 10 * 60_000;
+const quietWakeCopy = (project: Project, row: AgentRow, result: RestoreReceipt) => Effect.gen(function* () {
   const env = yield* MusterEnv;
   const catalogs = [project, ...registeredCatalogs(env.home)];
   const resolved = ownerName(row.owner, { catalogs, recorded: row.ownerName, switchboards: subscribedSwitchboards(env.home) }) ?? launchOwnerRatkingName(row.owner, catalogs);
@@ -43,7 +45,7 @@ const quietWakeCopy = (project: Project, row: AgentRow, result: RestoreReceipt, 
   if (!owner) return yield* new InputError({ message: "wake owner has no recorded Rat King name" });
   const proc = yield* Proc;
   const sent = yield* proc.run("env", ["-u", "RATKING_NAME", process.execPath, ratkingCliPath(process.env, env.home), "send", "--as", LAUNCHER_NAME, "--to", owner,
-    "--quiet", "--summary", `Desk wake ${result.result}: ${project.slug}/${row.name}`, "--body", `Caller: desk-host wake key. ${label}. Result: ${result.result}.`, "--json"], { cwd: project.dir, timeoutMs: 5_000 });
+    "--quiet", "--summary", `Desk wake ${result.result}: ${project.slug}/${row.name}`, "--body", wakeNoticeText(`${project.slug}/${row.name}`, result.messageId, result.result), "--json"], { cwd: project.dir, timeoutMs: 5_000 });
   if (sent.code !== 0) return yield* new InputError({ message: "quiet wake owner copy was not sent" });
 }).pipe(Effect.catchCause(() => Effect.sync(() => console.error("muster-restore: could not send quiet wake owner copy"))));
 
@@ -80,11 +82,23 @@ export const wakeRestore = (request: RestoreRequest, deadlineMs = wakeDeadlineMs
       const row = original.machine === "local" ? inspected.row : original;
       // Even if the flag changes between lookup and inspection, never launch a local wake without its rate lock.
       if (row.machine === "local" && !ratePath) return answer({ ...base, reason: "local wake admission changed; probe again" });
-      notice.target = { project, row };
       const now = env.now().getTime();
       const history = ratePath ? yield* Effect.try({ try: () => recentAttempts(ratePath, now), catch: () => new WakeRestoreStop({ result: "failed", message: "could not read wake rate history" }) }) : [];
-      if (history.length >= 4 || history.some(at => now - at < 10 * 60_000)) return answer({ ...base, reason: "rate" });
-      const charge = ratePath ? Effect.try({ try: () => atomicWrite(ratePath, [...history, env.now().getTime()]), catch: () => new WakeRestoreStop({ result: "failed", message: "could not save wake rate history" }) }) : undefined;
+      if (ratePath && (history.length >= 4 || history.some(at => now - at < WAKE_COOLDOWN_MS))) {
+        // Keep the copy marker under the same row lock as launch charges. If storage is uncertain, do not send.
+        const copyPath = `${ratePath}.notice`;
+        try {
+          if (!recentAttempts(copyPath, now).some(at => now - at < WAKE_COOLDOWN_MS)) {
+            atomicWrite(copyPath, [now]);
+            notice.target = { project, row };
+          }
+        } catch { /* the rate refusal still stands */ }
+        return answer({ ...base, reason: "rate" });
+      }
+      const charge = ratePath ? Effect.try({ try: () => {
+        atomicWrite(ratePath, [...history, env.now().getTime()]);
+        notice.target = { project, row };
+      }, catch: () => new WakeRestoreStop({ result: "failed", message: "could not save wake rate history" }) }) : undefined;
       const restored = yield* restoreWakeRow(project, row, reason, minutes, launching => {
         const pending: RestoreReceipt = { ...base, result: "restored", reason, session: launching.sessionId, pane: launching.pane?.paneId ?? null };
         onInput(pending);
@@ -107,7 +121,7 @@ export const wakeRestore = (request: RestoreRequest, deadlineMs = wakeDeadlineMs
   const attempt = Effect.gen(function* () {
     const found = yield* lookup;
     if (!found) return answer(refused);
-    if (dryRun || found.row.machine !== "local" || !localWakeEnabled(env.home, env.wakeConfigHome)) return yield* attemptRow(found);
+    if (dryRun || found.row.machine !== "local" || localWakeRefusal(env.home, env.wakeConfigHome)) return yield* attemptRow(found);
     const digest = createHash("sha256").update(name).digest("hex");
     return yield* withMachineLaunchLock("wake-row", Effect.gen(function* () {
       const current = yield* lookup;
@@ -182,9 +196,8 @@ export const wakeRestore = (request: RestoreRequest, deadlineMs = wakeDeadlineMs
   if (!dryRun && notice.target && (receipt.result === "failed" || receipt.result === "restored")) {
     const current = issued ? yield* lookup.pipe(Effect.catchCause(() => Effect.succeed(null))) : null;
     const target = current && current.row.pane?.paneId === issued?.pane ? current : notice.target;
-    const audit = target.row.machine === "local" && receipt.reason !== reason ? `${reason}: ${receipt.reason ?? receipt.result}` : receipt.reason ?? reason;
-    yield* noticeWakeRestore(target.project, target.row, audit, receipt.result === "restored", receipt.ready);
-    if (notice.target.row.machine === "local") yield* quietWakeCopy(notice.target.project, notice.target.row, receipt, reason);
+    yield* noticeWakeRestore(target.project, target.row, receipt.messageId, receipt.result);
+    if (notice.target.row.machine === "local") yield* quietWakeCopy(notice.target.project, notice.target.row, receipt);
   }
   return receipt;
 });

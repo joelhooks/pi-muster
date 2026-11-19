@@ -6,7 +6,7 @@ import { load, projectPath } from "./store.ts";
 import { turnLog } from "./turn-wake.ts";
 import { registerPiPrompt } from "./pi-prompt.ts";
 import { deskWriteId, watchEntries, withDeskWrites } from "./desk-local.ts";
-import { homedir } from "node:os";
+import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -250,6 +250,7 @@ export default function muster(host: ExtensionAPI) {
       Layer.succeed(Proc)(liveProc),
       Layer.succeed(MusterEnv)({
         home: homedir(),
+        wakeConfigHome: userInfo().homedir,
         now: () => new Date(),
         sessionId: ctx.sessionManager.getSessionId(),
         paneId: env.HERDR_PANE_ID,

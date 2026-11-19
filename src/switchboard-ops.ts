@@ -16,6 +16,8 @@ import { KIND_GLYPH, answerPost, deadDesk, fleetGroups, fleetStats, formatAge, i
 import type { InboxGroup, SystemView, UnregisteredSpace } from "./switchboard.ts";
 import { openDeskItems } from "./tokens.ts";
 
+import { deskWakeRefusal, UNREADABLE_SLEEP_JOURNAL } from "./desk-sleep.ts";
+
 export { readRegistry, registerProject, registryPath } from "./registry.ts";
 export type { RegistryEntry } from "./registry.ts";
 
@@ -49,9 +51,11 @@ export const loadSystemWith = (read = readQueues) => Effect.gen(function* () {
   const sessions = yield* intercom.sessions().pipe(Effect.catchCause(() => Effect.succeed(undefined)));
   const registeredSpaces = new Set(entries.map((entry) => entry.spaceId));
   const view: SystemView = {
-    groups: fleetGroups(inbox(queues, now), entries.map((entry) => entry.slug), outside).map((group) => ({
-      ...group, deadDesk: deadDesk(live.find((project) => project.slug === group.project), sessions),
-    })),
+    groups: fleetGroups(inbox(queues, now), entries.map((entry) => entry.slug), outside).map((group) => {
+      const project = live.find(project => project.slug === group.project);
+      return { ...group, deadDesk: deadDesk(project, sessions, row =>
+        !!project && row.sleep?.wakeBlock !== UNREADABLE_SLEEP_JOURNAL && row.sleep?.wakeBlock !== "session journal is missing" && !deskWakeRefusal(project, row, env)) };
+    }),
     unregistered: spaces.filter((space) => !registeredSpaces.has(space.workspace_id)).map((space) => ({ spaceId: space.workspace_id, label: space.label })),
     posts: recentPosts(queues, now),
     fleet: entries.length > 0 ? fleetStats(live) : null,

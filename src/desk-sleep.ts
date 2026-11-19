@@ -1,10 +1,39 @@
 import { statSync } from "node:fs";
-import { decodeReaderExit, decodeSleepJournalEntry, decodeSleepWatch } from "./domain.ts";
+import { decodeReaderExit, decodeSleepJournalEntry, decodeSleepWatch, placeAgent, type AgentRow, type Project } from "./domain.ts";
+import { localWakeRefusal } from "./remote.ts";
+import type { EnvShape } from "./runtime.ts";
 import { forEachJsonlLine } from "./restart-snapshot.ts";
 
 export const DRAIN_ENV = "RATKING_EXIT_WHEN_DRAINED";
 export const WAKE_PROMPT = "Woken because mail is waiting. Read your Rat King inbox, then continue.";
 export const MIN_DESK_IDLE_MS = 2 * 60 * 60_000;
+export const UNREADABLE_SLEEP_JOURNAL = "session journal is unreadable";
+
+export const deskWakeConfigRefusal = (row: AgentRow, env: Pick<EnvShape, "home" | "wakeConfigHome">) =>
+  localWakeRefusal(env.home, env.wakeConfigHome, row.restore?.env.HOME, row.profile.env.HOME, row.profile.policy?.env?.HOME);
+
+/** Durable admission shared by wake, owner status and queue nudges. Live checks come separately. */
+export function deskWakeRefusal(project: Project, row: AgentRow, env: Pick<EnvShape, "home" | "wakeConfigHome">): string | null {
+  if (row.machine !== "local" || row.role !== "desk" || !row.sleep) return "local wake requires a sleep-mode desk";
+  if (row.retirePending) return "row retirement is pending";
+  if (!row.sessionFile) return "row has no session file to restore";
+  const config = deskWakeConfigRefusal(row, env);
+  if (config) return config;
+  if (project.state === "archived") return "project is archived";
+  const lane = project.lanes.find(lane => lane.slug === row.lane);
+  if (lane?.state !== "open") return `lane ${row.lane} is ${lane?.state ?? "missing"}`;
+  const placed = placeAgent(project.slug, project.policy, "restore", undefined, row.machine, undefined);
+  return "refusal" in placed ? "project policy refuses restore on this machine" : null;
+}
+
+export function readSleepDrain(row: Pick<AgentRow, "sessionFile" | "sessionId">) {
+  if (!row.sessionFile) return { kind: "missing" } as const;
+  try { return { kind: "read", drainedAt: sleepJournal(row.sessionFile, row.sessionId).drainedAt } as const; }
+  catch (error) { return { kind: (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable" } as const; }
+}
+
+export const wakeNoticeText = (name: string, messageId: string | null, result: string) =>
+  `${name}: message ${messageId ?? "unknown"} · ${result}`;
 
 export const sleepRefusals = (e: {
   desk: boolean; open: boolean; idleMs: number | null; paneStatus: string | null;

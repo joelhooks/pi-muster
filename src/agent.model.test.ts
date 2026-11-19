@@ -100,8 +100,9 @@ describe("agent machine model", () => {
     expect(LIVE_STATES).not.toContain("closed");
   });
 
-  it("keeps PROCESS_STATES to the states that die with their pane and are not yet reported", () => {
-    const reportChain = ["reported", "verified", "landed"];
+  it("keeps PROCESS_STATES to the states that die on ordinary pane loss before reporting", () => {
+    // An asleep row already expects a missing pane. Only journal loss invokes PANE_GONE there.
+    const reportChain = ["reported", "verified", "landed", "asleep"];
     const dyingWithPane = STATES.filter(state => at(state).can({ type: "PANE_GONE" }) && !reportChain.includes(state));
     expect([...PROCESS_STATES].sort()).toEqual([...dyingWithPane].sort());
   });

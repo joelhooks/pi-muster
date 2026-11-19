@@ -118,11 +118,19 @@ export class QueueReader {
   }
 }
 
-type DeskCatalog = { readonly agents: readonly Pick<Project["agents"][number], "role" | "state" | "sessionId" | "owner">[] };
+type DeskRow = Pick<Project["agents"][number], "role" | "state" | "sessionId" | "owner" | "sleep">;
+type DeskCatalog<Row extends DeskRow> = { readonly agents: readonly Row[] };
 
-export function deadDesk(project: DeskCatalog | undefined, sessions: readonly string[] | undefined): boolean | undefined {
-  if (sessions === undefined) return undefined;
-  return !project?.agents.some((agent) => (agent.role === "desk" && (agent.state === "asleep" || (PROCESS_STATES.includes(agent.state) && sessions.includes(agent.sessionId)))) || sessions.includes(agent.owner));
+export function deadDesk<Row extends DeskRow>(project: DeskCatalog<Row> | undefined, sessions: readonly string[] | undefined, wakeable: (agent: Row) => boolean = row => !!row.sleep && !row.sleep.wakeBlock): boolean | undefined {
+  const serving = project?.agents.some(agent => agent.role === "desk" && agent.state === "asleep" && wakeable(agent));
+  if (serving) return false;
+  if (sessions === undefined) {
+    const desks = project?.agents.filter(agent => agent.role === "desk" && agent.state !== "closed");
+    return desks?.length && desks.every(agent => agent.state === "asleep") ? true : undefined;
+  }
+  return !project?.agents.some(agent => agent.state !== "asleep" && (
+    (agent.role === "desk" && PROCESS_STATES.includes(agent.state) && sessions.includes(agent.sessionId)) || sessions.includes(agent.owner)
+  ));
 }
 
 const rank = (item: InboxItem) => KIND_RANK[item.kind];

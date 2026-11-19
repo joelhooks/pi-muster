@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
@@ -218,12 +218,20 @@ export const machinesPath = (home: string) => join(home, ".config/muster/machine
 
 export const wakeConfigPath = (home: string) => join(home, ".config/muster/wake.json");
 
-// Headless authorization deliberately ignores MusterEnv.machines and all config-path overrides.
-export const localWakeEnabled = (home: string, accountHome = home) => {
-  if (home !== accountHome) return false;
-  try { return decodeLocalWake(JSON.parse(readFileSync(wakeConfigPath(accountHome), "utf8"))).local === true; }
-  catch { return false; }
-};
+// Authorization deliberately ignores MusterEnv.machines and all config-path overrides.
+export function localWakeRefusal(home: string, accountHome = home, ...savedHomes: (string | undefined)[]): string | null {
+  if (home !== accountHome || savedHomes.some(saved => saved !== undefined && saved !== accountHome)) return "session home differs from the OS account home";
+  const disabled = "machine local is not wake-enabled";
+  try {
+    const fd = openSync(wakeConfigPath(accountHome), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    try {
+      const info = fstatSync(fd);
+      const uid = process.getuid?.();
+      if (!info.isFile() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o022) !== 0) return disabled;
+      return decodeLocalWake(JSON.parse(readFileSync(fd, "utf8"))).local === true ? null : disabled;
+    } finally { closeSync(fd); }
+  } catch { return disabled; }
+}
 export const mapPath = (path: string, machine: MachineConfig): string => {
   const prefix = Object.keys(machine.paths).sort((a, b) => b.length - a.length).find(p => path === p || path.startsWith(`${p}/`));
   return prefix ? `${machine.paths[prefix]}${path.slice(prefix.length)}` : path;

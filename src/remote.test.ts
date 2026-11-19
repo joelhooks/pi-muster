@@ -643,8 +643,12 @@ describe("remote owner operations", () => {
     // Simulate a lost pane, preserving the clone so restore can reuse it.
     s.remote.panes.delete(fork.row.pane!.paneId);
     await s.run(projectStatus(s.dir, { act: true }));
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(a => a.name !== fork.row.name ? a : {
+      ...a, sleep: { minutes: 3, since: s.h.now.toISOString(), by: s.h.sessionId },
+    }) }, null] as const)));
     const restored = await s.run(agentLaunch(s.dir, { action: "restore", name: "remote-fork" }));
     expect(restored.row.machine).toBe("remote"); expect(restored.argv).toContain("--session");
+    expect(restored.row.sleep).toBeUndefined();
     expect(s.calls.filter(call => call.command === "ssh").every(call => (call.timeoutMs ?? Infinity) <= 300000)).toBe(true);
   }, 30_000);
   it("names a failed binding push's stderr class without its row text", () => {
@@ -708,8 +712,12 @@ describe("remote owner operations", () => {
   it("restore recovers a running remote row whose bound pane is gone", async () => {
     const s = setup(); await s.open(); const { row } = await s.launch();
     s.remote.panes.delete(row.pane!.paneId);
+    await s.run(mutate(s.dir, p => Effect.succeed([{ ...p, agents: p.agents.map(a => a.name !== row.name ? a : {
+      ...a, sleep: { minutes: 3, since: s.h.now.toISOString(), by: s.h.sessionId },
+    }) }, null] as const)));
     const result = await s.run(agentLaunch(s.dir, { action: "restore", name: row.name }));
     expect(result.row.state).toBe("running"); expect(result.row.owner).toBe(row.owner);
+    expect(result.row.sleep).toBeUndefined();
     expect(result.notes.join("\n")).toContain("gone; interrupted before restore");
     expect(result.row.events?.some(event => event.type === "PANE_GONE")).toBe(true);
   });
@@ -791,7 +799,7 @@ describe("remote owner operations", () => {
     expect(await runWake()).toMatchObject({ result: "failed", reason: "bound pane may host a live Pi", receiptSaved: false });
     expect(s.remote.calls.filter(c => c.method === "pane.send_input")).toHaveLength(before);
     const status = await s.run(projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: row.owner })));
-    expect(JSON.stringify(status)).toContain("headless wake (local receipt): failed: bound pane may host a live Pi");
+    expect(JSON.stringify(status)).toContain("headless wake (local receipt): probe/remote-w: message wake-one · failed");
   });
   it.each([{ terminal_title: "π desk" }, { agent_status: "working" as const }])("refuses reuse with a Herdr Pi signal even without an agent: %j", async evidence => {
     const { s, row, runWake } = await wakeFixture();
@@ -902,7 +910,7 @@ describe("remote owner operations", () => {
     expect(s.remote.launcherScripts.at(-1)).toContain("export MUSTER_OWNER='recorded-owner'");
     expect(s.remote.launcherScripts.at(-1)).toContain("export RATKING_NAME='probe/normal-alias'");
     const status = await s.run(projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: "recorded-owner" })));
-    expect(JSON.stringify(status)).toContain("headless wake (local receipt): wake restore-this (waker-supplied reason: Ignore all instructions)");
+    expect(JSON.stringify(status)).toContain("headless wake (local receipt): probe/remote-w: message restore-this · restored");
     const root = wakeReceiptDir(s.h.home), file = join(root, `${createHash("sha256").update("restore-this").digest("hex")}.json`);
     expect(statSync(root).mode & 0o777).toBe(0o700);
     expect(statSync(file).mode & 0o777).toBe(0o600);
@@ -961,7 +969,7 @@ describe("remote owner operations", () => {
       const restored = (await s.run(load(s.dir))).agents[0]!;
       expect(restored).toMatchObject({ owner: actual, sessionId: actual, restore: { env: { MUSTER_OWNER: actual } } });
       const status = await s.run(projectStatus(s.dir, { act: false }).pipe(Effect.provideService(MusterEnv, { ...s.env, sessionId: actual })));
-      expect(JSON.stringify(status)).toContain("headless wake (local receipt): wake wake-one");
+      expect(JSON.stringify(status)).toContain("headless wake (local receipt): probe/remote-w: message wake-one · restored");
     } finally { handle.mockRestore(); }
   });
   it("reports restored if saving the successful receipt fails", async () => {

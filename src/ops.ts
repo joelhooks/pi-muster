@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { turnLog, turnUnsupported } from "./turn-wake.ts";
-import { DRAIN_ENV, MIN_DESK_IDLE_MS, WAKE_PROMPT, sleepJournal, sleepRefusals } from "./desk-sleep.ts";
+import { deskWakeConfigRefusal, deskWakeRefusal, DRAIN_ENV, MIN_DESK_IDLE_MS, readSleepDrain, UNREADABLE_SLEEP_JOURNAL, WAKE_PROMPT, sleepJournal, sleepRefusals, wakeNoticeText } from "./desk-sleep.ts";
 import { WAKE_MODEL_ERROR } from "../bin/muster-restore-args.mjs";
 import { spawn } from "node:child_process";
 import { appendFileSync, chmodSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -68,7 +68,7 @@ import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent,
 import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
-import { localWakeEnabled, savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
+import { localWakeRefusal, savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
 import { DEFAULT_GATE_TIMEOUT_MIN, placeAgent, codemodeNote, laneLaunchPolicy, badToolNames, decodeCallsignClaim, decodeCallsignRelease, decodeToolLoadout, withRoleLaunch } from "./domain.ts";
 import { decodeAgentRow, decodeRemotePacket, decodeAgentLaunchRequest, decodeLaunchJob, decodeLaunchJobId, decodeWakeIdentity } from "./domain.ts";
 import { remoteCommsEnvironment } from "./comms.ts";
@@ -418,13 +418,13 @@ const remoteLaunch = (dir: string, catalog: Project, params: Omit<AgentLaunchInp
       if (note) restoreNotes.push(note);
     }
     const now = iso(env);
-    let row: AgentRow = { name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
+    let row: AgentRow = restoreSleepMode({ name, machine: nameOfMachine, intercomAddress: `${name}@${machine.herdr}`, role, lane: lane.slug, side: null, cwd, clone,
       profile: remoteProfile, owner: params.action === "restore" && existing ? existing.owner : env.sessionId,
       ...(params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId, liveOwner)), sessionId: existing?.sessionId ?? mintSessionId(name, env.now()), sessionFile, parentSessionFile, pane: null,
       brief: syncedBrief?.brief ?? existing?.brief ?? null,
       state: yield* stepAgent(name, existing?.state ?? "planned", { type: params.action === "restore" ? "RESTORE" : "LAUNCH" }), delivery: "none", restarts: existing?.restarts ?? 0,
-      restore: null, ...(wake && existing?.sleep ? { sleep: existing.sleep } : {}), ...(wake ? { events: [...(existing?.events ?? []), { type: "WAKE_RESTORE", at: now, detail: wake.reason }] }
-        : existing?.events ? { events: existing.events } : {}), createdAt: existing?.createdAt ?? now, updatedAt: now };
+      restore: null, ...(existing?.sleep ? { sleep: existing.sleep } : {}), ...(wake ? { events: [...(existing?.events ?? []), { type: "WAKE_RESTORE", at: now, detail: wake.reason }] }
+        : existing?.events ? { events: existing.events } : {}), createdAt: existing?.createdAt ?? now, updatedAt: now }, wake);
     const promptDir = (yield* git(cwd, "rev-parse", "--path-format=absolute", "--git-path", "muster-launch")
       .pipe(Effect.orElseSucceed(() => join(cwd, ".pi/muster")))).trim();
     yield* must("mkdir", ["-p", scratch], { cwd, timeoutMs: 10_000 });
@@ -1259,12 +1259,12 @@ const restoreSessionHolder = (row: AgentRow, panes: readonly PaneInfo[]) => pane
 
 /** Catalog-only recovery. A live session anywhere on this machine vetoes interruption. */
 const recoverGoneRestore = (row: AgentRow, snapshot?: readonly PaneInfo[], shell?: PaneInfo | null) => Effect.gen(function* () {
-  if (!row.pane || !PANE_GONE_STATES.includes(row.state)) return row;
+  if (!row.pane || row.state === "asleep" || !PANE_GONE_STATES.includes(row.state)) return row;
   if (snapshot ? snapshot.some(pane => pane.terminal_id === row.pane!.terminalId && pane !== shell) : yield* locatePane(row.pane)) return row;
   if (restoreSessionHolder(row, snapshot ?? (yield* paneList()))) return row;
   const env = yield* MusterEnv;
   const detail = `restore: pane ${row.pane.paneId} ${shell ? "no longer hosts Pi" : "gone"}; interrupted before restore`;
-  return { ...withoutSleep(row), pane: null, state: yield* stepAgent(row.name, row.state, { type: "PANE_GONE" }),
+  return { ...restoreSleepMode(row), pane: null, state: yield* stepAgent(row.name, row.state, { type: "PANE_GONE" }),
     events: [...(row.events ?? []), { type: "PANE_GONE", at: iso(env), detail }], updatedAt: iso(env) };
 });
 const recoverRestoreOnMachine = (row: AgentRow) => Effect.gen(function* () {
@@ -1307,7 +1307,8 @@ export const inspectWakeRestore = (project: Project, row: AgentRow, reconcile?: 
   if (!row.sessionFile) return yield* refuse("row has no session file to restore", true);
   const local = row.machine === "local";
   const machine = local ? null : yield* machineConfig(row.machine).pipe(Effect.orElseSucceed(() => null));
-  if (local ? !localWakeEnabled(env.home, env.wakeConfigHome) : machine?.wake !== true) return yield* refuse(`machine ${row.machine} is not wake-enabled`);
+  const configRefusal = local ? deskWakeConfigRefusal(row, env) : machine?.wake === true ? null : `machine ${row.machine} is not wake-enabled`;
+  if (configRefusal) return yield* refuse(configRefusal);
   if (local && row.role !== "desk") return yield* refuse("local wake requires an asleep desk");
   if (local && project.state === "archived") return yield* refuse("project is archived");
   const lane = project.lanes.find(lane => lane.slug === row.lane);
@@ -1336,7 +1337,12 @@ export const inspectWakeRestore = (project: Project, row: AgentRow, reconcile?: 
   const eligible = local && reconcile ? yield* reconcileLocalDeskSleep(project.dir, row, reconcile.act, panes).pipe(
     Effect.mapError(error => new WakeRestoreStop({ result: "failed", message: error.message })),
   ) : row;
-  if (local && (eligible.state !== "asleep" || !eligible.sleep)) return yield* refuse("local wake requires an asleep desk");
+  if (local) {
+    if (eligible.state !== "asleep" || !eligible.sleep) return yield* refuse("local wake requires an asleep desk");
+    const journal = readSleepDrain(eligible);
+    if (journal.kind === "missing") return yield* refuse("session journal is missing");
+    if (journal.kind === "unreadable") return yield* new WakeRestoreStop({ result: "failed", message: UNREADABLE_SLEEP_JOURNAL });
+  }
   if (bound) {
     if (!row.pane?.openedByMuster) return yield* refuse("bound shell was not opened by Muster");
     if (local && (bound.workspace_id !== project.spaceId || bound.tab_id !== lane.tabId)) return yield* boundWakeUncertain();
@@ -1608,6 +1614,12 @@ const advance = (row: AgentRow, events: readonly AgentEvent[]) =>
 
 /** Apply events to a row inside a locked mutation, only if the row is still in the state the caller read. */
 const withoutSleep = ({ sleep: _, ...row }: AgentRow): AgentRow => row;
+const restoreSleepMode = (row: AgentRow, wake?: WakeLaunch): AgentRow => {
+  if (!wake) return withoutSleep(row);
+  if (!row.sleep) return row;
+  const { wakeBlock: _block, journalReadFailures: _failures, ...sleep } = row.sleep;
+  return { ...row, sleep };
+};
 const patchRow = (dir: string, name: string, expected: AgentRow["state"] | null, events: readonly AgentEvent[], patch: Partial<AgentRow> = {}) =>
   Effect.gen(function* () {
     const env = yield* MusterEnv;
@@ -3049,7 +3061,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
     if (matches.length !== 1) return yield* input("sleep refused: desk has duplicate live panes");
     if (old.machine !== "local") return yield* input("sleep must run against the desk's local catalog on its own host");
     if (!self && !old.pane?.openedByMuster) return yield* input("sleep needs a Muster-opened pane for an owner-side restart");
-    yield* requireSleepEligible(project, old, pane);
+    yield* requireSleepEligible(project, old, pane, overrides.env?.HOME);
   }
   const oldPane = adoptionBinding(old, pane);
   // Herdr's live journal is authoritative even when its filename moved.
@@ -3103,6 +3115,10 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
   // provisional → proven → rebound → activated. Failed provisional forks never
   // acquire the identity lease. Network work is submitted only after activation.
   const environment: Record<string, string> = { ...agentEnv(project, row), ...(machine?.env ?? {}), ...(machine ? { MUSTER_MACHINE: old.machine, MUSTER_PROJECT_SLUG: project.slug, ...remoteCommsEnvironment(project, machine), MUSTER_REMOTE_ROW: JSON.stringify(row) } : {}) };
+  if (sleeping) {
+    const refusal = deskWakeConfigRefusal(row, env);
+    if (refusal) return yield* input(sleepWakeRefusal(refusal));
+  }
   // Ernestine, 2026-10-17: since rat-king 0b233bf a fork answering to its parent's name is renamed, and drovr's restarted
   // desk came up as drovr/drovr-desk-2-drovr-desk. A restart is a successor, not a sibling: pi-ratking (3b5dbc9) lets
   // RATKING_NAME stand when RATKING_SUCCEEDS names the parent session. Restart only; a fork or side desk never sets it.
@@ -3193,7 +3209,7 @@ const restartByFork = (dir: string, project: Project, old: AgentRow, overrides: 
         const latest = yield* findRow(current, old.name);
         if (latest.sessionId !== old.sessionId || latest.sessionFile !== recorded.sessionFile || latest.owner !== old.owner || latest.state !== old.state || latest.pane?.terminalId !== recorded.pane?.terminalId) return yield* input("row changed during restart; old agent untouched, retry");
         if (!self) yield* requireOwner(latest, env.sessionId, takeover, project.slug, false);
-        if (sleeping) yield* requireSleepEligible(current, latest, stillOld);
+        if (sleeping) yield* requireSleepEligible(current, latest, stillOld, environment.HOME);
         yield* guardPaneBinding(current, latest, binding);
         const next = withRow(current, row);
         const agents = next.agents.map(other => other.owner === old.sessionId ? { ...other, owner: id, restore: other.restore ? { ...other.restore, env: { ...other.restore.env, MUSTER_OWNER: id } } : null, updatedAt: iso(env) } : other);
@@ -3272,9 +3288,13 @@ const readLaunchJobs = (home: string): LaunchJob[] => {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).filter(file => file.endsWith(".json")).map(file => readLaunchJob(home, file.slice(0, -5)));
 };
-const requireSleepEligible = (project: Project, row: AgentRow, pane: PaneInfo) => Effect.gen(function* () {
+const sleepWakeRefusal = (reason: string) => reason === "machine local is not wake-enabled"
+  ? 'sleep refused: local wake is not enabled; set {"local":true} in ~/.config/muster/wake.json'
+  : `sleep refused: ${reason}`;
+const requireSleepEligible = (project: Project, row: AgentRow, pane: PaneInfo, launchHome?: string) => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  if (!localWakeEnabled(env.home, env.wakeConfigHome)) return yield* input('sleep refused: local wake is not enabled; set {"local":true} in ~/.config/muster/wake.json');
+  const refusal = deskWakeConfigRefusal(row, env) ?? (launchHome === undefined ? null : localWakeRefusal(env.home, env.wakeConfigHome, launchHome));
+  if (refusal) return yield* input(sleepWakeRefusal(refusal));
   const now = env.now().getTime();
   const evidence = yield* Effect.try({ try: () => {
     if (!row.sessionFile || pane.agent_session?.value !== row.sessionFile) throw new Error("catalog session journal does not match the pane");
@@ -3315,13 +3335,14 @@ const sameSleepRow = (latest: AgentRow | undefined, snapshot: AgentRow) => lates
 const drainableDeskState = (row: AgentRow) => ["running", "silent", "nudged", "restarted", "restoring"].includes(row.state);
 
 /** A gone pane alone is a crash, not proof of sleep. Keep the binding for the wake shell guard. */
-const reconcileLocalDeskSleep = (dir: string, row: AgentRow, act: boolean, snapshot?: readonly PaneInfo[]) => Effect.gen(function* () {
+const reconcileLocalDeskSleep = (dir: string, row: AgentRow, act: boolean, snapshot?: readonly PaneInfo[], drainedAt?: number) => Effect.gen(function* () {
   if (!row.sleep || row.machine !== "local" || row.role !== "desk" || !row.sessionFile || !drainableDeskState(row)) return row;
   const panes = snapshot ?? (yield* paneList());
   const bound = panes.find(pane => pane.terminal_id === row.pane?.terminalId);
   if (wakeSessionHolder(row, panes) || (bound && (hostsPi(bound) || suspectWakeShell(bound)))) return row;
-  const file = row.sessionFile;
-  const drained = yield* Effect.try({ try: () => sleepJournal(file, row.sessionId).drainedAt, catch: () => input("sleep journal unavailable; rechecking next pass") });
+  const journal = drainedAt === undefined ? readSleepDrain(row) : { kind: "read" as const, drainedAt };
+  if (journal.kind !== "read") return yield* input("sleep journal unavailable; rechecking next pass");
+  const drained = journal.drainedAt;
   const resumedAt = row.events?.filter(event => event.type === "WAKE_RESTORE" || event.type === "SLEEP" || event.type === "SLEEP_RESUMED" || event.type === "RESTARTED").at(-1)?.at ?? row.sleep.since;
   if (drained <= Date.parse(resumedAt)) return row;
   const env = yield* MusterEnv;
@@ -3337,20 +3358,19 @@ const reconcileLocalDeskSleep = (dir: string, row: AgentRow, act: boolean, snaps
 /** Record manual resumption without directing any input to its pane. */
 const resumedByLease = "live Rat King lease; waiting for Herdr session evidence";
 const reconcileResumedDesk = (project: Project, row: AgentRow, panes: readonly PaneInfo[], act: boolean) => Effect.gen(function* () {
-  const lastEvent = row.events?.at(-1);
-  const leaseOnly = row.state === "running" && lastEvent?.type === "SLEEP_RESUMED" && lastEvent.detail === resumedByLease;
   if (row.machine !== "local" || !row.sleep || (row.state !== "asleep" && !drainableDeskState(row))) return null;
   const exact = wakeSessionHolder(row, panes);
   const bound = panes.find(pane => pane.terminal_id === row.pane?.terminalId);
   // An explicitly different session on the old terminal is not this desk resuming.
   const pane = exact ?? (bound?.agent_session ? undefined : boundWakePi(bound));
   const lease = pane ? false : yield* liveWakeLease(project, row, null).pipe(Effect.orElseSucceed(() => null));
-  if (row.state !== "asleep") return !pane && (lease === true || (leaseOnly && lease === null)) ? { row, action: resumedByLease } : null;
+  if (row.state !== "asleep") return !pane && lease === true ? { row, action: resumedByLease } : null;
   if (!pane && lease !== true) return { row, action: null };
   const action = pane ? `sleep ended: live Pi in ${pane.pane_id}` : resumedByLease;
   const env = yield* MusterEnv;
   const state = yield* stepAgent(row.name, row.state, { type: "ADOPT" });
-  const next: AgentRow = { ...row, state, updatedAt: iso(env),
+  const { wakeBlock: _block, journalReadFailures: _failures, ...sleep } = row.sleep;
+  const next: AgentRow = { ...row, sleep, state, updatedAt: iso(env),
     events: [...(row.events ?? []), { type: "SLEEP_RESUMED", at: iso(env), detail: action }],
   };
   const resumed = act ? yield* mutate(project.dir, current => Effect.gen(function* () {
@@ -3360,6 +3380,43 @@ const reconcileResumedDesk = (project: Project, row: AgentRow, panes: readonly P
     return [withRow(current, adopted), adopted] as const;
   })) : next;
   return { row: resumed, action };
+});
+
+const checkDeskSleepStatus = (project: Project, row: AgentRow, panes: readonly PaneInfo[], act: boolean) => Effect.gen(function* () {
+  const resumed = yield* reconcileResumedDesk(project, row, panes, act);
+  if (resumed && resumed.row.state !== "asleep") return { ...resumed, hold: true };
+  if (!row.sleep || row.machine !== "local" || row.role !== "desk" || (row.state !== "asleep" && !drainableDeskState(row))) return { row, action: null, hold: false };
+  const env = yield* MusterEnv;
+  const save = (before: AgentRow, next: AgentRow) => act ? mutate(project.dir, current => Effect.gen(function* () {
+    const latest = yield* findRow(current, before.name);
+    if (!sameSleepRow(latest, before)) return [current, latest] as const;
+    return [withRow(current, next), next] as const;
+  })) : Effect.succeed(next);
+  const bound = panes.find(pane => pane.terminal_id === row.pane?.terminalId);
+  const live = wakeSessionHolder(row, panes) || (bound && (hostsPi(bound) || suspectWakeShell(bound)));
+  const journal = live && row.state !== "asleep" ? null : readSleepDrain(row);
+  const { journalReadFailures, wakeBlock, ...sleep } = row.sleep;
+  const failures = journal?.kind === "unreadable" && !bound && row.state !== "asleep" ? (journalReadFailures ?? 0) + 1 : 0;
+  if (!live && ((journal?.kind === "missing" && (!bound || row.state === "asleep")) || failures >= 3)) {
+    const action = journal?.kind === "missing" ? "session journal is missing: interrupted" : "session journal unreadable for 3 owner passes: interrupted";
+    const at = iso(env);
+    const next = { ...withoutSleep(row), pane: null, state: yield* stepAgent(row.name, row.state, { type: "PANE_GONE" }), updatedAt: at,
+      events: [...(row.events ?? []), { type: "PANE_GONE", at, detail: action }] };
+    return { row: yield* save(row, next), action, hold: true };
+  }
+  const drained = journal?.kind === "read" ? yield* reconcileLocalDeskSleep(project.dir, row, act, panes, journal.drainedAt) : row;
+  if (drained.state === "asleep") {
+    const blocked = deskWakeRefusal(project, drained, env) ?? (journal?.kind === "unreadable" ? UNREADABLE_SLEEP_JOURNAL : journal?.kind === "missing" ? "session journal is missing" : null);
+    const changed = blocked !== (wakeBlock ?? null);
+    const action = changed && blocked ? `alarm: sleeping desk cannot be woken: ${blocked}` : null;
+    if (!changed && !journalReadFailures) return { row: drained, action, hold: true };
+    const at = iso(env);
+    const next = { ...drained, sleep: { ...sleep, ...(blocked ? { wakeBlock: blocked } : {}) }, updatedAt: at,
+      ...(changed && (blocked || wakeBlock) ? { events: [...(drained.events ?? []), { type: blocked ? "SLEEP_WAKE_BLOCKED" : "SLEEP_WAKE_AVAILABLE", at, detail: blocked ?? "local wake available again" }] } : {}) };
+    return { row: yield* save(drained, next), action, hold: true };
+  }
+  const updated = failures !== (journalReadFailures ?? 0) ? yield* save(drained, { ...drained, sleep: { ...sleep, ...(failures ? { journalReadFailures: failures } : {}) }, updatedAt: iso(env) }) : drained;
+  return { row: updated, action: journal && journal.kind !== "read" ? "sleep journal unavailable; rechecking next pass" : null, hold: journal !== null && journal.kind !== "read" };
 });
 
 const LOCAL_WAKE_NOTE = "headless wake (local receipt): ";
@@ -3451,7 +3508,7 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
       request: parent && !project.agents.includes(parent) && parent.sessionFile ? { ...params, from: parent.sessionFile } : params };
     // Switchboard, 2026-10-28: the reservation carried no ownerName, so a rowless owner's launch receipt had no name to mail.
     const reservedOwnerName = params.action === "restore" && existing ? (existing.ownerName ? { ownerName: existing.ownerName } : {}) : launchOwnerName(env.home, dir, env.sessionId, yield* liveSelfName);
-    const reserved: AgentRow = { ...(existing ? withoutSleep(existing) : {}), ...reservedOwnerName, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
+    const reserved: AgentRow = { ...(existing ? restoreSleepMode(existing) : {}), ...reservedOwnerName, machine, name: params.name, role, side: side ? { parent: side.name } : null, lane: lane.slug,
       cwd: machine === "local" ? cwd : mapPath(cwd, yield* machineConfig(machine)), clone: existing?.clone ?? null, profile: params.action === "restore" && existing ? existing.profile : profile, sessionId: launchJob.sessionId,
       sessionFile: existing?.sessionFile ?? null, parentSessionFile: parent?.sessionFile ?? null, pane: existing?.pane ?? null,
       owner: params.action === "restore" && existing ? existing.owner : env.sessionId, brief, state, delivery: "none",
@@ -3593,21 +3650,23 @@ export const restoreWakeRow = (project: Project, row: AgentRow, reason: string, 
     Effect.acquireUseRelease(admission, () => launchForeground(project.dir, request, undefined, { ...wake, localSnapshot: row, ...(chargeLocalAttempt ? { chargeLocalAttempt } : {}) }), release => release));
 });
 
-export const noticeWakeRestore = (project: Project, row: AgentRow, reason: string, success: boolean, ready: boolean) => Effect.gen(function* () {
+export const noticeWakeRestore = (project: Project, row: AgentRow, messageId: string | null, result: "failed" | "restored") => Effect.gen(function* () {
   const env = yield* MusterEnv;
-  const request = { action: "restore" as const, name: row.name, reason };
+  const text = wakeNoticeText(`${project.slug}/${row.name}`, messageId, result);
+  const success = result === "restored";
+  const request = { action: "restore" as const, name: row.name };
   const id = randomUUID();
   const log = join(env.home, ".local/state/muster/launches", `${id}.log`);
   const running = yield* stepLaunchJob(id, "queued", { type: "RUN" });
   const state = yield* stepLaunchJob(id, running, { type: success ? "SUCCEED" : "FAIL" });
   const job: LaunchJob = { id, project: project.slug, name: row.name, sessionId: row.sessionId,
     pid: process.pid, log, startedAt: iso(env), state, priorState: row.state, owner: row.owner, request,
-    outcome: success ? "action" : "blocked", undelivered: `${LOCAL_WAKE_NOTE}${success ? reason : `failed: ${reason}`}` };
+    outcome: success ? "action" : "blocked", undelivered: `${LOCAL_WAKE_NOTE}${text}` };
   // Keep the wake on the existing local status feed; no new owner queue or Rat King write.
   yield* Effect.try({
     try: () => {
       mkdirSync(dirname(log), { recursive: true, mode: 0o700 });
-      writeFileSync(log, `${reason}\nsession ${row.sessionId} · pane ${row.pane?.paneId ?? "unknown"} · ready ${ready}\n`, { mode: 0o600, flag: "wx" });
+      writeFileSync(log, `${text}\n`, { mode: 0o600, flag: "wx" });
     },
     catch: () => new InputError({ message: "wake launch log unavailable" }),
   }).pipe(Effect.andThen(writeLaunchJob(env.home, job)));
@@ -3767,7 +3826,7 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string,
         if (note) skillNotes.push(note);
       }
       const { retirePending: _unretired, ...unmarked } = existing;
-      row = { ...(wake ? unmarked : withoutSleep(unmarked)), ...(wake ? {
+      row = { ...restoreSleepMode(unmarked, wake), ...(wake ? {
         pane: wakeShell ? unmarked.pane : null,
         events: [...(unmarked.events ?? []), { type: "WAKE_RESTORE", at: iso(env), detail: wake.reason }],
       } : {}), profile: { ...restoredProfile, skills: restoredSkills.paths, appendSystemPrompt: withHiddenSkills(restoredProfile.appendSystemPrompt, restoredSkills.hidden) }, cwd, sessionFile, owner: existing.owner, state: yield* stepAgent(name, existing.state, { type: "RESTORE" }) };
@@ -3897,6 +3956,10 @@ const launchForeground = (dir: string, params: AgentLaunchInput, jobId?: string,
     });
     const succeeds = kind === "restore" ? resumeSuccession(row.sessionFile) : null;
     const agentEnvironment: Record<string, string> = { ...agentEnv(project, row), ...(succeeds ? { RATKING_SUCCEEDS: succeeds } : {}) };
+    if (wake) {
+      const refusal = deskWakeConfigRefusal(row, env);
+      if (refusal) return yield* new WakeRestoreStop({ result: "refused", message: refusal });
+    }
     const musterBin = join(env.musterRoot, "bin");
     // A profile PATH is typed literally. Otherwise only the prepend is typed: a ~1 KB
     // owner PATH overflows the pane's input line and leaves the quote open.
@@ -5254,6 +5317,11 @@ const nudgeSleepingDesk = (project: Project, id: string) => Effect.gen(function*
   if (desks.length !== 1) return null;
   const desk = yield* reconcileLocalDeskSleep(project.dir, desks[0]!, true);
   if (desk.state !== "asleep") return null;
+  const env = yield* MusterEnv;
+  const refusal = deskWakeRefusal(project, desk, env) ?? (readRegistry(env.home).get(project.slug)?.dir !== project.dir ? "project is not registered for wake on this host" : null);
+  if (refusal) return `sleeping desk not nudged: ${desk.name}: ${refusal}; queue item is saved`;
+  const admission = yield* inspectWakeRestore(project, desk).pipe(Effect.result);
+  if (admission._tag === "Failure") return `sleeping desk not nudged: ${desk.name}: ${admission.failure.message}; queue item is saved`;
   const comms = yield* Comms;
   const result = yield* comms.send(`${project.slug}/${desk.name}`, `A desk queue item was posted: ${project.slug}#${id}. Read the desk queue.`, { wake: true });
   return result.status === "delivered" || result.status === "accepted" ? `sleeping desk nudged: ${desk.name}` : `sleeping desk nudge ${result.status}: ${result.detail ?? "see Rat King"}`;
@@ -5366,11 +5434,11 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     recoveryNotes.push(...undeliveredLaunchNotes(launchJobs, project.slug, env.sessionId, env.now().getTime()));
     const reapSources: ReapSources = new Map();
     for (const snapshot of project.agents) {
-      const resumed = yield* reconcileResumedDesk(project, snapshot, panes, act);
-      const sleep = resumed ? null : yield* reconcileLocalDeskSleep(dir, snapshot, act, panes).pipe(Effect.result);
-      const row = resumed?.row ?? (sleep?._tag === "Success" ? sleep.success : snapshot);
-      if (resumed || row.state === "asleep" || sleep?._tag === "Failure") {
-        const action = resumed?.action ?? (sleep?._tag === "Failure" ? sleep.failure.message : null);
+      const sleep = yield* checkDeskSleepStatus(project, snapshot, panes, act).pipe(Effect.catch(error =>
+        Effect.succeed({ row: snapshot, action: error.message, hold: true })));
+      const { row } = sleep;
+      if (sleep.hold || row.state === "asleep") {
+        const { action } = sleep;
         const pane = row.state !== "asleep" && row.pane ? byTerminal.get(row.pane.terminalId)?.pane_id ?? null : null;
         lines.push({ name: row.name, role: row.role, lane: row.lane, state: row.state, pane, silentMin: null, cache: null, cost: null, intercom: "unknown", action });
         continue;
