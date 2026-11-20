@@ -50,6 +50,7 @@
     "bin/muster-restore-args.mjs",
     "bin/muster-restore-args.d.mts",
     "src/wake-restore.ts",
+    "src/desk-sleep.ts",
     "bin/muster-close-after.ts",
     "bin/muster-close-after",
     "bin/muster-digest.ts",
