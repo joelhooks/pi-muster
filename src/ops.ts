@@ -4148,7 +4148,15 @@ export const projectRoleLine = (outcome: string) => {
   const flat = outcome.replace(/\s+/g, " ").trim();
   // A sentence ends before a capital letter, so "e.g. this" and "v1.4. next" stay whole.
   const sentence = flat.match(/^.*?[.!?](?=\s+[A-Z]|$)/)?.[0] ?? flat;
-  return sentence.length <= 120 ? sentence : `${sentence.slice(0, 119).trimEnd()}…`;
+  // The lexicon caps a role at 120 UTF-8 bytes, not code units: trim to 117 bytes and add "…" (3 bytes).
+  const bytes = new TextEncoder();
+  if (bytes.encode(sentence).length <= 120) return sentence;
+  let cut = "";
+  for (const ch of sentence) {
+    if (bytes.encode(cut + ch).length > 117) break;
+    cut += ch;
+  }
+  return `${cut.trimEnd()}…`;
 };
 
 /** The mailbox's project roles through the operator fleet shim; null before the mailbox has a role table. */
