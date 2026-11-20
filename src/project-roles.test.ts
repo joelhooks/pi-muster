@@ -26,7 +26,14 @@ async function setup(mailbox: string, slug = "probe") {
 describe("project role names", () => {
   it("takes the outcome's first sentence, at most 120 characters", () => {
     expect(projectRoleLine("Run the  probe\ndesk. Then more.")).toBe("Run the probe desk.");
-    expect(projectRoleLine("x".repeat(200))).toBe(`${"x".repeat(119)}…`);
+    expect(projectRoleLine("x".repeat(200))).toBe(`${"x".repeat(117)}…`);
+    // rats-nest 3n2phcdx5yc5g: the issuer counts UTF-8 bytes, so a trimmed line must fit 120 bytes.
+    for (const outcome of ["x".repeat(200), "Rat King: the fleet's network — ".repeat(8), "🐑 ".repeat(80), "é".repeat(130)]) {
+      const line = projectRoleLine(outcome);
+      expect(new TextEncoder().encode(line).length).toBeLessThanOrEqual(120);
+      expect(line.endsWith("…")).toBe(true);
+    }
+    expect(projectRoleLine("é".repeat(60))).toBe("é".repeat(60));
     expect(projectRoleLine("v1.2 ships")).toBe("v1.2 ships");
     expect(projectRoleLine("Ship v1.4. then e.g. more. Next part.")).toBe("Ship v1.4. then e.g. more.");
   });
