@@ -78,6 +78,19 @@ describe("a close retires the row's name with its own key", () => {
     expect(closed.notes.some(note => note.includes("not retired") && note.includes("LeaseLive"))).toBe(true);
   }, 60_000);
 
+  it("lets the operator retire a name whose own key was refused", async () => {
+    const f = await setup(`echo "Unauthorized: signature rejected" >&2; exit 1`);
+    const closed = await runWith(f.h, agentClose(f.dir, { name: "worker" }));
+    expect(f.shim()).toEqual(["retire --name probe/worker"]);
+    expect(closed.notes).toContain("Rat King name probe/worker retired: sends to it now fail Retired");
+  }, 60_000);
+
+  it("reports the own-key refusal when there is no shim to fall back to", async () => {
+    const f = await setup(`echo "Unauthorized: signature rejected" >&2; exit 1`, false);
+    const closed = await runWith(f.h, agentClose(f.dir, { name: "worker" }));
+    expect(closed.notes.some(note => note.includes("not retired") && note.includes("Unauthorized"))).toBe(true);
+  }, 60_000);
+
   it("uses the operator shim when this host has no ratking CLI", async () => {
     const f = await setup(null);
     await runWith(f.h, agentClose(f.dir, { name: "worker" }));

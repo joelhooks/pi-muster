@@ -4283,9 +4283,6 @@ export const selfRetired = (stdout: string, name: string) => {
   } catch { return false; }
 };
 
-/** Exit codes and errors after which the operator shim should try instead: no key here, no CLI, no host. */
-const selfRetireUnavailable = (code: number, output: string) => code === 127 || /\bNoIdentity\b|command not found|No such file/i.test(output);
-
 /**
  * `ratking retire --as <name>` on the row's own machine, where its key lives. Returns a runner for the retire's argv
  * tail, or null when the shim should handle it. A result counts as retired only with a self-signed record for this
@@ -4311,15 +4308,17 @@ const selfRetire = (row: AgentRow, name: string) => Effect.gen(function* () {
     const output = `${attempt.success.stderr}\n${attempt.success.stdout}`;
     if (attempt.success.code === 0) return selfRetired(attempt.success.stdout, name) ? attempt : yield* operator(args);
     if (/LeaseLive/.test(output)) return attempt;
-    if (selfRetireUnavailable(attempt.success.code ?? -1, output)) return yield* operator(args);
-    return attempt;
+    // Tin-Tin, #109 review: a stale or rejected own key (Unauthorized, a mailbox 5xx) still gets the operator's authority
+    // where the shim exists; without one, the self refusal is the answer.
+    const fallback = yield* operator(args);
+    return fallback ?? attempt;
   });
 }).pipe(Effect.catch(() => Effect.succeed(null)));
 
 /** The first line that names an error in CLI output, stack frames dropped; null when none does. */
 export const cliErrorLine = (output: string) => {
   // `ratking retire --as` names its refusal by tag alone (`LeaseLive: …`), with no CliError prefix.
-  const line = output.split(/\r?\n/).map(text => text.trim()).find(text => /error|refused|denied|not found|fail|\bLeaseLive\b|\bNoIdentity\b/i.test(text) && !/^at /.test(text));
+  const line = output.split(/\r?\n/).map(text => text.trim()).find(text => /error|refused|denied|not found|fail|\bLeaseLive\b|\bNoIdentity\b|\bUnauthorized\b/i.test(text) && !/^at /.test(text));
   return line ? line.replace(/^\[[\d:.]+\]\s*/, "").slice(0, 200) : null;
 };
 
