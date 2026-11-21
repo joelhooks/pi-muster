@@ -4240,15 +4240,22 @@ const retireNameOutcome = (project: Project, row: AgentRow, verb: "retire" | "un
   const successor = role ?? (owner && owner !== name ? owner : null);
   const done = verb === "retire" ? `retired: sends to it now fail Retired${successor ? `, naming ${successor}` : ""}` : "unretired: it takes mail again";
   const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
-  if (!existsSync(shim)) return plainNote(`Rat King name ${name} not ${verb}d: no ${shim}`);
   const proc = yield* Proc;
-  const run = (args: readonly string[]) => proc.run("sh", [shim, verb, "--name", name, ...args], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result);
+  // rats-nest, 2026-11-21 (rat-king efcfe7d): a name can retire itself with its own key on the machine that ran it, so
+  // closes on any host no longer need the operator wrapper. The operator shim stays the fallback for unretire, for a
+  // machine without that key or without `ratking`, and for an unreachable host.
+  const self = verb === "retire" ? yield* selfRetire(row, name) : null;
+  const run = (args: readonly string[]) => self ? self(args) : existsSync(shim)
+    ? proc.run("sh", [shim, verb, "--name", name, ...args], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result)
+    : Effect.succeed(null);
   let result = yield* run(successor ? ["--successor", successor] : []);
+  if (result === null) return plainNote(`Rat King name ${name} not ${verb}d: no ${shim}`);
   // A live reader still holds the name: no retry retires it, so report the refusal below.
   const leaseLive = result._tag === "Success" && /LeaseLive/.test(`${result.success.stderr}\n${result.success.stdout}`);
   // A refused successor must not cost the retire: retry without one and say so, rather than point mail at a bad name.
   if (successor && !leaseLive && (result._tag === "Failure" || result.success.code !== 0)) {
     const plain = yield* run([]);
+    if (plain === null) return plainNote(`Rat King name ${name} not ${verb}d: no ${shim}`);
     if (plain._tag === "Success" && plain.success.code === 0) return plainNote(`Rat King name ${name} retired without a successor (--successor ${successor} refused): sends to it now fail Retired`);
     result = plain;
   }
@@ -4264,9 +4271,55 @@ const retireNameOutcome = (project: Project, row: AgentRow, verb: "retire" | "un
   const leaseUntil = leaseLiveUntil(`${result.success.stderr}\n${result.success.stdout}`, nowMs) ?? new Date(nowMs + LEASE_FALLBACK_MS).toISOString();
   return { note, retryAt: retryAfter(leaseUntil), leaseLive: true };
 });
+/** A self-signed retirement (`by` equals `did`) for exactly this name; anything else is not proof it retired. */
+export const selfRetired = (stdout: string, name: string) => {
+  const line = stdout.trim().split(/\r?\n/).reverse().find(text => text.trim().startsWith("{"));
+  if (!line) return false;
+  try {
+    const value: unknown = JSON.parse(line);
+    if (typeof value !== "object" || value === null) return false;
+    const record = value as Record<string, unknown>;
+    return record.name === name && typeof record.did === "string" && record.by === record.did && typeof record.retiredAt === "string";
+  } catch { return false; }
+};
+
+/** Exit codes and errors after which the operator shim should try instead: no key here, no CLI, no host. */
+const selfRetireUnavailable = (code: number, output: string) => code === 127 || /\bNoIdentity\b|command not found|No such file/i.test(output);
+
+/**
+ * `ratking retire --as <name>` on the row's own machine, where its key lives. Returns a runner for the retire's argv
+ * tail, or null when the shim should handle it. A result counts as retired only with a self-signed record for this
+ * name; a LeaseLive refusal goes back as is, for the caller's lease retry.
+ */
+const selfRetire = (row: AgentRow, name: string) => Effect.gen(function* () {
+  const env = yield* MusterEnv;
+  const runner = yield* Proc;
+  const local = row.machine === "local";
+  const bin = join(env.home, ".local/bin/ratking");
+  if (local && !existsSync(bin)) return null;
+  const proc = local ? runner : sshProc(row.machine, yield* machineConfig(row.machine), runner, env.home);
+  const shim = join(env.home, ".config/muster/fleet-mailbox.sh");
+  const operator = (args: readonly string[]) => existsSync(shim)
+    ? runner.run("sh", [shim, "retire", "--name", name, ...args], { cwd: env.home, timeoutMs: 60_000 }).pipe(Effect.result)
+    : Effect.succeed(null);
+  return (args: readonly string[]) => Effect.gen(function* () {
+    const argv = ["retire", "--as", name, ...args];
+    const attempt = yield* (local
+      ? proc.run(bin, argv, { cwd: env.home, timeoutMs: 60_000 })
+      : proc.run("sh", ["-c", 'exec "$HOME/.local/bin/ratking" "$@"', "ratking", ...argv], { cwd: "/", timeoutMs: 60_000 })).pipe(Effect.result);
+    if (attempt._tag === "Failure") return yield* operator(args);
+    const output = `${attempt.success.stderr}\n${attempt.success.stdout}`;
+    if (attempt.success.code === 0) return selfRetired(attempt.success.stdout, name) ? attempt : yield* operator(args);
+    if (/LeaseLive/.test(output)) return attempt;
+    if (selfRetireUnavailable(attempt.success.code ?? -1, output)) return yield* operator(args);
+    return attempt;
+  });
+}).pipe(Effect.catch(() => Effect.succeed(null)));
+
 /** The first line that names an error in CLI output, stack frames dropped; null when none does. */
 export const cliErrorLine = (output: string) => {
-  const line = output.split(/\r?\n/).map(text => text.trim()).find(text => /error|refused|denied|not found|fail/i.test(text) && !/^at /.test(text));
+  // `ratking retire --as` names its refusal by tag alone (`LeaseLive: …`), with no CliError prefix.
+  const line = output.split(/\r?\n/).map(text => text.trim()).find(text => /error|refused|denied|not found|fail|\bLeaseLive\b|\bNoIdentity\b/i.test(text) && !/^at /.test(text));
   return line ? line.replace(/^\[[\d:.]+\]\s*/, "").slice(0, 200) : null;
 };
 
