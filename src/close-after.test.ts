@@ -42,16 +42,23 @@ describe("detached restart closer", () => {
     const h = harness();
     const child = { on: vi.fn(), unref: vi.fn() };
     const start = vi.fn(() => child);
-    spawnRestartCloser("/package", "/project", binding, "self restart", start as never, h.home);
-    expect(start).toHaveBeenCalledWith(process.execPath, expect.arrayContaining([String(process.pid), "/project", JSON.stringify(binding), "self restart"]), { detached: true, stdio: ["ignore", expect.any(Number), expect.any(Number)] });
+    spawnRestartCloser("/package", h.root, binding, "self restart", start as never, h.home);
+    expect(start).toHaveBeenCalledWith(process.execPath, expect.arrayContaining([String(process.pid), h.root, JSON.stringify(binding), "self restart"]), { cwd: h.root, detached: true, stdio: ["ignore", expect.any(Number), expect.any(Number)] });
     expect(child.unref).toHaveBeenCalledOnce();
     spawnRestartCloser("/package", "/project", { ...binding, openedByMuster: false }, "adopted", start as never, h.home);
     expect(start).toHaveBeenCalledOnce();
   });
+  it("falls back to home when the project directory is missing", () => {
+    const h = harness();
+    const start = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
+    spawnRestartCloser("/package", `${h.root}/gone`, binding, "restart", start as never, h.home);
+    expect(start).toHaveBeenCalledWith(process.execPath, expect.any(Array), expect.objectContaining({ cwd: h.home }));
+  });
   it("still spawns with ignored stdio when the startup log cannot be opened", () => {
     const start = vi.fn(() => ({ on: vi.fn(), unref: vi.fn() }));
-    spawnRestartCloser("/package", "/project", binding, "restart", start as never, "/dev/null");
-    expect(start).toHaveBeenCalledWith(process.execPath, expect.any(Array), { detached: true, stdio: "ignore" });
+    const h = harness();
+    spawnRestartCloser("/package", h.root, binding, "restart", start as never, "/dev/null");
+    expect(start).toHaveBeenCalledWith(process.execPath, expect.any(Array), { cwd: h.root, detached: true, stdio: "ignore" });
   });
   it("treats an already gone pane as a no-op", async () => {
     const h = harness();
