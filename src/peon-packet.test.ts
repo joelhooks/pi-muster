@@ -177,14 +177,30 @@ describe("peon packet intake", () => {
     expect(readFileSync(projectPath(dir), "utf8")).toBe(catalog);
   });
 
-  it.each(["rejected", "no_changes"] as const)("records %s without needing a verified bundle and only replays the same outcome", async outcome => {
+  it("refuses intake when head equals base without writing a packet", async () => {
+    const f = await fixture();
+    const before = readFileSync(projectPath(f.dir), "utf8");
+    expect(await failWith(f.h, packetIntake(f.dir, { lane: f.lane, result: { ...f.result, head: f.base } }))).toMatchObject({
+      _tag: "InputError", message: expect.stringContaining("head equals base: nothing to land"),
+    });
+    expect(readFileSync(projectPath(f.dir), "utf8")).toBe(before);
+  });
+
+  it.each(["rejected", "no_changes"] as const)("requires evidence for %s and records it without a verified bundle", async outcome => {
     const f = await fixture();
     const { packet } = await f.intake();
     rmSync(f.result.bundle.path);
+    const beforeRefusal = readFileSync(projectPath(f.dir), "utf8");
+    for (const evidence of [{}, { evidence: " \n\t" }]) {
+      expect(await failWith(f.h, packetLand(f.dir, { id: packet.id, outcome, ...evidence }))).toMatchObject({
+        _tag: "InputError", message: expect.stringContaining(`${outcome} requires non-empty evidence`),
+      });
+    }
+    expect(readFileSync(projectPath(f.dir), "utf8")).toBe(beforeRefusal);
     const land = packetLand(f.dir, { id: packet.id, outcome, evidence: "checked in the desk" });
     const landed = await runWith(f.h, land);
     expect(landed.packet).toMatchObject({ state: outcome, landedAs: null, evidence: "checked in the desk" });
-    expect((await runWith(f.h, land)).packet).toEqual(landed.packet);
+    expect((await runWith(f.h, packetLand(f.dir, { id: packet.id, outcome }))).packet).toEqual(landed.packet);
     const before = readFileSync(projectPath(f.dir), "utf8");
     expect(await failWith(f.h, f.land(packet.id))).toMatchObject({ _tag: "InputError", message: expect.stringContaining(`already ${outcome}`) });
     expect(readFileSync(projectPath(f.dir), "utf8")).toBe(before);
@@ -204,7 +220,7 @@ describe("peon packet intake", () => {
     expect(reopened.packet).toMatchObject({ state: "verified", landedAs: null, gate: null, peon: landed.packet.peon });
     const audit = JSON.parse(readFileSync(join(f.dir, ".brain", "data", "muster", "corrections.jsonl"), "utf8"));
     expect(audit).toMatchObject({ packetId: packet.id, from: { state: "committed", landedAs: landed.packet.landedAs }, by: "different-session", reason: correction.corrects });
-    expect((await runWith(f.h, packetLand(f.dir, { id: packet.id, outcome: "rejected" }))).packet.state).toBe("rejected");
+    expect((await runWith(f.h, packetLand(f.dir, { id: packet.id, outcome: "rejected", evidence: "corrected outcome after desk review" }))).packet.state).toBe("rejected");
     expect(sh(f.dir, "rev-parse", "HEAD").trim()).toBe(landed.packet.landedAs);
   });
 
@@ -224,13 +240,10 @@ describe("peon packet intake", () => {
     const f = await fixture();
     const { packet } = await f.intake();
     await runWith(f.h, packetVerify(f.dir, packet.id));
-    const lock = join(f.dir, ".git", "muster-peon-land.lock");
-    mkdirSync(lock);
-    const live = join(lock, `${process.pid}-${randomUUID()}`);
-    mkdirSync(live);
-    expect(await failWith(f.h, f.land(packet.id))).toMatchObject({ _tag: "GuardFailed", guard: "peon-land-lock" });
-    expect(readdirSync(lock)).toEqual([live.split("/").at(-1)]);
-    rmSync(live, { recursive: true });
+    const gitDir = join(f.dir, ".git");
+    const lock = join(gitDir, "muster-peon-land.lock");
+    expect(await failWith(f.h, withPeonLandLock(gitDir, f.land(packet.id)))).toMatchObject({ _tag: "GuardFailed", guard: "peon-land-lock", message: expect.stringContaining("another peon landing claim exists") });
+    expect(readdirSync(lock)).toEqual([]);
     const dead = spawnSync(process.execPath, ["-e", ""]);
     expect(dead.status).toBe(0);
     const stale = join(lock, `${dead.pid}-${randomUUID()}`);
@@ -239,8 +252,10 @@ describe("peon packet intake", () => {
     expect(readdirSync(lock)).toEqual([]);
   });
 
-  it("does not replace the result when releasing its landing claim fails", async () => {
+  it("keeps the result and lets the same process land after its claim release fails", async () => {
     const f = await fixture();
+    const { packet } = await f.intake();
+    await runWith(f.h, packetVerify(f.dir, packet.id));
     const gitDir = join(f.dir, ".git");
     const lock = join(gitDir, "muster-peon-land.lock");
     const operation = Effect.sync(() => {
@@ -249,6 +264,23 @@ describe("peon packet intake", () => {
       return { landedAs: f.head };
     });
     expect(await runWith(f.h, withPeonLandLock(gitDir, operation))).toEqual({ landedAs: f.head });
+    expect(readdirSync(lock)).toHaveLength(1);
+    expect((await runWith(f.h, f.land(packet.id))).packet.state).toBe("committed");
+    expect(readdirSync(lock)).toEqual([]);
+    const [abandoned] = readdirSync(gitDir).filter(name => name.startsWith("muster-peon-land.abandoned-"));
+    expect(readFileSync(join(gitDir, abandoned!, "release-fails-while-nonempty"), "utf8")).toBe("fixture\n");
+  });
+
+  it("names unexpected landing lock entries without removing them", async () => {
+    const f = await fixture();
+    const gitDir = join(f.dir, ".git");
+    const lock = join(gitDir, "muster-peon-land.lock");
+    mkdirSync(lock);
+    writeFileSync(join(lock, "unexpected-entry"), "fixture\n");
+    expect(await failWith(f.h, withPeonLandLock(gitDir, Effect.void))).toMatchObject({
+      _tag: "GuardFailed", guard: "peon-land-lock", message: expect.stringContaining('unexpected peon landing lock entry "unexpected-entry"'),
+    });
+    expect(readdirSync(lock)).toEqual(["unexpected-entry"]);
   });
 
   it("copies bundle proof scratch only under the source Git dir and removes it", async () => {
@@ -278,10 +310,14 @@ describe("peon packet intake", () => {
     ["report file", /missing or unreadable; restore the recorded report/],
   ] as const)("refuses %s with a typed next step", async (name, fix) => {
     const f = await fixture();
-    const { h, dir, box, base, result } = f;
+    const { h, dir, box, result } = f;
     const edits: Partial<typeof result> = {};
     if (name === "bundle sha256") edits.bundle = { ...result.bundle, sha256: "0".repeat(64) };
-    if (name === "bundle head") edits.head = base; // Already in the source, but not an advertised head in the bundle.
+    if (name === "bundle head") {
+      // Present in the source and distinct from base, but not advertised by the bundle.
+      sh(dir, "commit", "--allow-empty", "-qm", "source-only head");
+      edits.head = sh(dir, "rev-parse", "HEAD").trim();
+    }
     if (name === "head ancestry") {
       writeFileSync(join(dir, "owner.txt"), "owner\n");
       sh(dir, "add", "owner.txt"); sh(dir, "commit", "-qm", "owner-only sibling");

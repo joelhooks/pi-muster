@@ -4717,6 +4717,7 @@ export const packetIntake = (dir: string, raw: unknown) => Effect.gen(function* 
   const project = yield* load(dir);
   yield* guardSideDesk(project, env.sessionId, "packet_intake");
   const { summary, checks, exportReceipt, ...source } = result;
+  if (source.head === source.base) return yield* input("peon result head equals base: nothing to land; submit a bundle with a new commit");
   const key = peonKey(source.box, source.head);
   const id = `peon-${key}`;
   const response = (packet: Packet, repeated: boolean, note: string | null) => ({ packet, repeated, note });
@@ -5254,6 +5255,8 @@ const peonLand = (project: Project, packet: Packet & { peon: PeonPacketSource },
     ? Effect.succeed({ packet: current, note: "already recorded; nothing changed", notes: custodyNotes(current) })
     : Effect.fail(input(`packet ${packet.id.slice(0, 12)} is already ${current.state}; use corrects with a reason to reopen it`));
   if (TERMINAL_PACKET_STATES.includes(packet.state)) return yield* repeated(packet);
+  const suppliedEvidence = params.evidence?.trim();
+  if (outcome !== "committed" && !suppliedEvidence) return yield* input(`${outcome} requires non-empty evidence (what you checked and where)`);
   const env = yield* MusterEnv;
   const proc = yield* Proc;
   if (params.review && !isAbsolute(params.review)) return yield* input("review must be an absolute path to the blind review findings");
@@ -5287,7 +5290,7 @@ const peonLand = (project: Project, packet: Packet & { peon: PeonPacketSource },
       }
       const saved = yield* mutate(project.dir, catalog => Effect.gen(function* () {
         const entry = yield* findPacket(catalog, packet.id);
-        const evidence = [params.evidence?.trim(), landing.gate ? landing.note : null].filter(Boolean).join("\n") || undefined;
+        const evidence = [suppliedEvidence, landing.gate ? landing.note : null].filter(Boolean).join("\n") || undefined;
         const recorded = yield* recordPacketOutcome(catalog, { ...entry, gate: landing.gate, ...(params.review ? { review: params.review } : {}) }, outcome, landing.landedAs, evidence, iso(env));
         return [recorded.project, recorded.packet] as const;
       }));

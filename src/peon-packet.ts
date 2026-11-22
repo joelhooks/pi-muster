@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, mkdirSync, readdirSync, realpathSync, rmdirSync } from "node:fs";
+import { createReadStream, mkdirSync, readdirSync, realpathSync, renameSync, rmdirSync } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -20,8 +20,10 @@ const deadProcess = (pid: number) => {
   catch (error) { return isCode(error, "ESRCH"); }
 };
 
+const activePeonLandClaims = new Set<string>();
+
 /** Publish a unique claim before checking for any other live claim. Two calls can both back off, but neither can
- * pass a claim that was published first and is still held. Dead claims never share a path with their replacement. */
+ * pass a claim that was published first and is still held. Stale claims never share a path with their replacement. */
 export const withPeonLandLock = <A, E, R>(gitDir: string, operation: Effect.Effect<A, E, R>) => {
   const root = join(gitDir, "muster-peon-land.lock");
   const lockError = (detail: string) => new GuardFailed({ guard: "peon-land-lock", message: `${detail} (${root}); retry after the other landing exits, or inspect the lock if it persists` });
@@ -30,6 +32,7 @@ export const withPeonLandLock = <A, E, R>(gitDir: string, operation: Effect.Effe
       mkdirSync(root, { recursive: true, mode: 0o700 });
       const name = `${process.pid}-${randomUUID()}`;
       mkdirSync(join(root, name), { mode: 0o700 });
+      activePeonLandClaims.add(name);
       return name;
     },
     catch: error => lockError(`cannot publish the peon landing claim: ${String(error)}`),
@@ -38,16 +41,30 @@ export const withPeonLandLock = <A, E, R>(gitDir: string, operation: Effect.Effe
       try: () => {
         for (const other of readdirSync(root, { withFileTypes: true })) {
           if (other.name === name) continue;
-          const match = /^(\d+)-[a-f0-9-]{36}$/.exec(other.name);
-          if (!match || !other.isDirectory() || !deadProcess(decodePeonLockPid(Number(match[1])))) throw new Error("another peon landing claim exists");
-          try { rmdirSync(join(root, other.name)); } catch (error) { if (!isCode(error, "ENOENT")) throw error; }
+          const match = /^(\d+)-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.exec(other.name);
+          if (!match || !other.isDirectory()) throw new Error(`unexpected peon landing lock entry ${JSON.stringify(other.name)}; inspect it before retrying`);
+          const pid = decodePeonLockPid(Number(match[1]));
+          const live = pid === process.pid ? activePeonLandClaims.has(other.name) : !deadProcess(pid);
+          if (live) throw new Error("another peon landing claim exists");
+          const stale = join(root, other.name);
+          try { rmdirSync(stale); }
+          catch (error) {
+            if (isCode(error, "ENOENT")) continue;
+            if (!isCode(error, "ENOTEMPTY") && !isCode(error, "EEXIST")) throw error;
+            // Keep unexpected contents, but move the stale claim out of the lock scan.
+            try { renameSync(stale, join(gitDir, `muster-peon-land.abandoned-${other.name}-${randomUUID()}`)); }
+            catch (moveError) { if (!isCode(moveError, "ENOENT")) throw moveError; }
+          }
         }
       },
       catch: error => lockError(String(error)),
     });
     return yield* operation;
   }), name => Effect.try({
-    try: () => rmdirSync(join(root, name)),
+    try: () => {
+      try { rmdirSync(join(root, name)); }
+      finally { activePeonLandClaims.delete(name); }
+    },
     catch: error => error,
   }).pipe(Effect.catch(error => isCode(error, "ENOENT") ? Effect.void : Effect.logWarning(`could not release peon landing claim ${join(root, name)}: ${String(error)}`))));
 };
