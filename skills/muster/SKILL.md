@@ -24,7 +24,7 @@ Bosses, the hawk, judges and arbiters are opt-in for a named risk. Record the ri
 - Fan out only when the critical path needs a second writer now. Every extra lane costs owner attention and a cold prefix.
 - Parallel lanes need disjoint write scopes. One writer per checkout; everyone else reviews a named hash.
 - A short fan-out does not require a boss. The desk remains accountable unless a named coordination risk warrants one.
-- Read-only fan-out (research, scan, gather, review, judge) goes to peons first: one `peon_swarm({ briefs: [...] })`, with the evidence passed as `docs` or a pinned `checkout`, watched with `peon_status`. A native subagent is the exception, for a read-only branch that must run commands or touch live state. Anything that writes, runs long, or needs restoration belongs in a lane.
+- Read-only fan-out (research, scan, gather, review, judge) goes to peons first: one `peon_swarm({ briefs: [...] })`, with the evidence passed as `docs` or a pinned `checkout` (which needs `PEONS_CHECKOUT=on`), watched with `peon_status`. A native subagent is the exception, for a read-only branch that must run commands or touch live state. Anything that writes, runs long, or needs restoration belongs in a lane.
 - Use a side desk when Joel wants to explore an evolving design alongside the main conversation. Keep execution with the parent desk; the side desk hands over briefs and decision notes.
 
 ## How to cut a lane
