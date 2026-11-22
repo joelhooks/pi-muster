@@ -15,7 +15,7 @@ const decodePull = Schema.decodeUnknownSync(Pull);
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 export const AUTOLAND_CAP = 10;
 export const AUTOLAND_RECHECK_MS = 10 * 60_000;
-export const autolandEligible = (packet: Packet) => packet.kind === "commit" && (packet.state === "reported" || packet.state === "verified");
+export const autolandEligible = (packet: Packet) => !packet.peon && packet.kind === "commit" && (packet.state === "reported" || packet.state === "verified");
 /**
  * A check is due when something it depends on moved since the last one, not when a clock says so (rule hunt,
  * 2026-10-17): the packet was reported again, or another packet in the project landed, so the base may hold it now.

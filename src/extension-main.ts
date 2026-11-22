@@ -34,6 +34,7 @@ import {
   laneClose,
   laneOpen,
   laneDeliver,
+  packetIntake,
   packetLand,
   packetReport,
   packetVerify,
@@ -737,10 +738,28 @@ export default function muster(host: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "packet_intake",
+    label: "Muster peon packet intake",
+    description: "Record an offline peon result on a rift-merge lane, without starting an agent or creating a clone. Replay must match the original lane, repo and bundle SHA-256. Replay can attach a new exportReceipt; prior receipts remain in order and replaying one cannot make it current again. Then call packet_verify and packet_land with the returned packet ID. Keep the exact bundle on this host through landing. Missing exportReceipt blocks box destruction, not landing; peons/desk verifies custody and owns destruction.",
+    parameters: Type.Object({ project: ProjectParam, lane: Type.String(), result: Type.Object({
+      bundle: Type.Object({ path: Type.String({ description: "Absolute path to a local Git bundle advertising head as a ref" }), sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
+      repo: Type.String({ description: "Absolute path to the lane's local source checkout" }),
+      base: Type.String({ pattern: "^[a-f0-9]{40}$" }), head: Type.String({ pattern: "^[a-f0-9]{40}$" }),
+      checks: Type.Array(Type.Object({ name: Type.String(), outcome: StringEnum(["pass", "fail", "skip"] as const), detail: Type.Optional(Type.String()) })),
+      summary: Type.String(), box: Type.String(), peon: Type.String(),
+      exportReceipt: Type.Optional(Type.Object({ id: Type.String(), sha256: Type.String({ pattern: "^[a-f0-9]{64}$" }), location: Type.String(), mirror: Type.Optional(Type.String()) }, { description: "Permanent raw-session export receipt: manifest SHA-256 and paths to primary (and optional mirror) RECEIPT.json" })),
+    }) }),
+    async execute(_id, { project, ...result }, signal, _onUpdate, ctx) {
+      return run(ctx, signal, packetIntake(projectDir(ctx, project), result), (record) =>
+        [`Packet ${record.packet.id} ${record.repeated ? `already recorded (${record.packet.state})` : "reported"}.`, `Report: ${record.packet.report}`, record.note].filter(Boolean).join("\n"));
+    },
+  });
+
+  pi.registerTool({
     name: "packet_verify",
     label: "Muster packet verify",
     description:
-      "Verify a reported packet from evidence, not the report's claim: the commit exists in the clone, sits on the lane branch, and shares history with the expected repo; every dirty path in the clone is byte-identical to the source or a named generated file; the report file exists. An artifact packet checks its sha256.",
+      "Verify a reported packet from evidence, not the report's claim: the commit exists in the clone, sits on the lane branch, and shares history with the expected repo; every dirty path in the clone is byte-identical to the source or a named generated file; the report file exists. An artifact packet checks its sha256. A peon packet checks the bundle hash and head, head ancestry, base reachability in the local source, and the report file.",
     parameters: Type.Object({ project: ProjectParam, id: Type.String({ description: "Packet id or a unique prefix of at least 7 chars" }) }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       return run(ctx, signal, packetVerify(projectDir(ctx, params.project), params.id), (result) =>
@@ -753,7 +772,7 @@ export default function muster(host: ExtensionAPI) {
     name: "packet_land",
     label: "Muster packet land",
     description:
-      "Record a packet's outcome: committed, rejected, or no_changes. In rift-merge mode, committed fetches the worker branch into a clean source checkout and merges it --no-ff as shitratgit[bot], running the optional gate under the machine-wide heavy-job lock between merge and commit (a failed gate aborts the merge). Other modes require landedAs reachable from the freshly fetched lane base and real, non-placeholder evidence. Pass corrects with a reason to audit an already-landed packet and reopen it to verified, then call again to record the corrected outcome. Only the packet's owner or takeover may correct. An artifact packet, or any packet without a clone branch, is recorded without a merge and requires evidence (what you checked and where). Never pushes. project_status records packets that already landed outside Muster (on the base branch or in a merged PR) automatically.",
+      "Record a packet's outcome: committed, rejected, or no_changes. In rift-merge mode, committed fetches the worker branch into a clean source checkout and merges it --no-ff as shitratgit[bot], running the optional gate under the machine-wide heavy-job lock between merge and commit (a failed gate aborts the merge). Other modes require landedAs reachable from the freshly fetched lane base and real, non-placeholder evidence. Pass corrects with a reason to audit an already-landed packet and reopen it to verified, then call again to record the corrected outcome. Only the packet's owner or takeover may correct. Peon packets use the same merge and optional gate with the verified local bundle head in place of the clone branch. Repeating the same peon landing outcome returns the existing record; a different outcome requires an audited correction. An artifact or other cloneless packet is recorded without a merge and requires evidence (what you checked and where). Never pushes. project_status records packets that already landed outside Muster (on the base branch or in a merged PR) automatically.",
     parameters: Type.Object({
       project: ProjectParam,
       id: Type.String(),
@@ -772,7 +791,7 @@ export default function muster(host: ExtensionAPI) {
       const rendered = await run(ctx, signal, packetLand(projectDir(ctx, project), rest), (result) =>
         [`Packet ${result.packet.id.slice(0, 12)} ${result.packet.state}${result.packet.landedAs ? ` as ${result.packet.landedAs}` : ""}${result.packet.attested ? " (attested)" : ""}. ${result.note}`, ...result.notes].join("\n"),
       );
-      if ("isError" in rendered && rendered.content.some(item => /^GuardFailed: (?:run packet_verify |.* does not match packet )/.test(item.text))) {
+      if ("isError" in rendered && rendered.content.some(item => /^GuardFailed: (?:run packet_verify (?!on peon-)|.* does not match packet )/.test(item.text))) {
         return { ...rendered, content: rendered.content.map(item => ({ ...item, text: `${item.text}\nif the work landed inside a larger commit, pass attested: true with evidence` })) };
       }
       return rendered;

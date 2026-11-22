@@ -132,7 +132,7 @@ const probeTask = (project: Project, row: AgentRow, panes: readonly PaneInfo[], 
     if (resolved.code !== 0) gaps.push("worker branch head unavailable");
     else head = resolved.stdout.trim();
     // Rejection remains an explicit catalog fact, never inferred from failure or pane absence.
-    facts.rejected = project.packets.some(packet => packet.agent === row.name && packet.lane === row.lane && packet.state === "rejected" && (!head || packet.id === head));
+    facts.rejected = project.packets.some(packet => !packet.peon && packet.agent === row.name && packet.lane === row.lane && packet.state === "rejected" && (!head || packet.id === head));
     const baseSha = row.clone?.base?.sha;
     if (!baseSha) gaps.push("starting base SHA unavailable");
     if (head && baseSha) {
@@ -180,13 +180,13 @@ const probeTask = (project: Project, row: AgentRow, panes: readonly PaneInfo[], 
         else tree = mergedTree.stdout.trim();
       }
       // Catalog locates a report only; its presence proves reporting, not packet state.
-      const packet = project.packets.find(packet => packet.agent === row.name && packet.lane === row.lane && packet.id === head && packet.kind === "commit");
+      const packet = project.packets.find(packet => !packet.peon && packet.agent === row.name && packet.lane === row.lane && packet.id === head && packet.kind === "commit");
       const evidence = yield* files(head, packet?.report ?? null);
       facts.report = evidence.report;
       if (evidence.sidecar) {
         try {
           const sidecar = decodeRemotePacket(JSON.parse(evidence.sidecar));
-          if (sidecar.project === project.slug && sidecar.machine === row.machine && sidecar.packet.agent === row.name && sidecar.packet.lane === row.lane && sidecar.packet.id === head && sidecar.packet.kind === "commit") facts.report = true;
+          if (!sidecar.packet.peon && sidecar.project === project.slug && sidecar.machine === row.machine && sidecar.packet.agent === row.name && sidecar.packet.lane === row.lane && sidecar.packet.id === head && sidecar.packet.kind === "commit") facts.report = true;
           else gaps.push("packet sidecar identity disagrees");
         } catch { gaps.push("packet sidecar invalid"); }
       }
@@ -221,7 +221,7 @@ export const traceProjectTasks = (project: Project, panes: readonly PaneInfo[], 
           Effect.flatMap(raw => io(() => decodeFiles(JSON.parse(raw))))));
     }).pipe(Effect.catch(error => Effect.succeed<TaskTrace>({ derived: "?", liveness: "?", facts: {
       live: false, commits: false, merged: false, report: false, gate: false,
-      rejected: project.packets.some(packet => packet.agent === row.name && packet.lane === row.lane && packet.state === "rejected"),
+      rejected: project.packets.some(packet => !packet.peon && packet.agent === row.name && packet.lane === row.lane && packet.state === "rejected"),
       head: null, tree: null, gaps: [`facts unavailable: ${error.message}`],
     } })));
     traces.set(row.name, result);

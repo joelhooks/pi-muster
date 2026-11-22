@@ -82,6 +82,7 @@ const OWNER_TOOLS = [
   "agent_launch",
   "agent_rewind",
   "agent_close",
+  "packet_intake",
   "packet_verify",
   "packet_land",
   "desk_post",

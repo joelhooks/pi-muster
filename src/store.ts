@@ -23,7 +23,7 @@ const LOCK_STALE_MS = 30_000;
 const LOCK_WAIT_MS = 20_000;
 
 /** Bump whenever persisted fields are added, including nested structs, and teach requiredWriterSchema what needs it. Never a git SHA. */
-export const CATALOG_WRITER_SCHEMA_VERSION = 7; // 7: lane workerTools; 6: policy machines.deny; 5: role policy tools, env, appendSystemPrompt (Lean Loadout)
+export const CATALOG_WRITER_SCHEMA_VERSION = 8; // 8: peon packets and receipt history; 7: lane workerTools; 6: policy machines.deny; 5: Lean Loadout
 
 /**
  * The oldest writer that can rewrite this content without losing or misreading it.
@@ -31,6 +31,8 @@ export const CATALOG_WRITER_SCHEMA_VERSION = 7; // 7: lane workerTools; 6: polic
  * fenced out only where a newer field or value is actually present.
  */
 export function requiredWriterSchema(project: Project): number {
+  // Older writers drop the bundle identity and permanent transcript custody receipt.
+  if (project.packets.some(packet => packet.peon)) return 8;
   // An older writer drops workerTools on decode, and the lane's workers would launch with the wider role list.
   if (project.lanes.some(lane => (lane.workerTools?.length ?? 0) > 0)) return 7;
   // An older writer drops machines on decode and would lift a data guard without a word. An empty list guards
@@ -67,14 +69,16 @@ const readProject = (path: string, dir: string): Effect.Effect<Project, StoreErr
 
 export const load = (dir: string): Effect.Effect<Project, StoreError | NotFound> => readProject(projectPath(dir), dir);
 
+export const guardCatalogWriter = (path: string, version: number, writerVersion: number) => version > writerVersion
+  ? Effect.fail(new StoreError({ path, message: `catalog written by a newer Muster (schema ${version} > ${writerVersion}); restart this session on current code` }))
+  : Effect.void;
+
 const writeAtomic = (path: string, project: Project) =>
   Effect.gen(function* () {
     // Inspect the disk under mutate's lock: a patch cannot remove/downgrade the fence.
     const disk = existsSync(path) ? yield* readProject(path, project.dir) : undefined;
     const version = Math.max(disk?.writerSchemaVersion ?? 0, project.writerSchemaVersion ?? 0);
-    if (version > CATALOG_WRITER_SCHEMA_VERSION) {
-      return yield* new StoreError({ path, message: `catalog written by a newer Muster (schema ${version} > ${CATALOG_WRITER_SCHEMA_VERSION}); restart this session on current code` });
-    }
+    yield* guardCatalogWriter(path, version, CATALOG_WRITER_SCHEMA_VERSION);
     yield* Effect.try({
       try: () => {
         mkdirSync(dirname(path), { recursive: true });

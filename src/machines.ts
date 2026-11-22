@@ -210,22 +210,25 @@ export const stepLaunchJob = (id: string, from: LaunchJobState, event: LaunchJob
   return Effect.succeed(next.value as LaunchJobState);
 };
 
+type PacketEvent = { type: "VERIFY" | "COMMIT" | "REJECT" | "NO_CHANGES" | "CORRECT" };
+
 /** A correction reopens a terminal packet, never an unlanded report. */
 export const packetMachine = createMachine({
-  schemas: { events: eventSchemas<{ type: "CORRECT" }>("CORRECT") },
+  schemas: { events: eventSchemas<PacketEvent>("VERIFY", "COMMIT", "REJECT", "NO_CHANGES", "CORRECT") },
   initial: "reported",
   states: {
-    reported: {}, verified: {},
+    reported: { on: { VERIFY: to("verified"), REJECT: to("rejected"), NO_CHANGES: to("no_changes") } },
+    verified: { on: { VERIFY: to("verified"), COMMIT: to("committed"), REJECT: to("rejected"), NO_CHANGES: to("no_changes") } },
     committed: { on: { CORRECT: to("verified") } },
     rejected: { on: { CORRECT: to("verified") } },
     no_changes: { on: { CORRECT: to("verified") } },
   },
 });
-export const stepPacket = (id: string, from: PacketState, event: { type: "CORRECT" }) => {
+export const stepPacket = (id: string, from: PacketState, event: PacketEvent) => {
   const snapshot = packetMachine.resolveState({ value: from });
   if (!snapshot.can(event)) return Effect.fail(new InputError({ message: `packet ${id}: ${event.type} is not allowed from ${from}` }));
   const [next] = transition(packetMachine, snapshot, event);
-  // The only permitted target is the schema-owned verified state.
+  // Every target above is a schema-owned packet state.
   return Effect.succeed(next.value as PacketState);
 };
 

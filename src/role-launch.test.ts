@@ -61,7 +61,7 @@ describe("role launch policy", () => {
   });
 
   it("stamps writer schema 7 for a lane with workerTools, and lets older writers back once it clears", () => {
-    const project = { lanes: [], agents: [], policy: undefined } as unknown as Project;
+    const project = { lanes: [], agents: [], packets: [], policy: undefined } as unknown as Project;
     expect(requiredWriterSchema({ ...project, lanes: [{ workerTools: ["read"] }] } as unknown as Project)).toBe(7);
     expect(requiredWriterSchema({ ...project, lanes: [{ workerTools: [] }] } as unknown as Project)).toBe(1);
   });
@@ -80,7 +80,7 @@ describe("role launch policy", () => {
   });
 
   it("stamps the catalog so an older writer cannot drop a role's tool policy", () => {
-    const project = { lanes: [], agents: [], policy: undefined } as unknown as Project;
+    const project = { lanes: [], agents: [], packets: [], policy: undefined } as unknown as Project;
     expect(requiredWriterSchema(project)).toBe(1);
     expect(requiredWriterSchema({ ...project, policy: lean })).toBe(5);
     expect(requiredWriterSchema({ ...project, agents: [{ state: "running", profile: withRoleLaunch(base, lean, "judge") }] } as unknown as Project)).toBe(5);

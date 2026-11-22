@@ -386,8 +386,41 @@ export type GateReceipt = typeof GateReceipt.Type;
 export const PacketGate = Schema.Struct({ ...GateFields, receipt: Path });
 export type PacketGate = typeof PacketGate.Type;
 
+const PeonSha256 = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
+const PeonCommit = Schema.String.check(Schema.isPattern(/^[a-f0-9]{40}$/));
+const PeonId = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256), Schema.isPattern(/^[^\s\p{Cc}]+$/u));
+const PeonExportReceipt = Schema.Struct({ id: PeonId, sha256: PeonSha256, location: RemotePath, mirror: Schema.optionalKey(RemotePath) });
+const peonSourceFields = {
+  box: PeonId,
+  peon: PeonId,
+  repo: RemotePath,
+  base: PeonCommit,
+  head: PeonCommit,
+  bundle: Schema.Struct({ path: RemotePath, sha256: PeonSha256 }),
+};
+const PeonPacketSource = Schema.Struct({
+  ...peonSourceFields,
+  owner: Schema.String,
+  exportReceipts: Schema.Array(Schema.Struct({ ...PeonExportReceipt.fields, attachedAt: Iso })),
+});
+export type PeonPacketSource = typeof PeonPacketSource.Type;
+export type PeonExportReceipt = typeof PeonExportReceipt.Type;
+export const decodePeonLockPid = Schema.decodeUnknownSync(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(0x7fffffff)));
+export const PeonIntake = Schema.Struct({
+  lane: Slug,
+  result: Schema.Struct({
+    ...peonSourceFields,
+    checks: Schema.Array(CheckOutcome),
+    summary: Schema.String.check(Schema.isPattern(/\S/)),
+    exportReceipt: Schema.optionalKey(PeonExportReceipt),
+  }),
+});
+export const decodePeonIntake = Schema.decodeUnknownEffect(PeonIntake);
+export const decodePacketReportText = Schema.decodeUnknownSync(Schema.String);
+export const decodeBundleHeads = Schema.decodeUnknownSync(Schema.Array(PeonCommit));
+
 export const Packet = Schema.Struct({
-  /** Full commit id or sha256 of the artifact. The packet's name. */
+  /** Full commit id, artifact sha256, or a namespaced (box, head) id for a peon. */
   id: Schema.String,
   kind: Schema.Literals(["commit", "artifact"]),
   lane: Slug,
@@ -410,6 +443,7 @@ export const Packet = Schema.Struct({
   evidence: Schema.optionalKey(Schema.String),
   reportedAt: Iso,
   updatedAt: Iso,
+  peon: Schema.optionalKey(PeonPacketSource),
 });
 export type Packet = typeof Packet.Type;
 
