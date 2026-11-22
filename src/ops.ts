@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { turnLog, turnUnsupported } from "./turn-wake.ts";
 import { deskWakeConfigRefusal, deskWakeRefusal, DRAIN_ENV, MIN_DESK_IDLE_MS, readSleepDrain, UNREADABLE_SLEEP_JOURNAL, WAKE_PROMPT, sleepJournal, sleepRefusals, wakeNoticeText } from "./desk-sleep.ts";
 import { WAKE_MODEL_ERROR } from "../bin/muster-restore-args.mjs";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, chmodSync, fsyncSync, closeSync, openSync, readSync, fstatSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { availableParallelism, homedir, loadavg } from "node:os";
@@ -2872,6 +2872,10 @@ const closeRestartShell = (dir: string, old: PaneBinding, quitRequested: boolean
 
 const adoptedSelfNote = (pane: PaneBinding) => `adopted shell ${pane.paneId}/${pane.terminalId}: close after its agent is gone: herdr_pane close ${pane.paneId} once herdr pane get shows no agent on terminal ${pane.terminalId}`;
 
+// Helpers must not inherit Pi's cwd: a worktree swap can leave it pointing at a deleted directory.
+const launchHelperCwd = (dir: string, home: string) =>
+  isAbsolute(dir) && statSync(dir, { throwIfNoEntry: false })?.isDirectory() ? dir : home;
+
 /** The child must outlive Pi so every later extension can finish session_shutdown. */
 export function spawnRestartCloser(root: string, dir: string, binding: PaneBinding, reason: string, start = spawn, home = homedir()) {
   if (!binding.openedByMuster) return;
@@ -2883,7 +2887,7 @@ export function spawnRestartCloser(root: string, dir: string, binding: PaneBindi
   } catch { /* Best effort: a logging failure must not prevent shutdown. */ }
   try {
     const child = start(process.execPath, ["--import", import.meta.resolve("tsx"), join(root, "bin/muster-close-after.ts"),
-      String(process.pid), dir, JSON.stringify(binding), reason], { detached: true, stdio: log === undefined ? "ignore" : ["ignore", log, log] });
+      String(process.pid), dir, JSON.stringify(binding), reason], { cwd: launchHelperCwd(dir, home), detached: true, stdio: log === undefined ? "ignore" : ["ignore", log, log] });
     child.on("error", error => { console.error("Muster restart closer failed to start:", error); });
     child.unref();
   } catch (error) { console.error("Muster restart closer failed to start:", error); }
@@ -3433,8 +3437,40 @@ const findLaunchJob = (jobs: readonly LaunchJob[], project: string, row: AgentRo
   return latest?.outcome ? undefined : latest;
 };
 
-/** Fast admission only. No process/model/pane probes run in the caller's turn. */
-export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(function* () {
+const waitForLaunchExit = (child: ChildProcess, startupWindowMs: number) => Effect.callback<string | null>(resume => {
+  const describeExit = (code: number | null, signal: NodeJS.Signals | null) => signal ? `signal ${signal}` : `exit code ${code}`;
+  // Node records the exit before emitting it. The pid may have been saved after that event.
+  if (child.exitCode != null || child.signalCode != null) return resume(Effect.succeed(describeExit(child.exitCode, child.signalCode)));
+  const exited = (code: number | null, signal: NodeJS.Signals | null) => {
+    clearTimeout(timer);
+    resume(Effect.succeed(describeExit(code, signal)));
+  };
+  const timer = setTimeout(() => {
+    child.off("exit", exited);
+    resume(Effect.succeed(null));
+  }, startupWindowMs);
+  child.once("exit", exited);
+}).pipe(Effect.ensuring(Effect.sync(() => child.unref())));
+
+const earlyLaunchFailure = (job: LaunchJob, exit: string) => Effect.gen(function* () {
+  const tail = yield* Effect.try(() => {
+    // Read a bounded suffix: a runaway helper can write a lot even in the startup window.
+    const fd = openSync(job.log, "r");
+    try {
+      const size = fstatSync(fd).size;
+      const buffer = Buffer.alloc(Math.min(size, 16_384));
+      const bytes = readSync(fd, buffer, 0, buffer.length, size - buffer.length);
+      return stripVTControlCharacters(buffer.subarray(0, bytes).toString("utf8")).trimEnd().split("\n").slice(-20).join("\n") || "(empty log)";
+    } finally { closeSync(fd); }
+  }).pipe(Effect.orElseSucceed(() => "(log unavailable)"));
+  const fix = /\buv_cwd\b/.test(tail)
+    ? "The startup directory is gone; restart this session from an existing directory and retry agent_launch."
+    : "Check the full log, fix the startup error, then retry agent_launch.";
+  return yield* input(`launch ${job.name} (${job.id}) died during startup (${exit}) without an outcome. ${fix}\nLog: ${job.log}\nLog tail (UNTRUSTED):\n${tail}`);
+});
+
+/** Admit and check helper startup only. Model and pane work stays in the background. */
+export const agentLaunch = (dir: string, raw: AgentLaunchInput, { startupWindowMs = 3_000 } = {}) => Effect.gen(function* () {
   const params = yield* decodeWith(decodeAgentLaunchRequest, raw);
   if (params.sleepMinutes !== undefined && params.action !== "restart") return yield* input("sleepMinutes requires action: restart");
   if (params.action === "adopt" || params.action === "restart") return yield* agentLaunchForeground(dir, params);
@@ -3523,26 +3559,34 @@ export const agentLaunch = (dir: string, raw: AgentLaunchInput) => Effect.gen(fu
     const latest = yield* findRow(project, reserved.name);
     const job = yield* readJob(env.home, id);
     if (latest.sessionId !== job.sessionId || job.pid !== null || latest.state !== "launching") return yield* input("launch reservation changed before spawn");
-    const pid = yield* Effect.callback<number, InputError>(resume => {
+    const { child, pid } = yield* Effect.callback<{ child: ChildProcess; pid: number }, InputError>(resume => {
       let fd: number | undefined;
       try {
         mkdirSync(dirname(log), { recursive: true, mode: 0o700 });
         fd = openSync(log, "a", 0o600);
         const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), join(env.musterRoot, "bin/muster-launch.ts"), dir, id], {
-          detached: true, stdio: ["ignore", fd, fd],
+          cwd: launchHelperCwd(dir, env.home), detached: true, stdio: ["ignore", fd, fd],
           env: { ...process.env, HOME: env.home, MUSTER_MACHINE: "local", MUSTER_OWNER: env.sessionId, MUSTER_LAUNCH_PANE: env.paneId ?? "", MUSTER_WORKER_WORKTREE: env.workerWorktree },
         });
-        child.once("error", error => resume(Effect.fail(new InputError({ message: `launch spawn failed: ${error.message}` }))));
-        child.once("spawn", () => { child.unref(); resume(child.pid ? Effect.succeed(child.pid) : input("launch process has no pid")); });
+        child.once("error", error => resume(input(`launch spawn failed: ${error.message}`)));
+        child.once("spawn", () => resume(child.pid ? Effect.succeed({ child, pid: child.pid }) : input("launch process has no pid")));
       } catch (error) { resume(input(`launch spawn failed: ${String(error)}`)); }
       finally { if (fd !== undefined) closeSync(fd); }
     });
-    yield* writeLaunchJob(env.home, { ...job, pid });
-    return [project, latest] as const;
-  })).pipe(Effect.tapError(error => mutate(dir, project => Effect.gen(function* () {
+    yield* writeLaunchJob(env.home, { ...job, pid }).pipe(Effect.tapError(() => Effect.sync(() => child.unref())));
+    return [project, { row: latest, child }] as const;
+  })).pipe(Effect.flatMap(({ row, child }) => Effect.gen(function* () {
+    // Wait outside the catalog lock so the helper can claim and finish the job in this window.
+    const exit = yield* waitForLaunchExit(child, startupWindowMs);
+    if (exit !== null) {
+      const job = yield* readJob(env.home, id);
+      if (!job.outcome) return yield* earlyLaunchFailure(job, exit);
+    }
+    return row;
+  })), Effect.tapError(error => mutate(dir, project => Effect.gen(function* () {
     const latest = yield* findRow(project, reserved.name);
     const job = yield* readJob(env.home, id);
-    if (latest.sessionId !== job.sessionId || latest.state !== "launching") return [project, null] as const;
+    if (job.outcome || latest.sessionId !== job.sessionId || latest.state !== "launching") return [project, null] as const;
     const state = yield* stepAgent(latest.name, latest.state, { type: "LAUNCH_FAILED" });
     yield* writeLaunchJob(env.home, { ...job, state: yield* stepLaunchJob(id, job.state, { type: "FAIL" }), outcome: "blocked" });
     return [withRow(project, { ...latest, state, events: [...(latest.events ?? []), { type: "LAUNCH_FAILED", at: iso(env), detail: error.message }], updatedAt: iso(env) }), null] as const;

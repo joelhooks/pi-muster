@@ -1,27 +1,34 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { Effect } from "effect";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const spawned = vi.hoisted(() => ({ calls: [] as unknown[][], fail: false, observe: undefined as undefined | ((args: unknown[]) => void) }));
+const spawned = vi.hoisted(() => ({
+  calls: [] as unknown[][], fail: false, observe: undefined as undefined | ((args: unknown[]) => void),
+  afterSpawn: undefined as undefined | ((child: EventEmitter & { exitCode: number | null }, args: unknown[]) => void),
+  unref: vi.fn(),
+}));
 vi.mock("node:child_process", async importOriginal => ({
   ...await importOriginal<typeof import("node:child_process")>(),
   spawn: (...args: unknown[]) => {
     spawned.calls.push(args);
     spawned.observe?.(args);
-    const child = Object.assign(new EventEmitter(), { pid: process.pid, unref: vi.fn() });
-    queueMicrotask(() => spawned.fail ? child.emit("error", new Error("fake spawn refusal")) : child.emit("spawn"));
+    const child = Object.assign(new EventEmitter(), { pid: process.pid, exitCode: null, signalCode: null, unref: spawned.unref });
+    queueMicrotask(() => {
+      if (spawned.fail) child.emit("error", new Error("fake spawn refusal"));
+      else { child.emit("spawn"); spawned.afterSpawn?.(child, args); }
+    });
     return child;
   },
 }));
 import { agentClose, agentLaunch as launch, agentLaunchForeground, laneOpen, launchResultText, projectOpen, projectStatus, readLaunchJob, runLaunchJob } from "./ops.ts";
 import { load, mutate } from "./store.ts";
 import { MusterEnv } from "./runtime.ts";
-const agentLaunch = (...args: Parameters<typeof launch>) => launch(...args).pipe(Effect.map(result => { if (!("jobId" in result)) throw new Error("expected asynchronous admission"); return result; }));
+const agentLaunch = (dir: string, request: Parameters<typeof launch>[1], startupWindowMs = 10) => launch(dir, request, { startupWindowMs }).pipe(Effect.map(result => { if (!("jobId" in result)) throw new Error("expected asynchronous admission"); return result; }));
 import { failWith, harness, makeRepo, runWith } from "./test-support.ts";
 
 async function setup() {
@@ -32,10 +39,10 @@ async function setup() {
   const request = { action: "launch" as const, name: "worker", role: "worker" as const, lane: "work", label: "worker", cwd: dir, prompt: "Do the work." };
   return { h, dir, request };
 }
-beforeEach(() => { spawned.calls.splice(0); spawned.fail = false; spawned.observe = undefined; });
+beforeEach(() => { spawned.calls.splice(0); spawned.fail = false; spawned.observe = undefined; spawned.afterSpawn = undefined; spawned.unref.mockClear(); });
 
 describe("asynchronous launch admission", () => {
-  it("returns under one second without entering a slow model/process/pane path", async () => {
+  it("returns a background receipt when the helper survives the window, without probing model or pane", async () => {
     const { h, dir, request } = await setup();
     h.proc = { run: () => Effect.promise(() => new Promise(() => {})) };
     const before = h.herdr.calls.length;
@@ -46,6 +53,7 @@ describe("asynchronous launch admission", () => {
       const args = spawned.calls.at(-1)?.[1] as string[];
       expect(readLaunchJob(h.home, args.at(-1)!)).toMatchObject({ state: "queued", pid: null });
     };
+    spawned.afterSpawn = () => expect(spawned.unref).not.toHaveBeenCalled();
     const start = performance.now();
     const result = await runWith(h, agentLaunch(dir, request));
     expect(performance.now() - start).toBeLessThan(1000);
@@ -55,7 +63,8 @@ describe("asynchronous launch admission", () => {
     expect(result.proof).toBeNull();
     expect(h.herdr.calls).toHaveLength(before);
     expect(spawned.calls).toHaveLength(1);
-    expect(spawned.calls[0]?.[2]).toMatchObject({ detached: true });
+    expect(spawned.calls[0]?.[2]).toMatchObject({ detached: true, cwd: dir });
+    expect(spawned.unref).toHaveBeenCalledOnce();
     expect(readLaunchJob(h.home, result.jobId).id).toBe(result.jobId);
   });
 
@@ -315,6 +324,63 @@ describe("asynchronous launch admission", () => {
     expect((await failWith(h, agentLaunch(dir, request)))._tag).toBe("InputError");
     expect((await runWith(h, load(dir))).agents[0]?.state).toBe("failed");
   });
+
+  it.each([0, 1])("fails an early exit (%i) without an outcome and quotes the log tail", async code => {
+    const { h, dir, request } = await setup();
+    let id = "";
+    spawned.afterSpawn = (child, args) => {
+      id = (args[1] as string[]).at(-1)!;
+      const job = readLaunchJob(h.home, id);
+      writeFileSync(job.log, "old log line\n" + "context\n".repeat(19) + "Error: ENOENT: uv_cwd\n");
+      child.exitCode = code;
+      child.emit("exit", code, null);
+    };
+    const error = await failWith(h, agentLaunch(dir, request, 100));
+    expect(error._tag).toBe("InputError");
+    expect(error.message).toContain(`exit code ${code}`);
+    expect(error.message).toContain("Error: ENOENT: uv_cwd");
+    expect(error.message).toContain("restart this session");
+    expect(error.message).not.toContain("old log line");
+    expect(readLaunchJob(h.home, id)).toMatchObject({ pid: process.pid, state: "failed", outcome: "blocked" });
+    const row = (await runWith(h, load(dir))).agents[0];
+    expect(row?.state).toBe("failed");
+    expect(row?.events?.at(-1)).toMatchObject({ type: "LAUNCH_FAILED", detail: error.message });
+  });
+
+  it("boots the real background helper even when the caller's cwd was deleted", async () => {
+    const { h, dir, request } = await setup();
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    const deleted = mkdtempSync(join(root, ".launch-cwd-"));
+    try {
+      const result = spawnSync(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", `
+        import { rmdirSync } from "node:fs";
+        import { Effect } from "effect";
+        import { agentLaunch } from "./src/ops.ts";
+        import { MusterEnv } from "./src/runtime.ts";
+        import { harness, runWith } from "./src/test-support.ts";
+        const [deleted, dir, home, root, request] = process.argv.slice(1);
+        const h = harness();
+        const env = { home, now: () => h.now, sessionId: h.sessionId, musterRoot: root,
+          workerWorktree: h.workerWorktree, createId: () => "unused", sleep: Effect.sleep, emitPaneClose: h.emitPaneClose };
+        process.chdir(deleted);
+        rmdirSync(deleted);
+        try { process.cwd(); throw new Error("fixture cwd is still readable"); }
+        catch (error) { if (error.code !== "ENOENT") throw error; }
+        const result = await runWith(h, agentLaunch(dir, JSON.parse(request), { startupWindowMs: 10_000 }).pipe(Effect.provideService(MusterEnv, env)));
+        console.log(JSON.stringify(result.job));
+      `, deleted, dir, h.home, root, JSON.stringify(request)], {
+        cwd: root, encoding: "utf8", timeout: 15_000,
+        env: { ...process.env, MUSTER_FLEET_COMPUTE: "off", HERDR_SOCKET_PATH: join(h.root, "no-herdr.sock") },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      const job = readLaunchJob(h.home, JSON.parse(result.stdout).id);
+      // Herdr is deliberately unavailable. This is the real helper's normal report, not an unreported death.
+      expect(job).toMatchObject({ outcome: "blocked", state: "failed" });
+      const log = readFileSync(job.log, "utf8");
+      expect(log).toContain("Launch worker failed:");
+      expect(log).not.toContain("uv_cwd");
+    } finally { rmSync(deleted, { force: true, recursive: true }); }
+  }, 20_000);
 
   it("admits clone: true on a lane without its own repo, falling back to the project dir", async () => {
     const { h, dir, request } = await setup();

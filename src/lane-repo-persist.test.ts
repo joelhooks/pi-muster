@@ -11,9 +11,11 @@ vi.mock("node:child_process", async importOriginal => ({
     return child;
   },
 }));
-import { agentLaunch, laneOpen, projectOpen, runLaunchJob } from "./ops.ts";
+import { agentLaunch as launch, laneOpen, projectOpen, runLaunchJob } from "./ops.ts";
 import { load } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
+
+const agentLaunch = (dir: string, request: Parameters<typeof launch>[1]) => launch(dir, request, { startupWindowMs: 10 });
 
 async function fixture() {
   const h = harness();

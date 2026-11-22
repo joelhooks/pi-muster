@@ -26,7 +26,7 @@ async function setup(withOwnerRow: boolean) {
   const dir = makeRepo(join(h.root, "repo"));
   await runWith(h, projectOpen({ dir, slug: "mail", outcome: "mail", reviewTrigger: "weekly", nextAction: "launch", criticalPath: ["work"], space: "w1", ephemeral: true, musterExtension: "/muster", deskExtension: null }));
   await runWith(h, laneOpen(dir, { slug: "work", label: "work", goal: "launch" }));
-  const receipt = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", cwd: dir, prompt: "go" }));
+  const receipt = await runWith(h, agentLaunch(dir, { action: "launch", name: "worker", role: "worker", lane: "work", label: "worker", cwd: dir, prompt: "go" }, { startupWindowMs: 10 }));
   if (!("jobId" in receipt)) throw new Error("expected job");
   if (withOwnerRow) await runWith(h, mutate(dir, project => Effect.succeed([{ ...project, agents: [...project.agents, { ...project.agents[0]!, name: "desk", sessionId: h.sessionId, state: "running" as const }] }, null] as const)));
   const sends: string[][] = [];
