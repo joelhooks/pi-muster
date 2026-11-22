@@ -1,6 +1,6 @@
 # Brief patterns
 
-Most lane rework traces back to the brief, not the worker. These sixteen patterns name what a brief needs so the worker can finish without asking, and so the owner can tell done from not done. The [brief template](done.md#brief-template) lists the sections; this page says what makes each one work.
+Most lane rework traces back to the brief, not the worker. These seventeen patterns name what a brief needs so the worker can finish without asking, and so the owner can tell done from not done. The [brief template](done.md#brief-template) lists the sections; this page says what makes each one work.
 
 ## Before dispatch
 
@@ -9,6 +9,7 @@ Most lane rework traces back to the brief, not the worker. These sixteen pattern
 - **Done is a ledger.** Acceptance is a finite list the worker can complete and count (call sites, cases, named suites with what they must run), not an adjective like "broad" or "relevant".
 - **Fenced write scope.** Narrow shared files to symbols, and name each sibling lane and what it owns. Bring into scope what the change must break: existing assertions on changed strings, callers of a changed entry point, manifests for new dependencies, registered schemas for new tool inputs. Do the search yourself and name the hits.
 - **Deploy level line.** State the level, its source, the rollback, and for ship-and-watch, the watch.
+- **Scratch on real disk, removed at done.** Name one per-run scratch dir on real disk, under the clone or `$HOME`, named for the row, and remove it at done. `/tmp` holds no more than a few files: no clones, no installs (on 2026-11-21 hand-made clones and installs there used up Sloat's tmpfs inodes). A mutation-style judge works in one tree, or in reflink copies, not one full tree per mutant.
 
 ## The checks the worker runs
 
