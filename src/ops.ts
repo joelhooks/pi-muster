@@ -29,7 +29,7 @@ import {
 import type { LaunchKind, ProfileInput } from "./argv.ts";
 import { appendDesk, deskRecord, queuePath, readDesk } from "./desk.ts";
 import { AUTOLAND_CAP, autolandDue, autolandEligible, findLanding, landingEvidence } from "./autoland.ts";
-import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PeonPacketSource, PaneBinding, Project, Role, Thinking } from "./domain.ts";
+import type { LaunchJob, AgentRow, CheckOutcome, DeskItem, DeskKind, Lane, LaunchProfile, Mode, Packet, PacketGate, PeonPacketSource, PeonExportReceipt, PaneBinding, Project, Role, Thinking } from "./domain.ts";
 import { decodeWatchdogProbes, decodeWatchdogTails, decodePacketCorrection, decodePacketReportText, decodePeonIntake, GateReceipt, Project as ProjectSchema, SessionId, CACHE_WARM_CADENCE_MINUTES, MAX_CADENCE_MINUTES, TERMINAL_PACKET_STATES, decodeAgentName, decodeDeployLevel, decodeDeployRule, DEPLOY_RULE_CAPS, decodePolicy, decodeSlug, effectivePolicy, isTempPath, mergePolicy, policyComms, silenceLimits, unknownCommsNote } from "./domain.ts";
 import { GuardFailed, IllegalTransition, InputError, NotFound, PacketCheckFailed, ProcError, StoreError } from "./errors.ts";
 import { busyQueue, gatesLine } from "./fleet.ts";
@@ -66,7 +66,7 @@ import { effectiveDistill, fleetDistill, restartDistill } from "./restart-distil
 import type { AgentEvent } from "./machines.ts";
 import { PANE_GONE_STATES, PROCESS_STATES, stepPacket, stepLaunchJob, stepAgent, stepDelivery, stepLane, stepProject } from "./machines.ts";
 import { basePathsExceptLanding, blindReviewNote, changedLines, evidenceNote, reviewBrief, staleEvidence } from "./packet-evidence.ts";
-import { peonCustodyAlarm, peonKey, peonLocalProc, peonSourceRepo, withPeonBundle } from "./peon-packet.ts";
+import { peonCurrentReceipt, peonCustodyAlarm, peonKey, peonLocalProc, peonSourceRepo, samePeonReceipt, withPeonBundle, withPeonLandLock } from "./peon-packet.ts";
 import { DEFAULT_GENERATED, isGenerated, isTranscriptPath, transcriptRescueScript, failures, parsePorcelainZ, sha256File, sourceOf, verifyCommitBranch, verifyGoneClone, verifyPacket } from "./packet.ts";
 
 import { localWakeRefusal, savedMachines, remotePullReceipt, sidecarRoots, sidecarRootsScript, cleanupRemoteBrief, cloneUrl, transferredBriefSource, decodeRemoteNote, defaultCloneMachine, machineConfig, mapPath, mapWorkerPath, onRemote, prerequisites, readyForRemoteLaunch, remoteNode, sshProc, syncRemoteBrief, withMachineLaunchLock, launchReservationKey, liveLaunchReservations, reserveLaunch } from "./remote.ts";
@@ -709,7 +709,7 @@ const cloneReapAssessment = (project: Project, row: AgentRow, source: string, re
           continue;
         }
         const id = file.path.split("/")[3];
-        const packet = project.packets.find(packet => packet.id === id && packet.agent === row.name && packet.lane === row.lane);
+        const packet = project.packets.find(packet => !packet.peon && packet.id === id && packet.agent === row.name && packet.lane === row.lane);
         if (!packet || !existsSync(packet.report)) continue;
         const report = readFileSync(packet.report, "utf8");
         if (file.path.endsWith("/report.svx")) { if (file.text === report) provenSidecars.push(file.path); continue; }
@@ -801,7 +801,7 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
   // Bring only the base object into the clone, never change its checkout or refs.
   yield* must("git", ["fetch", "--no-write-fetch-head", "-q", "--", source, base], { cwd: row.cwd, timeoutMs: 30_000 });
   let proof: string | null = null;
-  for (const packet of project.packets.filter(packet => packet.agent === row.name && (packet.state === "committed" || packet.state === "no_changes") && packet.landedAs)) {
+  for (const packet of project.packets.filter(packet => !packet.peon && packet.agent === row.name && (packet.state === "committed" || packet.state === "no_changes") && packet.landedAs)) {
     // A landed packet does not license deleting newer commits from the worker.
     if ((yield* run(row.cwd, "merge-base", "--is-ancestor", head, packet.id)).code === 0 &&
         (yield* run(source, "merge-base", "--is-ancestor", packet.landedAs!, base)).code === 0) { proof = `landedAs ${packet.landedAs}`; break; }
@@ -825,7 +825,7 @@ process.stdout.write(JSON.stringify(same));`, row.cwd, source, JSON.stringify(co
   }
   const dirt = dirty.length ? `; harness-only paths ${dirty.map(path => JSON.stringify(path)).sort().join(", ")}` : "";
   // aih-support-sweep, 2026-10-26: a bare "unreachable" read as a dead host. It means no landing holds this HEAD.
-  const packet = project.packets.find(packet => packet.agent === row.name && packet.id === head);
+  const packet = project.packets.find(packet => !packet.peon && packet.agent === row.name && packet.id === head);
   const next = proof ? "" : `; HEAD is unreachable from base ${base.slice(0, 12)} (no landed packet, branch or equivalent squash holds it); record its landing with packet_land id:${packet?.id ?? "<packet>"} outcome:committed landedAs:<sha>, or agent_close force: true to keep HEAD in a rescue ref and retire the clone`;
   return { safe: proof !== null, force: proof !== null, detail: `${proof ? `harvested: ${proof}` : "unreachable"}: ${row.cwd}; HEAD ${head}${dirt}${next}` };
 });
@@ -1125,7 +1125,7 @@ export const ingestRemotePackets = (dir: string, owner?: string, timeoutMs = 30_
         yield* mutate(dir, current => Effect.gen(function* () {
           if (current.packets.some(prior => prior.id === packet.id)) return [current, false] as const;
           const latest = yield* findRow(current, row.name);
-          const earlier = [...current.packets].reverse().find(prior => prior.agent === latest.name && !TERMINAL_PACKET_STATES.includes(prior.state));
+          const earlier = [...current.packets].reverse().find(prior => !prior.peon && prior.agent === latest.name && !TERMINAL_PACKET_STATES.includes(prior.state));
           if (earlier) {
             if (packet.kind !== "commit" || earlier.kind !== "commit") return yield* input(`machine ${row.machine}: earlier packet needs an outcome first`);
             const runner = yield* Proc;
@@ -1162,7 +1162,7 @@ export function sessionChain(row: Pick<AgentRow, "sessionId" | "events">): strin
 }
 
 const watchdogProbeRows = (project: Project, rows: readonly AgentRow[], sessionId: string) => rows.map(row => {
-  const packets = project.packets.filter(packet => packet.agent === row.name);
+  const packets = project.packets.filter(packet => !packet.peon && packet.agent === row.name);
   return { name: row.name, cwd: row.cwd, sessionFile: row.sessionFile, brief: row.brief, clone: row.clone ? { base: row.clone.base } : null,
     watchdog: workingRow(row) && ["worker", "boss"].includes(row.role) && row.sessionId !== sessionId,
     artifactAt: Math.max(Date.parse(row.createdAt), ...packets.map(packet => Date.parse(packet.reportedAt))),
@@ -1723,7 +1723,7 @@ export function brainSummary(project: Project): string {
     "",
     "| Packet | Lane | Agent | State | Report | Evidence |",
     "| --- | --- | --- | --- | --- | --- |",
-    ...project.packets.map((packet) => `| \`${packet.id.slice(0, 12)}\` | ${packet.lane} | ${packet.agent} | ${packet.state} | \`${esc(packet.report)}\` | ${esc(packet.evidence ?? "-")} |`),
+    ...project.packets.map((packet) => `| \`${packet.id.slice(0, 12)}\` | ${packet.lane} | ${packet.peon ? esc(`peon:${packet.peon.peon}`) : packet.agent} | ${packet.state} | \`${esc(packet.report)}\` | ${esc(packet.evidence ?? "-")} |`),
     "",
     "## Agents",
     "",
@@ -3310,7 +3310,7 @@ const requireSleepEligible = (project: Project, row: AgentRow, pane: PaneInfo, l
   const packets: string[] = [], launches: string[] = [];
   for (const catalog of catalogs) {
     const owned = new Set(catalog.agents.filter(other => other.owner === row.sessionId || (catalog.dir === project.dir && other.name === row.name)).map(other => other.name));
-    for (const packet of catalog.packets) if (owned.has(packet.agent) && !TERMINAL_PACKET_STATES.includes(packet.state)) packets.push(`${catalog.slug}/${packet.id}`);
+    for (const packet of catalog.packets) if ((packet.peon ? packet.peon.owner === row.sessionId : owned.has(packet.agent)) && !TERMINAL_PACKET_STATES.includes(packet.state)) packets.push(`${catalog.slug}/${packet.id}`);
     for (const other of catalog.agents) if (owned.has(other.name) && ["launching", "restoring"].includes(other.state)) launches.push(`${catalog.slug}/${other.name}`);
     for (const job of evidence.jobs) if (job.project === catalog.slug && (job.owner === row.sessionId || owned.has(job.name)) && ["queued", "running"].includes(job.state)) launches.push(`${catalog.slug}/${job.name} (${job.id})`);
   }
@@ -4560,6 +4560,11 @@ const reportCell = (text: string): string => {
   const cell = text.replace(/[&<>{}|`\\*_[\]~\r]/g, (char) => `&#${char.charCodeAt(0)};`).replace(/\n/g, "<br />");
   return `<code>${cell}</code>`;
 };
+const PEON_CUSTODY_LINE = "- Transcript custody: ";
+const peonCustodyLine = (source: PeonPacketSource) => {
+  const receipt = peonCurrentReceipt(source);
+  return `${PEON_CUSTODY_LINE}${receipt ? `permanent raw-session export receipt ${reportCell(receipt.id)} (manifest SHA-256 ${reportCell(receipt.sha256)})` : peonCustodyAlarm(source)}`;
+};
 
 export function reportMarkdown(row: Pick<AgentRow, "name" | "lane" | "clone" | "cwd">, packet: Pick<Packet, "id" | "kind" | "artifact" | "checks" | "peon">, summary: string, body: string | undefined, delivery: Pick<PacketReportInput, "deploy" | "proof" | "signals"> = {}): string {
   const title = `Packet ${packet.id.slice(0, 12)} from ${row.name}`;
@@ -4580,7 +4585,7 @@ export function reportMarkdown(row: Pick<AgentRow, "name" | "lane" | "clone" | "
       `- Peon: ${reportCell(packet.peon.peon)}`,
       `- Base: ${reportCell(packet.peon.base)}`,
       `- Bundle SHA-256: ${reportCell(packet.peon.bundle.sha256)}`,
-      packet.peon.exportReceipt ? `- Permanent raw-session export receipt: ${reportCell(packet.peon.exportReceipt.id)}` : `- ${peonCustodyAlarm(packet.peon)}`,
+      peonCustodyLine(packet.peon),
     ] : []),
     "",
     "## Summary",
@@ -4619,7 +4624,7 @@ export const packetReport = (params: PacketReportInput) =>
       id = sha256File(artifact);
     }
     const earlier = [...project.packets].reverse().find((candidate) =>
-      candidate.agent === row.name && !TERMINAL_PACKET_STATES.includes(candidate.state));
+      !candidate.peon && candidate.agent === row.name && !TERMINAL_PACKET_STATES.includes(candidate.state));
     if (!project.packets.some((packet) => packet.id === id) && earlier) {
       const ancestor = !!params.commit && earlier.kind === "commit" &&
         (yield* proc.run("git", ["merge-base", "--is-ancestor", earlier.id, id], { cwd: params.cwd })).code === 0;
@@ -4643,7 +4648,7 @@ export const packetReport = (params: PacketReportInput) =>
         let supersedes = prior?.supersedes ?? null;
         if (!prior) {
           const pending = [...current.packets].reverse().find((candidate) =>
-            candidate.agent === latest.name && !TERMINAL_PACKET_STATES.includes(candidate.state));
+            !candidate.peon && candidate.agent === latest.name && !TERMINAL_PACKET_STATES.includes(candidate.state));
           if (pending?.id !== earlier?.id) return yield* input("earlier packet changed during reporting; retry packet_report");
           supersedes = pending?.id ?? null;
         }
@@ -4683,6 +4688,28 @@ export const packetReport = (params: PacketReportInput) =>
     return { packet: saved.packet, delivery: notice.delivery, notice };
   });
 
+/** Only the custody line changes; the summary and original check claims stay byte-identical. */
+const attachPeonReceipt = (packet: Packet, source: PeonPacketSource, receipt: PeonExportReceipt, now: string) => Effect.gen(function* () {
+  const peon: PeonPacketSource = { ...source, exportReceipts: [...source.exportReceipts, { ...receipt, attachedAt: now }] };
+  const report = yield* readPeonReport(packet);
+  const lines = report.split("\n");
+  const index = lines.findIndex(line => line.startsWith(PEON_CUSTODY_LINE));
+  if (index === -1) return yield* new StoreError({ path: packet.report, message: "cannot attach receipt: restore the original packet report custody line and retry" });
+  const custody = peonCustodyLine(peon);
+  if (lines[index] !== custody) {
+    lines[index] = custody;
+    yield* Effect.try({
+      try: () => {
+        const temp = `${packet.report}.${randomUUID()}.tmp`;
+        try { writeFileSync(temp, lines.join("\n"), { mode: 0o600, flag: "wx" }); renameSync(temp, packet.report); }
+        finally { rmSync(temp, { force: true }); }
+      },
+      catch: error => new StoreError({ path: packet.report, message: `cannot update report custody; fix report directory access and retry: ${String(error)}` }),
+    });
+  }
+  return { ...packet, peon, updatedAt: now };
+});
+
 /** Owner-side intake; a box has no catalog row, Pi session, or clone to report from. */
 export const packetIntake = (dir: string, raw: unknown) => Effect.gen(function* () {
   const env = yield* MusterEnv;
@@ -4692,17 +4719,25 @@ export const packetIntake = (dir: string, raw: unknown) => Effect.gen(function* 
   const { summary, checks, exportReceipt, ...source } = result;
   const key = peonKey(source.box, source.head);
   const id = `peon-${key}`;
-  const response = (packet: Packet, peon: PeonPacketSource, repeated: boolean) => ({ packet, repeated, note: peonCustodyAlarm(peon) });
+  const response = (packet: Packet, repeated: boolean, note: string | null) => ({ packet, repeated, note });
   return yield* mutate(dir, current => Effect.gen(function* () {
     const prior = current.packets.find(packet => packet.peon?.box === source.box && packet.peon.head === source.head);
-    if (prior?.peon) return [current, response(prior, prior.peon, true)] as const;
+    const now = iso(env);
+    if (prior?.peon) {
+      const conflict = prior.lane !== slug ? "lane" : prior.peon.repo !== source.repo ? "repo" : prior.peon.bundle.sha256 !== source.bundle.sha256 ? "bundle sha256" : null;
+      if (conflict) return yield* new GuardFailed({ guard: "peon-intake-conflict", message: `intake ${conflict} conflicts with packet ${prior.id}; replay with the recorded ${conflict}, or report a different (box, head)` });
+      if (!exportReceipt || prior.peon.exportReceipts.some(receipt => samePeonReceipt(receipt, exportReceipt))) {
+        return [current, response(prior, true, peonCustodyAlarm(prior.peon))] as const;
+      }
+      const updated = yield* attachPeonReceipt(prior, prior.peon, exportReceipt, now);
+      return [withPacket(current, updated), response(updated, true, `attached permanent raw-session export receipt ${exportReceipt.id}`)] as const;
+    }
     const lane = yield* findLane(current, slug);
     if (current.mode !== "rift-merge") return yield* input("peon packet intake requires a rift-merge project; choose a rift-merge lane for the source checkout");
     yield* peonSourceRepo(current, lane, source.repo);
     const agent = `peon-${key.slice(0, 24)}`;
     const report = join(reportsDir(dir), lane.slug, `${id}.svx`);
-    const peon: PeonPacketSource = { ...source, owner: env.sessionId, exportReceipt: exportReceipt ?? null };
-    const now = iso(env);
+    const peon: PeonPacketSource = { ...source, owner: env.sessionId, exportReceipts: exportReceipt ? [{ ...exportReceipt, attachedAt: now }] : [] };
     const packet: Packet = { id, kind: "commit", lane: lane.slug, agent, peon, artifact: null, report, checks,
       state: "reported", verification: null, gate: null, supersedes: null, landedAs: null, reportedAt: now, updatedAt: now };
     yield* Effect.try({
@@ -4712,7 +4747,7 @@ export const packetIntake = (dir: string, raw: unknown) => Effect.gen(function* 
       },
       catch: error => new StoreError({ path: report, message: `cannot write peon packet report; fix report directory access and retry: ${String(error)}` }),
     });
-    return [withPacket(current, packet), response(packet, peon, false)] as const;
+    return [withPacket(current, packet), response(packet, false, peonCustodyAlarm(peon))] as const;
   }));
 });
 
@@ -5209,27 +5244,27 @@ const notOnBase = (landedAs: string, base: LandingBase, source: string) =>
       `merge it into ${base.branch} in the source checkout, or name the remote it lands on in the lane base (lane_open base: "<remote>/${base.branch}", or "refs/heads/${base.branch}" for a repo that never pushes)`;
 
 const peonLand = (project: Project, packet: Packet & { peon: PeonPacketSource }, params: PacketLandInput) => Effect.gen(function* () {
-  const repeated = (current: Packet) => ({ packet: current, note: "already recorded; nothing changed", notes: [peonCustodyAlarm(packet.peon)].filter((note): note is string => note !== null) });
-  if (TERMINAL_PACKET_STATES.includes(packet.state)) return repeated(packet);
-  const env = yield* MusterEnv;
-  const proc = yield* Proc;
   const outcome = params.outcome;
   if (!outcome) return yield* input("outcome is required unless correcting a landing");
+  const custodyNotes = (current: Packet) => {
+    const alarm = current.peon ? peonCustodyAlarm(current.peon) : null;
+    return alarm ? [alarm] : [];
+  };
+  const repeated = (current: Packet) => current.state === outcome
+    ? Effect.succeed({ packet: current, note: "already recorded; nothing changed", notes: custodyNotes(current) })
+    : Effect.fail(input(`packet ${packet.id.slice(0, 12)} is already ${current.state}; use corrects with a reason to reopen it`));
+  if (TERMINAL_PACKET_STATES.includes(packet.state)) return yield* repeated(packet);
+  const env = yield* MusterEnv;
+  const proc = yield* Proc;
   if (params.review && !isAbsolute(params.review)) return yield* input("review must be an absolute path to the blind review findings");
   if (params.landedAs || params.attested) return yield* input("peon packets land from their verified bundle; omit landedAs and attested");
   const lane = yield* findLane(project, packet.lane);
   const source = yield* peonSourceRepo(project, lane, packet.peon.repo);
   const gitDir = (yield* git(source, "rev-parse", "--absolute-git-dir")).trim();
-  const lock = join(gitDir, "muster-peon-land.lock");
-  return yield* Effect.acquireUseRelease(
-    Effect.try({
-      try: () => mkdirSync(lock),
-      catch: (error) => new GuardFailed({ guard: "peon-land-lock", message: `cannot lock the peon landing at ${lock}; wait for the other landing and retry (if abandoned, confirm no landing is active before removing the lock): ${String(error)}` }),
-    }),
-    () => Effect.gen(function* () {
+  return yield* withPeonLandLock(gitDir, Effect.gen(function* () {
       const current = yield* load(project.dir);
       const latest = yield* findPacket(current, packet.id);
-      if (TERMINAL_PACKET_STATES.includes(latest.state)) return repeated(latest);
+      if (TERMINAL_PACKET_STATES.includes(latest.state)) return yield* repeated(latest);
       const currentLane = yield* findLane(current, latest.lane);
       if (source !== (yield* peonSourceRepo(current, currentLane, packet.peon.repo))) return yield* input("the source checkout changed; re-run packet_verify before landing");
       let landing: { landedAs: string | null; gate: PacketGate | null; note: string } = { landedAs: null, gate: null, note: "recorded without a merge" };
@@ -5257,10 +5292,8 @@ const peonLand = (project: Project, packet: Packet & { peon: PeonPacketSource },
         return [recorded.project, recorded.packet] as const;
       }));
       const tokens = yield* publishTokens(yield* load(project.dir));
-      return { packet: saved, note: landing.note, notes: [...repeated(saved).notes, tokens] };
-    }),
-    () => Effect.sync(() => rmdirSync(lock)),
-  );
+      return { packet: saved, note: landing.note, notes: [...custodyNotes(saved), tokens] };
+    }));
 });
 
 export const packetLand = (dir: string, params: PacketLandInput) =>
@@ -5914,7 +5947,7 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
     for (const name of new Set(watchdogRows.filter(row => ingestion.failedMachines.has(row.machine)).map(row => row.machine))) recoveryNotes.push(`watchdog: ${name} probes unavailable: machine status failed`);
     const observations: { row: AgentRow; artifactAt: number; flags: string[]; fingerprint: string; cached: string | null; tail: string }[] = [];
     for (const row of watchdogRows) {
-      const packets = project.packets.filter(packet => packet.agent === row.name);
+      const packets = project.packets.filter(packet => !packet.peon && packet.agent === row.name);
       let artifactAt = Math.max(Date.parse(row.createdAt), ...packets.map(packet => Date.parse(packet.reportedAt)));
       let artifact = packets.map(packet => packet.id).join(",");
       let tail = "";
@@ -5989,9 +6022,9 @@ export const projectStatus = (dir: string, params: StatusInput = {}, judge?: Wat
         }
         const recorded = yield* mutate(dir, current => Effect.gen(function* () {
           const latest = yield* findPacket(current, packet.id);
+          if (!autolandEligible(latest) || !autolandDue(current, latest, now)) return [current, false] as const;
           const row = yield* findRow(current, latest.agent);
-          if (!autolandEligible(latest) || row.owner !== env.sessionId ||
-            !autolandDue(current, latest, now)) return [current, false] as const;
+          if (row.owner !== env.sessionId) return [current, false] as const;
           const checked = { ...latest, autolandCheckedAt: iso(env) };
           if (!landing) return [withPacket(current, checked), false] as const;
           const result = yield* recordPacketOutcome(current, checked, "no_changes", landing.sha, landingEvidence(landing, landing.base), iso(env));
@@ -6094,7 +6127,7 @@ export function board(project: Project, agents: readonly AgentLine[], openDesk: 
     ...[flowLine(project, nowMs, desk)].filter(Boolean),
     ...landedBlock(project, nowMs),
     ...laneBlock(lanes, posture.level),
-    `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.agent} ${packet.state}`).join("; ") || "none"}`,
+    `packets waiting: ${pending.map((packet) => `${packet.id.slice(0, 10)} ${packet.peon ? `peon:${packet.peon.peon}` : packet.agent} ${packet.state}`).join("; ") || "none"}`,
     `desk: ${openDesk} open for Joel`,
     ...(gates ? [gates] : []),
     ...(due ? [`${due}. Reconfirm the outcome; work drifting to another project's outcome goes to that project's desk.`] : []),

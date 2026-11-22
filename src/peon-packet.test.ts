@@ -1,9 +1,13 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { Effect } from "effect";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { packetIntake, packetLand, packetVerify, laneOpen, projectOpen } from "./ops.ts";
-import { load, projectPath } from "./store.ts";
+import { projectDigest } from "./digest.ts";
+import { packetIntake, packetLand, packetVerify, laneClose, laneOpen, projectOpen, projectReview, projectStatus } from "./ops.ts";
+import { withPeonLandLock } from "./peon-packet.ts";
+import { guardCatalogWriter, load, projectPath } from "./store.ts";
 import { failWith, harness, makeRepo, runWith, sh } from "./test-support.ts";
 
 const digest = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -53,7 +57,7 @@ describe("peon packet intake", () => {
     const f = await fixture();
     const { h, dir, base, head } = f;
     const { packet } = await f.intake();
-    expect(packet).toMatchObject({ state: "reported", checks: f.result.checks, peon: { box: "box1", peon: "peon1", base, head, exportReceipt: f.receipt } });
+    expect(packet).toMatchObject({ state: "reported", checks: f.result.checks, peon: { box: "box1", peon: "peon1", base, head, exportReceipts: [{ ...f.receipt, attachedAt: h.now.toISOString() }] } });
     expect(dirname(packet.report)).toBe(join(dir, ".brain", "data", "muster", "reports", f.lane));
     const report = readFileSync(packet.report, "utf8");
     expect(report).toContain("Adds offline work");
@@ -96,7 +100,7 @@ describe("peon packet intake", () => {
     const { exportReceipt: _receipt, ...withoutReceipt } = result;
     const missing = await runWith(h, packetIntake(dir, { lane, result: withoutReceipt }));
     expect(missing.note).toContain("destroy blocked");
-    expect(missing.packet.peon?.exportReceipt).toBeNull();
+    expect(missing.packet.peon?.exportReceipts).toEqual([]);
     expect(readFileSync(missing.packet.report, "utf8")).toContain("destroy blocked");
     const anotherBox = await f.intake({ box: "box2" });
     expect(anotherBox.packet.id).not.toBe(missing.packet.id);
@@ -107,6 +111,163 @@ describe("peon packet intake", () => {
     const nextHead = f.add("follow-up", "more\n");
     const anotherHead = await f.intake({ head: nextHead, bundle: f.exportBundle("main", `^${f.head}`) });
     expect(anotherHead.packet.id).not.toBe(missing.packet.id);
+  });
+
+  it("shows the rowless packet in status, the Brain board, digest and retro, and drains the lane until its outcome", async () => {
+    const f = await fixture();
+    const { h, dir, lane } = f;
+    const { packet } = await f.intake();
+    const status = await runWith(h, projectStatus(dir, { act: true }));
+    expect(status.agents).toEqual([]);
+    expect(status.board).toContain(`packets waiting: ${packet.id.slice(0, 10)} peon:peon1 reported`);
+    const brain = status.notes.find(note => note.startsWith("brain: "))?.slice("brain: ".length);
+    expect(readFileSync(brain!, "utf8")).toContain("| peon:peon1 | reported |");
+    const digest = await projectDigest(dir, { now: h.now, env: { HOME: h.home, MUSTER_FLEET_COMPUTE: "off" }, available: async () => false, run: async () => '{"slots":0,"holders":[]}' });
+    expect(digest.parts.packets).toMatchObject({ state: "ok", text: expect.stringContaining("packets 1 to land") });
+    expect(digest.parts.agents).toMatchObject({ state: "ok", text: "agents 0 work 0 idle 0 stale" });
+    expect(await runWith(h, laneClose(dir, lane))).toMatchObject({ closed: false, lane: { state: "draining" }, pending: [`packet ${packet.id.slice(0, 12)} is reported`] });
+    await runWith(h, packetLand(dir, { id: packet.id, outcome: "rejected", evidence: "fixture" }));
+    expect(await runWith(h, laneClose(dir, lane))).toMatchObject({ closed: true });
+    const review = await runWith(h, projectReview(dir, { note: "rowless retro" }));
+    expect(review.retroLanes).toContainEqual({ slug: lane, reports: [packet.report], sessionFiles: [], closedTails: [] });
+  });
+
+  it("attaches ordered custody receipts after landing without letting a stale replay supersede the current receipt", async () => {
+    const f = await fixture();
+    const { h, dir, lane } = f;
+    const { exportReceipt: first, ...withoutReceipt } = f.result;
+    const { packet } = await runWith(h, packetIntake(dir, { lane, result: withoutReceipt }));
+    expect(readFileSync(packet.report, "utf8")).toContain("destroy blocked");
+    await runWith(h, packetVerify(dir, packet.id));
+    const landed = await runWith(h, f.land(packet.id));
+    expect(landed.notes).toContainEqual(expect.stringContaining("destroy blocked"));
+    h.now = new Date(h.now.getTime() + 60_000);
+    const firstTime = h.now.toISOString();
+    const firstAttach = await f.intake();
+    expect(firstAttach.note).toContain("attached permanent raw-session export receipt");
+    expect(firstAttach.packet).toMatchObject({ state: "committed", landedAs: landed.packet.landedAs, peon: { exportReceipts: [{ ...first, attachedAt: firstTime }] } });
+    expect(readFileSync(packet.report, "utf8")).not.toContain("destroy blocked");
+    expect((await runWith(h, f.land(packet.id))).notes).toEqual([]);
+    const second = { ...first, id: "peon1/20261122T010000Z-box1", sha256: "b".repeat(64) };
+    h.now = new Date(h.now.getTime() + 60_000);
+    const secondAttach = await f.intake({ exportReceipt: second });
+    expect(secondAttach.packet.peon?.exportReceipts).toEqual([{ ...first, attachedAt: firstTime }, { ...second, attachedAt: h.now.toISOString() }]);
+    const report = readFileSync(packet.report, "utf8");
+    expect(report).toContain(second.id);
+    expect(report).not.toContain(first.id);
+    expect(report).toContain("Adds offline work");
+    const catalog = readFileSync(projectPath(dir), "utf8");
+    expect((await f.intake({ exportReceipt: first })).packet).toEqual(secondAttach.packet);
+    expect(readFileSync(projectPath(dir), "utf8")).toBe(catalog);
+    expect(readFileSync(packet.report, "utf8")).toBe(report);
+  });
+
+  it("refuses replay with a conflicting lane, repo or bundle hash", async () => {
+    const f = await fixture();
+    const { h, dir, lane, result } = f;
+    await f.intake();
+    const catalog = readFileSync(projectPath(dir), "utf8");
+    for (const [field, value] of [
+      ["lane", { lane: "wrong", result }],
+      ["repo", { lane, result: { ...result, repo: f.box } }],
+      ["bundle sha256", { lane, result: { ...result, bundle: { ...result.bundle, sha256: "b".repeat(64) } } }],
+    ] as const) {
+      expect(await failWith(h, packetIntake(dir, value))).toMatchObject({ _tag: "GuardFailed", guard: "peon-intake-conflict", message: expect.stringContaining(`intake ${field} conflicts`) });
+    }
+    expect(readFileSync(projectPath(dir), "utf8")).toBe(catalog);
+  });
+
+  it.each(["rejected", "no_changes"] as const)("records %s without needing a verified bundle and only replays the same outcome", async outcome => {
+    const f = await fixture();
+    const { packet } = await f.intake();
+    rmSync(f.result.bundle.path);
+    const land = packetLand(f.dir, { id: packet.id, outcome, evidence: "checked in the desk" });
+    const landed = await runWith(f.h, land);
+    expect(landed.packet).toMatchObject({ state: outcome, landedAs: null, evidence: "checked in the desk" });
+    expect((await runWith(f.h, land)).packet).toEqual(landed.packet);
+    const before = readFileSync(projectPath(f.dir), "utf8");
+    expect(await failWith(f.h, f.land(packet.id))).toMatchObject({ _tag: "InputError", message: expect.stringContaining(`already ${outcome}`) });
+    expect(readFileSync(projectPath(f.dir), "utf8")).toBe(before);
+    expect(sh(f.dir, "rev-parse", "HEAD").trim()).toBe(f.base);
+  });
+
+  it("audits a correction to a terminal peon packet and does not require an agent row", async () => {
+    const f = await fixture();
+    const { packet } = await f.intake();
+    await runWith(f.h, packetVerify(f.dir, packet.id));
+    const landed = await runWith(f.h, f.land(packet.id));
+    expect(await failWith(f.h, packetLand(f.dir, { id: packet.id, outcome: "rejected" }))).toMatchObject({ _tag: "InputError", message: expect.stringContaining("already committed") });
+    const correction = { id: packet.id, corrects: "The recorded outcome was incorrect." };
+    f.h.sessionId = "different-session";
+    expect(await failWith(f.h, packetLand(f.dir, correction))).toMatchObject({ _tag: "GuardFailed", guard: "packet-owner" });
+    const reopened = await runWith(f.h, packetLand(f.dir, { ...correction, takeover: true }));
+    expect(reopened.packet).toMatchObject({ state: "verified", landedAs: null, gate: null, peon: landed.packet.peon });
+    const audit = JSON.parse(readFileSync(join(f.dir, ".brain", "data", "muster", "corrections.jsonl"), "utf8"));
+    expect(audit).toMatchObject({ packetId: packet.id, from: { state: "committed", landedAs: landed.packet.landedAs }, by: "different-session", reason: correction.corrects });
+    expect((await runWith(f.h, packetLand(f.dir, { id: packet.id, outcome: "rejected" }))).packet.state).toBe("rejected");
+    expect(sh(f.dir, "rev-parse", "HEAD").trim()).toBe(landed.packet.landedAs);
+  });
+
+  it("fences a schema-7 writer from a persisted peon catalog without changing it", async () => {
+    const f = await fixture();
+    await f.intake();
+    const path = projectPath(f.dir);
+    const catalog = readFileSync(path, "utf8");
+    const { writerSchemaVersion } = await runWith(f.h, load(f.dir));
+    expect(writerSchemaVersion).toBe(8);
+    const fence = await failWith(f.h, guardCatalogWriter(path, writerSchemaVersion ?? 0, 7));
+    expect(fence).toMatchObject({ _tag: "StoreError", message: expect.stringContaining("schema 8 > 7") });
+    expect(readFileSync(path, "utf8")).toBe(catalog);
+  });
+
+  it("reclaims a dead landing claim but does not steal a live one", async () => {
+    const f = await fixture();
+    const { packet } = await f.intake();
+    await runWith(f.h, packetVerify(f.dir, packet.id));
+    const lock = join(f.dir, ".git", "muster-peon-land.lock");
+    mkdirSync(lock);
+    const live = join(lock, `${process.pid}-${randomUUID()}`);
+    mkdirSync(live);
+    expect(await failWith(f.h, f.land(packet.id))).toMatchObject({ _tag: "GuardFailed", guard: "peon-land-lock" });
+    expect(readdirSync(lock)).toEqual([live.split("/").at(-1)]);
+    rmSync(live, { recursive: true });
+    const dead = spawnSync(process.execPath, ["-e", ""]);
+    expect(dead.status).toBe(0);
+    const stale = join(lock, `${dead.pid}-${randomUUID()}`);
+    mkdirSync(stale);
+    expect((await runWith(f.h, f.land(packet.id))).packet.state).toBe("committed");
+    expect(readdirSync(lock)).toEqual([]);
+  });
+
+  it("does not replace the result when releasing its landing claim fails", async () => {
+    const f = await fixture();
+    const gitDir = join(f.dir, ".git");
+    const lock = join(gitDir, "muster-peon-land.lock");
+    const operation = Effect.sync(() => {
+      const [claim] = readdirSync(lock);
+      writeFileSync(join(lock, claim!, "release-fails-while-nonempty"), "fixture\n");
+      return { landedAs: f.head };
+    });
+    expect(await runWith(f.h, withPeonLandLock(gitDir, operation))).toEqual({ landedAs: f.head });
+  });
+
+  it("copies bundle proof scratch only under the source Git dir and removes it", async () => {
+    const f = await fixture();
+    const { packet } = await f.intake();
+    const proc = f.h.proc;
+    const snapshots: string[] = [];
+    f.h.proc = { run: (command, args, options) => {
+      if (command === "git" && args[0] === "bundle") snapshots.push(args.at(-1)!);
+      return proc.run(command, args, options);
+    } };
+    await runWith(f.h, packetVerify(f.dir, packet.id));
+    await runWith(f.h, f.land(packet.id));
+    expect(new Set(snapshots).size).toBe(2);
+    for (const file of snapshots) {
+      expect(file).toMatch(/^.*\/\.git\/muster-peon-bundle-[^/]+\/packet\.bundle$/);
+      expect(dirname(dirname(file))).toBe(join(f.dir, ".git"));
+      expect(existsSync(dirname(file))).toBe(false);
+    }
   });
 
   it.each([

@@ -1,17 +1,56 @@
-import { createHash } from "node:crypto";
-import { createReadStream, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, mkdirSync, readdirSync, realpathSync, rmdirSync } from "node:fs";
 import { copyFile, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { decodeBundleHeads, type CheckOutcome, type Lane, type PeonPacketSource, type Project } from "./domain.ts";
+import { decodeBundleHeads, decodePeonLockPid, type CheckOutcome, type Lane, type PeonExportReceipt, type PeonPacketSource, type Project } from "./domain.ts";
 import { GuardFailed, PacketCheckFailed } from "./errors.ts";
 import { Proc, type ProcShape } from "./runtime.ts";
 
 export const peonKey = (box: string, head: string) => createHash("sha256").update(JSON.stringify([box, head])).digest("hex");
-export const peonCustodyAlarm = (source: PeonPacketSource) => source.exportReceipt === null
-  ? "destroy blocked: missing permanent raw-session export receipt; have peons/desk archive and verify custody before destroying the box"
-  : null;
+export const peonCurrentReceipt = (source: PeonPacketSource) => source.exportReceipts.at(-1);
+export const peonCustodyAlarm = (source: PeonPacketSource) => peonCurrentReceipt(source) ? null
+  : "destroy blocked: missing permanent raw-session export receipt; have peons/desk archive and verify custody before destroying the box";
+export const samePeonReceipt = (a: PeonExportReceipt, b: PeonExportReceipt) =>
+  a.id === b.id && a.sha256 === b.sha256 && a.location === b.location && a.mirror === b.mirror;
+
+const isCode = (error: unknown, code: string) => error instanceof Error && "code" in error && error.code === code;
+const deadProcess = (pid: number) => {
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return isCode(error, "ESRCH"); }
+};
+
+/** Publish a unique claim before checking for any other live claim. Two calls can both back off, but neither can
+ * pass a claim that was published first and is still held. Dead claims never share a path with their replacement. */
+export const withPeonLandLock = <A, E, R>(gitDir: string, operation: Effect.Effect<A, E, R>) => {
+  const root = join(gitDir, "muster-peon-land.lock");
+  const lockError = (detail: string) => new GuardFailed({ guard: "peon-land-lock", message: `${detail} (${root}); retry after the other landing exits, or inspect the lock if it persists` });
+  return Effect.acquireUseRelease(Effect.try({
+    try: () => {
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      const name = `${process.pid}-${randomUUID()}`;
+      mkdirSync(join(root, name), { mode: 0o700 });
+      return name;
+    },
+    catch: error => lockError(`cannot publish the peon landing claim: ${String(error)}`),
+  }), name => Effect.gen(function* () {
+    yield* Effect.try({
+      try: () => {
+        for (const other of readdirSync(root, { withFileTypes: true })) {
+          if (other.name === name) continue;
+          const match = /^(\d+)-[a-f0-9-]{36}$/.exec(other.name);
+          if (!match || !other.isDirectory() || !deadProcess(decodePeonLockPid(Number(match[1])))) throw new Error("another peon landing claim exists");
+          try { rmdirSync(join(root, other.name)); } catch (error) { if (!isCode(error, "ENOENT")) throw error; }
+        }
+      },
+      catch: error => lockError(String(error)),
+    });
+    return yield* operation;
+  }), name => Effect.try({
+    try: () => rmdirSync(join(root, name)),
+    catch: error => error,
+  }).pipe(Effect.catch(error => isCode(error, "ENOENT") ? Effect.void : Effect.logWarning(`could not release peon landing claim ${join(root, name)}: ${String(error)}`))));
+};
 
 export const peonSourceRepo = (project: Project, lane: Lane, repo: string) => Effect.try({
   try: () => {
@@ -63,17 +102,19 @@ export interface PeonBundleProof {
 /** Hash and read the same private snapshot. Verification uses a temporary object store with a read-only
  * alternate for thin bundles. Landing imports only after the exact same checks succeed again. */
 export const withPeonBundle = <A, E, R>(packet: { id: string; peon: PeonPacketSource }, source: string, lane: Lane,
-  use: (proof: PeonBundleProof) => Effect.Effect<A, E, R>) => {
+  use: (proof: PeonBundleProof) => Effect.Effect<A, E, R>) => Effect.gen(function* () {
   const { id, peon: { base, head, bundle } } = packet;
   const failure = (name: string, fix: string) => new PacketCheckFailed({ packet: id, failures: [`${name}: ${fix}`], message: fix });
   const io = <B>(name: string, fix: string, task: () => Promise<B>) => Effect.tryPromise({ try: task, catch: () => failure(name, fix) });
-  return Effect.acquireUseRelease(
-    io("bundle snapshot", "cannot create private verification scratch; make temporary storage writable and retry", () => mkdtemp(join(tmpdir(), "muster-peon-"))),
+  const proc = yield* Proc;
+  const run = localGit(proc, source);
+  const root = yield* run("rev-parse", "--show-toplevel");
+  if (root.code !== 0 || root.stdout.replace(/\r?\n$/, "") !== source) return yield* failure("source checkout", "point the lane and result.repo at the root of the local Git checkout and retry");
+  const gitDir = yield* run("rev-parse", "--absolute-git-dir");
+  if (gitDir.code !== 0) return yield* failure("source checkout", "cannot resolve the source's Git directory; fix the checkout and retry");
+  return yield* Effect.acquireUseRelease(
+    io("bundle snapshot", "cannot create private verification scratch under the source Git directory; check write access and free disk space", () => mkdtemp(join(gitDir.stdout.replace(/\r?\n$/, ""), "muster-peon-bundle-"))),
     scratch => Effect.gen(function* () {
-      const proc = yield* Proc;
-      const run = localGit(proc, source);
-      const root = yield* run("rev-parse", "--show-toplevel");
-      if (root.code !== 0 || root.stdout.replace(/\r?\n$/, "") !== source) return yield* failure("source checkout", "point the lane and result.repo at the root of the local Git checkout and retry");
       const snapshot = join(scratch, "packet.bundle");
       const digest = yield* io("bundle sha256", "cannot read the bundle; restore the exported bundle at result.bundle.path and retry", async () => {
         if (!(await lstat(bundle.path)).isFile()) throw new Error("expected regular file");
@@ -120,6 +161,8 @@ export const withPeonBundle = <A, E, R>(packet: { id: string; peon: PeonPacketSo
         importHead: unpack(run).pipe(Effect.mapError(error => error._tag === "PacketCheckFailed" ? error : failure("bundle import", "Git could not import the verified bundle; check source checkout permissions and retry"))),
       });
     }),
-    scratch => Effect.promise(() => rm(scratch, { recursive: true, force: true })),
+    scratch => Effect.tryPromise({ try: () => rm(scratch, { recursive: true, force: true }), catch: error => error }).pipe(
+      Effect.catch(error => Effect.logWarning(`could not remove peon bundle scratch ${scratch}: ${String(error)}`)),
+    ),
   );
-};
+});

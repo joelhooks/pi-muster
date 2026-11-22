@@ -401,9 +401,11 @@ const peonSourceFields = {
 const PeonPacketSource = Schema.Struct({
   ...peonSourceFields,
   owner: Schema.String,
-  exportReceipt: Schema.NullOr(PeonExportReceipt),
+  exportReceipts: Schema.Array(Schema.Struct({ ...PeonExportReceipt.fields, attachedAt: Iso })),
 });
 export type PeonPacketSource = typeof PeonPacketSource.Type;
+export type PeonExportReceipt = typeof PeonExportReceipt.Type;
+export const decodePeonLockPid = Schema.decodeUnknownSync(Schema.Number.check(Schema.isInt(), Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(0x7fffffff)));
 export const PeonIntake = Schema.Struct({
   lane: Slug,
   result: Schema.Struct({
